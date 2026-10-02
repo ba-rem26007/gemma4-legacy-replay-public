@@ -1,0 +1,1256 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+index be835fe2ccda8..203b98a5ad99c 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+@@ -46,4 +46,6 @@ export default {
+   customerSearchContainer: '#discount_customer_eligibility_eligibility_single_customer',
+   productSegmentAttributes: '#discount_conditions_product_product_segment_attributes',
+   productSegmentFeatures: '#discount_conditions_product_product_segment_features',
++  quantityPerCustomerInput: '#discount_usability_quantity_per_customer',
++  customerEligibilityInput: '#discount_customer_eligibility_eligibility',
+ };
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index c2c05d6fbf718..ea196cfaaf877 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -40,6 +40,7 @@ $(() => {
+       'ChoiceTree',
+       'ChoiceTable',
+       'EventEmitter',
++      'DisablingSwitch',
+     ],
+   );
+ 
+@@ -80,8 +81,20 @@ $(() => {
+     if (radio.value === 'carriers') {
+       $(DiscountMap.carriersSelect).trigger('change');
+     }
++    if (radio.value === 'single_customer') {
++      $(DiscountMap.quantityPerCustomerInput).parents('.form-group').hide();
++    }
++    if (radio.value === 'customer_groups' || radio.value === 'all_customers') {
++      $(DiscountMap.quantityPerCustomerInput).parents('.form-group').show();
++    }
+   });
+ 
++  if ($(DiscountMap.customerEligibilityInput).find('input[type="radio"]:checked').attr('value') === 'single_customer') {
++    $(DiscountMap.quantityPerCustomerInput).parents('.form-group').hide();
++  } else {
++    $(DiscountMap.quantityPerCustomerInput).parents('.form-group').show();
++  }
++
+   $(DiscountMap.countriesSelect).select2({
+     templateResult: formatOption,
+     templateSelection: formatOption,
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index e603d1b992ef6..96a37bf9b4f2f 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -131,8 +131,8 @@ class CartRuleCore extends ObjectModel
+             'date_from' => ['type' => self::TYPE_DATE, 'validate' => 'isDate', 'required' => true],
+             'date_to' => ['type' => self::TYPE_DATE, 'validate' => 'isDate', 'required' => true],
+             'description' => ['type' => self::TYPE_STRING, 'validate' => 'isCleanHtml', 'size' => DiscountSettings::MAX_DESCRIPTION_LENGTH],
+-            'quantity' => ['type' => self::TYPE_INT, 'validate' => 'isUnsignedInt'],
+-            'quantity_per_user' => ['type' => self::TYPE_INT, 'validate' => 'isUnsignedInt'],
++            'quantity' => ['type' => self::TYPE_INT, 'allow_null' => true, 'validate' => 'isUnsignedInt'],
++            'quantity_per_user' => ['type' => self::TYPE_INT, 'allow_null' => true, 'validate' => 'isUnsignedInt'],
+             'priority' => ['type' => self::TYPE_INT, 'validate' => 'isUnsignedInt'],
+             'partial_use' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'code' => ['type' => self::TYPE_STRING, 'validate' => 'isCleanHtml', 'size' => 254],
+@@ -450,7 +450,7 @@ public static function getCustomerCartRules(
+         // Then, conditions for date, voucher active property and total amount of vouchers in stock
+         $sql .= ' AND NOW() BETWEEN cr.date_from AND cr.date_to
+             ' . ($active ? 'AND cr.`active` = 1' : '') . '
+-            ' . ($inStock ? 'AND cr.`quantity` > 0' : '');
++            ' . ($inStock ? 'AND (cr.`quantity` > 0 OR cr.`quantity` is null)' : '');
+ 
+         // If we want to select only vouchers that have free shipping as the action
+         if ($free_shipping_only) {
+@@ -797,7 +797,7 @@ public function checkValidity(Context $context, $alreadyInCart = false, $display
+             }
+ 
+             // We verify the total available quantity
+-            if (!$this->quantity) {
++            if ($this->quantity !== null && !$this->quantity) {
+                 return (!$display_error) ? false : $this->trans('This voucher has already been used', [], 'Shop.Notifications.Error');
+             }
+ 
+@@ -840,7 +840,7 @@ public function checkValidity(Context $context, $alreadyInCart = false, $display
+                     ++$quantityUsed;
+                 }
+ 
+-                if ($quantityUsed > $this->quantity_per_user) {
++                if ($this->quantity_per_user !== null && $quantityUsed > $this->quantity_per_user) {
+                     return (!$display_error) ? false : $this->trans('You cannot use this voucher anymore (usage limit reached)', [], 'Shop.Notifications.Error');
+                 }
+             }
+@@ -1991,7 +1991,7 @@ public static function autoAddToCart(?Context $context = null, bool $useOrderPri
+ 		LEFT JOIN ' . _DB_PREFIX_ . 'cart_rule_country crco ON cr.id_cart_rule = crco.id_cart_rule
+ 		WHERE cr.active = 1
+ 		AND cr.code = ""
+-		AND cr.quantity > 0
++		AND (cr.quantity > 0 OR cr.quantity is null)
+ 		AND NOW() BETWEEN cr.date_from AND cr.date_to
+ 		AND (
+ 			cr.id_customer = 0
+diff --git a/classes/PaymentModule.php b/classes/PaymentModule.php
+index 2d2e0fce2a284..403cb61f22651 100644
+--- a/classes/PaymentModule.php
++++ b/classes/PaymentModule.php
+@@ -1324,7 +1324,10 @@ protected function createOrderCartRules(
+ 
+                 // Create a new instance of Cart Rule without id_lang, in order to update its quantity
+                 $cart_rule_to_update = new CartRule((int) $cartRule->id);
+-                $cart_rule_to_update->quantity = max(0, $cart_rule_to_update->quantity - 1);
++                // if the cart rule isn't in nolimit mode, we decrease the quantity available
++                if ($cart_rule_to_update->quantity !== null) {
++                    $cart_rule_to_update->quantity = max(0, $cart_rule_to_update->quantity - 1);
++                }
+                 $cart_rule_to_update->update();
+             }
+ 
+diff --git a/composer.json b/composer.json
+index 80a75859d8e5a..8603a35ad484c 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/hummingbird": "^2.0",
+         "prestashop/pagesnotfound": "^3",
+         "prestashop/productcomments": "^8.0",
+-        "prestashop/ps_apiresources": "dev-dev",
++        "prestashop/ps_apiresources": "dev-make-nullable-discount-quantity-and-quantity-per-user",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -212,7 +212,7 @@
+         },
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/PrestaShop/ps_apiresources"
++            "url": "https://github.com/boherm/ps_apiresources"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 575af9f81783e..c2b725c053060 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "4a909806fc5806b3c60c8d77fb06443b",
++    "content-hash": "83f5e0a5d4fe3a054b4a6edb4ae97e77",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5211,16 +5211,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "dev-dev",
++            "version": "dev-make-nullable-discount-quantity-and-quantity-per-user",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/PrestaShop/ps_apiresources.git",
+-                "reference": "9b22f4e8c9848705132455ac623c369e0ec63d64"
++                "url": "https://github.com/boherm/ps_apiresources.git",
++                "reference": "fa5a345e7df9e97364a61201c7c3da77c56c0b13"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/9b22f4e8c9848705132455ac623c369e0ec63d64",
+-                "reference": "9b22f4e8c9848705132455ac623c369e0ec63d64",
++                "url": "https://api.github.com/repos/boherm/ps_apiresources/zipball/fa5a345e7df9e97364a61201c7c3da77c56c0b13",
++                "reference": "fa5a345e7df9e97364a61201c7c3da77c56c0b13",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5234,7 +5234,6 @@
+                 "prestashop/php-dev-tools": "^4.3",
+                 "rector/rector": "^2.0"
+             },
+-            "default-branch": true,
+             "type": "prestashop-module",
+             "autoload": {
+                 "psr-4": {
+@@ -5285,10 +5284,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/PrestaShop/ps_apiresources/tree/dev",
+-                "issues": "https://github.com/PrestaShop/ps_apiresources/issues"
++                "source": "https://github.com/boherm/ps_apiresources/tree/make-nullable-discount-quantity-and-quantity-per-user"
+             },
+-            "time": "2025-12-16T08:18:10+00:00"
++            "time": "2025-12-16T14:50:38+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -18272,9 +18270,9 @@
+         "ext-simplexml": "*",
+         "ext-zip": "*"
+     },
+-    "platform-dev": [],
++    "platform-dev": {},
+     "platform-overrides": {
+         "php": "8.1.0"
+     },
+-    "plugin-api-version": "2.2.0"
++    "plugin-api-version": "2.6.0"
+ }
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index f151f07e8867c..a0dea22d6a8fa 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -169,8 +169,8 @@ CREATE TABLE `PREFIX_cart_rule` (
+   `date_from` datetime NOT NULL,
+   `date_to` datetime NOT NULL,
+   `description` MEDIUMTEXT,
+-  `quantity` int(10) unsigned NOT NULL DEFAULT '0',
+-  `quantity_per_user` int(10) unsigned NOT NULL DEFAULT '0',
++  `quantity` int(10) unsigned DEFAULT '0',
++  `quantity_per_user` int(10) unsigned DEFAULT '0',
+   `priority` int(10) unsigned NOT NULL DEFAULT 1,
+   `partial_use` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `code` varchar(254) NOT NULL,
+diff --git a/src/Adapter/Discount/Update/Filler/DiscountFiller.php b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+index b7cc3b7d6290b..abc33eba7b73e 100644
+--- a/src/Adapter/Discount/Update/Filler/DiscountFiller.php
++++ b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+@@ -38,59 +38,59 @@ class DiscountFiller
+     public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountCommand $command): array
+     {
+         $updatableProperties = [];
+-        if (null !== $command->getValidFrom()) {
++        if ($command->isDirty('validFrom')) {
+             $cartRule->date_from = $command->getValidFrom()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT);
+             $updatableProperties[] = 'date_from';
+         }
+-        if (null !== $command->getValidTo()) {
++        if ($command->isDirty('validTo')) {
+             $cartRule->date_to = $command->getValidTo()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT);
+             $updatableProperties[] = 'date_to';
+         }
+-        if (null !== $command->getLocalizedNames()) {
++        if ($command->isDirty('localizedNames')) {
+             $cartRule->name = $command->getLocalizedNames();
+             $this->fillLocalizedValues($cartRule, 'name', $command->getLocalizedNames(), $updatableProperties);
+         }
+-        if (null !== $command->getDescription()) {
++        if ($command->isDirty('description')) {
+             $cartRule->description = $command->getDescription();
+             $updatableProperties[] = 'description';
+         }
+-        if (null !== $command->getCode()) {
++        if ($command->isDirty('code')) {
+             $cartRule->code = $command->getCode();
+             $updatableProperties[] = 'code';
+         }
+-        if (null !== $command->isHighlightInCart()) {
++        if ($command->isDirty('highlightInCart')) {
+             $cartRule->highlight = $command->isHighlightInCart();
+             $updatableProperties[] = 'highlight';
+         }
+-        if (null !== $command->allowPartialUse()) {
++        if ($command->isDirty('allowPartialUse')) {
+             $cartRule->partial_use = $command->allowPartialUse();
+             $updatableProperties[] = 'partial_use';
+         }
+-        if (null !== $command->isActive()) {
++        if ($command->isDirty('active')) {
+             $cartRule->active = $command->isActive();
+             $updatableProperties[] = 'active';
+         }
+-        if (null !== $command->getCustomerId()) {
++        if ($command->isDirty('customerId')) {
+             $cartRule->id_customer = $command->getCustomerId()->getValue();
+             $updatableProperties[] = 'id_customer';
+         }
+-        if (null !== $command->getTotalQuantity()) {
++        if ($command->isDirty('totalQuantity')) {
+             $cartRule->quantity = $command->getTotalQuantity();
+             $updatableProperties[] = 'quantity';
+         }
+-        if (null !== $command->getQuantityPerUser()) {
++        if ($command->isDirty('quantityPerUser')) {
+             $cartRule->quantity_per_user = $command->getQuantityPerUser();
+             $updatableProperties[] = 'quantity_per_user';
+         }
+-        if (null !== $command->getPriority()) {
++        if ($command->isDirty('priority')) {
+             $cartRule->priority = $command->getPriority();
+             $updatableProperties[] = 'priority';
+         }
+-        if (null !== $command->getReductionProduct()) {
++        if ($command->isDirty('reductionProduct')) {
+             $cartRule->reduction_product = $command->getReductionProduct();
+             $updatableProperties[] = 'reduction_product';
+         }
+-        if (null !== $command->getAmountDiscount()) {
++        if ($command->isDirty('amountDiscount')) {
+             $cartRule->reduction_amount = (float) (string) $command->getAmountDiscount()->getAmount();
+             $cartRule->reduction_currency = $command->getAmountDiscount()->getCurrencyId()->getValue();
+             $cartRule->reduction_tax = $command->getAmountDiscount()->isTaxIncluded();
+@@ -100,7 +100,7 @@ public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountComman
+             $updatableProperties[] = 'reduction_tax';
+             $updatableProperties[] = 'reduction_percent';
+         }
+-        if (null !== $command->getPercentDiscount()) {
++        if ($command->isDirty('percentDiscount')) {
+             $cartRule->reduction_percent = (float) (string) $command->getPercentDiscount();
+             $cartRule->reduction_amount = null;
+             $cartRule->reduction_currency = 0;
+@@ -110,11 +110,11 @@ public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountComman
+             $updatableProperties[] = 'reduction_currency';
+             $updatableProperties[] = 'reduction_tax';
+         }
+-        if (null !== $command->getProductId()) {
++        if ($command->isDirty('productId')) {
+             $cartRule->gift_product = $command->getProductId()->getValue();
+             $updatableProperties[] = 'gift_product';
+         }
+-        if (null !== $command->getCombinationId()) {
++        if ($command->isDirty('combinationId')) {
+             $cartRule->gift_product_attribute = $command->getCombinationId()->getValue();
+             $updatableProperties[] = 'gift_product_attribute';
+         }
+diff --git a/src/Core/Domain/Discount/Command/AddDiscountCommand.php b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+index 18d22ecfb4448..bf685f94d3203 100644
+--- a/src/Core/Domain/Discount/Command/AddDiscountCommand.php
++++ b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+@@ -47,8 +47,8 @@ class AddDiscountCommand
+     private bool $active = false;
+     private ?DateTimeImmutable $validFrom = null;
+     private ?DateTimeImmutable $validTo = null;
+-    private int $totalQuantity = 1;
+-    private int $quantityPerUser = 1;
++    private ?int $totalQuantity = null;
++    private ?int $quantityPerUser = 1;
+     private string $description = '';
+     private string $code = '';
+     private ?CustomerId $customerId = null;
+@@ -150,7 +150,7 @@ public function setPriority(int $priority): self
+         return $this;
+     }
+ 
+-    public function getTotalQuantity(): int
++    public function getTotalQuantity(): ?int
+     {
+         return $this->totalQuantity;
+     }
+@@ -168,9 +168,9 @@ public function setHighlightInCart(bool $highlightInCart): void
+     /**
+      * @throws DiscountConstraintException
+      */
+-    public function setTotalQuantity(int $quantity): self
++    public function setTotalQuantity(?int $quantity): self
+     {
+-        if (0 > $quantity) {
++        if ($quantity !== null && 0 > $quantity) {
+             throw new DiscountConstraintException(sprintf('Quantity cannot be lower than zero, %d given', $quantity), DiscountConstraintException::INVALID_QUANTITY);
+         }
+ 
+@@ -179,7 +179,7 @@ public function setTotalQuantity(int $quantity): self
+         return $this;
+     }
+ 
+-    public function getQuantityPerUser(): int
++    public function getQuantityPerUser(): ?int
+     {
+         return $this->quantityPerUser;
+     }
+@@ -187,9 +187,9 @@ public function getQuantityPerUser(): int
+     /**
+      * @throws DiscountConstraintException
+      */
+-    public function setQuantityPerUser(int $quantity): self
++    public function setQuantityPerUser(?int $quantity): self
+     {
+-        if (0 > $quantity) {
++        if ($quantity !== null && 0 > $quantity) {
+             throw new DiscountConstraintException(sprintf('Quantity per user cannot be lower than zero, %d given', $quantity), DiscountConstraintException::INVALID_QUANTITY_PER_USER);
+         }
+ 
+diff --git a/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php b/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
+index 830e7b83b9826..7576cfe88cdea 100644
+--- a/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
++++ b/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
+@@ -41,9 +41,12 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\ValueObject\Money;
++use PrestaShop\PrestaShop\Core\Trait\DirtyTrait;
+ 
+ class UpdateDiscountCommand
+ {
++    use DirtyTrait;
++
+     private ?array $localizedNames = null;
+     private ?int $priority = null;
+     private ?bool $active = null;
+@@ -74,6 +77,7 @@ public function __construct(int $discountId)
+     public function setLocalizedNames(array $localizedNames): self
+     {
+         $this->localizedNames = $localizedNames;
++        $this->markDirty('localizedNames');
+ 
+         return $this;
+     }
+@@ -94,6 +98,7 @@ public function isActive(): ?bool
+     public function setActive(bool $active): self
+     {
+         $this->active = $active;
++        $this->markDirty('active');
+ 
+         return $this;
+     }
+@@ -111,6 +116,7 @@ public function getValidTo(): ?DateTimeImmutable
+     public function setValidFrom(DateTimeImmutable $validFrom): self
+     {
+         $this->validFrom = $validFrom;
++        $this->markDirty('validFrom');
+ 
+         return $this;
+     }
+@@ -118,6 +124,7 @@ public function setValidFrom(DateTimeImmutable $validFrom): self
+     public function setValidTo(DateTimeImmutable $validTo): self
+     {
+         $this->validTo = $validTo;
++        $this->markDirty('validTo');
+ 
+         return $this;
+     }
+@@ -133,6 +140,8 @@ public function setValidityDateRange(DateTimeImmutable $from, DateTimeImmutable
+ 
+         $this->validFrom = $from;
+         $this->validTo = $to;
++        $this->markDirty('validFrom');
++        $this->markDirty('validTo');
+ 
+         return $this;
+     }
+@@ -155,6 +164,7 @@ public function setPriority(int $priority): self
+         }
+ 
+         $this->priority = $priority;
++        $this->markDirty('priority');
+ 
+         return $this;
+     }
+@@ -172,18 +182,20 @@ public function isHighlightInCart(): ?bool
+     public function setHighlightInCart(bool $highlightInCart): void
+     {
+         $this->highlightInCart = $highlightInCart;
++        $this->markDirty('highlightInCart');
+     }
+ 
+     /**
+      * @throws DiscountConstraintException
+      */
+-    public function setTotalQuantity(int $quantity): self
++    public function setTotalQuantity(?int $quantity): self
+     {
+-        if (0 > $quantity) {
++        if ($quantity !== null && 0 > $quantity) {
+             throw new DiscountConstraintException(sprintf('Quantity cannot be lower than zero, %d given', $quantity), DiscountConstraintException::INVALID_QUANTITY);
+         }
+ 
+         $this->totalQuantity = $quantity;
++        $this->markDirty('totalQuantity');
+ 
+         return $this;
+     }
+@@ -196,13 +208,14 @@ public function getQuantityPerUser(): ?int
+     /**
+      * @throws DiscountConstraintException
+      */
+-    public function setQuantityPerUser(int $quantityPerUser): self
++    public function setQuantityPerUser(?int $quantityPerUser): self
+     {
+-        if (0 > $quantityPerUser) {
++        if ($quantityPerUser !== null && 0 > $quantityPerUser) {
+             throw new DiscountConstraintException(sprintf('Quantity per user cannot be lower than zero, %d given', $quantityPerUser), DiscountConstraintException::INVALID_QUANTITY_PER_USER);
+         }
+ 
+         $this->quantityPerUser = $quantityPerUser;
++        $this->markDirty('quantityPerUser');
+ 
+         return $this;
+     }
+@@ -215,6 +228,7 @@ public function getDescription(): ?string
+     public function setDescription(string $description): self
+     {
+         $this->description = $description;
++        $this->markDirty('description');
+ 
+         return $this;
+     }
+@@ -227,6 +241,7 @@ public function getCode(): ?string
+     public function setCode(string $code): self
+     {
+         $this->code = $code;
++        $this->markDirty('code');
+ 
+         return $this;
+     }
+@@ -239,6 +254,7 @@ public function allowPartialUse(): ?bool
+     public function setAllowPartialUse(bool $allow): self
+     {
+         $this->allowPartialUse = $allow;
++        $this->markDirty('allowPartialUse');
+ 
+         return $this;
+     }
+@@ -251,6 +267,7 @@ public function getCustomerId(): ?CustomerId
+     public function setCustomerId(int $customerId): self
+     {
+         $this->customerId = new CustomerId($customerId);
++        $this->markDirty('customerId');
+ 
+         return $this;
+     }
+@@ -263,6 +280,7 @@ public function getPercentDiscount(): ?DecimalNumber
+     public function setPercentDiscount(DecimalNumber $percentDiscount): self
+     {
+         $this->percentDiscount = $percentDiscount;
++        $this->markDirty('percentDiscount');
+ 
+         return $this;
+     }
+@@ -283,6 +301,7 @@ public function setAmountDiscount(DecimalNumber $amountDiscount, int $currencyId
+         }
+ 
+         $this->amountDiscount = new Money($amountDiscount, new CurrencyId($currencyId), $taxIncluded);
++        $this->markDirty('amountDiscount');
+ 
+         return $this;
+     }
+@@ -298,6 +317,7 @@ public function getProductId(): ?ProductId
+     public function setProductId(int $productId): self
+     {
+         $this->productId = new ProductId($productId);
++        $this->markDirty('productId');
+ 
+         return $this;
+     }
+@@ -317,6 +337,7 @@ public function setCombinationId(int $combinationId): self
+         } else {
+             $this->combinationId = new CombinationId($combinationId);
+         }
++        $this->markDirty('combinationId');
+ 
+         return $this;
+     }
+@@ -340,6 +361,7 @@ public function getReductionProduct(): ?int
+     public function setReductionProduct(int $reductionProduct): self
+     {
+         $this->reductionProduct = $reductionProduct;
++        $this->markDirty('reductionProduct');
+ 
+         return $this;
+     }
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index 60db3c8d0511e..6092e5d7a88d9 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -40,8 +40,8 @@ public function __construct(
+         private readonly bool $active,
+         private readonly ?DateTimeImmutable $validFrom,
+         private readonly ?DateTimeImmutable $validTo,
+-        private readonly int $totalQuantity,
+-        private readonly int $quantityPerUser,
++        private readonly ?int $totalQuantity,
++        private readonly ?int $quantityPerUser,
+         private readonly string $description,
+         private readonly string $code,
+         private readonly ?int $customerId,
+@@ -92,12 +92,12 @@ public function getValidTo(): ?DateTimeImmutable
+         return $this->validTo;
+     }
+ 
+-    public function getTotalQuantity(): int
++    public function getTotalQuantity(): ?int
+     {
+         return $this->totalQuantity;
+     }
+ 
+-    public function getQuantityPerUser(): int
++    public function getQuantityPerUser(): ?int
+     {
+         return $this->quantityPerUser;
+     }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 7149d8b2664b1..1ea1cc12879a8 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -168,6 +168,14 @@ public function create(array $data)
+             $command->setPriority((int) $data['usability']['priority']);
+         }
+ 
++        if (array_key_exists('quantity_total', $data['usability'])) {
++            $command->setTotalQuantity($data['usability']['quantity_total']);
++        }
++
++        if (array_key_exists('quantity_per_customer', $data['usability'])) {
++            $command->setQuantityPerUser($data['usability']['quantity_per_customer']);
++        }
++
+         /** @var DiscountId $discountId */
+         $discountId = $this->commandBus->handle($command);
+         $this->updateDiscountConditions($discountId->getValue(), $data);
+@@ -274,6 +282,14 @@ public function update($id, array $data): void
+             $command->setPriority((int) $data['usability']['priority']);
+         }
+ 
++        if (array_key_exists('quantity_total', $data['usability'])) {
++            $command->setTotalQuantity($data['usability']['quantity_total']);
++        }
++
++        if (array_key_exists('quantity_per_customer', $data['usability'])) {
++            $command->setQuantityPerUser($data['usability']['quantity_per_customer']);
++        }
++
+         $this->commandBus->handle($command);
+         $this->updateDiscountConditions($id, $data);
+         $this->updateDiscountCompatibility($id, $data);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index a8d55330e7e2c..5d07729e5d6e0 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -110,6 +110,8 @@ public function getDefaultData()
+                     'children_selector' => DiscountUsabilityModeType::AUTO_MODE,
+                     'code' => '',
+                 ],
++                'quantity_total' => null,
++                'quantity_per_customer' => 1,
+                 'compatibility' => $this->getCompatibilityData(),
+                 'priority' => 1,
+             ],
+@@ -233,6 +235,8 @@ public function getData($id)
+                     'children_selector' => $discountForEditing->getCode() ? DiscountUsabilityModeType::CODE_MODE : DiscountUsabilityModeType::AUTO_MODE,
+                     'code' => $discountForEditing->getCode(),
+                 ],
++                'quantity_total' => $discountForEditing->getTotalQuantity(),
++                'quantity_per_customer' => $discountForEditing->getQuantityPerUser(),
+                 'compatibility' => $this->getCompatibilityData($id),
+                 'priority' => $discountForEditing->getPriority(),
+             ],
+diff --git a/src/Core/Trait/DirtyTrait.php b/src/Core/Trait/DirtyTrait.php
+new file mode 100644
+index 0000000000000..5c31fa09297e3
+--- /dev/null
++++ b/src/Core/Trait/DirtyTrait.php
+@@ -0,0 +1,74 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Trait;
++
++/**
++ * Trait DirtyTrait
++ * Provides functionality to track modified (dirty) properties of an object.
++ * You need to manually call markDirty() method when a property is modified.
++ */
++trait DirtyTrait
++{
++    /**
++     * Indicates whether the object has been modified.
++     */
++    protected array $dirtyProperties = [];
++
++    /**
++     * Marks a specific property as dirty (modified).
++     *
++     * @param string $propertyName
++     *
++     * @return void
++     */
++    public function markDirty(string $propertyName): void
++    {
++        $this->dirtyProperties[$propertyName] = true;
++    }
++
++    /**
++     * Checks if a specific property is dirty (modified).
++     *
++     * @param string $propertyName
++     *
++     * @return bool
++     */
++    public function isDirty(string $propertyName): bool
++    {
++        return isset($this->dirtyProperties[$propertyName]) && $this->dirtyProperties[$propertyName];
++    }
++
++    /**
++     * Retrieves a list of all dirty (modified) properties.
++     *
++     * @return array
++     */
++    public function getDirtyProperties(): array
++    {
++        return array_keys($this->dirtyProperties);
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+index 2a00916576863..782c755c1e624 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+@@ -44,6 +44,57 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Specifiy discount mode', 'Admin.Catalog.Feature'),
+                 'label_tag_name' => 'h3',
+                 'required' => false,
++                'choice_options' => [
++                    'label' => false,
++                ],
++            ])
++            ->add('quantity_total', IntegerType::class, [
++                'required' => false,
++                'label' => $this->trans('Select total usage limits', 'Admin.Catalog.Feature'),
++                'label_help_box' => $this->trans('This discount can be used "X" time(s) in total.', 'Admin.Catalog.Help'),
++                'label_tag_name' => 'h3',
++                'attr' => [
++                    'min' => 0,
++                ],
++                'label_attr' => [
++                    'class' => 'd-flex align-items-center',
++                ],
++                'disabling_switch' => true,
++                'disabling_switch_label' => $this->trans('No limit', 'Admin.Catalog.Feature'),
++                'switch_state_on_disable' => 'on',
++                'default_empty_data' => null,
++                'disabled_value' => function ($data) {
++                    return null === $data;
++                },
++                'constraints' => [
++                    new Assert\GreaterThanOrEqual(0),
++                ],
++            ])
++            ->add('quantity_per_customer', IntegerType::class, [
++                'required' => false,
++                'label' => $this->trans('Select usage limits per customer', 'Admin.Catalog.Feature'),
++                'label_help_box' => $this->trans('A customer will only be able to use this discount "X" time(s).', 'Admin.Catalog.Help'),
++                'label_tag_name' => 'h3',
++                'attr' => [
++                    'min' => 0,
++                ],
++                'label_attr' => [
++                    'class' => 'd-flex align-items-center',
++                ],
++                'disabling_switch' => true,
++                'disabling_switch_label' => $this->trans('No limit', 'Admin.Catalog.Feature'),
++                'switch_state_on_disable' => 'on',
++                'default_empty_data' => null,
++                'disabled_value' => function ($data) {
++                    return null === $data;
++                },
++                'constraints' => [
++                    new Assert\GreaterThanOrEqual(0),
++                    new Assert\LessThanOrEqual([
++                        'propertyPath' => 'parent.all[quantity_total].data',
++                        'message' => $this->trans('The usage limit per customer cannot be higher than the total usage limit.', 'Admin.Catalog.Notification'),
++                    ]),
++                ],
+             ])
+             ->add('compatibility', DiscountCompatibilityType::class, [
+                 'label_tag_name' => 'h3',
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/DisablingSwitchType.php b/src/PrestaShopBundle/Form/Admin/Type/DisablingSwitchType.php
+index 194e31e7e1a8c..93af9cd61e46d 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/DisablingSwitchType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/DisablingSwitchType.php
+@@ -54,6 +54,9 @@ public function configureOptions(OptionsResolver $resolver)
+                 'show_choices' => false,
+                 'label' => false,
+                 'required' => false,
++                'label_attr' => [
++                    'class' => 'font-weight-normal small mb-0',
++                ],
+                 'row_attr' => [
+                     'class' => 'ps-disabling-switch',
+                 ],
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/EventListener/AddDisablingSwitchListener.php b/src/PrestaShopBundle/Form/Admin/Type/EventListener/AddDisablingSwitchListener.php
+index 6dbae254f4eb0..d4e2dc557e38a 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/EventListener/AddDisablingSwitchListener.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/EventListener/AddDisablingSwitchListener.php
+@@ -123,6 +123,7 @@ public function addDisablingSwitch(PreSetDataEvent $event): void
+             'switch_event' => $form->getConfig()->getOption(DisablingSwitchExtension::SWITCH_EVENT_OPTION),
+             'data' => $disabledData,
+             'disable_on_match' => $disableOnMatch,
++            'label' => $form->getConfig()->getOption(DisablingSwitchExtension::SWITCH_LABEL),
+         ];
+ 
+         $parent->add(
+diff --git a/src/PrestaShopBundle/Form/Extension/DisablingSwitchExtension.php b/src/PrestaShopBundle/Form/Extension/DisablingSwitchExtension.php
+index 4120bbc6a9d4d..211f71cb311b8 100644
+--- a/src/PrestaShopBundle/Form/Extension/DisablingSwitchExtension.php
++++ b/src/PrestaShopBundle/Form/Extension/DisablingSwitchExtension.php
+@@ -55,6 +55,7 @@ class DisablingSwitchExtension extends AbstractTypeExtension
+     public const SWITCH_EVENT_OPTION = 'disabling_switch_event';
+     public const DISABLED_VALUE_OPTION = 'disabled_value';
+     public const SWITCH_STATE_ON_DISABLE_OPTION = 'switch_state_on_disable';
++    public const SWITCH_LABEL = 'disabling_switch_label';
+ 
+     /**
+      * @var AddDisablingSwitchListener
+@@ -151,12 +152,15 @@ public function configureOptions(OptionsResolver $resolver): void
+                 static::SWITCH_EVENT_OPTION => null,
+                 // Define the state of the switch component when value is disabled (by default on off)
+                 static::SWITCH_STATE_ON_DISABLE_OPTION => 'off',
++                // Define the label of the switch component if needed
++                static::SWITCH_LABEL => false,
+             ])
+             ->setAllowedTypes(static::SWITCH_OPTION, 'bool')
+             ->setAllowedTypes(static::DISABLED_VALUE_OPTION, ['null', 'string', 'int', 'array', 'object', 'bool', 'float', 'callback', Closure::class])
+             ->setAllowedTypes(static::SWITCH_EVENT_OPTION, ['string', 'null'])
+             ->setAllowedTypes(static::SWITCH_STATE_ON_DISABLE_OPTION, 'string')
+             ->setAllowedValues(static::SWITCH_STATE_ON_DISABLE_OPTION, ['off', 'on'])
++            ->setAllowedTypes(static::SWITCH_LABEL, ['bool', 'string'])
+         ;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig
+index a9100eff707d4..b98577368e5ff 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig
+@@ -129,8 +129,11 @@
+ {% block form_disabling_switch %}
+   {% set disablingSwitchName = disabling_switch_prefix ~ form.vars.name %}
+   {% if attribute(form.parent, disablingSwitchName) is defined %}
+-    {{ form_errors(attribute(form.parent, disablingSwitchName)) }}
+-    {{ form_widget(attribute(form.parent, disablingSwitchName)) }}
++    <div class="d-inline-flex align-items-center ml-3">
++      {{ form_errors(attribute(form.parent, disablingSwitchName)) }}
++      {{ form_widget(attribute(form.parent, disablingSwitchName)) }}
++      {{ form_label(attribute(form.parent, disablingSwitchName)) }}
++    </div>
+   {% endif %}
+ {% endblock %}
+ 
+@@ -192,7 +195,8 @@
+       {% set placement = label_attr['popover_placement'] is defined ? label_attr['popover_placement'] : 'top' %}
+       {{ include('@Common/HelpBox/helpbox.html.twig', {placement: placement, content: content}) }}
+     {% endif %}
+-    {{- block('form_disabling_switch') -}}
++
++      {{- block('form_disabling_switch') -}}
+     </{{ labelTag }}>
+   {%- endif -%}
+   {% if label_subtitle is defined and label_subtitle is not empty %}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index d9bb4aa681c4e..3204a4cb7a47e 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -187,11 +187,18 @@ public function createDiscount(string $discountReference, string $discountType,
+             }
+         }
+         if (isset($data['total_quantity'])) {
+-            $command->setTotalQuantity((int) $data['total_quantity']);
++            if ($data['total_quantity'] === 'null') {
++                $command->setTotalQuantity(null);
++            } else {
++                $command->setTotalQuantity((int) $data['total_quantity']);
++            }
+         }
+-
+         if (isset($data['quantity_per_user'])) {
+-            $command->setQuantityPerUser((int) $data['quantity_per_user']);
++            if ($data['quantity_per_user'] === 'null') {
++                $command->setQuantityPerUser(null);
++            } else {
++                $command->setQuantityPerUser((int) $data['quantity_per_user']);
++            }
+         }
+ 
+         if (isset($data['description'])) {
+@@ -333,11 +340,18 @@ public function editDiscount(string $discountReference, TableNode $node): void
+             $command->setValidTo(new DateTimeImmutable($data['valid_to']));
+         }
+         if (isset($data['total_quantity'])) {
+-            $command->setTotalQuantity((int) $data['total_quantity']);
++            if ($data['total_quantity'] === 'null') {
++                $command->setTotalQuantity(null);
++            } else {
++                $command->setTotalQuantity((int) $data['total_quantity']);
++            }
+         }
+-
+         if (isset($data['quantity_per_user'])) {
+-            $command->setQuantityPerUser((int) $data['quantity_per_user']);
++            if ($data['quantity_per_user'] === 'null') {
++                $command->setQuantityPerUser(null);
++            } else {
++                $command->setQuantityPerUser((int) $data['quantity_per_user']);
++            }
+         }
+ 
+         if (isset($data['description'])) {
+@@ -495,10 +509,18 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+             );
+         }
+         if (isset($expectedData['total_quantity'])) {
+-            Assert::assertSame((int) $expectedData['total_quantity'], $discountForEditing->getTotalQuantity(), 'Unexpected quantity');
++            if ($expectedData['total_quantity'] === 'null') {
++                Assert::assertNull($discountForEditing->getTotalQuantity(), 'Unexpected total quantity, expected null');
++            } else {
++                Assert::assertSame((int) $expectedData['total_quantity'], $discountForEditing->getTotalQuantity(), 'Unexpected quantity');
++            }
+         }
+         if (isset($expectedData['quantity_per_user'])) {
+-            Assert::assertSame((int) $expectedData['quantity_per_user'], $discountForEditing->getQuantityPerUser(), 'Unexpected quantity_per_user');
++            if ($expectedData['quantity_per_user'] === 'null') {
++                Assert::assertNull($discountForEditing->getQuantityPerUser(), 'Unexpected quantity_per_user, expected null');
++            } else {
++                Assert::assertSame((int) $expectedData['quantity_per_user'], $discountForEditing->getQuantityPerUser(), 'Unexpected quantity_per_user');
++            }
+         }
+ 
+         if (isset($expectedData['reduction_percent'])) {
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_usage_limits.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_usage_limits.feature
+new file mode 100644
+index 0000000000000..9928c090c2458
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_usage_limits.feature
+@@ -0,0 +1,232 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-usage-limits-fo
++@restore-all-tables-before-feature
++@discount-usage-limits-fo
++Feature: Customer using discount with usage limits in FO
++  PrestaShop allows customers to use discounts that are limited by usage per user or total.
++  As a customer
++  I should be able to use a discount code that is limited by usage per user or total
++  And I should not be able to use a discount code that has reached its usage limit
++
++  Background:
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And the module "dummy_payment" is installed
++    And country "US" is enabled
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And there is a product in the catalog named "product1" with a price of 25.00 and 1000 items in stock
++    And there is a product in the catalog named "product2" with a price of 15.00 and 1000 items in stock
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And there is a customer named "testCustomer2" whose email is "pub2@prestashop.com"
++    And I add new address to customer "testCustomer2" with following details:
++      | Address alias    | test-address                       |
++      | First name       | testFirstName                      |
++      | Last name        | testLastName                       |
++      | Address          | Work address st. 1234567890        |
++      | City             | Birmingham                         |
++      | Country          | United States                      |
++      | State            | Alabama                            |
++      | Postal code      | 12345                              |
++    And customer "testCustomer2" has address in "US" country
++
++  Scenario: Discount Free shipping that is available only one time for all customers
++    Given I create a "free_shipping" discount "vip_discount10" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_FREE_SHIPPING     |
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount10" should have the following properties:
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++    # First Johh's cart + discount with order placed
++    When I create an empty cart "john_cart10" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart10"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart10"
++    Then my cart "john_cart10" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.42  |
++      | total_discount | $0.00  |
++      | total          | $60.42 |
++    When I use a voucher "vip_discount10" on the cart "john_cart10"
++    Then my cart "john_cart10" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.42  |
++      | total_discount | -$7.00 |
++      | total          | $53.00 |
++    And I add order "john_order" from cart "john_cart10" with "dummy_payment" payment method and "Payment accepted" order status
++    # Now Jane's cart + discount
++    When I create an empty cart "jane_cart10" for customer "testCustomer2"
++    And I add 2 product "product1" to the cart "jane_cart10"
++    And I select "US" address as delivery and invoice address for customer "testCustomer2" in cart "jane_cart10"
++    And I use a voucher "vip_discount10" on the cart "jane_cart10"
++    Then I should get an error that the discount is invalid
++
++  Scenario: Discount product level that is available only one time for all customers
++    Given I create a "product_level" discount "vip_discount11" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_PRODUCT_LEVEL     |
++      | reduction_percent        | 10.0                  |
++      | reduction_product        | product1              |
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount11" should have the following properties:
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++    # First Johh's cart + discount with order placed
++    When I create an empty cart "john_cart12" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart12"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart12"
++    Then my cart "john_cart12" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.42  |
++      | total_discount | $0.00  |
++      | total          | $60.42 |
++    When I use a voucher "vip_discount11" on the cart "john_cart12"
++    Then my cart "john_cart12" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.42  |
++      | total_discount | -$5.00 |
++      | total          | $55.12 |
++    And I add order "john_order" from cart "john_cart12" with "dummy_payment" payment method and "Payment accepted" order status
++    # Now Jane's cart + discount
++    When I create an empty cart "jane_cart12" for customer "testCustomer2"
++    And I add 2 product "product1" to the cart "jane_cart12"
++    And I select "US" address as delivery and invoice address for customer "testCustomer2" in cart "jane_cart12"
++    And I use a voucher "vip_discount11" on the cart "jane_cart12"
++    Then I should get an error that the discount is invalid
++
++  Scenario: Discount that is available only one time per user
++    Given I create a "cart_level" discount "vip_discount" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_20                |
++      | reduction_percent        | 20.0                  |
++      | total_quantity           | 100                   |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount" should have the following properties:
++      | total_quantity           | 100                   |
++      | quantity_per_user        | 1                     |
++    # First Johh's cart + discount with order placed
++    When I create an empty cart "john_cart" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount" on the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$40.00'
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart"
++    And I add order "john_order" from cart "john_cart" with "dummy_payment" payment method and "Payment accepted" order status
++    # Second John's cart with discount already used before
++    When I create an empty cart "john_cart2" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart2"
++    Then cart "john_cart2" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount" on the cart "john_cart2"
++    Then I should get an error that the discount is invalid
++    # Now Jane's cart + discount
++    When I create an empty cart "jane_cart" for customer "testCustomer2"
++    And I add 2 product "product1" to the cart "jane_cart"
++    Then cart "jane_cart" total with tax included should be '$57.00'
++    When I use a voucher "vip_discount" on the cart "jane_cart"
++    Then cart "jane_cart" total with tax included should be '$47.00'
++
++  Scenario: Discount that is available only one time for all customers
++    Given I create a "cart_level" discount "vip_discount2" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_20_2              |
++      | reduction_percent        | 20.0                  |
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount2" should have the following properties:
++      | total_quantity           | 1                     |
++      | quantity_per_user        | 1                     |
++    # First Johh's cart + discount with order placed
++    When I create an empty cart "john_cart" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount2" on the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$40.00'
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart"
++    And I add order "john_order" from cart "john_cart" with "dummy_payment" payment method and "Payment accepted" order status
++    # Now Jane's cart + discount
++    When I create an empty cart "jane_cart" for customer "testCustomer2"
++    And I add 2 product "product1" to the cart "jane_cart"
++    Then cart "jane_cart" total with tax included should be '$57.00'
++    When I use a voucher "vip_discount2" on the cart "jane_cart"
++    Then I should get an error that the discount is invalid
++
++  Scenario: Discount that is available with no limit in total usage
++    Given I create a "cart_level" discount "vip_discount4" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_20_4              |
++      | reduction_percent        | 20.0                  |
++      | total_quantity           | null                  |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount4" should have the following properties:
++      | total_quantity           | null                  |
++      | quantity_per_user        | 1                     |
++    # First Johh's cart + discount with order placed
++    And I create an empty cart "john_cart3" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart3"
++    Then cart "john_cart3" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount4" on the cart "john_cart3"
++    Then cart "john_cart3" total with tax included should be '$40.00'
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart3"
++    And I add order "john_order1" from cart "john_cart3" with "dummy_payment" payment method and "Payment accepted" order status
++    # Second John's cart with discount already used before
++    When I create an empty cart "john_cart2" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart2"
++    Then cart "john_cart2" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount4" on the cart "john_cart2"
++    Then I should get an error that the discount is invalid
++    # Now Jane's cart + discount
++    When I create an empty cart "jane_cart" for customer "testCustomer2"
++    And I add 2 product "product1" to the cart "jane_cart"
++    Then cart "jane_cart" total with tax included should be '$57.00'
++    When I use a voucher "vip_discount4" on the cart "jane_cart"
++    Then cart "jane_cart" total with tax included should be '$47.00'
++
++  Scenario: Discount that is available with no limit per user
++    Given I create a "cart_level" discount "vip_discount3" with following properties:
++      | name[en-US]              | VIP Discount          |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2099-12-31 23:59:59   |
++      | code                     | VIP_20_3              |
++      | reduction_percent        | 20.0                  |
++      | total_quantity           | 10                    |
++      | quantity_per_user        | null                  |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount3" should have the following properties:
++      | total_quantity           | 10                    |
++      | quantity_per_user        | null                  |
++    # First Johh's cart + discount with order placed
++    And I create an empty cart "john_cart1" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart1"
++    Then cart "john_cart1" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount3" on the cart "john_cart1"
++    Then cart "john_cart1" total with tax included should be '$40.00'
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "john_cart1"
++    And I add order "john_order1" from cart "john_cart1" with "dummy_payment" payment method and "Payment accepted" order status
++    # Second John's cart with discount already used before
++    When I create an empty cart "john_cart2" for customer "testCustomer"
++    And I add 2 product "product1" to the cart "john_cart2"
++    Then cart "john_cart2" total with tax included should be '$50.00'
++    When I use a voucher "vip_discount3" on the cart "john_cart2"
++    Then cart "john_cart2" total with tax included should be '$40.00'
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index d5c088ead642e..e1b9b6a97f53d 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -353,6 +353,8 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureValuesFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+         - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+ 
+     catalog_price_rule:
+       paths:
+diff --git a/tests/Unit/Core/Trait/DirtyTraitTest.php b/tests/Unit/Core/Trait/DirtyTraitTest.php
+new file mode 100644
+index 0000000000000..6ce94495b4e79
+--- /dev/null
++++ b/tests/Unit/Core/Trait/DirtyTraitTest.php
+@@ -0,0 +1,68 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace Tests\Unit\Core\Trait;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Trait\DirtyTrait;
++
++class DirtyTraitMock
++{
++    use DirtyTrait;
++}
++
++class DirtyTraitTest extends TestCase
++{
++    public function testIsDirtyInitiallyEmpty(): void
++    {
++        $object = new DirtyTraitMock();
++        $this->assertEmpty($object->getDirtyProperties());
++    }
++
++    public function testMarkDirty(): void
++    {
++        $object = new DirtyTraitMock();
++        $object->markDirty('someProperty');
++        $object->markDirty('someProperty2');
++
++        $this->assertCount(2, $object->getDirtyProperties());
++
++        $this->assertContains('someProperty', $object->getDirtyProperties());
++        $this->assertContains('someProperty2', $object->getDirtyProperties());
++        $this->assertNotContains('someProperty3', $object->getDirtyProperties());
++    }
++
++    public function testIsDirty(): void
++    {
++        $object = new DirtyTraitMock();
++        $object->markDirty('someProperty');
++        $object->markDirty('someProperty2');
++
++        $this->assertTrue($object->isDirty('someProperty'));
++        $this->assertTrue($object->isDirty('someProperty2'));
++        $this->assertFalse($object->isDirty('someProperty3'));
++    }
++}

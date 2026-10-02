@@ -1,0 +1,120 @@
+diff --git a/.github/release-healthcheck/generated-files.sh b/.github/release-healthcheck/generated-files.sh
+index b15fea6cf059e..91c69bac138c1 100644
+--- a/.github/release-healthcheck/generated-files.sh
++++ b/.github/release-healthcheck/generated-files.sh
+@@ -10,6 +10,7 @@
+ #   app          : C1 hooks listing, C2 JS routing  (need a booted PrestaShop: PHP+MySQL+assets)
+ #   composer     : C3 translation fixtures, C4 license headers, C5 linters (no DB)
+ #   translation  : C6 default catalogue extraction (checks out the external TranslationTool)
++#   static       : C7 localization packs sync with LocalizationFiles (git + public clone only)
+ 
+ # HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
+ # shellcheck disable=SC2034
+@@ -130,6 +131,34 @@ check_default_catalogue_extracted() {
+   git -C "$core_dir" checkout -- translations/ 2>/dev/null || true
+ }
+ 
++# spec ref: C7 — bundled localization packs in sync with PrestaShop/LocalizationFiles.
++# Mirrors sync_localization_files.yml: copy every top-level *.xml pack from the source
++# repo (copy-only — core-only packs and CLDR/.htaccess are never touched) and expect no
++# git diff. A diff means the packs are stale: run the sync workflow on this branch.
++check_localization_packs_in_sync() {
++  local id="generated/localization-packs" title="Localization packs in sync"
++  HC_LINK="https://github.com/$REPO/tree/$REF/localization"
++  if ! ge_9_1; then
++    emit "$id" "$title" "$HC_NA" "$HC_SEV_FAIL" "sync with LocalizationFiles only covers >= 9.1" ">= 9.1"
++    return
++  fi
++
++  local src_dir
++  src_dir="$(mktemp -d 2>/dev/null)" || { emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (no temp dir)"; return; }
++  if ! git clone --quiet --depth 1 https://github.com/PrestaShop/LocalizationFiles "$src_dir" 2>/dev/null; then
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (LocalizationFiles clone failed)"; return
++  fi
++
++  find "$src_dir" -maxdepth 1 -name '*.xml' -exec cp {} localization/ \;
++  if git diff --quiet -- localization/ 2>/dev/null; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_FAIL" "no diff after copying packs from LocalizationFiles master"
++  else
++    local changed; changed="$(git diff --name-only -- localization/ 2>/dev/null | wc -l | tr -d ' ')"
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_FAIL" "$changed stale pack(s) — run the sync-localization-files workflow on $REF"
++    git checkout -- localization/ 2>/dev/null || true
++  fi
++}
++
+ run_generated_files_app_checks() {
+   HC_GROUP="Generated files in sync"
+   guard check_hooks_listing_in_sync
+@@ -147,3 +176,8 @@ run_generated_files_translation_checks() {
+   HC_GROUP="Generated files in sync"
+   guard check_default_catalogue_extracted
+ }
++
++run_generated_files_static_checks() {
++  HC_GROUP="Generated files in sync"
++  guard check_localization_packs_in_sync
++}
+diff --git a/.github/release-healthcheck/run-tier.sh b/.github/release-healthcheck/run-tier.sh
+index 1f88ec49cda67..8533e0a23bab6 100644
+--- a/.github/release-healthcheck/run-tier.sh
++++ b/.github/release-healthcheck/run-tier.sh
+@@ -46,8 +46,10 @@ case "$TIER" in
+   static)
+     . "$SELF_DIR/version-integrity.sh"
+     . "$SELF_DIR/release-content.sh"
++    . "$SELF_DIR/generated-files.sh"
+     run_version_integrity_checks
+     run_release_content_checks
++    run_generated_files_static_checks
+     ;;
+   deps)
+     . "$SELF_DIR/dependencies.sh"
+diff --git a/.github/workflows/sync_localization_files.yml b/.github/workflows/sync_localization_files.yml
+index 4a65aa3f0d73f..df1b440e48718 100644
+--- a/.github/workflows/sync_localization_files.yml
++++ b/.github/workflows/sync_localization_files.yml
+@@ -7,6 +7,8 @@ name: Sync localization files from LocalizationFiles
+ # Run manually from the Actions tab (Run workflow). It copies every country
+ # pack from the chosen LocalizationFiles branch into localization/ and, if
+ # anything changed, opens a Pull Request against the selected core branch(es).
++# The target accepts any branch name (e.g. a build branch during the release
++# process); "all" targets the active version branches.
+ #
+ # Notes:
+ #  - Files present in core but absent from LocalizationFiles are
+@@ -19,13 +21,9 @@ on:
+   workflow_dispatch:
+     inputs:
+       target:
+-        description: 'Core branch(es) to open a sync PR for'
+-        type: choice
++        description: 'Core branch to open a sync PR for — "all" = develop + 9.2.x + 9.1.x, or any branch name (e.g. build-920)'
++        type: string
+         default: all
+-        options:
+-          - all
+-          - develop
+-          - 9.1.x
+       lf_branch:
+         description: 'LocalizationFiles branch to sync from'
+         type: string
+@@ -44,12 +42,14 @@ jobs:
+       matrix: ${{ steps.pick.outputs.matrix }}
+     steps:
+       - id: pick
++        env:
++          TARGET: ${{ inputs.target }}
+         run: |
+-          case "${{ inputs.target }}" in
+-            develop) echo 'matrix=["develop"]' >> "$GITHUB_OUTPUT" ;;
+-            9.1.x)   echo 'matrix=["9.1.x"]' >> "$GITHUB_OUTPUT" ;;
+-            *)       echo 'matrix=["develop","9.1.x"]' >> "$GITHUB_OUTPUT" ;;
+-          esac
++          if [ "$TARGET" = "all" ]; then
++            echo 'matrix=["develop","9.2.x","9.1.x"]' >> "$GITHUB_OUTPUT"
++          else
++            echo "matrix=$(jq -cn --arg b "$TARGET" '[$b]')" >> "$GITHUB_OUTPUT"
++          fi
+ 
+   sync-localization-files:
+     needs: setup

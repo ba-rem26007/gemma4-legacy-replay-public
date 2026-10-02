@@ -1,0 +1,141 @@
+diff --git a/admin-dev/themes/default/js/bundle/module/module.js b/admin-dev/themes/default/js/bundle/module/module.js
+index ef3849da8fcb9..7e62ba7875d86 100644
+--- a/admin-dev/themes/default/js/bundle/module/module.js
++++ b/admin-dev/themes/default/js/bundle/module/module.js
+@@ -640,7 +640,7 @@ var AdminModuleController = function () {
+           acceptedFiles: '.zip, .tar',
+            // The name that will be used to transfer the file
+           paramName: 'file_uploaded',
+-          maxFilesize: 5, // MB
++          maxFilesize: 50, // can't be greater than 50Mb because it's an addons limitation
+           uploadMultiple: false,
+           addRemoveLinks: true,
+           dictDefaultMessage: '',
+@@ -659,9 +659,15 @@ var AdminModuleController = function () {
+           processing: function () {
+               // Leave it empty ATM since we don't require anything while processing upload
+           },
++          /* error(file, errorMessage) */
++          error: function (file, message) {
++            $(_this.moduleImportProcessingSelector).fadeOut(function() {
++              $(_this.moduleImportFailureMsgDetailsSelector).html(message);
++              $(_this.moduleImportFailureSelector).fadeIn();
++            });
++          },
+           /* complete(file, response) */
+-          complete: function (file) {
+-
++          complete: function (file, response) {
+               if (file.status !== 'error') {
+                   var responseObject = jQuery.parseJSON(file.xhr.response);
+ 
+@@ -678,11 +684,6 @@ var AdminModuleController = function () {
+                           $(_this.moduleImportFailureSelector).fadeIn();
+                       }
+                   });
+-              } else {
+-                  $(_this.moduleImportProcessingSelector).fadeOut(function() {
+-                       $(_this.moduleImportFailureMsgDetailsSelector).html(file.xhr.responseText);
+-                       $(_this.moduleImportFailureSelector).fadeIn();
+-                   });
+               }
+               // State that we have finish the process to unlock some actions
+               _this.isUploadStarted = false;
+diff --git a/src/PrestaShopBundle/Controller/Admin/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+index 575c85152408a..52ba8a5667144 100755
+--- a/src/PrestaShopBundle/Controller/Admin/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+@@ -12,6 +12,7 @@
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+ use Symfony\Component\HttpFoundation\JsonResponse;
++use Symfony\Component\Validator\Constraints\File;
+ 
+ class ModuleController extends FrameworkBundleAdminController
+ {
+@@ -308,12 +309,29 @@ public function getPreferredModulesAction()
+      */
+     public function importModuleAction(Request $request)
+     {
+-        $moduleManagerFactory = new ModuleManagerBuilder();
+-        $moduleManager = $moduleManagerFactory->build();
+-        $moduleRepository = $moduleManagerFactory->buildRepository();
+-
++        $moduleManager = $this->get('prestashop.module.manager');
+         try {
+             $file_uploaded = $request->files->get('file_uploaded');
++            $violations = $this->get('validator')->validate($file_uploaded, new File(
++                [
++                    'maxSize' => ini_get('upload_max_filesize'),
++                    'mimeTypes' => [
++                        'application/zip',
++                        'application/x-gzip',
++                        'application/gzip',
++                        'application/x-gtar',
++                        'application/x-tgz'
++                    ],
++                ]
++            ));
++            if (0 !== count($violations)) {
++                $violationsMessages = '';
++                foreach ($violations as $violation) {
++                    $violationsMessages .= $violation->getMessage() . PHP_EOL;
++                }
++                throw new Exception($violationsMessages);
++            }
++
+             $file_uploaded_tmp_path = _PS_CACHE_DIR_.'tmp'.DIRECTORY_SEPARATOR.'upload';
+             $tmp_filename_uniq = md5(uniqid()).$file_uploaded->guessExtension();
+             $file_uploaded_tmp_fullpath = $file_uploaded_tmp_path.'/'.$tmp_filename_uniq;
+@@ -334,7 +352,7 @@ public function importModuleAction(Request $request)
+             } else {
+                 $installation_response['msg'] = 'Install action on module '. $module_name;
+                 if ($installation_response['status'] === true) {
+-                    $installation_response['is_configurable'] = (bool)$moduleRepository->getModule($module_name)->attributes->get('is_configurable');
++                    $installation_response['is_configurable'] = (bool)$this->get('prestashop.core.admin.module.repository')->getModule($module_name)->attributes->get('is_configurable');
+                     $installation_response['msg'] .= 'succeeded';
+                 } else {
+                     $installation_response['msg'] .= 'failed';
+@@ -390,27 +408,25 @@ protected function getToolbarButtons()
+         return $toolbarButtons;
+     }
+ 
+-    private function inflateModule($file_to_inflate)
++    private function inflateModule($fileToInflate)
+     {
+-        if (file_exists($file_to_inflate)) {
+-            $zip_archive = new \ZipArchive();
+-            $ret = $zip_archive->open($file_to_inflate);
+-
+-            if ($ret === true) {
+-                // Get module name depending on first folder found in archive and trim all separator that might be there
+-                $module_name = str_replace('/', '', $zip_archive->statIndex(0)['name']);
+-                // Put it in Module directory
+-                $zip_archive->extractTo(_PS_MODULE_DIR_);
+-                // Close archive
+-                $zip_archive->close();
+-                // Delete archive from tmp folder
+-                unlink($file_to_inflate);
+-                return $module_name;
++        if (file_exists($fileToInflate)) {
++            $zipArchive = new \ZipArchive();
++            $extractionStatus = $zipArchive->open($fileToInflate);
++
++            if ($extractionStatus === true) {
++                $filename = $zipArchive->getNameIndex(0);
++                $moduleName = substr($filename, 0, strpos($filename, '/'));
++                $zipArchive->extractTo(_PS_MODULE_DIR_);
++                $zipArchive->close();
++                unlink($fileToInflate);
++
++                return $moduleName;
+             } else {
+-                throw new Exception('Cannot open the following archive: '.$file_to_inflate.' (error code: '.$ret.')');
++                throw new Exception('Cannot open the following archive: '.$fileToInflate.' (error code: '.$extractionStatus.')');
+             }
+         } else {
+-            throw new Exception('Unable to find uploaded module at the following path: '.$file_to_inflate);
++            throw new Exception('Unable to find uploaded module at the following path: '.$fileToInflate);
+         }
+     }
+ 

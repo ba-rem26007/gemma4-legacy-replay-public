@@ -1,0 +1,170 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 10312b6f82b81..94998c22ac0d4 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -1976,7 +1976,8 @@ public function getOrderTotal(
+                 break;
+             case Cart::BOTH_WITHOUT_SHIPPING:
+                 $calculator->calculateRows();
+-                $calculator->calculateCartRules();
++                // dont process free shipping to avoid calculation loop (and maximum nested functions !)
++                $calculator->calculateCartRulesWithoutFreeShipping();
+                 $amount = $calculator->getTotal(true);
+                 break;
+             case Cart::ONLY_PRODUCTS:
+diff --git a/src/Core/Cart/Calculator.php b/src/Core/Cart/Calculator.php
+index 7cdc9b4585ac1..8bd77d58b8b5c 100644
+--- a/src/Core/Cart/Calculator.php
++++ b/src/Core/Cart/Calculator.php
+@@ -272,6 +272,18 @@ public function calculateCartRules()
+             ->applyCartRules();
+     }
+ 
++    /**
++     * calculate only cart rules (rows and fees have to be calculated first), but don't process free-shipping discount
++     * (avoid loop on shipping calculation)
++     */
++    public function calculateCartRulesWithoutFreeShipping()
++    {
++        $this->cartRuleCalculator->setCartRules($this->cartRules)
++            ->setCartRows($this->cartRows)
++            ->setCalculator($this)
++            ->applyCartRulesWithoutFreeShipping();
++    }
++
+     /**
+      * calculate wrapping and shipping fees (rows have to be calculated first).
+      *
+diff --git a/src/Core/Cart/CartRuleCalculator.php b/src/Core/Cart/CartRuleCalculator.php
+index e44c14585ab83..a648dc3adb559 100644
+--- a/src/Core/Cart/CartRuleCalculator.php
++++ b/src/Core/Cart/CartRuleCalculator.php
+@@ -26,6 +26,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Cart;
+ 
++use Cart;
++
+ class CartRuleCalculator
+ {
+     /**
+@@ -48,6 +50,9 @@ class CartRuleCalculator
+      */
+     protected $fees;
+ 
++    /**
++     * process cartrules calculation
++     */
+     public function applyCartRules()
+     {
+         foreach ($this->cartRules as $cartRule) {
+@@ -55,6 +60,16 @@ public function applyCartRules()
+         }
+     }
+ 
++    /**
++     * process cartrules calculation, excluding free-shipping processing
++     */
++    public function applyCartRulesWithoutFreeShipping()
++    {
++        foreach ($this->cartRules as $cartRule) {
++            $this->applyCartRule($cartRule, false);
++        }
++    }
++
+     /**
+      * @param \PrestaShop\PrestaShop\Core\Cart\CartRuleCollection $cartRules
+      *
+@@ -67,7 +82,13 @@ public function setCartRules($cartRules)
+         return $this;
+     }
+ 
+-    protected function applyCartRule(CartRuleData $cartRuleData)
++    /**
++     * @param CartRuleData $cartRuleData
++     * @param bool $withFreeShipping used to calculate free shipping discount (avoid loop on shipping calculation)
++     *
++     * @throws \PrestaShopDatabaseException
++     */
++    protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping = true)
+     {
+         $cartRule = $cartRuleData->getCartRule();
+         $cart = $this->calculator->getCart();
+@@ -77,8 +98,11 @@ protected function applyCartRule(CartRuleData $cartRuleData)
+         }
+ 
+         // Free shipping on selected carriers
+-        if ($cartRule->free_shipping) {
+-            $initialShippingFees = $this->calculator->getFees()->getInitialShippingFees();
++        if ($cartRule->free_shipping && $withFreeShipping) {
++            $initialShippingFees = new AmountImmutable(
++                $cart->getOrderTotal(true, Cart::ONLY_SHIPPING),
++                $cart->getOrderTotal(false, Cart::ONLY_SHIPPING)
++            );
+             $this->calculator->getFees()->subDiscountValueShipping($initialShippingFees);
+             $cartRuleData->addDiscountApplied($initialShippingFees);
+         }
+diff --git a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+index 33b242775a68d..90ac47f7cd840 100644
+--- a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+@@ -80,7 +80,7 @@ public function before(BeforeScenarioScope $scope)
+     }
+ 
+     /**
+-     * @Given /^there is a cart rule named "(.+)" that applies a percent discount of (\d+\.\d+)% with priority (\d+), quantity of (.*) and quantity per user (.*)$/
++     * @Given /^there is a cart rule named "(.+)" that applies a percent discount of (\d+\.\d+)% with priority (\d+), quantity of (\d+) and quantity per user (\d+)$/
+      */
+     public function thereIsACartRuleWithNameAndPercentDiscountOf50AndPriorityOfAndQuantityOfAndQuantityPerUserOf($cartRuleName, $percent, $priority, $cartRuleQuantity, $cartRuleQuantityPerUser)
+     {
+@@ -88,7 +88,15 @@ public function thereIsACartRuleWithNameAndPercentDiscountOf50AndPriorityOfAndQu
+     }
+ 
+     /**
+-     * @Given /^there is a cart rule named "(.+)" that applies an amount discount of (\d+\.\d+) with priority (\d+), quantity of (.*) and quantity per user (.*)$/
++     * @Given /^there is a cart rule named "(.+)" that applies no discount with priority (\d+), quantity of (\d+) and quantity per user (\d+)$/
++     */
++    public function thereIsACartRuleWithNameAndNoDiscountAndPriorityOfAndQuantityOfAndQuantityPerUserOf($cartRuleName, $priority, $cartRuleQuantity, $cartRuleQuantityPerUser)
++    {
++        $this->createCartRule($cartRuleName, 0, 0, $priority, $cartRuleQuantity, $cartRuleQuantityPerUser);
++    }
++
++    /**
++     * @Given /^there is a cart rule named "(.+)" that applies an amount discount of (\d+\.\d+) with priority (\d+), quantity of (\d+) and quantity per user (\d+)$/
+      */
+     public function thereIsACartRuleWithNameAndAmountDiscountOfAndPriorityOfAndQuantityOfAndQuantityPerUserOf($cartRuleName, $amount, $priority, $cartRuleQuantity, $cartRuleQuantityPerUser)
+     {
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature
+new file mode 100644
+index 0000000000000..c230b83df5e71
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature
+@@ -0,0 +1,28 @@
++@reset-database-before-feature
++Feature: Cart rule (amount) calculation with one cart rule offering free shipping
++  As a customer
++  I must be able to have correct cart total when adding cart rules
++
++  Scenario: One product in cart, one cartRule offering only free shipping
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a cart rule named "cartrule4" that applies no discount with priority 4, quantity of 1000 and quantity per user 1000
++    Given cart rule "cartrule4" offers free shipping
++    Given cart rule "cartrule4" has a discount code "foo4"
++    When I add 1 items of product "product1" in my cart
++    When I use the discount "cartrule4"
++    Then my cart total should be 19.812 tax included
++    Then my cart total using previous calculation method should be 19.812 tax included
++
++  Scenario: One product in cart, one cartRule offering free shipping AND 5€ discount
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a cart rule named "cartrule4" that applies an amount discount of 5.0 with priority 4, quantity of 1000 and quantity per user 1000
++    Given cart rule "cartrule4" offers free shipping
++    Given cart rule "cartrule4" has a discount code "foo4"
++    When I add 1 items of product "product1" in my cart
++    When I use the discount "cartrule4"
++    Then my cart total should be 14.812 tax included
++    Then my cart total using previous calculation method should be 14.812 tax included

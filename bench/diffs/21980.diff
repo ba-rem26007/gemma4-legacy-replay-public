@@ -1,0 +1,164 @@
+diff --git a/src/Adapter/Cart/CommandHandler/UpdateProductQuantityInCartHandler.php b/src/Adapter/Cart/CommandHandler/UpdateProductQuantityInCartHandler.php
+index 455edde8adb51..af1927a357ebb 100644
+--- a/src/Adapter/Cart/CommandHandler/UpdateProductQuantityInCartHandler.php
++++ b/src/Adapter/Cart/CommandHandler/UpdateProductQuantityInCartHandler.php
+@@ -129,7 +129,7 @@ private function updateProductQuantityInCart(Cart $cart, UpdateProductQuantityIn
+         // It seems that $updateResult can be -1,
+         // when adding product with less quantity than minimum required.
+         if ($updateResult < 0) {
+-            $minQuantity = $command->getCustomizationId() ?
++            $minQuantity = $combinationIdValue ?
+                 Attribute::getAttributeMinimalQty($combinationIdValue) :
+                 $product->minimal_quantity;
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
+index e989a9cb02879..264a82c4e8424 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
+@@ -26,6 +26,7 @@
+ 
+ namespace Tests\Integration\Behaviour\Features\Context\Domain;
+ 
++use Behat\Behat\Hook\Scope\BeforeScenarioScope;
+ use Cart;
+ use CartRule;
+ use Configuration;
+@@ -59,6 +60,7 @@
+ use Product;
+ use RuntimeException;
+ use State;
++use Tests\Integration\Behaviour\Features\Context\ProductFeatureContext;
+ use Tests\Integration\Behaviour\Features\Context\SharedStorage;
+ use Tests\Integration\Behaviour\Features\Transform\StringToBooleanTransform;
+ 
+@@ -66,6 +68,17 @@ class CartFeatureContext extends AbstractDomainFeatureContext
+ {
+     use StringToBooleanTransform;
+ 
++    /**
++     * @var ProductFeatureContext
++     */
++    protected $productFeatureContext;
++
++    /** @BeforeScenario */
++    public function before(BeforeScenarioScope $scope)
++    {
++        $this->productFeatureContext = $scope->getEnvironment()->getContext(ProductFeatureContext::class);
++    }
++
+     /**
+      * @Given the current currency is :currencyIsoCode
+      */
+@@ -201,6 +214,44 @@ public function addCustomizedProductToCarts(int $quantity, $productReference, $r
+         );
+     }
+ 
++    /**
++     * @When I add :quantity items of combination :combinationName of the product :productName to the cart :cartReference
++     *
++     * @param int $quantity
++     * @param string $combinationName
++     * @param string $productName
++     * @param string $cartReference
++     */
++    public function addProductsCombinationsToCart(
++        int $quantity,
++        string $combinationName,
++        string $productName,
++        string $cartReference
++    ) {
++        $this->productFeatureContext->checkProductWithNameExists($productName);
++        $this->productFeatureContext->checkCombinationWithNameExists($productName, $combinationName);
++        $productId = (int) $this->productFeatureContext->getProductWithName($productName)->id;
++        $combinationId = (int) $this->productFeatureContext->getCombinationWithName($productName, $combinationName)->id;
++        $cartId = (int) SharedStorage::getStorage()->get($cartReference);
++
++        $this->lastException = null;
++        try {
++            $this->getCommandBus()->handle(
++                new UpdateProductQuantityInCartCommand(
++                    $cartId,
++                    $productId,
++                    $quantity,
++                    $combinationId
++                )
++            );
++
++            // Clear cart static cache or it will have no products in next calls
++            Cart::resetStaticCache();
++        } catch (MinimalQuantityException $e) {
++            $this->lastException = $e;
++        }
++    }
++
+     /**
+      * @When I select :countryIsoCode address as delivery and invoice address for customer :customerReference in cart :cartReference
+      * @Given cart :cartReference delivery and invoice address country for customer :customeReferenceis is :countryIsoCode
+diff --git a/tests/Integration/Behaviour/Features/Context/ProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/ProductFeatureContext.php
+index 8fb1852c2444d..f2d28ee414db6 100644
+--- a/tests/Integration/Behaviour/Features/Context/ProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/ProductFeatureContext.php
+@@ -92,6 +92,17 @@ public function getProductWithName($productName)
+         return $this->products[$productName];
+     }
+ 
++    /**
++     * @param string $productName
++     * @param string $combinationName
++     *
++     * @return Combination
++     */
++    public function getCombinationWithName(string $productName, string $combinationName): Combination
++    {
++        return $this->combinations[$productName][$combinationName];
++    }
++
+     /**
+      * @Given /^there is a product in the catalog named "(.+)" with a price of (\d+\.\d+) and (\d+) items in stock$/
+      */
+@@ -425,6 +436,22 @@ public function productWithNameHasACombinationWithNameAndQuantity($productName,
+         $this->combinations[$productName][$combinationName] = $combination;
+     }
+ 
++    /**
++     * @Given /^the combination "(.+)" of the product "(.+)" has a minimal quantity of (\d+)$/
++     *
++     * @param string $combinationName
++     * @param string $productName
++     * @param int $minimalQty
++     */
++    public function setProductCombinationMinimalQuantity(string $combinationName, string $productName, int $minimalQty)
++    {
++        $this->checkProductWithNameExists($productName);
++        $this->checkCombinationWithNameExists($productName, $combinationName);
++
++        $this->combinations[$productName][$combinationName]->minimal_quantity = $minimalQty;
++        $this->combinations[$productName][$combinationName]->save();
++    }
++
+     /**
+      * @Given /^product "(.+)" has combinations with following details:$/
+      */
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Adding/Product/add_combination.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Adding/Product/add_combination.feature
+index 2d9ac0d2c049b..bfdc9dad71152 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Adding/Product/add_combination.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Adding/Product/add_combination.feature
+@@ -22,6 +22,18 @@ Feature: Add product combination in cart
+     Then I should have 0 items of combination "combi1" of product "product7" in my cart
+     Then the remaining available stock for combination "combi1" of product "product7" should be 500
+ 
++  @add-combinations-to-cart
++  Scenario: Cannot add product with combination in cart with minimal quantity enabled
++    Given there is customer "testCustomer" with email "pub@prestashop.com"
++    And  I create an empty cart "dummy_cart" for customer "testCustomer"
++    And there is a product in the catalog named "product7" with a price of 19.812 and 1000 items in stock
++    And product "product7" has a combination named "combi1" with 500 items in stock
++    And the combination "combi1" of the product "product7" has a minimal quantity of 10
++    When I add 5 items of combination "combi1" of the product "product7" to the cart "dummy_cart"
++    Then I should get error that minimum quantity of 10 must be added to cart
++    Then I should have 0 items of combination "combi1" of product "product7" in my cart
++    Then the remaining available stock for combination "combi1" of product "product7" should be 500
++
+   @add-combinations-to-cart
+   Scenario: Be able to add out of stock combination if configuration allows it
+     Given order out of stock products is allowed

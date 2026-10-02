@@ -1,0 +1,1073 @@
+diff --git a/admin-dev/themes/new-theme/scss/pages/product/product_page.scss b/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
+index 79f7186dc2001..c609e867c09c7 100644
+--- a/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
++++ b/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
+@@ -1581,7 +1581,8 @@ $product-page-padding-bottom: 80px !default;
+     border: none;
+   }
+ 
+-  .employee_preview {
++  .employee_preview,
++  .api_client_preview {
+     display: inline-block;
+     max-width: 300px;
+     overflow: hidden;
+diff --git a/phpstan-baseline.neon b/phpstan-baseline.neon
+index 64081bf877c5e..79226ef70b327 100644
+--- a/phpstan-baseline.neon
++++ b/phpstan-baseline.neon
+@@ -127,7 +127,7 @@ parameters:
+ 
+ 		-
+ 			message: "#^Namespace Tools is forbidden, No legacy calls inside the prestashop bundle\\. Please create an interface and an adapter if you need to\\.$#"
+-			count: 3
++			count: 4
+ 			path: src/Core/Cart/Calculator.php
+ 
+ 		-
+@@ -1643,4 +1643,4 @@ parameters:
+ 		-
+ 			message: "#^Unsafe access to private constant bankwire\\:\\:NAME through static\\:\\:\\.$#"
+ 			count: 1
+-			path: tests/Unit/Resources/parsed-modules/module-static-const.php
+\ No newline at end of file
++			path: tests/Unit/Resources/parsed-modules/module-static-const.php
+diff --git a/src/Adapter/Product/Stock/QueryHandler/AbstractGetStockMovementsHandler.php b/src/Adapter/Product/Stock/QueryHandler/AbstractGetStockMovementsHandler.php
+index 7c4c742254d21..0325d07b9d75c 100644
+--- a/src/Adapter/Product/Stock/QueryHandler/AbstractGetStockMovementsHandler.php
++++ b/src/Adapter/Product/Stock/QueryHandler/AbstractGetStockMovementsHandler.php
+@@ -52,30 +52,72 @@ protected function getStockMovements(StockId $stockId, int $offset, int $limit):
+             $limit
+         );
+ 
++        $apiClients = $this->stockMovementRepository->getApiClientsByStockMovementIds(
++            array_merge([], ...array_map(
++                static function (array $historyRow): array {
++                    return explode(',', (string) $historyRow['id_stock_mvt_list']);
++                },
++                array_values($lastStockMovements)
++            ))
++        );
++
+         return array_map(
+-            function (array $historyRow): StockMovement {
++            function (array $historyRow) use ($apiClients): StockMovement {
+                 return $historyRow['grouping_type'] === StockMovement::EDITION_TYPE
+-                    ? $this->createEditionStockMovement($historyRow)
+-                    : $this->createOrdersStockMovement($historyRow)
++                    ? $this->createEditionStockMovement($historyRow, $apiClients)
++                    : $this->createOrdersStockMovement($historyRow, $apiClients)
+                 ;
+             },
+             $lastStockMovements
+         );
+     }
+ 
++    /**
++     * Extracts the api clients related to the row's stock movements, as two aligned
++     * deduplicated lists [ids[], names[]].
++     *
++     * @param array<string, string|int|null> $historyRow
++     * @param array<int, array<string, mixed>> $apiClients indexed by stock movement id
++     *
++     * @return array{0: int[], 1: string[]}
++     */
++    protected function extractApiClients(array $historyRow, array $apiClients): array
++    {
++        $apiClientIds = [];
++        $apiClientNames = [];
++        foreach (explode(',', (string) $historyRow['id_stock_mvt_list']) as $stockMovementId) {
++            $apiClient = $apiClients[(int) $stockMovementId] ?? null;
++            if (null === $apiClient || in_array($apiClient['id_api_client'], $apiClientIds, true)) {
++                continue;
++            }
++            $apiClientIds[] = $apiClient['id_api_client'];
++            $apiClientNames[] = $apiClient['client_name'];
++        }
++
++        return [$apiClientIds, $apiClientNames];
++    }
++
+     /**
+      * @param array<string, string|int|null> $historyRow
++     * @param array<int, array<string, mixed>> $apiClients indexed by stock movement id
+      *
+      * @return StockMovement
+      */
+-    protected function createEditionStockMovement(array $historyRow): StockMovement
++    protected function createEditionStockMovement(array $historyRow, array $apiClients = []): StockMovement
+     {
+-        $employeeName = $this->translator->trans('%firstname% %lastname%', [
+-            '%firstname%' => $historyRow['employee_firstname'],
+-            '%lastname%' => $historyRow['employee_lastname'],
+-        ],
+-            'Admin.Global'
+-        );
++        // A movement can have no employee (e.g. when it was created through the Admin API)
++        if (empty($historyRow['employee_firstname']) && empty($historyRow['employee_lastname'])) {
++            $employeeName = null;
++        } else {
++            $employeeName = $this->translator->trans('%firstname% %lastname%', [
++                '%firstname%' => $historyRow['employee_firstname'],
++                '%lastname%' => $historyRow['employee_lastname'],
++            ],
++                'Admin.Global'
++            );
++        }
++
++        [$apiClientIds, $apiClientNames] = $this->extractApiClients($historyRow, $apiClients);
+ 
+         return StockMovement::createEditionMovement(
+             $historyRow['date_add_min'],
+@@ -84,17 +126,22 @@ protected function createEditionStockMovement(array $historyRow): StockMovement
+             (int) $historyRow['id_order_list'],
+             (int) $historyRow['id_employee_list'],
+             $employeeName,
+-            (int) $historyRow['delta_quantity']
++            (int) $historyRow['delta_quantity'],
++            $apiClientIds,
++            $apiClientNames
+         );
+     }
+ 
+     /**
+      * @param array<string, string|int|null> $historyRow
++     * @param array<int, array<string, mixed>> $apiClients indexed by stock movement id
+      *
+      * @return StockMovement
+      */
+-    protected function createOrdersStockMovement(array $historyRow): StockMovement
++    protected function createOrdersStockMovement(array $historyRow, array $apiClients = []): StockMovement
+     {
++        [$apiClientIds, $apiClientNames] = $this->extractApiClients($historyRow, $apiClients);
++
+         return StockMovement::createOrdersMovement(
+             $historyRow['date_add_min'],
+             $historyRow['date_add_max'],
+@@ -102,7 +149,9 @@ protected function createOrdersStockMovement(array $historyRow): StockMovement
+             explode(',', $historyRow['id_stock_list']),
+             explode(',', $historyRow['id_order_list']),
+             explode(',', $historyRow['id_employee_list']),
+-            (int) $historyRow['delta_quantity']
++            (int) $historyRow['delta_quantity'],
++            $apiClientIds,
++            $apiClientNames
+         );
+     }
+ }
+diff --git a/src/Adapter/Product/Stock/Repository/StockMovementRepository.php b/src/Adapter/Product/Stock/Repository/StockMovementRepository.php
+index 1ac42398efb36..45c6c896ea65d 100644
+--- a/src/Adapter/Product/Stock/Repository/StockMovementRepository.php
++++ b/src/Adapter/Product/Stock/Repository/StockMovementRepository.php
+@@ -92,6 +92,46 @@ public function getLastStockMovements(
+         return $result;
+     }
+ 
++    /**
++     * Returns the API clients that created the given stock movements, based on the mutation
++     * table (StockMvt has no api client relation). The result is indexed by stock movement id:
++     *
++     *     [<id_stock_mvt> => ['id_api_client' => int, 'client_name' => string]]
++     *
++     * @param int[]|string[] $stockMovementIds
++     *
++     * @return array<int, array<string, mixed>>
++     */
++    public function getApiClientsByStockMovementIds(array $stockMovementIds): array
++    {
++        if (empty($stockMovementIds)) {
++            return [];
++        }
++
++        $queryBuilder = $this->connection->createQueryBuilder();
++        $queryBuilder
++            ->select('m.mutation_row_id', 'ac.id_api_client', 'ac.client_name')
++            ->from($this->dbPrefix . 'mutation', 'm')
++            ->innerJoin('m', $this->dbPrefix . 'api_client', 'ac', 'ac.id_api_client = m.mutator_identifier')
++            ->andWhere('m.mutation_table = :mutationTable')
++            ->andWhere('m.mutator_type = :mutatorType')
++            ->andWhere('m.mutation_row_id IN (:stockMovementIds)')
++            ->setParameter('mutationTable', 'stock_mvt')
++            ->setParameter('mutatorType', 'api_client')
++            ->setParameter('stockMovementIds', array_map('intval', $stockMovementIds), Connection::PARAM_INT_ARRAY)
++        ;
++
++        $apiClientsByStockMovementId = [];
++        foreach ($queryBuilder->executeQuery()->fetchAllAssociative() as $row) {
++            $apiClientsByStockMovementId[(int) $row['mutation_row_id']] = [
++                'id_api_client' => (int) $row['id_api_client'],
++                'client_name' => $row['client_name'],
++            ];
++        }
++
++        return $apiClientsByStockMovementId;
++    }
++
+     private function addGroupingCondition(QueryBuilder $queryBuilder): void
+     {
+         /**
+diff --git a/src/Core/Cart/Calculator.php b/src/Core/Cart/Calculator.php
+index 0879ecabf85d4..c519a40cd1ba3 100644
+--- a/src/Core/Cart/Calculator.php
++++ b/src/Core/Cart/Calculator.php
+@@ -156,12 +156,29 @@ public function getTotal($ignoreProcessedFlag = false)
+             throw new Exception('Cart must be processed before getting its total');
+         }
+ 
++        /*
++         * First, we get the total price of items in the cart with no discounts.
++         * We will round everything once again, because some prices in the sum may not be rounded
++         * to keep their precision.
++         */
+         $amount = $this->rounded($this->getRowTotalWithoutDiscount(), $this->computePrecision);
++
++        /*
++         * Now, we subtract the amount of discounts from this sum.
++         */
+         $amount = $amount->sub($this->rounded($this->getDiscountTotal(), $this->computePrecision));
++
++        /*
++         * Next thing, we add a rounded value for shipping fees.
++         */
+         $shippingFees = $this->fees->getInitialShippingFees();
+         if (null !== $shippingFees) {
+             $amount = $amount->add($this->rounded($shippingFees, $this->computePrecision));
+         }
++
++        /*
++         * And absolutely last, we add wrapping fees if they are present.
++         */
+         $wrappingFees = $this->fees->getFinalWrappingFees();
+         if (null !== $wrappingFees) {
+             $amount = $amount->add($this->rounded($wrappingFees, $this->computePrecision));
+@@ -186,6 +203,9 @@ public function getRowTotal()
+     }
+ 
+     /**
++     * This method returns sum of all cart lines - products.
++     * It returns the prices with their original price, without applying any cart rules on them.
++     *
+      * @return AmountImmutable
+      *
+      * @throws Exception
+@@ -194,7 +214,19 @@ public function getRowTotalWithoutDiscount()
+     {
+         $amount = new AmountImmutable();
+         foreach ($this->cartRows as $cartRow) {
+-            $amount = $amount->add($cartRow->getInitialTotalPrice());
++            /*
++             * We round the tax included price only, to keep the calculations using
++             * the displayed prices the user sees. If he sees 999 EUR, we will use this
++             * rounded values for calculations, no magic 999.5 EUR behind this.
++             *
++             * For tax excluded price however, we keep the non-rounded value, because we could
++             * have a big difference at the end of the calculation. We will round the tax
++             * excluded price as a last thing.
++             *
++             * If we decide one day to support using tax excluded price as the primary one, we
++             * can reverse this the other way around.
++             */
++            $amount = $amount->add($this->roundedTaxIncluded($cartRow->getInitialTotalPrice(), $this->computePrecision));
+         }
+ 
+         return $amount;
+@@ -294,7 +326,7 @@ protected function calculateRowTotal(CartRow $cartRow)
+     }
+ 
+     /**
+-     * calculate only product rows.
++     * Calculate only product rows.
+      */
+     public function calculateRows()
+     {
+@@ -304,7 +336,7 @@ public function calculateRows()
+     }
+ 
+     /**
+-     * calculate only cart rules (rows and fees have to be calculated first).
++     * Calculate only cart rules (rows and fees have to be calculated first).
+      */
+     public function calculateCartRules()
+     {
+@@ -345,6 +377,9 @@ public function getCartRulesData()
+     }
+ 
+     /**
++     * Rounds both values in the amount by given precision. Useful for total sums,
++     * where no additional precision is required and we want the final price.
++     *
+      * @param AmountImmutable $amount
+      * @param int $computePrecision
+      *
+@@ -357,4 +392,22 @@ private function rounded(AmountImmutable $amount, int $computePrecision)
+             Tools::ps_round($amount->getTaxExcluded(), $computePrecision)
+         );
+     }
++
++    /**
++     * Rounds only tax included price by given precision and leaves the tax
++     * excluded price with original precision. Useful for inter-calculations
++     * when we have one primary price to use.
++     *
++     * @param AmountImmutable $amount
++     * @param int $computePrecision
++     *
++     * @return AmountImmutable
++     */
++    private function roundedTaxIncluded(AmountImmutable $amount, int $computePrecision): AmountImmutable
++    {
++        return new AmountImmutable(
++            Tools::ps_round($amount->getTaxIncluded(), $computePrecision),
++            $amount->getTaxExcluded()
++        );
++    }
+ }
+diff --git a/src/Core/ContainerBuilder.php b/src/Core/ContainerBuilder.php
+index dd438a1e1cef0..1077aa6d5518c 100644
+--- a/src/Core/ContainerBuilder.php
++++ b/src/Core/ContainerBuilder.php
+@@ -7,6 +7,7 @@
+ namespace PrestaShop\PrestaShop\Core;
+ 
+ use PrestaShop\PrestaShop\Core\Foundation\IoC\Container;
++use PrestaShop\PrestaShop\Core\Stock\StockManager;
+ 
+ class ContainerBuilder
+ {
+@@ -26,6 +27,16 @@ public function build()
+         $container->bind('\\PrestaShop\\PrestaShop\\Core\\Foundation\\Database\\DatabaseInterface', '\\PrestaShop\\PrestaShop\\Adapter\\Database', true);
+         $container->bind('PrestaShop\\PrestaShop\\Core\\Foundation\\Database\\DatabaseInterface', '\\PrestaShop\\PrestaShop\\Adapter\\Database', true);
+         $container->bind('PrestaShop\\PrestaShop\\Core\\Image\\ImageFormatConfiguration', 'PrestaShop\\PrestaShop\\Core\\Image\\ImageFormatConfiguration', true);
++        // StockManager's optional MutationTracker cannot be built by this container (the
++        // reflection-based resolution chokes on its EntityManager dependency), so the
++        // instantiation is explicit. The tracker is not needed in the legacy contexts served
++        // by this container: it only records mutations for the Admin API kernel requests,
++        // which resolve StockManager through the Symfony container.
++        $stockManagerFactory = static function (): StockManager {
++            return new StockManager();
++        };
++        $container->bind('\\PrestaShop\\PrestaShop\\Core\\Stock\\StockManager', $stockManagerFactory);
++        $container->bind('PrestaShop\\PrestaShop\\Core\\Stock\\StockManager', $stockManagerFactory);
+ 
+         return $container;
+     }
+diff --git a/src/Core/Domain/Employee/Exception/EmployeeNotFoundException.php b/src/Core/Domain/Employee/Exception/EmployeeNotFoundException.php
+index 7b6022d20b417..7979364243809 100644
+--- a/src/Core/Domain/Employee/Exception/EmployeeNotFoundException.php
++++ b/src/Core/Domain/Employee/Exception/EmployeeNotFoundException.php
+@@ -15,17 +15,17 @@
+ class EmployeeNotFoundException extends EmployeeException
+ {
+     /**
+-     * @var EmployeeId
++     * @var EmployeeId|null
+      */
+     private $employeeId;
+ 
+     /**
+-     * @param EmployeeId $employeeId
++     * @param EmployeeId|null $employeeId The employee id is not always known, typically when the employee was searched by email
+      * @param string $message
+      * @param int $code
+      * @param Exception|null $previous
+      */
+-    public function __construct(EmployeeId $employeeId, $message = '', $code = 0, $previous = null)
++    public function __construct(?EmployeeId $employeeId = null, $message = '', $code = 0, $previous = null)
+     {
+         parent::__construct($message, $code, $previous);
+ 
+@@ -33,7 +33,7 @@ public function __construct(EmployeeId $employeeId, $message = '', $code = 0, $p
+     }
+ 
+     /**
+-     * @return EmployeeId
++     * @return EmployeeId|null
+      */
+     public function getEmployeeId()
+     {
+diff --git a/src/Core/Domain/Product/Stock/QueryResult/StockMovement.php b/src/Core/Domain/Product/Stock/QueryResult/StockMovement.php
+index 594852501bc8e..6b2c24085c8ca 100644
+--- a/src/Core/Domain/Product/Stock/QueryResult/StockMovement.php
++++ b/src/Core/Domain/Product/Stock/QueryResult/StockMovement.php
+@@ -51,6 +51,16 @@ class StockMovement
+      */
+     protected $employeeName = null;
+ 
++    /**
++     * @var int[]
++     */
++    protected $apiClientIds = [];
++
++    /**
++     * @var string[]
++     */
++    protected $apiClientNames = [];
++
+     /**
+      * @var int
+      */
+@@ -65,6 +75,8 @@ class StockMovement
+      * @param int[] $employeeIds
+      * @param string|null $employeeName
+      * @param int $deltaQuantity
++     * @param int[] $apiClientIds
++     * @param string[] $apiClientNames
+      */
+     protected function __construct(
+         string $type,
+@@ -74,7 +86,9 @@ protected function __construct(
+         array $orderIds,
+         array $employeeIds,
+         ?string $employeeName,
+-        int $deltaQuantity
++        int $deltaQuantity,
++        array $apiClientIds = [],
++        array $apiClientNames = []
+     ) {
+         $this->type = $type;
+         $this->dates = $this->initializeDates($dates);
+@@ -82,9 +96,10 @@ protected function __construct(
+         $this->stockIds = $this->initializeIds($stockIds);
+         $this->orderIds = $this->initializeIds($orderIds);
+         $this->employeeIds = $this->initializeIds($employeeIds);
+-        $this->stockMovementIds = $this->initializeIds($stockMovementIds);
+         $this->employeeName = $employeeName;
+         $this->deltaQuantity = $deltaQuantity;
++        $this->apiClientIds = $this->initializeIds($apiClientIds);
++        $this->apiClientNames = array_values(array_filter($apiClientNames));
+     }
+ 
+     /**
+@@ -118,6 +133,10 @@ static function (string $date): DateTimeImmutable {
+         );
+     }
+ 
++    /**
++     * @param int[] $apiClientIds
++     * @param string[] $apiClientNames
++     */
+     public static function createEditionMovement(
+         string $dateAdd,
+         int $stockMovementId,
+@@ -125,7 +144,9 @@ public static function createEditionMovement(
+         ?int $orderId,
+         int $employeeId,
+         ?string $employeeName,
+-        int $deltaQuantity
++        int $deltaQuantity,
++        array $apiClientIds = [],
++        array $apiClientNames = []
+     ): self {
+         return new static(
+             static::EDITION_TYPE,
+@@ -137,7 +158,9 @@ public static function createEditionMovement(
+             $orderId !== null ? [$orderId] : [],
+             [$employeeId],
+             $employeeName,
+-            $deltaQuantity
++            $deltaQuantity,
++            $apiClientIds,
++            $apiClientNames
+         );
+     }
+ 
+@@ -149,6 +172,8 @@ public static function createEditionMovement(
+      * @param string[]|int[] $orderIds
+      * @param string[]|int[] $employeeIds
+      * @param int $deltaQuantity
++     * @param int[] $apiClientIds
++     * @param string[] $apiClientNames
+      */
+     public static function createOrdersMovement(
+         string $fromDate,
+@@ -157,7 +182,9 @@ public static function createOrdersMovement(
+         array $stockIds,
+         array $orderIds,
+         array $employeeIds,
+-        int $deltaQuantity
++        int $deltaQuantity,
++        array $apiClientIds = [],
++        array $apiClientNames = []
+     ): self {
+         return new static(
+             static::ORDERS_TYPE,
+@@ -170,7 +197,9 @@ public static function createOrdersMovement(
+             $orderIds,
+             $employeeIds,
+             null,
+-            $deltaQuantity
++            $deltaQuantity,
++            $apiClientIds,
++            $apiClientNames
+         );
+     }
+ 
+@@ -229,6 +258,22 @@ public function getEmployeeName(): ?string
+         return $this->employeeName;
+     }
+ 
++    /**
++     * @return int[]
++     */
++    public function getApiClientIds(): array
++    {
++        return $this->apiClientIds;
++    }
++
++    /**
++     * @return string[]
++     */
++    public function getApiClientNames(): array
++    {
++        return $this->apiClientNames;
++    }
++
+     public function getDeltaQuantity(): int
+     {
+         return $this->deltaQuantity;
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
+index b77933e8f0044..4dd265cbf1cf1 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
+@@ -233,6 +233,7 @@ function (StockMovement $stockMovement): array {
+                     'type' => $stockMovement->getType(),
+                     'date' => $date,
+                     'employee_name' => $stockMovement->getEmployeeName(),
++                    'api_client_name' => implode(', ', $stockMovement->getApiClientNames()) ?: null,
+                     'delta_quantity' => $stockMovement->getDeltaQuantity(),
+                 ];
+             },
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
+index 6ba325a86d046..fefa8537d4127 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
+@@ -428,6 +428,7 @@ function (StockMovement $stockMovement): array {
+                     'type' => $stockMovement->getType(),
+                     'date' => $date,
+                     'employee_name' => $stockMovement->getEmployeeName(),
++                    'api_client_name' => implode(', ', $stockMovement->getApiClientNames()) ?: null,
+                     'delta_quantity' => $stockMovement->getDeltaQuantity(),
+                 ];
+             },
+diff --git a/src/Core/Stock/StockManager.php b/src/Core/Stock/StockManager.php
+index a4a2c97bf689f..1500a07c4ca49 100644
+--- a/src/Core/Stock/StockManager.php
++++ b/src/Core/Stock/StockManager.php
+@@ -18,6 +18,8 @@
+ use PrestaShop\PrestaShop\Adapter\LegacyContext as ContextAdapter;
+ use PrestaShop\PrestaShop\Adapter\ServiceLocator;
+ use PrestaShop\PrestaShop\Adapter\SymfonyContainer;
++use PrestaShop\PrestaShop\Core\Mutation\MutationTracker;
++use PrestaShopBundle\Entity\MutationAction;
+ use PrestaShopBundle\Entity\StockMvt;
+ use PrestaShopException;
+ use Product;
+@@ -28,6 +30,15 @@
+  */
+ class StockManager
+ {
++    /**
++     * The tracker is optional because this class is still instantiated without the
++     * container in some legacy paths (e.g. OrderHistory); no mutation is recorded there.
++     */
++    public function __construct(
++        private readonly ?MutationTracker $mutationTracker = null,
++    ) {
++    }
++
+     /**
+      * This will update a Pack quantity and will decrease the quantity of containing Products if needed.
+      *
+@@ -347,8 +358,15 @@ public function saveMovement($productId, $productAttributeId, $deltaQuantity, $p
+         }
+ 
+         $stockMvtRepository = $sfContainer->get('prestashop.core.api.stock_movement.repository');
++        $stockMovementId = $stockMvtRepository->saveStockMvt($stockMvt);
++
++        if ($stockMovementId) {
++            // Records which API client created the movement (no-op when the request is not
++            // authenticated with an API client), since StockMvt has no api client relation
++            $this->mutationTracker?->addMutationForApiClient('stock_mvt', (int) $stockMovementId, MutationAction::CREATE);
++        }
+ 
+-        return $stockMvtRepository->saveStockMvt($stockMvt);
++        return $stockMovementId;
+     }
+ 
+     /**
+@@ -394,8 +412,10 @@ private function prepareMovement($productId, $productAttributeId, $deltaQuantity
+                 $stockMvt->setDateAdd(new DateTime());
+ 
+                 $employee = (new ContextAdapter())->getContext()->employee;
+-                if (!empty($employee)) {
+-                    $stockMvt->setIdEmployee($employee->id);
++                // The context may hold an employee without an id (e.g. when the stock movement is
++                // triggered outside the back office, like from the Admin API), keep the default 0.
++                if (!empty($employee) && !empty($employee->id)) {
++                    $stockMvt->setIdEmployee((int) $employee->id);
+                     $stockMvt->setEmployeeFirstname($employee->firstname);
+                     $stockMvt->setEmployeeLastname($employee->lastname);
+                 }
+diff --git a/src/PrestaShopBundle/Controller/Admin/LoginController.php b/src/PrestaShopBundle/Controller/Admin/LoginController.php
+index 8926adf4e1da2..1887220b02f93 100644
+--- a/src/PrestaShopBundle/Controller/Admin/LoginController.php
++++ b/src/PrestaShopBundle/Controller/Admin/LoginController.php
+@@ -9,6 +9,7 @@
+ namespace PrestaShopBundle\Controller\Admin;
+ 
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\Employee\Exception\EmployeeNotFoundException;
+ use PrestaShop\PrestaShop\Core\Form\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Security\OpenSsl\OpenSSL;
+ use PrestaShop\PrestaShop\Core\Security\PasswordGenerator;
+@@ -129,9 +130,10 @@ public function requestPasswordResetAction(
+                     $infoMessage = $this->trans('Please, check your mailbox.', [], 'Admin.Login.Notification') . '<br/>' .
+                         $this->trans('If this email address has been registered in our store, you will receive a link to reset your password.', [], 'Admin.Login.Notification')
+                     ;
+-                } catch (UserNotFoundException) {
++                } catch (EmployeeNotFoundException|UserNotFoundException) {
+                     // If the email doesn't match a known employee we still display a generic success message to avoid any hacker using this
+                     // to find out the employee's emails via brute force.
++                    // UserNotFoundException is no longer thrown by EmployeePasswordResetter but is still caught for safety.
+                     $infoMessage = $this->trans('Please, check your mailbox.', [], 'Admin.Login.Notification') . '<br/>' .
+                         $this->trans('If this email address has been registered in our store, you will receive a link to reset your password.', [], 'Admin.Login.Notification')
+                     ;
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
+index 278f0f416bbcc..637a53bb1c57a 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
+@@ -32,6 +32,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Employee', 'Admin.Global'),
+                 'preview_class' => 'employee_preview',
+             ])
++            ->add('api_client_name', TextPreviewType::class, [
++                'label' => $this->trans('API Client', 'Admin.Global'),
++                'preview_class' => 'api_client_preview',
++            ])
+             ->add('type', HiddenType::class)
+             // Quantity field depends on the data, then it's added via form event
+             ->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event) use ($options) {
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/stock.yml b/src/PrestaShopBundle/Resources/config/services/core/stock.yml
+index 2e21f15b84c63..188137169db39 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/stock.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/stock.yml
+@@ -2,4 +2,6 @@ services:
+   _defaults:
+     public: false
+ 
+-  PrestaShop\PrestaShop\Core\Stock\StockManager: ~
++  PrestaShop\PrestaShop\Core\Stock\StockManager:
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Mutation\MutationTracker'
+diff --git a/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php b/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
+index 80aa507d35679..332af9115db5c 100644
+--- a/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
++++ b/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
+@@ -13,12 +13,12 @@
+ use Mail;
+ use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Crypto\Hashing;
++use PrestaShop\PrestaShop\Core\Domain\Employee\Exception\EmployeeNotFoundException;
+ use PrestaShopBundle\Entity\Employee\Employee;
+ use PrestaShopBundle\Entity\Repository\EmployeeRepository;
+ use PrestaShopBundle\Routing\AdminUrlGenerator;
+ use PrestaShopBundle\Security\Admin\Exception\PasswordResetTemporarilyBlockedException;
+ use RuntimeException;
+-use Symfony\Component\Security\Core\Exception\UserNotFoundException;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ class EmployeePasswordResetter
+@@ -36,7 +36,7 @@ public function __construct(
+ 
+     /**
+      * @throws PasswordResetTemporarilyBlockedException
+-     * @throws UserNotFoundException
++     * @throws EmployeeNotFoundException
+      * @throws RuntimeException
+      */
+     public function sendResetEmail(string $email): void
+@@ -45,11 +45,11 @@ public function sendResetEmail(string $email): void
+             /** @var Employee|null $employee */
+             $employee = $this->employeeRepository->loadEmployeeByIdentifier($email);
+         } catch (UnexpectedResultException) {
+-            throw new UserNotFoundException(sprintf('Employee with email "%s" does not exist.', $email));
++            throw new EmployeeNotFoundException(null, sprintf('Employee with email "%s" does not exist.', $email));
+         }
+ 
+         if (empty($employee)) {
+-            throw new UserNotFoundException(sprintf('Employee with email "%s" does not exist.', $email));
++            throw new EmployeeNotFoundException(null, sprintf('Employee with email "%s" does not exist.', $email));
+         }
+ 
+         $this->checkLastPasswordGeneration($employee);
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationStockMovementsFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationStockMovementsFeatureContext.php
+index 5e640b2c13481..cf1a73ab0ec32 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationStockMovementsFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationStockMovementsFeatureContext.php
+@@ -84,6 +84,20 @@ private function assertStockMovements(GetCombinationStockMovements $query, Table
+                     $stockMovement->getEmployeeName()
+                 )
+             );
++            if (array_key_exists('api_client_names', $tableRow)) {
++                $expectedApiClientNames = '' === $tableRow['api_client_names']
++                    ? []
++                    : array_map('trim', explode(',', $tableRow['api_client_names']));
++                Assert::assertSame(
++                    $expectedApiClientNames,
++                    $stockMovement->getApiClientNames(),
++                    sprintf(
++                        'Invalid api client names of stock movement event, expected "%s" instead of "%s"',
++                        $tableRow['api_client_names'],
++                        implode(', ', $stockMovement->getApiClientNames())
++                    )
++                );
++            }
+             Assert::assertSame(
+                 (int) $tableRow['delta_quantity'],
+                 $stockMovement->getDeltaQuantity(),
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockMovementsFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockMovementsFeatureContext.php
+index 2ac892e0f0055..b77bf368c8e87 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockMovementsFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockMovementsFeatureContext.php
+@@ -84,6 +84,20 @@ private function assertStockMovements(GetProductStockMovements $query, TableNode
+                     $stockMovement->getEmployeeName()
+                 )
+             );
++            if (array_key_exists('api_client_names', $tableRow)) {
++                $expectedApiClientNames = '' === $tableRow['api_client_names']
++                    ? []
++                    : array_map('trim', explode(',', $tableRow['api_client_names']));
++                Assert::assertSame(
++                    $expectedApiClientNames,
++                    $stockMovement->getApiClientNames(),
++                    sprintf(
++                        'Invalid api client names of stock movement event, expected "%s" instead of "%s"',
++                        $tableRow['api_client_names'],
++                        implode(', ', $stockMovement->getApiClientNames())
++                    )
++                );
++            }
+             Assert::assertSame(
+                 (int) $tableRow['delta_quantity'],
+                 $stockMovement->getDeltaQuantity(),
+diff --git a/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php b/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
+index bf7e1aecb52fe..4857466784956 100644
+--- a/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
+@@ -55,6 +55,20 @@ public function logsOutBackOffice()
+         $employeeContext->setOverriddenEmployee(null);
+     }
+ 
++    /**
++     * @Given the current employee context has no id
++     */
++    public function useEmployeeContextWithoutId()
++    {
++        // Simulates the state where the context holds an Employee object whose id is null,
++        // e.g. when a stock movement is triggered from the Admin API where the authenticated
++        // principal is an API client rather than a back-office employee.
++        Context::getContext()->employee = new LegacyEmployee();
++        /** @var EmployeeContextDecorator $employeeContext */
++        $employeeContext = CommonFeatureContext::getContainer()->get(EmployeeContextDecorator::class);
++        $employeeContext->setOverriddenEmployee(null);
++    }
++
+     /**
+      * @AfterFeature
+      */
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_line.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_line.feature
+index 810a3483f2ed7..4298c41bbd1e0 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_line.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_line.feature
+@@ -27,7 +27,7 @@ Feature: Cart calculation with rounding type LINE
+     When I add 2 items of product "product2" in my cart
+     And I add 3 items of product "product1" in my cart
+     And I add 1 items of product "product3" in my cart
+-    Then my cart total should be precisely 162.4 tax included
++    Then my cart total should be precisely 162.41 tax included
+     And my cart total shipping fees should be 7.0 tax included
+ 
+   @restore-cart-rules-after-scenario
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_total.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_total.feature
+index dac2ae2d14f32..ced3038494435 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_total.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Rounding/RoundingType/round_total.feature
+@@ -27,7 +27,7 @@ Feature: Cart calculation with rounding type TOTAL
+     When I add 2 items of product "product2" in my cart
+     When I add 3 items of product "product1" in my cart
+     When I add 1 items of product "product3" in my cart
+-    Then my cart total should be precisely 162.4 tax included
++    Then my cart total should be precisely 162.41 tax included
+     And my cart total shipping fees should be 7.0 tax included
+ 
+   @restore-cart-rules-after-scenario
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/combination_stock_movement_history.feature b/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/combination_stock_movement_history.feature
+index 0c86e482d0aab..2ecf1efcb877b 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/combination_stock_movement_history.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/combination_stock_movement_history.feature
+@@ -183,3 +183,26 @@ Feature: Search stock movements from Back Office (BO)
+       | orders  |            | -2             |
+       | edition | Puffin Mummy | -5             |
+       | edition | Puffin Mummy | 15             |
++
++  Scenario: A combination stock update triggered by an API client records the movement related to it
++    Given I create an api client "combinationStockApiClient" with following properties:
++      | clientName  | Combination stock API client    |
++      | clientId    | combination-stock-api-client    |
++      | enabled     | true                            |
++      | description | client used to update the stock |
++      | lifetime    | 3600                            |
++    When I update combination "product1MBlack" stock with following details:
++      | delta quantity | 10 |
++    Then combination "product1MBlack" should have 10 available items
++    # The Admin API context: an API client is authenticated and the employee has no id
++    When the current employee context has no id
++    And I am logged in as api client with id "combination-stock-api-client"
++    And I update combination "product1MBlack" stock with following details:
++      | delta quantity | -4 |
++    Then combination "product1MBlack" should have 6 available items
++    When I search stock movements of combination "product1MBlack" I should get following results:
++      | type    | employee     | api_client_names             | delta_quantity |
++      | edition |              | Combination stock API client | -4             |
++      | edition | Puffin Mummy |                              | 10             |
++    # Reset the API client context so it does not leak into the following scenarios
++    And I am not logged in as an api client
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/stock_movement_history.feature b/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/stock_movement_history.feature
+index 93bd948ec8efc..f062876cb4816 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/stock_movement_history.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/StockMovement/stock_movement_history.feature
+@@ -154,3 +154,35 @@ Feature: Search stock movements from Back Office (BO)
+       | orders  |            | -2             |
+       | edition | Puffin Mummy | -5             |
+       | edition | Puffin Mummy | 100            |
++
++  Scenario: A stock update triggered from a context whose employee has no id records the movement without a TypeError
++    # Regression: the context can hold an Employee whose id is null (e.g. when the update is
++    # triggered from the Admin API, where the authenticated principal is an API client). The
++    # StockManager guard used to call setIdEmployee(null) and throw a TypeError, aborting the
++    # whole update.
++    Given there is a product in the catalog named "no_employee_product" with a price of 5.0 and 10 items in stock
++    And the current employee context has no id
++    When I update product "no_employee_product" stock with following information:
++      | delta_quantity | -1 |
++    Then the available stock for product "no_employee_product" should be 9
++
++  Scenario: A stock update triggered by an API client records the movement related to it
++    Given there is a product in the catalog named "api_client_product" with a price of 5.0 and 10 items in stock
++    And I create an api client "stockApiClient" with following properties:
++      | clientName  | Stock API client                |
++      | clientId    | stock-api-client                |
++      | enabled     | true                            |
++      | description | client used to update the stock |
++      | lifetime    | 3600                            |
++    # The Admin API context: an API client is authenticated and the employee has no id
++    And the current employee context has no id
++    And I am logged in as api client with id "stock-api-client"
++    When I update product "api_client_product" stock with following information:
++      | delta_quantity | -1 |
++    Then the available stock for product "api_client_product" should be 9
++    When I search stock movements of product "api_client_product" I should get following results:
++      | type    | employee     | api_client_names | delta_quantity |
++      | edition |              | Stock API client | -1             |
++      | edition | Puffin Mummy |                  | 10             |
++    # Reset the API client context so it does not leak into the following scenarios
++    And I am not logged in as an api client
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 47eb2ccc04636..4bd7490ff723b 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -467,6 +467,7 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+diff --git a/tests/Unit/Core/Domain/Product/Stock/QueryResult/StockMovementTest.php b/tests/Unit/Core/Domain/Product/Stock/QueryResult/StockMovementTest.php
+index cd72903408c50..8be7185a3b5c6 100644
+--- a/tests/Unit/Core/Domain/Product/Stock/QueryResult/StockMovementTest.php
++++ b/tests/Unit/Core/Domain/Product/Stock/QueryResult/StockMovementTest.php
+@@ -26,7 +26,9 @@ public function testSingleHistoryIsSuccessfullyConstructed(
+         ?int $orderId,
+         int $employeeId,
+         ?string $employeeName,
+-        int $deltaQuantity
++        int $deltaQuantity,
++        array $apiClientIds = [],
++        array $apiClientNames = []
+     ): void {
+         $history = StockMovement::createEditionMovement(
+             $dateAdd,
+@@ -35,7 +37,9 @@ public function testSingleHistoryIsSuccessfullyConstructed(
+             $orderId,
+             $employeeId,
+             $employeeName,
+-            $deltaQuantity
++            $deltaQuantity,
++            $apiClientIds,
++            $apiClientNames
+         );
+         Assert::assertTrue($history->isEdition());
+         Assert::assertFalse($history->isFromOrders());
+@@ -47,9 +51,12 @@ public function testSingleHistoryIsSuccessfullyConstructed(
+             $orderId !== null ? [$orderId] : [],
+             $history->getOrderIds()
+         );
+-        Assert::assertSame([$employeeId], $history->getEmployeeIds());
++        // Falsy ids are filtered (0 is the "no employee" value)
++        Assert::assertSame($employeeId !== 0 ? [$employeeId] : [], $history->getEmployeeIds());
+         Assert::assertSame($employeeName, $history->getEmployeeName());
+         Assert::assertSame($deltaQuantity, $history->getDeltaQuantity());
++        Assert::assertSame($apiClientIds, $history->getApiClientIds());
++        Assert::assertSame($apiClientNames, $history->getApiClientNames());
+     }
+ 
+     public function getSingleHistoryValidValues(): Generator
+@@ -81,6 +88,17 @@ public function getSingleHistoryValidValues(): Generator
+             'employeeName' => null,
+             'deltaQuantity' => 5,
+         ];
++        yield 'single history related to an api client' => [
++            'dateAdd' => '2022-01-13 18:21:33',
++            'stockMovementId' => 1,
++            'stockId' => 2,
++            'orderId' => null,
++            'employeeId' => 0,
++            'employeeName' => null,
++            'deltaQuantity' => 5,
++            'apiClientIds' => [3],
++            'apiClientNames' => ['My API client'],
++        ];
+     }
+ 
+     /**
+@@ -101,7 +119,9 @@ public function testGroupHistoryIsSuccessfullyConstructed(
+         array $stockIds,
+         array $orderIds,
+         array $employeeIds,
+-        int $deltaQuantity
++        int $deltaQuantity,
++        array $apiClientIds = [],
++        array $apiClientNames = []
+     ): void {
+         $history = StockMovement::createOrdersMovement(
+             $fromDate,
+@@ -110,7 +130,9 @@ public function testGroupHistoryIsSuccessfullyConstructed(
+             $stockIds,
+             $orderIds,
+             $employeeIds,
+-            $deltaQuantity
++            $deltaQuantity,
++            $apiClientIds,
++            $apiClientNames
+         );
+         Assert::assertFalse($history->isEdition());
+         Assert::assertTrue($history->isFromOrders());
+@@ -122,6 +144,8 @@ public function testGroupHistoryIsSuccessfullyConstructed(
+         Assert::assertEquals($orderIds, $history->getOrderIds());
+         Assert::assertEquals($employeeIds, $history->getEmployeeIds());
+         Assert::assertEquals($deltaQuantity, $history->getDeltaQuantity());
++        Assert::assertEquals($apiClientIds, $history->getApiClientIds());
++        Assert::assertEquals($apiClientNames, $history->getApiClientNames());
+     }
+ 
+     public function getGroupHistoryValidValues(): Generator
+@@ -153,6 +177,17 @@ public function getGroupHistoryValidValues(): Generator
+             'employeeIds' => ['7', '8'],
+             'deltaQuantity' => 9,
+         ];
++        yield 'group history related to api clients' => [
++            'fromDate' => '2022-01-13 18:20:58',
++            'toDate' => '2022-01-13 18:21:18',
++            'stockMovementIds' => [1, 2],
++            'stockIds' => [3, 4],
++            'orderIds' => [5, 6],
++            'employeeIds' => [],
++            'deltaQuantity' => 9,
++            'apiClientIds' => [3, 4],
++            'apiClientNames' => ['First API client', 'Second API client'],
++        ];
+     }
+ 
+     /**
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
+index 56dd8b481c42b..d684d23f7704e 100644
+--- a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
++++ b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
+@@ -238,30 +238,35 @@ private function getDatasetsForStock(): array
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -19,
+             ],
+             [
+                 'type' => 'edition',
+                 'date' => '2021-05-24 15:24:32',
+                 'employee_name' => 'Paul Atreide',
++                'api_client_name' => null,
+                 'delta_quantity' => +20,
+             ],
+             [
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -23,
+             ],
+             [
+                 'type' => 'edition',
+                 'date' => '2021-05-22 16:35:48',
+                 'employee_name' => 'Frodo Baggins',
++                'api_client_name' => null,
+                 'delta_quantity' => +20,
+             ],
+             [
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -17,
+             ],
+         ];
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
+index cdfb712af9684..6841e3ca6f205 100644
+--- a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
++++ b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
+@@ -469,30 +469,35 @@ private function getDatasetsForStock(): array
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -19,
+             ],
+             [
+                 'type' => 'edition',
+                 'date' => '2021-05-24 15:24:32',
+                 'employee_name' => 'Paul Atreide',
++                'api_client_name' => null,
+                 'delta_quantity' => +20,
+             ],
+             [
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -23,
+             ],
+             [
+                 'type' => 'edition',
+                 'date' => '2021-05-22 16:35:48',
+                 'employee_name' => 'Frodo Baggins',
++                'api_client_name' => null,
+                 'delta_quantity' => +20,
+             ],
+             [
+                 'type' => 'orders',
+                 'date' => null,
+                 'employee_name' => null,
++                'api_client_name' => null,
+                 'delta_quantity' => -17,
+             ],
+         ];

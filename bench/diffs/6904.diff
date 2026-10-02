@@ -1,0 +1,99 @@
+diff --git a/src/Adapter/Module/ModuleDataProvider.php b/src/Adapter/Module/ModuleDataProvider.php
+index a44fbf7068d36..fa38fc99b183c 100644
+--- a/src/Adapter/Module/ModuleDataProvider.php
++++ b/src/Adapter/Module/ModuleDataProvider.php
+@@ -25,11 +25,12 @@
+  */
+ namespace PrestaShop\PrestaShop\Adapter\Module;
+ 
++use Doctrine\ORM\EntityManager;
++use PhpParser;
++use PrestaShop\PrestaShop\Adapter\LegacyContext;
+ use PrestaShop\PrestaShop\Adapter\Shop\Context;
+ use PrestaShop\PrestaShop\Core\Addon\Module\AddonListFilterDeviceStatus;
+ use Psr\Log\LoggerInterface;
+-use PrestaShop\PrestaShop\Adapter\LegacyContext;
+-use Doctrine\ORM\EntityManager;
+ use Symfony\Component\Translation\TranslatorInterface;
+ 
+ class ModuleDataProvider
+@@ -169,24 +170,10 @@ public function isModuleMainClassValid($name)
+             return false;
+         }
+ 
+-
+-        $file = trim(file_get_contents($file_path));
+-
+-        if (substr($file, 0, 5) == '<?php') {
+-            $file = substr($file, 5);
+-        }
+-
+-        if (substr($file, -2) == '?>') {
+-            $file = substr($file, 0, -2);
+-        }
+-
+-        // We check any parse error before including the file.
+-        // If (false) is a trick to not load the class with "eval".
+-        // This way require_once will works correctly
+-        // But namespace and use statements need to be removed
+-        $content = preg_replace('/\n[\s\t]*?use\s.*?;/', '', $file);
+-        $content = preg_replace('/\n[\s\t]*?namespace\s.*?;/', '', $content);
+-        if (eval('if (false){	'.$content.' }') === false) {
++        $parser = (new PhpParser\ParserFactory)->create(PhpParser\ParserFactory::PREFER_PHP7);
++        try {
++            $parser->parse(file_get_contents($file_path));
++        } catch (PhpParser\Error $exception) {
+             $this->logger->critical(
+                 $this->translator->trans(
+                     'Parse error detected in main class of module %module%!',
+diff --git a/src/Adapter/Module/ModuleZipManager.php b/src/Adapter/Module/ModuleZipManager.php
+index 3179b436b199d..2712b64a1816b 100644
+--- a/src/Adapter/Module/ModuleZipManager.php
++++ b/src/Adapter/Module/ModuleZipManager.php
+@@ -144,7 +144,9 @@ public function storeInModulesFolder($source)
+         $this->filesystem->mkdir($modulePath);
+         $this->filesystem->mirror(
+             $sandboxPath.$name,
+-            $modulePath
++            $modulePath,
++            null,
++            array('override' => true)
+         );
+         $this->filesystem->remove($sandboxPath);
+     }
+diff --git a/src/Core/Addon/Module/ModuleManager.php b/src/Core/Addon/Module/ModuleManager.php
+index 614cf1a91f74e..436b476979c7b 100644
+--- a/src/Core/Addon/Module/ModuleManager.php
++++ b/src/Core/Addon/Module/ModuleManager.php
+@@ -123,12 +123,11 @@ public function install($source)
+             return $this->upgrade($name, 'latest', $source);
+         }
+ 
+-        if (! $this->moduleProvider->isOnDisk($name)) {
+-            if (!empty($source)) {
+-                $this->moduleZipManager->storeInModulesFolder($source);
+-            } else {
+-                $this->moduleUpdater->setModuleOnDiskFromAddons($name);
+-            }
++        if (!empty($source)) {
++            $this->moduleZipManager->storeInModulesFolder($source);
++        }
++        else if (! $this->moduleProvider->isOnDisk($name)) {
++            $this->moduleUpdater->setModuleOnDiskFromAddons($name);
+         }
+ 
+         $module = $this->moduleRepository->getModule($name);
+diff --git a/src/PrestaShopBundle/Controller/Admin/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+index 81fc7e4e7fa3f..156777fa947ac 100755
+--- a/src/PrestaShopBundle/Controller/Admin/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+@@ -539,8 +539,7 @@ public function importModuleAction(Request $request)
+             );
+         } catch (Exception $e) {
+             if (isset($module_name)) {
+-                $moduleManager->uninstall($module_name);
+-                $moduleManager->removeModuleFromDisk($module_name);
++                $moduleManager->disable($module_name);
+             }
+ 
+             return new JsonResponse(

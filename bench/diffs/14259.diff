@@ -1,0 +1,105 @@
+diff --git a/classes/Language.php b/classes/Language.php
+index 30484d68c7261..b0ea7c3143423 100644
+--- a/classes/Language.php
++++ b/classes/Language.php
+@@ -1073,13 +1073,8 @@ public static function downloadAndInstallLanguagePack($iso, $version = _PS_VERSI
+         if (Language::downloadLanguagePack($iso, $version, $errors)) {
+             if ($install) {
+                 Language::installLanguagePack($iso, $params, $errors);
+-                Language::updateMultilangTable($iso);
+             } else {
+-                $lang_pack = self::getLangDetails($iso);
+-                if (!empty($lang_pack['locale'])) {
+-                    self::installSfLanguagePack($lang_pack['locale'], $errors);
+-                    self::generateEmailsLanguagePack($lang_pack, $errors, false);
+-                }
++                Language::updateLanguagePack($iso, $errors);
+             }
+         }
+ 
+@@ -1209,11 +1204,29 @@ public static function installLanguagePack($iso, $params, &$errors = array())
+ 
+         $lang_pack = self::getLangDetails($iso);
+         self::installSfLanguagePack(self::getLocaleByIso($iso), $errors);
++        self::updateMultilangTable($iso);
+         self::generateEmailsLanguagePack($lang_pack, $errors, true);
+ 
+         return count($errors) ? $errors : true;
+     }
+ 
++    public static function updateLanguagePack($iso, &$errors = array())
++    {
++        $lang_pack = self::getLangDetails($iso);
++        if (!empty($lang_pack['locale'])) {
++            //Update locale field if empty (manually created, or imported without it)
++            $language = new Language(Language::getIdByIso($iso));
++            if ($language->id && empty($language->locale)) {
++                $language->locale = $lang_pack['locale'];
++                $language->save();
++            }
++
++            self::installSfLanguagePack($lang_pack['locale'], $errors);
++            Language::updateMultilangTable($iso);
++            self::generateEmailsLanguagePack($lang_pack, $errors, false);
++        }
++    }
++
+     /**
+      * Check if more on than one language is activated.
+      *
+diff --git a/classes/LocalizationPack.php b/classes/LocalizationPack.php
+index 12317c546644f..e924b291c0d41 100644
+--- a/classes/LocalizationPack.php
++++ b/classes/LocalizationPack.php
+@@ -434,7 +434,8 @@ protected function _installLanguages($xml, $install_mode = false)
+                     continue;
+                 }
+ 
+-                $errors = Language::downloadAndInstallLanguagePack($attributes['iso_code'], $attributes['version'], $attributes);
++                $freshInstall = empty(Language::getIdByIso($attributes['iso_code']));
++                $errors = Language::downloadAndInstallLanguagePack($attributes['iso_code'], $attributes['version'], $attributes, $freshInstall);
+                 if ($errors !== true && is_array($errors)) {
+                     $this->_errors = array_merge($this->_errors, $errors);
+                 }
+diff --git a/src/Adapter/Language/CommandHandler/AddLanguageHandler.php b/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
+index 9b511aff4afbc..7fa2ddf55d1cc 100644
+--- a/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
++++ b/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
+@@ -100,6 +100,9 @@ private function createLegacyLanguageObjectFromCommand(AddLanguageCommand $comma
+         $language = new Language();
+         $language->name = $command->getName();
+         $language->iso_code = $command->getIsoCode()->getValue();
++        if (false !== ($languageDetails = Language::getLangDetails($command->getIsoCode()->getValue()))) {
++            $language->locale = $languageDetails['locale'];
++        }
+         $language->language_code = $command->getTagIETF()->getValue();
+         $language->date_format_lite = $command->getShortDateFormat();
+         $language->date_format_full = $command->getFullDateFormat();
+diff --git a/src/Adapter/Language/CommandHandler/EditLanguageHandler.php b/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
+index f295d1e4d06aa..f58bf63fa64a0 100644
+--- a/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
++++ b/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
+@@ -76,6 +76,9 @@ private function updateLanguageWithCommandData(Language $language, EditLanguageC
+ 
+         if (null !== $command->getIsoCode()) {
+             $language->iso_code = $command->getIsoCode()->getValue();
++            if (false !== ($languageDetails = Language::getLangDetails($command->getIsoCode()->getValue()))) {
++                $language->locale = $languageDetails['locale'];
++            }
+         }
+ 
+         if (null !== $command->getTagIETF()) {
+diff --git a/src/Adapter/Language/LanguagePackInstaller.php b/src/Adapter/Language/LanguagePackInstaller.php
+index 6a47c502f270c..03b822ba3d3b7 100644
+--- a/src/Adapter/Language/LanguagePackInstaller.php
++++ b/src/Adapter/Language/LanguagePackInstaller.php
+@@ -63,7 +63,8 @@ public function __construct(TranslatorInterface $translator, Version $version)
+      */
+     public function downloadAndInstallLanguagePack($iso)
+     {
+-        $result = Language::downloadAndInstallLanguagePack($iso, $this->version->getVersion());
++        $freshInstall = empty(Language::getIdByIso($iso));
++        $result = Language::downloadAndInstallLanguagePack($iso, $this->version->getVersion(), null, $freshInstall);
+ 
+         if (false === $result) {
+             return [

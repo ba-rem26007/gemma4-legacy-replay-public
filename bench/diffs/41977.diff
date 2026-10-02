@@ -1,0 +1,1600 @@
+diff --git a/classes/ImageManager.php b/classes/ImageManager.php
+index d00cc525c8fd7..e1f143a056541 100644
+--- a/classes/ImageManager.php
++++ b/classes/ImageManager.php
+@@ -4,6 +4,8 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
+ /**
+  * Class ImageManagerCore.
+  *
+@@ -159,6 +161,7 @@ public static function checkImageMemoryLimit($image)
+      * @param int $quality Needed by AdminImportController to speed up the import process
+      * @param int $sourceWidth Needed by AdminImportController to speed up the import process
+      * @param int $sourceHeight Needed by AdminImportController to speed up the import process
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment Defines how the source image fits generated dimensions
+      *
+      * @return bool Operation result
+      */
+@@ -174,7 +177,8 @@ public static function resize(
+         &$targetHeight = null,
+         $quality = 5,
+         &$sourceWidth = null,
+-        &$sourceHeight = null
++        &$sourceHeight = null,
++        string $imageFitment = ImageFitment::FIT
+     ) {
+         clearstatcache(true, $sourceFile);
+ 
+@@ -254,23 +258,38 @@ public static function resize(
+             $destinationHeight = $sourceHeight;
+         }
+ 
++        // Unknown fitments fall back to legacy behavior to keep old integrations working.
++        if (!in_array($imageFitment, ImageFitment::AVAILABLE_VALUES, true)) {
++            $imageFitment = ImageFitment::FIT;
++        }
++
+         $widthDiff = $destinationWidth / $sourceWidth;
+         $heightDiff = $destinationHeight / $sourceHeight;
+ 
+         $psImageGenerationMethod = Configuration::get('PS_IMAGE_GENERATION_METHOD');
+-        if ($widthDiff > 1 && $heightDiff > 1) {
++
++        // Calculate target dimensions according to the selected thumbnail fitment.
++        if ($imageFitment === ImageFitment::BOUND) {
++            $ratio = min(1, $widthDiff, $heightDiff);
++            $nextWidth = (int) round($sourceWidth * $ratio);
++            $nextHeight = (int) round($sourceHeight * $ratio);
++            $destinationWidth = $nextWidth;
++            $destinationHeight = $nextHeight;
++        } elseif ($imageFitment === ImageFitment::CROP) {
++            $ratio = max($widthDiff, $heightDiff);
++            $nextWidth = (int) round($sourceWidth * $ratio);
++            $nextHeight = (int) round($sourceHeight * $ratio);
++        } elseif ($widthDiff > 1 && $heightDiff > 1) {
+             $nextWidth = $sourceWidth;
+             $nextHeight = $sourceHeight;
++        } elseif ($psImageGenerationMethod == 2 || (!$psImageGenerationMethod && $widthDiff > $heightDiff)) {
++            $nextHeight = $destinationHeight;
++            $nextWidth = round(($sourceWidth * $nextHeight) / $sourceHeight);
++            $destinationWidth = (int) (!$psImageGenerationMethod ? $destinationWidth : $nextWidth);
+         } else {
+-            if ($psImageGenerationMethod == 2 || (!$psImageGenerationMethod && $widthDiff > $heightDiff)) {
+-                $nextHeight = $destinationHeight;
+-                $nextWidth = round(($sourceWidth * $nextHeight) / $sourceHeight);
+-                $destinationWidth = (int) (!$psImageGenerationMethod ? $destinationWidth : $nextWidth);
+-            } else {
+-                $nextWidth = $destinationWidth;
+-                $nextHeight = round($sourceHeight * $destinationWidth / $sourceWidth);
+-                $destinationHeight = (int) (!$psImageGenerationMethod ? $destinationHeight : $nextHeight);
+-            }
++            $nextWidth = $destinationWidth;
++            $nextHeight = round($sourceHeight * $destinationWidth / $sourceWidth);
++            $destinationHeight = (int) (!$psImageGenerationMethod ? $destinationHeight : $nextHeight);
+         }
+ 
+         if (!ImageManager::checkImageMemoryLimit($sourceFile)) {
+@@ -837,7 +856,8 @@ public static function copyImg($id_entity, $id_image = null, $url = '', $entity
+                         $tgt_height,
+                         5,
+                         $src_width,
+-                        $src_height
++                        $src_height,
++                        $image_type['image_fitment']
+                     )) {
+                         // the last image should not be added in the candidate list if it's bigger than the original image
+                         if ($tgt_width <= $src_width && $tgt_height <= $src_height) {
+diff --git a/classes/ImageType.php b/classes/ImageType.php
+index 48826437f21e5..b842d483bb01c 100644
+--- a/classes/ImageType.php
++++ b/classes/ImageType.php
+@@ -4,6 +4,8 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
+ /**
+  * Class ImageTypeCore.
+  */
+@@ -20,6 +22,9 @@ class ImageTypeCore extends ObjectModel
+     /** @var int Height */
+     public $height;
+ 
++    /** @var value-of<ImageFitment::AVAILABLE_VALUES> Image fitment */
++    public $image_fitment = ImageFitment::FIT;
++
+     /** @var bool Apply to products */
+     public $products;
+ 
+@@ -45,6 +50,7 @@ class ImageTypeCore extends ObjectModel
+             'name' => ['type' => self::TYPE_STRING, 'validate' => 'isImageTypeName', 'required' => true, 'size' => 64],
+             'width' => ['type' => self::TYPE_INT, 'validate' => 'isImageSize', 'required' => true],
+             'height' => ['type' => self::TYPE_INT, 'validate' => 'isImageSize', 'required' => true],
++            'image_fitment' => ['type' => self::TYPE_STRING, 'validate' => 'isGenericName', 'required' => true, 'size' => 16, 'values' => ImageFitment::AVAILABLE_VALUES],
+             'categories' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'products' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'manufacturers' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+diff --git a/classes/webservice/WebserviceSpecificManagementImages.php b/classes/webservice/WebserviceSpecificManagementImages.php
+index bfe37c2d266e1..85a7ba3efde67 100644
+--- a/classes/webservice/WebserviceSpecificManagementImages.php
++++ b/classes/webservice/WebserviceSpecificManagementImages.php
+@@ -3,6 +3,8 @@
+  * For the full copyright and license information, please view the
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
+ class WebserviceSpecificManagementImagesCore implements WebserviceSpecificManagementInterface
+ {
+     /** @var WebserviceOutputBuilder */
+@@ -883,7 +885,7 @@ protected function deleteImageOnDisk($file_path, $image_types = null, $parent_pa
+      *
+      * @throws WebserviceException
+      */
+-    protected function writeImageOnDisk($base_path, $new_path, $dest_width = null, $dest_height = null, $image_types = null, $parent_path = null)
++    protected function writeImageOnDisk($base_path, $new_path, $dest_width = null, $dest_height = null, $image_types = null, $parent_path = null, $image_fitment = ImageFitment::FIT)
+     {
+         list($source_width, $source_height, $type, $attr) = getimagesize($base_path);
+         if (!$source_width) {
+@@ -895,6 +897,12 @@ protected function writeImageOnDisk($base_path, $new_path, $dest_width = null, $
+         if ($dest_height == null) {
+             $dest_height = $source_height;
+         }
++
++        // Unknown fitments fall back to legacy behavior to keep webservice uploads backward-compatible.
++        if (!in_array($image_fitment, ImageFitment::AVAILABLE_VALUES, true)) {
++            $image_fitment = ImageFitment::FIT;
++        }
++
+         switch ($type) {
+             case IMAGETYPE_GIF:
+                 $source_image = imagecreatefromgif($base_path);
+@@ -914,7 +922,18 @@ protected function writeImageOnDisk($base_path, $new_path, $dest_width = null, $
+         $width_diff = $dest_width / $source_width;
+         $height_diff = $dest_height / $source_height;
+ 
+-        if ($width_diff > 1 && $height_diff > 1) {
++        // Calculate generated dimensions with the same fitment rules as ImageManager::resize().
++        if ($image_fitment === ImageFitment::BOUND) {
++            $ratio = min(1, $width_diff, $height_diff);
++            $next_width = (int) round($source_width * $ratio);
++            $next_height = (int) round($source_height * $ratio);
++            $dest_width = $next_width;
++            $dest_height = $next_height;
++        } elseif ($image_fitment === ImageFitment::CROP) {
++            $ratio = max($width_diff, $height_diff);
++            $next_width = (int) round($source_width * $ratio);
++            $next_height = (int) round($source_height * $ratio);
++        } elseif ($width_diff > 1 && $height_diff > 1) {
+             $next_width = $source_width;
+             $next_height = $source_height;
+         } else {
+@@ -993,7 +1012,7 @@ protected function writeImageOnDisk($base_path, $new_path, $dest_width = null, $
+                         $thumbnail_path = $parent_path . $this->wsObject->urlSegment[2] . '-' . $image_type['name'] . '.jpg';
+                     }
+                 }
+-                if (!$this->writeImageOnDisk($base_path, $thumbnail_path, $image_type['width'], $image_type['height'])) {
++                if (!$this->writeImageOnDisk($base_path, $thumbnail_path, $image_type['width'], $image_type['height'], null, null, $image_type['image_fitment'])) {
+                     throw new WebserviceException(sprintf('Unable to save the thumbnail "%s" of this image.', $image_type['name']), [71, 500]);
+                 }
+             }
+@@ -1120,7 +1139,27 @@ protected function writePostedImageOnDisk($reception_path, $dest_width = null, $
+                         } else {
+                             $images_types = ImageType::getImagesTypes('products');
+                             foreach ($images_types as $imageType) {
+-                                if (!ImageManager::resize($tmp_name, _PS_PRODUCT_IMG_DIR_ . $image->getExistingImgPath() . '-' . stripslashes($imageType['name']) . '.' . $image->image_format, $imageType['width'], $imageType['height'], $image->image_format)) {
++                                $error = 0;
++                                $targetWidth = null;
++                                $targetHeight = null;
++                                $sourceWidth = null;
++                                $sourceHeight = null;
++
++                                if (!ImageManager::resize(
++                                    $tmp_name,
++                                    _PS_PRODUCT_IMG_DIR_ . $image->getExistingImgPath() . '-' . stripslashes($imageType['name']) . '.' . $image->image_format,
++                                    $imageType['width'],
++                                    $imageType['height'],
++                                    $image->image_format,
++                                    false,
++                                    $error,
++                                    $targetWidth,
++                                    $targetHeight,
++                                    5,
++                                    $sourceWidth,
++                                    $sourceHeight,
++                                    $imageType['image_fitment']
++                                )) {
+                                     $this->getWsObject()->errors[] = Context::getContext()->getTranslator()->trans('An error occurred while copying this image: %s', [stripslashes($imageType['name'])], 'Admin.Notifications.Error');
+                                 }
+                             }
+@@ -1142,7 +1181,27 @@ protected function writePostedImageOnDisk($reception_path, $dest_width = null, $
+                         }
+                         $images_types = ImageType::getImagesTypes($this->imageType);
+                         foreach ($images_types as $imageType) {
+-                            if (!ImageManager::resize($tmp_name, $parent_path . $this->wsObject->urlSegment[2] . '-' . stripslashes($imageType['name']) . '.jpg', $imageType['width'], $imageType['height'])) {
++                            $error = 0;
++                            $targetWidth = null;
++                            $targetHeight = null;
++                            $sourceWidth = null;
++                            $sourceHeight = null;
++
++                            if (!ImageManager::resize(
++                                $tmp_name,
++                                $parent_path . $this->wsObject->urlSegment[2] . '-' . stripslashes($imageType['name']) . '.jpg',
++                                $imageType['width'],
++                                $imageType['height'],
++                                'jpg',
++                                false,
++                                $error,
++                                $targetWidth,
++                                $targetHeight,
++                                5,
++                                $sourceWidth,
++                                $sourceHeight,
++                                $imageType['image_fitment']
++                            )) {
+                                 $this->getWsObject()->errors[] = Context::getContext()->getTranslator()->trans('An error occurred while copying this image: %s', [stripslashes($imageType['name'])], 'Admin.Notifications.Error');
+                             }
+                         }
+diff --git a/controllers/admin/AdminStoresController.php b/controllers/admin/AdminStoresController.php
+index 66361b098e71a..52942f9d29e91 100644
+--- a/controllers/admin/AdminStoresController.php
++++ b/controllers/admin/AdminStoresController.php
+@@ -407,12 +407,26 @@ protected function postImage($id)
+             $images_types = ImageType::getImagesTypes('stores');
+             foreach ($images_types as $image_type) {
+                 foreach ($configuredImageFormats as $imageFormat) {
++                    $error = 0;
++                    $targetWidth = null;
++                    $targetHeight = null;
++                    $sourceWidth = null;
++                    $sourceHeight = null;
++
+                     ImageManager::resize(
+                         _PS_STORE_IMG_DIR_ . $id_store . '.jpg',
+                         _PS_STORE_IMG_DIR_ . $id_store . '-' . stripslashes($image_type['name']) . '.' . $imageFormat,
+                         (int) $image_type['width'],
+                         (int) $image_type['height'],
+-                        $imageFormat
++                        $imageFormat,
++                        false,
++                        $error,
++                        $targetWidth,
++                        $targetHeight,
++                        5,
++                        $sourceWidth,
++                        $sourceHeight,
++                        $image_type['image_fitment']
+                     );
+                 }
+             }
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 4985f0ae2873a..7fb5352b98b57 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -2897,6 +2897,7 @@ CREATE TABLE `PREFIX_image_type` (
+   `name`          VARCHAR(64) NOT NULL,
+   `width`         INT UNSIGNED NOT NULL,
+   `height`        INT UNSIGNED NOT NULL,
++  `image_fitment` ENUM('fit', 'crop', 'bound') NOT NULL DEFAULT 'fit',
+   `products`      TINYINT(1) DEFAULT 1 NOT NULL,
+   `categories`    TINYINT(1) DEFAULT 1 NOT NULL,
+   `manufacturers` TINYINT(1) DEFAULT 1 NOT NULL,
+diff --git a/install-dev/fixtures/fashion/img/c/resize.php b/install-dev/fixtures/fashion/img/c/resize.php
+index 79d19f0a8e535..c1c4b73b9ea97 100644
+--- a/install-dev/fixtures/fashion/img/c/resize.php
++++ b/install-dev/fixtures/fashion/img/c/resize.php
+@@ -15,7 +15,13 @@
+     if (preg_match('/^([a-z0-9-_]+)\.jpg$/i', $file, $match) && !preg_match('/default\.jpg$/i', $file)) {
+         foreach ($types as $type) {
+             if (!file_exists($match[1].'-'.$type['name'].'.jpg')) {
+-                ImageManager::resize($file, $match[1].'-'.$type['name'].'.jpg', $type['width'], $type['height'], 'jpg', true);
++                $error = 0;
++                $targetWidth = null;
++                $targetHeight = null;
++                $sourceWidth = null;
++                $sourceHeight = null;
++
++                ImageManager::resize($file, $match[1].'-'.$type['name'].'.jpg', $type['width'], $type['height'], 'jpg', true, $error, $targetWidth, $targetHeight, 5, $sourceWidth, $sourceHeight, $type['image_fitment']);
+             }
+         }
+     }
+diff --git a/install-dev/fixtures/fashion/img/p/resize.php b/install-dev/fixtures/fashion/img/p/resize.php
+index 5c280c4f7629a..c7136d1913bfb 100644
+--- a/install-dev/fixtures/fashion/img/p/resize.php
++++ b/install-dev/fixtures/fashion/img/p/resize.php
+@@ -15,7 +15,13 @@
+     if (preg_match('/^Fotolia_([0-9]+)_X\.jpg$/i', $file, $match)) {
+         foreach ($types as $type) {
+             if (!file_exists($match[1].'-'.$type['name'].'.jpg')) {
+-                ImageManager::resize($file, $match[1].'-'.$type['name'].'.jpg', $type['width'], $type['height'], 'jpg', true);
++                $error = 0;
++                $targetWidth = null;
++                $targetHeight = null;
++                $sourceWidth = null;
++                $sourceHeight = null;
++
++                ImageManager::resize($file, $match[1].'-'.$type['name'].'.jpg', $type['width'], $type['height'], 'jpg', true, $error, $targetWidth, $targetHeight, 5, $sourceWidth, $sourceHeight, $type['image_fitment']);
+             }
+         }
+         ImageManager::resize($file, $match[1].'.jpg', 800, 800, 'jpg', true);
+diff --git a/src/Adapter/Image/ImageGenerator.php b/src/Adapter/Image/ImageGenerator.php
+index ecd134d4262e4..e7cab977646f5 100644
+--- a/src/Adapter/Image/ImageGenerator.php
++++ b/src/Adapter/Image/ImageGenerator.php
+@@ -79,12 +79,26 @@ protected function resize(string $filePath, ImageType $imageType, int $imageId =
+         $result = true;
+ 
+         foreach ($configuredImageFormats as $imageFormat) {
++            $error = 0;
++            $targetWidth = null;
++            $targetHeight = null;
++            $sourceWidth = null;
++            $sourceHeight = null;
++
+             if (!ImageManager::resize(
+                 $filePath,
+                 sprintf('%s-%s.%s', dirname($filePath) . DIRECTORY_SEPARATOR . $imageId, stripslashes($imageType->name), $imageFormat),
+                 $imageType->width,
+                 $imageType->height,
+-                $imageFormat
++                $imageFormat,
++                false,
++                $error,
++                $targetWidth,
++                $targetHeight,
++                5,
++                $sourceWidth,
++                $sourceHeight,
++                $imageType->image_fitment
+             )) {
+                 $result = false;
+             }
+diff --git a/src/Adapter/Image/ImageRetriever.php b/src/Adapter/Image/ImageRetriever.php
+index de78b0b5ddc92..32ee03969513c 100644
+--- a/src/Adapter/Image/ImageRetriever.php
++++ b/src/Adapter/Image/ImageRetriever.php
+@@ -280,12 +280,26 @@ private function checkOrGenerateImageType(string $originalImagePath, string $ima
+ 
+         // Check if the thumbnail exists and generate it if needed
+         if (!file_exists($resizedImagePath)) {
++            $error = 0;
++            $targetWidth = null;
++            $targetHeight = null;
++            $sourceWidth = null;
++            $sourceHeight = null;
++
+             ImageManager::resize(
+                 $originalImagePath,
+                 $resizedImagePath,
+                 (int) $imageTypeData['width'],
+                 (int) $imageTypeData['height'],
+-                $imageFormat
++                $imageFormat,
++                false,
++                $error,
++                $targetWidth,
++                $targetHeight,
++                5,
++                $sourceWidth,
++                $sourceHeight,
++                $imageTypeData['image_fitment']
+             );
+         }
+     }
+@@ -380,11 +394,26 @@ public function getNoPictureImage(Language $language)
+ 
+                 // Check if the thumbnail exists and generate it if needed
+                 if (!file_exists($resizedImagePath)) {
++                    $error = 0;
++                    $targetWidth = null;
++                    $targetHeight = null;
++                    $sourceWidth = null;
++                    $sourceHeight = null;
++
+                     ImageManager::resize(
+                         $originalImagePath,
+                         $resizedImagePath,
+                         (int) $imageType['width'],
+-                        (int) $imageType['height']
++                        (int) $imageType['height'],
++                        'jpg',
++                        false,
++                        $error,
++                        $targetWidth,
++                        $targetHeight,
++                        5,
++                        $sourceWidth,
++                        $sourceHeight,
++                        $imageType['image_fitment']
+                     );
+                 }
+ 
+diff --git a/src/Adapter/Image/Uploader/AbstractImageUploader.php b/src/Adapter/Image/Uploader/AbstractImageUploader.php
+index cc518d423e372..99054a02c19a1 100644
+--- a/src/Adapter/Image/Uploader/AbstractImageUploader.php
++++ b/src/Adapter/Image/Uploader/AbstractImageUploader.php
+@@ -138,12 +138,26 @@ private function resize($id, $imageDir, array $imageType)
+         $ext = '.jpg';
+         $width = $imageType['width'];
+         $height = $imageType['height'];
++        $error = 0;
++        $targetWidth = null;
++        $targetHeight = null;
++        $sourceWidth = null;
++        $sourceHeight = null;
+ 
+         if (!ImageManager::resize(
+             $imageDir . $id . '.jpg',
+             $imageDir . $id . '-' . stripslashes($imageType['name']) . $ext,
+             (int) $width,
+-            (int) $height
++            (int) $height,
++            'jpg',
++            false,
++            $error,
++            $targetWidth,
++            $targetHeight,
++            5,
++            $sourceWidth,
++            $sourceHeight,
++            $imageType['image_fitment']
+         )) {
+             return false;
+         }
+diff --git a/src/Adapter/Image/Uploader/CategoryCoverImageUploader.php b/src/Adapter/Image/Uploader/CategoryCoverImageUploader.php
+index 6f30fae5e2683..2afc43249dce8 100644
+--- a/src/Adapter/Image/Uploader/CategoryCoverImageUploader.php
++++ b/src/Adapter/Image/Uploader/CategoryCoverImageUploader.php
+@@ -109,12 +109,26 @@ private function generateDifferentTypes($id)
+         $imagesTypes = ImageType::getImagesTypes('categories');
+         foreach ($imagesTypes as $imageType) {
+             foreach ($configuredImageFormats as $imageFormat) {
++                $error = 0;
++                $targetWidth = null;
++                $targetHeight = null;
++                $sourceWidth = null;
++                $sourceHeight = null;
++
+                 $generated = ImageManager::resize(
+                     _PS_CAT_IMG_DIR_ . $id . '.jpg',
+                     _PS_CAT_IMG_DIR_ . $id . '-' . stripslashes($imageType['name']) . '.' . $imageFormat,
+                     (int) $imageType['width'],
+                     (int) $imageType['height'],
+-                    $imageFormat
++                    $imageFormat,
++                    false,
++                    $error,
++                    $targetWidth,
++                    $targetHeight,
++                    5,
++                    $sourceWidth,
++                    $sourceHeight,
++                    $imageType['image_fitment']
+                 );
+ 
+                 if (!$generated) {
+diff --git a/src/Adapter/Image/Uploader/CategoryThumbnailImageUploader.php b/src/Adapter/Image/Uploader/CategoryThumbnailImageUploader.php
+index 2e38544a14819..2f0beca745152 100644
+--- a/src/Adapter/Image/Uploader/CategoryThumbnailImageUploader.php
++++ b/src/Adapter/Image/Uploader/CategoryThumbnailImageUploader.php
+@@ -107,12 +107,26 @@ private function generateDifferentTypes($id)
+         $imagesTypes = ImageType::getImagesTypes('categories');
+         foreach ($imagesTypes as $imageType) {
+             foreach ($configuredImageFormats as $imageFormat) {
++                $error = 0;
++                $targetWidth = null;
++                $targetHeight = null;
++                $sourceWidth = null;
++                $sourceHeight = null;
++
+                 $generated = ImageManager::resize(
+                     _PS_CAT_IMG_DIR_ . $id . '_thumb.jpg',
+                     _PS_CAT_IMG_DIR_ . $id . '_thumb-' . stripslashes($imageType['name']) . '.' . $imageFormat,
+                     (int) $imageType['width'],
+                     (int) $imageType['height'],
+-                    $imageFormat
++                    $imageFormat,
++                    false,
++                    $error,
++                    $targetWidth,
++                    $targetHeight,
++                    5,
++                    $sourceWidth,
++                    $sourceHeight,
++                    $imageType['image_fitment']
+                 );
+ 
+                 if (!$generated) {
+diff --git a/src/Adapter/Image/Uploader/ManufacturerImageUploader.php b/src/Adapter/Image/Uploader/ManufacturerImageUploader.php
+index 150f878f74b9b..57f84c3e405b5 100644
+--- a/src/Adapter/Image/Uploader/ManufacturerImageUploader.php
++++ b/src/Adapter/Image/Uploader/ManufacturerImageUploader.php
+@@ -69,12 +69,26 @@ private function generateDifferentSizeImages($manufacturerId)
+ 
+                 foreach ($imageTypes as $imageType) {
+                     foreach ($configuredImageFormats as $imageFormat) {
++                        $error = 0;
++                        $targetWidth = null;
++                        $targetHeight = null;
++                        $sourceWidth = null;
++                        $sourceHeight = null;
++
+                         $resized &= ImageManager::resize(
+                             _PS_MANU_IMG_DIR_ . $manufacturerId . '.jpg',
+                             _PS_MANU_IMG_DIR_ . $manufacturerId . '-' . stripslashes($imageType['name']) . '.' . $imageFormat,
+                             (int) $imageType['width'],
+                             (int) $imageType['height'],
+-                            $imageFormat
++                            $imageFormat,
++                            false,
++                            $error,
++                            $targetWidth,
++                            $targetHeight,
++                            5,
++                            $sourceWidth,
++                            $sourceHeight,
++                            $imageType['image_fitment']
+                         );
+                     }
+                 }
+diff --git a/src/Adapter/ImageThumbnailsRegenerator.php b/src/Adapter/ImageThumbnailsRegenerator.php
+index 7d19b8960c652..d1aa46c1bc9f6 100644
+--- a/src/Adapter/ImageThumbnailsRegenerator.php
++++ b/src/Adapter/ImageThumbnailsRegenerator.php
+@@ -146,12 +146,26 @@ public function regenerateNewImages(string $dir, array $type, bool $productsImag
+                                 if (!file_exists($dir . $originalImageName) || !filesize($dir . $originalImageName)) {
+                                     $errors[] = $this->translator->trans('Source file does not exist or is empty (%filepath%)', ['%filepath%' => $dir . $originalImageName], 'Admin.Design.Notification');
+                                 } else {
++                                    $error = 0;
++                                    $targetWidth = null;
++                                    $targetHeight = null;
++                                    $sourceWidth = null;
++                                    $sourceHeight = null;
++
+                                     if (!LegacyImageManager::resize(
+                                         $dir . $originalImageName,
+                                         $newDir . $thumbnailName,
+                                         (int) $imageType->getWidth(),
+                                         (int) $imageType->getHeight(),
+-                                        $imageFormat
++                                        $imageFormat,
++                                        false,
++                                        $error,
++                                        $targetWidth,
++                                        $targetHeight,
++                                        5,
++                                        $sourceWidth,
++                                        $sourceHeight,
++                                        $imageType->getImageFitment()
+                                     )) {
+                                         $errors[] = $this->translator->trans('Failed to resize image file (%filepath%)', ['%filepath%' => $dir . $originalImageName], 'Admin.Design.Notification');
+                                     }
+@@ -181,12 +195,26 @@ public function regenerateNewImages(string $dir, array $type, bool $productsImag
+                             );
+ 
+                             if (!file_exists($thumbnailPath)) {
++                                $error = 0;
++                                $targetWidth = null;
++                                $targetHeight = null;
++                                $sourceWidth = null;
++                                $sourceHeight = null;
++
+                                 if (!LegacyImageManager::resize(
+                                     $originalImagePath,
+                                     $thumbnailPath,
+                                     (int) $imageType->getWidth(),
+                                     (int) $imageType->getHeight(),
+-                                    $imageFormat
++                                    $imageFormat,
++                                    false,
++                                    $error,
++                                    $targetWidth,
++                                    $targetHeight,
++                                    5,
++                                    $sourceWidth,
++                                    $sourceHeight,
++                                    $imageType->getImageFitment()
+                                 )) {
+                                     $errors[] = $this->translator->trans(
+                                         'Original image is corrupt (%filename%) for product ID %id% or bad permission on folder.',
+@@ -294,12 +322,26 @@ public function regenerateNoPictureImages(string $dir, array $type, array $langu
+ 
+                 foreach ($configuredImageFormats as $imageFormat) {
+                     if (!file_exists($dir . $language->getIsoCode() . '-default-' . stripslashes($image_type->getName()) . '.' . $imageFormat)) {
++                        $error = 0;
++                        $targetWidth = null;
++                        $targetHeight = null;
++                        $sourceWidth = null;
++                        $sourceHeight = null;
++
+                         if (!LegacyImageManager::resize(
+                             $file,
+                             $dir . $language->getIsoCode() . '-default-' . stripslashes($image_type->getName()) . '.' . $imageFormat,
+                             (int) $image_type->getWidth(),
+                             (int) $image_type->getHeight(),
+-                            $imageFormat
++                            $imageFormat,
++                            false,
++                            $error,
++                            $targetWidth,
++                            $targetHeight,
++                            5,
++                            $sourceWidth,
++                            $sourceHeight,
++                            $image_type->getImageFitment()
+                         )) {
+                             $errors = true;
+                         }
+diff --git a/src/Adapter/Import/ImageCopier.php b/src/Adapter/Import/ImageCopier.php
+index 67fb82fb3a6f1..a10c8fab5bcf2 100644
+--- a/src/Adapter/Import/ImageCopier.php
++++ b/src/Adapter/Import/ImageCopier.php
+@@ -161,7 +161,8 @@ public function copyImg($entityId, $imageId = null, $url = '', $entity = 'produc
+                         $targetHeight,
+                         5,
+                         $sourceWidth,
+-                        $sourceHeight
++                        $sourceHeight,
++                        $imageType['image_fitment']
+                     )) {
+                         // the last image should not be added in the candidate list if it's bigger than the original image
+                         if ($targetWidth <= $sourceWidth && $targetHeight <= $sourceHeight) {
+diff --git a/src/Adapter/Product/Image/Repository/ProductImageRepository.php b/src/Adapter/Product/Image/Repository/ProductImageRepository.php
+index 1d50f7d482472..0d8fed2f1b50a 100644
+--- a/src/Adapter/Product/Image/Repository/ProductImageRepository.php
++++ b/src/Adapter/Product/Image/Repository/ProductImageRepository.php
+@@ -733,6 +733,7 @@ public function getProductImageTypes(): array
+             $imageType->name = $result['name'];
+             $imageType->width = (int) $result['width'];
+             $imageType->height = (int) $result['height'];
++            $imageType->image_fitment = $result['image_fitment'];
+             $imageType->products = (bool) $result['products'];
+             $imageType->categories = (bool) $result['categories'];
+             $imageType->manufacturers = (bool) $result['manufacturers'];
+diff --git a/src/Core/Domain/ImageSettings/Command/AddImageTypeCommand.php b/src/Core/Domain/ImageSettings/Command/AddImageTypeCommand.php
+index f8bac217563ef..f3c71d4ac4d01 100644
+--- a/src/Core/Domain/ImageSettings/Command/AddImageTypeCommand.php
++++ b/src/Core/Domain/ImageSettings/Command/AddImageTypeCommand.php
+@@ -8,11 +8,24 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\Command;
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
+ /**
+  * Adds new image type with provided data.
+  */
+ class AddImageTypeCommand
+ {
++    /**
++     * @param string $name Name of the image type
++     * @param int $width Width of the image
++     * @param int $height Height of the image
++     * @param bool $products Whether the image type is used for products
++     * @param bool $categories Whether the image type is used for categories
++     * @param bool $manufacturers Whether the image type is used for manufacturers
++     * @param bool $suppliers Whether the image type is used for suppliers
++     * @param bool $stores Whether the image type is used for stores
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment
++     */
+     public function __construct(
+         private readonly string $name,
+         private readonly int $width,
+@@ -21,8 +34,10 @@ public function __construct(
+         private readonly bool $categories,
+         private readonly bool $manufacturers,
+         private readonly bool $suppliers,
+-        private readonly bool $stores
++        private readonly bool $stores,
++        private readonly string $imageFitment = ImageFitment::FIT
+     ) {
++        ImageFitment::assertIsValid($imageFitment);
+     }
+ 
+     public function getName(): string
+@@ -40,6 +55,16 @@ public function getHeight(): int
+         return $this->height;
+     }
+ 
++    /**
++     * Gets the image fitment used when generating thumbnails.
++     *
++     * @return value-of<ImageFitment::AVAILABLE_VALUES>
++     */
++    public function getImageFitment(): string
++    {
++        return $this->imageFitment;
++    }
++
+     public function isProducts(): bool
+     {
+         return $this->products;
+diff --git a/src/Core/Domain/ImageSettings/Command/EditImageSettingsCommand.php b/src/Core/Domain/ImageSettings/Command/EditImageSettingsCommand.php
+index a6e66c6eb53c9..d5065a4d24669 100644
+--- a/src/Core/Domain/ImageSettings/Command/EditImageSettingsCommand.php
++++ b/src/Core/Domain/ImageSettings/Command/EditImageSettingsCommand.php
+@@ -9,7 +9,7 @@
+ namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\Command;
+ 
+ /**
+- * Command that edits zone
++ * Command that edits image settings
+  */
+ class EditImageSettingsCommand
+ {
+diff --git a/src/Core/Domain/ImageSettings/Command/EditImageTypeCommand.php b/src/Core/Domain/ImageSettings/Command/EditImageTypeCommand.php
+index 9af7029d3f579..23796dc067c86 100644
+--- a/src/Core/Domain/ImageSettings/Command/EditImageTypeCommand.php
++++ b/src/Core/Domain/ImageSettings/Command/EditImageTypeCommand.php
+@@ -8,10 +8,11 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\Command;
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageTypeId;
+ 
+ /**
+- * Command that edits zone
++ * Command that edits image type
+  */
+ class EditImageTypeCommand
+ {
+@@ -19,6 +20,9 @@ class EditImageTypeCommand
+     private ?string $name = null;
+     private ?int $width = null;
+     private ?int $height = null;
++
++    /** @var value-of<ImageFitment::AVAILABLE_VALUES>|null */
++    private ?string $imageFitment = null;
+     private ?bool $products = null;
+     private ?bool $categories = null;
+     private ?bool $manufacturers = null;
+@@ -71,6 +75,30 @@ public function setHeight(int $height): self
+         return $this;
+     }
+ 
++    /**
++     * Gets the image fitment used when generating thumbnails.
++     *
++     * @return value-of<ImageFitment::AVAILABLE_VALUES>|null
++     */
++    public function getImageFitment(): ?string
++    {
++        return $this->imageFitment;
++    }
++
++    /**
++     * Sets the image fitment used when generating thumbnails.
++     *
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment
++     */
++    public function setImageFitment(string $imageFitment): self
++    {
++        ImageFitment::assertIsValid($imageFitment);
++
++        $this->imageFitment = $imageFitment;
++
++        return $this;
++    }
++
+     public function isProducts(): ?bool
+     {
+         return $this->products;
+diff --git a/src/Core/Domain/ImageSettings/CommandHandler/AddImageTypeHandler.php b/src/Core/Domain/ImageSettings/CommandHandler/AddImageTypeHandler.php
+index f6644dfc3f233..4cee38ac9f146 100644
+--- a/src/Core/Domain/ImageSettings/CommandHandler/AddImageTypeHandler.php
++++ b/src/Core/Domain/ImageSettings/CommandHandler/AddImageTypeHandler.php
+@@ -34,6 +34,7 @@ public function handle(AddImageTypeCommand $command): ImageTypeId
+         $imageType->setName($command->getName());
+         $imageType->setWidth($command->getWidth());
+         $imageType->setHeight($command->getHeight());
++        $imageType->setImageFitment($command->getImageFitment());
+         $imageType->setProducts($command->isProducts());
+         $imageType->setCategories($command->isCategories());
+         $imageType->setManufacturers($command->isManufacturers());
+diff --git a/src/Core/Domain/ImageSettings/CommandHandler/EditImageTypeHandler.php b/src/Core/Domain/ImageSettings/CommandHandler/EditImageTypeHandler.php
+index 87b0aa485d5ab..9abd7cc1783fb 100644
+--- a/src/Core/Domain/ImageSettings/CommandHandler/EditImageTypeHandler.php
++++ b/src/Core/Domain/ImageSettings/CommandHandler/EditImageTypeHandler.php
+@@ -50,6 +50,10 @@ public function handle(EditImageTypeCommand $command): void
+             $imageType->setHeight($command->getHeight());
+         }
+ 
++        if (null !== $command->getImageFitment()) {
++            $imageType->setImageFitment($command->getImageFitment());
++        }
++
+         if (null !== $command->isProducts()) {
+             $imageType->setProducts($command->isProducts());
+         }
+diff --git a/src/Core/Domain/ImageSettings/Exception/InvalidImageFitmentException.php b/src/Core/Domain/ImageSettings/Exception/InvalidImageFitmentException.php
+new file mode 100644
+index 0000000000000..a35e74aaae28e
+--- /dev/null
++++ b/src/Core/Domain/ImageSettings/Exception/InvalidImageFitmentException.php
+@@ -0,0 +1,23 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\Exception;
++
++/**
++ * Thrown when an image fitment value is not supported by the ImageSettings domain.
++ */
++class InvalidImageFitmentException extends ImageTypeException
++{
++    /**
++     * @param string $imageFitment Invalid image fitment value
++     */
++    public function __construct(string $imageFitment)
++    {
++        parent::__construct(sprintf('Invalid image fitment "%s".', $imageFitment));
++    }
++}
+diff --git a/src/Core/Domain/ImageSettings/QueryHandler/GetImageTypeForEditingHandler.php b/src/Core/Domain/ImageSettings/QueryHandler/GetImageTypeForEditingHandler.php
+index 4cd7ea99bf4dd..a0c672c26855c 100644
+--- a/src/Core/Domain/ImageSettings/QueryHandler/GetImageTypeForEditingHandler.php
++++ b/src/Core/Domain/ImageSettings/QueryHandler/GetImageTypeForEditingHandler.php
+@@ -47,7 +47,8 @@ public function handle(GetImageTypeForEditing $query): EditableImageType
+             (bool) $imageType->isCategories(),
+             (bool) $imageType->isManufacturers(),
+             (bool) $imageType->isSuppliers(),
+-            (bool) $imageType->isStores()
++            (bool) $imageType->isStores(),
++            (string) $imageType->getImageFitment()
+         );
+     }
+ }
+diff --git a/src/Core/Domain/ImageSettings/QueryResult/EditableImageType.php b/src/Core/Domain/ImageSettings/QueryResult/EditableImageType.php
+index a0eba6bcd4043..7fe406b992d31 100644
+--- a/src/Core/Domain/ImageSettings/QueryResult/EditableImageType.php
++++ b/src/Core/Domain/ImageSettings/QueryResult/EditableImageType.php
+@@ -7,6 +7,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\QueryResult;
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageTypeId;
+ 
+ /**
+@@ -14,6 +15,18 @@
+  */
+ class EditableImageType
+ {
++    /**
++     * @param ImageTypeId $imageTypeId ID of the image type
++     * @param string $name Name of the image type
++     * @param int $width Width of the image
++     * @param int $height Height of the image
++     * @param bool $products Whether the image type is used for products
++     * @param bool $categories Whether the image type is used for categories
++     * @param bool $manufacturers Whether the image type is used for manufacturers
++     * @param bool $suppliers Whether the image type is used for suppliers
++     * @param bool $stores Whether the image type is used for stores
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment
++     */
+     public function __construct(
+         private readonly ImageTypeId $imageTypeId,
+         private readonly string $name,
+@@ -24,6 +37,7 @@ public function __construct(
+         private readonly bool $manufacturers,
+         private readonly bool $suppliers,
+         private readonly bool $stores,
++        private readonly string $imageFitment = ImageFitment::FIT,
+     ) {
+     }
+ 
+@@ -47,6 +61,16 @@ public function getHeight(): int
+         return $this->height;
+     }
+ 
++    /**
++     * Gets the image fitment used when generating thumbnails.
++     *
++     * @return value-of<ImageFitment::AVAILABLE_VALUES>
++     */
++    public function getImageFitment(): string
++    {
++        return $this->imageFitment;
++    }
++
+     public function isProducts(): bool
+     {
+         return $this->products;
+diff --git a/src/Core/Domain/ImageSettings/ValueObject/ImageFitment.php b/src/Core/Domain/ImageSettings/ValueObject/ImageFitment.php
+new file mode 100644
+index 0000000000000..c88e1b6b593de
+--- /dev/null
++++ b/src/Core/Domain/ImageSettings/ValueObject/ImageFitment.php
+@@ -0,0 +1,40 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Exception\InvalidImageFitmentException;
++
++/**
++ * Defines supported image fitment values for the ImageSettings domain.
++ */
++final class ImageFitment
++{
++    public const FIT = 'fit';
++    public const CROP = 'crop';
++    public const BOUND = 'bound';
++
++    public const AVAILABLE_VALUES = [
++        self::FIT,
++        self::CROP,
++        self::BOUND,
++    ];
++
++    /**
++     * Asserts that the provided image fitment is supported.
++     *
++     * @throws InvalidImageFitmentException
++     */
++    public static function assertIsValid(string $imageFitment): void
++    {
++        // Image fitment is intentionally a closed list at domain level.
++        if (!in_array($imageFitment, self::AVAILABLE_VALUES, true)) {
++            throw new InvalidImageFitmentException($imageFitment);
++        }
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/ImageTypeFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/ImageTypeFormDataHandler.php
+index 2014799c0e97c..336fd437ab7c9 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/ImageTypeFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/ImageTypeFormDataHandler.php
+@@ -30,6 +30,7 @@ public function create(array $data)
+             (bool) $data['manufacturers'],
+             (bool) $data['suppliers'],
+             (bool) $data['stores'],
++            $data['image_fitment'],
+         ));
+     }
+ 
+@@ -40,6 +41,7 @@ public function update($id, array $data)
+             ->setName($data['name'])
+             ->setWidth((int) $data['width'])
+             ->setHeight((int) $data['height'])
++            ->setImageFitment($data['image_fitment'])
+             ->setProducts((bool) $data['products'])
+             ->setCategories((bool) $data['categories'])
+             ->setManufacturers((bool) $data['manufacturers'])
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/ImageTypeFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/ImageTypeFormDataProvider.php
+index 2d1706a953716..b3a1b5e0f2d39 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/ImageTypeFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/ImageTypeFormDataProvider.php
+@@ -11,6 +11,7 @@
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Query\GetImageTypeForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\QueryResult\EditableImageType;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ 
+ /**
+  * Provides data for image type add/edit form.
+@@ -35,6 +36,7 @@ public function getData($id): array
+             'name' => $result->getName(),
+             'width' => $result->getWidth(),
+             'height' => $result->getHeight(),
++            'image_fitment' => $result->getImageFitment(),
+             'products' => $result->isProducts(),
+             'categories' => $result->isCategories(),
+             'manufacturers' => $result->isManufacturers(),
+@@ -52,6 +54,7 @@ public function getDefaultData(): array
+             'name' => '',
+             'width' => null,
+             'height' => null,
++            'image_fitment' => ImageFitment::FIT,
+             'products' => false,
+             'categories' => false,
+             'manufacturers' => false,
+diff --git a/src/Core/Grid/Data/Factory/ImageTypeGridDataFactory.php b/src/Core/Grid/Data/Factory/ImageTypeGridDataFactory.php
+new file mode 100644
+index 0000000000000..ead8e1dd17fae
+--- /dev/null
++++ b/src/Core/Grid/Data/Factory/ImageTypeGridDataFactory.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Grid\Data\Factory;
++
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
++use PrestaShop\PrestaShop\Core\Grid\Data\GridDataInterface;
++use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
++use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++/**
++ * Decorates image type grid data with translated image fitment labels.
++ */
++final class ImageTypeGridDataFactory implements GridDataFactoryInterface
++{
++    public function __construct(
++        private readonly GridDataFactoryInterface $imageTypeGridDataFactory,
++        private readonly TranslatorInterface $translator,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getData(SearchCriteriaInterface $searchCriteria): GridDataInterface
++    {
++        $data = $this->imageTypeGridDataFactory->getData($searchCriteria);
++        $records = $data->getRecords()->all();
++
++        foreach ($records as &$record) {
++            $record['image_fitment_name'] = $this->getImageFitmentName($record['image_fitment']);
++        }
++
++        return new GridData(
++            new RecordCollection($records),
++            $data->getRecordsTotal(),
++            $data->getQuery()
++        );
++    }
++
++    /**
++     * Gets translated image fitment name for the grid.
++     */
++    private function getImageFitmentName(string $imageFitment): string
++    {
++        $imageFitmentNames = [
++            ImageFitment::FIT => $this->translator->trans('Fit to size', [], 'Admin.Design.Feature'),
++            ImageFitment::CROP => $this->translator->trans('Fill and crop', [], 'Admin.Design.Feature'),
++            ImageFitment::BOUND => $this->translator->trans('Keep ratio', [], 'Admin.Design.Feature'),
++        ];
++
++        return $imageFitmentNames[$imageFitment] ?? $imageFitment;
++    }
++}
+diff --git a/src/Core/Grid/Definition/Factory/ImageTypeGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/ImageTypeGridDefinitionFactory.php
+index 6aa1f96566307..989af9de7858b 100644
+--- a/src/Core/Grid/Definition/Factory/ImageTypeGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/ImageTypeGridDefinitionFactory.php
+@@ -6,6 +6,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Grid\Definition\Factory;
+ 
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\BulkActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\GridActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Row\RowActionCollection;
+@@ -22,6 +23,7 @@
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
+ use PrestaShopBundle\Form\Admin\Type\SearchAndResetType;
+ use PrestaShopBundle\Form\Admin\Type\YesAndNoChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\Extension\Core\Type\NumberType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ 
+@@ -90,6 +92,13 @@ protected function getColumns()
+                         'field' => 'height',
+                     ])
+             )
++            ->add(
++                (new DataColumn('image_fitment'))
++                    ->setName($this->trans('Image fitment', [], 'Admin.Design.Feature'))
++                    ->setOptions([
++                        'field' => 'image_fitment_name',
++                    ])
++            )
+             ->add(
+                 (new StatusColumn('products'))
+                     ->setName($this->trans('Products', [], 'Admin.Global'))
+@@ -219,6 +228,18 @@ protected function getFilters()
+                     ])
+                     ->setAssociatedColumn('height')
+             )
++            ->add(
++                (new Filter('image_fitment', ChoiceType::class))
++                    ->setTypeOptions([
++                        'choices' => [
++                            $this->trans('Fit the thumbnail and fill the rest with empty space', [], 'Admin.Design.Feature') => ImageFitment::FIT,
++                            $this->trans('Fill the thumbnail and crop the rest', [], 'Admin.Design.Feature') => ImageFitment::CROP,
++                            $this->trans('Keep the ratio of the original image', [], 'Admin.Design.Feature') => ImageFitment::BOUND,
++                        ],
++                        'required' => false,
++                    ])
++                    ->setAssociatedColumn('image_fitment')
++            )
+             ->add(
+                 (new Filter('products', YesAndNoChoiceType::class))
+                     ->setAssociatedColumn('products')
+diff --git a/src/Core/Grid/Query/ImageTypeQueryBuilder.php b/src/Core/Grid/Query/ImageTypeQueryBuilder.php
+index b514480722663..f59e6727d6bb1 100644
+--- a/src/Core/Grid/Query/ImageTypeQueryBuilder.php
++++ b/src/Core/Grid/Query/ImageTypeQueryBuilder.php
+@@ -104,6 +104,7 @@ private function applyFilters(QueryBuilder $builder, SearchCriteriaInterface $cr
+             'name',
+             'width',
+             'height',
++            'image_fitment',
+             'products',
+             'categories',
+             'manufacturers',
+diff --git a/src/Core/Image/ImageTypeRepository.php b/src/Core/Image/ImageTypeRepository.php
+index a1837892d6752..2d8c9c8d95b70 100644
+--- a/src/Core/Image/ImageTypeRepository.php
++++ b/src/Core/Image/ImageTypeRepository.php
+@@ -7,6 +7,7 @@
+ namespace PrestaShop\PrestaShop\Core\Image;
+ 
+ use Db;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ 
+ class ImageTypeRepository
+ {
+@@ -33,19 +34,26 @@ public function setTypes(array $types)
+                 $name,
+                 $data['width'],
+                 $data['height'],
+-                $data['scope']
++                $data['scope'],
++                $data['image_fitment'] ?? ImageFitment::FIT
+             );
+         }
+ 
+         return $this;
+     }
+ 
+-    public function createType($name, $width, $height, array $scope)
++    public function createType($name, $width, $height, array $scope, string $imageFitment = ImageFitment::FIT)
+     {
++        // Keep unsupported theme values on the default behavior instead of breaking theme activation.
++        if (!in_array($imageFitment, ImageFitment::AVAILABLE_VALUES, true)) {
++            $imageFitment = ImageFitment::FIT;
++        }
++
+         $data = [
+             'name' => $this->db->escape($name),
+             'width' => $this->db->escape($width),
+             'height' => $this->db->escape($height),
++            'image_fitment' => $this->db->escape($imageFitment),
+         ];
+ 
+         foreach ($this->getScopeList() as $scope_item) {
+diff --git a/src/PrestaShopBundle/Entity/ImageType.php b/src/PrestaShopBundle/Entity/ImageType.php
+index 3d31162ea7d36..0c4756d1ea8df 100644
+--- a/src/PrestaShopBundle/Entity/ImageType.php
++++ b/src/PrestaShopBundle/Entity/ImageType.php
+@@ -9,6 +9,7 @@
+ namespace PrestaShopBundle\Entity;
+ 
+ use Doctrine\ORM\Mapping as ORM;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use Symfony\Bridge\Doctrine\Validator\Constraints\UniqueEntity;
+ 
+ /**
+@@ -44,6 +45,11 @@ class ImageType
+      */
+     private int $height;
+ 
++    /**
++     * @ORM\Column(name="image_fitment", type="string", length=16, options={"default": ImageFitment::FIT})
++     */
++    private string $imageFitment = ImageFitment::FIT;
++
+     /**
+      * @ORM\Column(name="products", type="boolean", options={"default": 1})
+      */
+@@ -110,6 +116,28 @@ public function setHeight(int $height): static
+         return $this;
+     }
+ 
++    /**
++     * Gets the image fitment used when generating this image type.
++     *
++     * @return value-of<ImageFitment::AVAILABLE_VALUES>
++     */
++    public function getImageFitment(): string
++    {
++        return $this->imageFitment;
++    }
++
++    /**
++     * Sets the image fitment used when generating this image type.
++     *
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment
++     */
++    public function setImageFitment(string $imageFitment): static
++    {
++        $this->imageFitment = $imageFitment;
++
++        return $this;
++    }
++
+     public function isProducts(): bool
+     {
+         return $this->products;
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/Design/ImageSettings/ImageTypeType.php b/src/PrestaShopBundle/Form/Admin/Improve/Design/ImageSettings/ImageTypeType.php
+index 46c392dc26f43..7eb101cbc4c87 100644
+--- a/src/PrestaShopBundle/Form/Admin/Improve/Design/ImageSettings/ImageTypeType.php
++++ b/src/PrestaShopBundle/Form/Admin/Improve/Design/ImageSettings/ImageTypeType.php
+@@ -9,11 +9,14 @@
+ namespace PrestaShopBundle\Form\Admin\Improve\Design\ImageSettings;
+ 
+ use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShopBundle\Form\Admin\Type\SwitchType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Validator\Constraints\Choice;
+ use Symfony\Component\Validator\Constraints\NotBlank;
+ use Symfony\Component\Validator\Constraints\Range;
+ 
+@@ -81,6 +84,22 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ],
+                 'help' => $this->trans('Maximum image height in pixels.', 'Admin.Design.Help'),
+             ])
++            ->add('image_fitment', ChoiceType::class, [
++                'label' => $this->trans('Image fitment', 'Admin.Design.Feature'),
++                'required' => true,
++                'choices' => [
++                    $this->trans('Fit the thumbnail and fill the rest with empty space', 'Admin.Design.Feature') => ImageFitment::FIT,
++                    $this->trans('Fill the thumbnail and crop the rest', 'Admin.Design.Feature') => ImageFitment::CROP,
++                    $this->trans('Keep the ratio of the original image', 'Admin.Design.Feature') => ImageFitment::BOUND,
++                ],
++                'constraints' => [
++                    new NotBlank(),
++                    new Choice([
++                        'choices' => ImageFitment::AVAILABLE_VALUES,
++                    ]),
++                ],
++                'help' => $this->trans('Defines how source images are resized into this image type. Fit keeps the configured thumbnail dimensions and fills empty space when ratios differ. Fill and crop keeps the configured thumbnail dimensions and crops overflowing image parts. Keep ratio uses the configured dimensions as maximum bounds, keeps the original ratio, does not upscale, and does not add empty space.', 'Admin.Design.Help'),
++            ])
+             ->add('products', SwitchType::class, [
+                 'label' => $this->trans('Products', 'Admin.Global'),
+                 'help' => $this->trans('This type will be used for Product images.', 'Admin.Design.Help'),
+diff --git a/src/PrestaShopBundle/Install/Install.php b/src/PrestaShopBundle/Install/Install.php
+index ad23bfa3f73af..a4a2b5ededfa5 100644
+--- a/src/PrestaShopBundle/Install/Install.php
++++ b/src/PrestaShopBundle/Install/Install.php
+@@ -699,11 +699,26 @@ public function copyLanguageImages($iso)
+                         $dst_path . $iso . '-default-' . $type['name'] . '.jpg'
+                     );
+                 } else {
++                    $error = 0;
++                    $targetWidth = null;
++                    $targetHeight = null;
++                    $sourceWidth = null;
++                    $sourceHeight = null;
++
+                     ImageManager::resize(
+                         $img_path . $iso . '.jpg',
+                         $dst_path . $iso . '-default-' . $type['name'] . '.jpg',
+                         $type['width'],
+-                        $type['height']
++                        $type['height'],
++                        'jpg',
++                        false,
++                        $error,
++                        $targetWidth,
++                        $targetHeight,
++                        5,
++                        $sourceWidth,
++                        $sourceHeight,
++                        $type['image_fitment']
+                     );
+                 }
+             }
+diff --git a/src/PrestaShopBundle/Install/XmlLoader.php b/src/PrestaShopBundle/Install/XmlLoader.php
+index ef71a0908acc0..1eedcd88f29f8 100644
+--- a/src/PrestaShopBundle/Install/XmlLoader.php
++++ b/src/PrestaShopBundle/Install/XmlLoader.php
+@@ -756,6 +756,11 @@ public function copyImages($entity, $identifier, $path, array $data, $extension
+             foreach ($types as $type) {
+                 $origin_file = $from_path . $identifier . '-' . $type['name'] . '.' . $extension;
+                 $target_file = $dst_path . $entity_id . '-' . $type['name'] . '.' . $extension;
++                $error = 0;
++                $targetWidth = null;
++                $targetHeight = null;
++                $sourceWidth = null;
++                $sourceHeight = null;
+ 
+                 // Test if dest folder is writable
+                 if (!is_writable(dirname($target_file))) {
+@@ -783,7 +788,16 @@ public function copyImages($entity, $identifier, $path, array $data, $extension
+                     $from_path . $identifier . '.' . $extension,
+                     $target_file,
+                     $type['width'],
+-                    $type['height']
++                    $type['height'],
++                    'jpg',
++                    false,
++                    $error,
++                    $targetWidth,
++                    $targetHeight,
++                    5,
++                    $sourceWidth,
++                    $sourceHeight,
++                    $type['image_fitment']
+                 )) {
+                     // Resize the image if no cache was prepared in fixtures
+                     $this->setError(
+@@ -856,6 +870,11 @@ public function copyImagesImage($identifier)
+         foreach ($types as $type) {
+             $origin_file = $path . $identifier . '-' . $type['name'] . '.jpg';
+             $target_file = $dst_path . '-' . $type['name'] . '.' . $image->image_format;
++            $error = 0;
++            $targetWidth = null;
++            $targetHeight = null;
++            $sourceWidth = null;
++            $sourceHeight = null;
+ 
+             // Test if dest folder is writable
+             if (!is_writable(dirname($target_file))) {
+@@ -879,7 +898,21 @@ public function copyImagesImage($identifier)
+                     );
+                 }
+                 @chmod($target_file, FileSystem::DEFAULT_MODE_FILE);
+-            } elseif (!ImageManager::resize($path . $identifier . '.jpg', $target_file, $type['width'], $type['height'])) {
++            } elseif (!ImageManager::resize(
++                $path . $identifier . '.jpg',
++                $target_file,
++                $type['width'],
++                $type['height'],
++                'jpg',
++                false,
++                $error,
++                $targetWidth,
++                $targetHeight,
++                5,
++                $sourceWidth,
++                $sourceHeight,
++                $type['image_fitment']
++            )) {
+                 // Resize the image if no cache was prepared in fixtures
+                 $this->setError(
+                     $this->translator->trans(
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+index 6fe7619c2e969..985ab8cdfae71 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+@@ -717,6 +717,11 @@ services:
+       - '@prestashop.core.grid.query.doctrine_query_parser'
+       - 'image_type'
+ 
++  PrestaShop\PrestaShop\Core\Grid\Data\Factory\ImageTypeGridDataFactory:
++    arguments:
++      - '@prestashop.core.grid.data_factory.image_type'
++      - '@translator'
++
+   PrestaShop\PrestaShop\Core\Grid\Data\Factory\Shipment:
+     class: '%prestashop.core.grid.data.factory.doctrine_grid_data_factory%'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+index 114e4b66cf46e..8503567c30427 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+@@ -555,7 +555,7 @@ services:
+     class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+     arguments:
+       - '@PrestaShop\PrestaShop\Core\Grid\Definition\Factory\ImageTypeGridDefinitionFactory'
+-      - '@prestashop.core.grid.data_factory.image_type'
++      - '@PrestaShop\PrestaShop\Core\Grid\Data\Factory\ImageTypeGridDataFactory'
+       - '@prestashop.core.grid.filter.form_factory'
+       - '@prestashop.core.hook.dispatcher'
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ImageSettings/ImageTypeContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ImageSettings/ImageTypeContext.php
+index 2369a11afa8c4..2143be108c767 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ImageSettings/ImageTypeContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ImageSettings/ImageTypeContext.php
+@@ -14,6 +14,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Exception\ImageTypeNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Query\GetImageTypeForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\QueryResult\EditableImageType;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageTypeId;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\Domain\AbstractDomainFeatureContext;
+@@ -36,7 +37,8 @@ public function createImageTypeUsingCommand(string $imageTypeName, TableNode $ta
+             $data['categories'],
+             $data['manufacturers'],
+             $data['suppliers'],
+-            $data['stores']
++            $data['stores'],
++            $data['image_fitment'] ?? ImageFitment::FIT
+         );
+ 
+         /** @var ImageTypeId $imageTypeId */
+@@ -63,6 +65,10 @@ public function editImageTypeUsingCommand(string $imageTypeName, TableNode $tabl
+             $command->setHeight($data['height']);
+         }
+ 
++        if (isset($data['image_fitment'])) {
++            $command->setImageFitment($data['image_fitment']);
++        }
++
+         if (isset($data['products'])) {
+             $command->setProducts($data['products']);
+         }
+@@ -138,6 +144,12 @@ public function assertQueryImageTypeProperties(string $imageTypeName, TableNode
+             }
+         }
+ 
++        if (isset($expectedData['image_fitment'])) {
++            if ($imageType->getImageFitment() !== $expectedData['image_fitment']) {
++                $errors[] = 'image_fitment';
++            }
++        }
++
+         if (isset($expectedData['products'])) {
+             if ($imageType->isProducts() !== filter_var($expectedData['products'], FILTER_VALIDATE_BOOL)) {
+                 $errors[] = 'products';
+diff --git a/tests/Unit/Core/Domain/ImageSettings/Command/ImageTypeCommandTest.php b/tests/Unit/Core/Domain/ImageSettings/Command/ImageTypeCommandTest.php
+new file mode 100644
+index 0000000000000..859c70b17965f
+--- /dev/null
++++ b/tests/Unit/Core/Domain/ImageSettings/Command/ImageTypeCommandTest.php
+@@ -0,0 +1,66 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\ImageSettings\Command;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Command\AddImageTypeCommand;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Command\EditImageTypeCommand;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Exception\InvalidImageFitmentException;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
++class ImageTypeCommandTest extends TestCase
++{
++    public function testAddImageTypeCommandValidatesImageFitment(): void
++    {
++        $this->expectException(InvalidImageFitmentException::class);
++
++        new AddImageTypeCommand(
++            'test',
++            100,
++            100,
++            true,
++            false,
++            false,
++            false,
++            false,
++            // @phpstan-ignore-next-line argument.type (intentionally invalid value to test validation)
++            'invalid'
++        );
++    }
++
++    public function testEditImageTypeCommandValidatesImageFitment(): void
++    {
++        $command = new EditImageTypeCommand(1);
++
++        $this->expectException(InvalidImageFitmentException::class);
++
++        // @phpstan-ignore-next-line argument.type (intentionally invalid value to test validation)
++        $command->setImageFitment('invalid');
++    }
++
++    public function testImageFitmentIsStoredInCommands(): void
++    {
++        $addCommand = new AddImageTypeCommand(
++            'test',
++            100,
++            100,
++            true,
++            false,
++            false,
++            false,
++            false,
++            ImageFitment::CROP
++        );
++        $editCommand = new EditImageTypeCommand(1);
++        $editCommand->setImageFitment(ImageFitment::BOUND);
++
++        self::assertSame(ImageFitment::CROP, $addCommand->getImageFitment());
++        self::assertSame(ImageFitment::BOUND, $editCommand->getImageFitment());
++    }
++}
+diff --git a/tests/Unit/Core/Domain/ImageSettings/QueryResult/EditableImageTypeTest.php b/tests/Unit/Core/Domain/ImageSettings/QueryResult/EditableImageTypeTest.php
+index ed66ab9982dff..0417b2cf5554a 100644
+--- a/tests/Unit/Core/Domain/ImageSettings/QueryResult/EditableImageTypeTest.php
++++ b/tests/Unit/Core/Domain/ImageSettings/QueryResult/EditableImageTypeTest.php
+@@ -10,6 +10,7 @@
+ 
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\QueryResult\EditableImageType;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageTypeId;
+ 
+ class EditableImageTypeTest extends TestCase
+@@ -27,6 +28,7 @@ public function testConstruct(): void
+             true,
+             true,
+             true,
++            ImageFitment::CROP,
+         );
+ 
+         self::assertSame($imageTypeId, $instance->getImageTypeId());
+@@ -38,5 +40,6 @@ public function testConstruct(): void
+         self::assertTrue($instance->isManufacturers());
+         self::assertTrue($instance->isSuppliers());
+         self::assertTrue($instance->isStores());
++        self::assertSame(ImageFitment::CROP, $instance->getImageFitment());
+     }
+ }
+diff --git a/tests/Unit/Core/Domain/ImageSettings/ValueObject/ImageFitmentTest.php b/tests/Unit/Core/Domain/ImageSettings/ValueObject/ImageFitmentTest.php
+new file mode 100644
+index 0000000000000..b8003be51e7a6
+--- /dev/null
++++ b/tests/Unit/Core/Domain/ImageSettings/ValueObject/ImageFitmentTest.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\ImageSettings\ValueObject;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\Exception\InvalidImageFitmentException;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
++
++class ImageFitmentTest extends TestCase
++{
++    /**
++     * @dataProvider getValidImageFitments
++     */
++    public function testValidImageFitment(string $imageFitment): void
++    {
++        ImageFitment::assertIsValid($imageFitment);
++
++        self::addToAssertionCount(1);
++    }
++
++    /**
++     * @return iterable<array{string}>
++     */
++    public function getValidImageFitments(): iterable
++    {
++        yield [ImageFitment::FIT];
++        yield [ImageFitment::CROP];
++        yield [ImageFitment::BOUND];
++    }
++
++    public function testInvalidImageFitment(): void
++    {
++        $this->expectException(InvalidImageFitmentException::class);
++
++        ImageFitment::assertIsValid('invalid');
++    }
++}

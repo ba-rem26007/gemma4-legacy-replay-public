@@ -1,0 +1,109 @@
+diff --git a/classes/order/OrderInvoice.php b/classes/order/OrderInvoice.php
+index a068475d16769..5a6add5cf1eff 100644
+--- a/classes/order/OrderInvoice.php
++++ b/classes/order/OrderInvoice.php
+@@ -883,4 +883,24 @@ public static function getCurrentFormattedShopAddress($id_shop = null) {
+ 
+         return AddressFormat::generateAddress($address, array(), '<br />', ' ');
+     }
++    
++    /**
++     * This method is used to fix shop addresses that cannot be fixed during upgrade process
++     * (because uses the whole environnement of PS classes that is not available during upgrade).
++     * This method should execute once on an upgraded PrestaShop to fix all OrderInvoices in one shot.
++     * This method is triggered once during a (non bulk) creation of a PDF from an OrderInvoice that is not fixed yet.
++     *
++     * @since 1.6.1.1
++     */
++    public static function fixAllShopAddresses() {
++        $shop_ids = Shop::getShops(false, null, true);
++        $db = Db::getInstance();
++        foreach($shop_ids as $id_shop) {
++            $address = self::getCurrentFormattedShopAddress($id_shop);
++            $escaped_address = $db->escape($address, true, true);
++
++            $db->execute('UPDATE `'._DB_PREFIX_.'order_invoice` INNER JOIN `'._DB_PREFIX_.'orders` USING (`id_order`)
++                SET `shop_address` = \''.$escaped_address.'\' WHERE `shop_address` IS NULL AND `id_shop` = '.$id_shop);
++        }
++    }
+ }
+diff --git a/classes/pdf/HTMLTemplateDeliverySlip.php b/classes/pdf/HTMLTemplateDeliverySlip.php
+index 2009cbcdb48d7..32997962c676e 100755
+--- a/classes/pdf/HTMLTemplateDeliverySlip.php
++++ b/classes/pdf/HTMLTemplateDeliverySlip.php
+@@ -36,7 +36,7 @@ class HTMLTemplateDeliverySlipCore extends HTMLTemplate
+      * @param $smarty
+      * @throws PrestaShopException
+      */
+-    public function __construct(OrderInvoice $order_invoice, $smarty)
++    public function __construct(OrderInvoice $order_invoice, $smarty, $bulk_mode = false)
+     {
+         $this->order_invoice = $order_invoice;
+         $this->order = new Order($this->order_invoice->id_order);
+@@ -47,6 +47,9 @@ public function __construct(OrderInvoice $order_invoice, $smarty)
+         // (DB: bug fixed in 1.6.1.1 with upgrade SQL script to avoid null shop_address in old orderInvoices)
+         if (!isset($this->order_invoice->shop_address) || !$this->order_invoice->shop_address) {
+             $this->order_invoice->shop_address = OrderInvoice::getCurrentFormattedShopAddress((int)$this->order->id_shop);
++            if (!$bulk_mode) {
++                OrderInvoice::fixAllShopAddresses();
++            }
+         }
+ 
+         // header informations
+diff --git a/classes/pdf/HTMLTemplateInvoice.php b/classes/pdf/HTMLTemplateInvoice.php
+index 54f539ce7ddef..3f144843d26b3 100755
+--- a/classes/pdf/HTMLTemplateInvoice.php
++++ b/classes/pdf/HTMLTemplateInvoice.php
+@@ -38,7 +38,7 @@ class HTMLTemplateInvoiceCore extends HTMLTemplate
+      * @param $smarty
+      * @throws PrestaShopException
+      */
+-    public function __construct(OrderInvoice $order_invoice, $smarty)
++    public function __construct(OrderInvoice $order_invoice, $smarty, $bulk_mode = false)
+     {
+         $this->order_invoice = $order_invoice;
+         $this->order = new Order((int)$this->order_invoice->id_order);
+@@ -49,6 +49,9 @@ public function __construct(OrderInvoice $order_invoice, $smarty)
+         // (DB: bug fixed in 1.6.1.1 with upgrade SQL script to avoid null shop_address in old orderInvoices)
+         if (!isset($this->order_invoice->shop_address) || !$this->order_invoice->shop_address) {
+             $this->order_invoice->shop_address = OrderInvoice::getCurrentFormattedShopAddress((int)$this->order->id_shop);
++            if (!$bulk_mode) {
++                OrderInvoice::fixAllShopAddresses();
++            }
+         }
+         
+         // header informations
+diff --git a/classes/pdf/PDF.php b/classes/pdf/PDF.php
+index 6d663f9cc88c7..50764cbe09dea 100755
+--- a/classes/pdf/PDF.php
++++ b/classes/pdf/PDF.php
+@@ -33,6 +33,7 @@ class PDFCore
+     public $pdf_renderer;
+     public $objects;
+     public $template;
++    public $send_bulk_flag = false;
+ 
+     const TEMPLATE_INVOICE = 'Invoice';
+     const TEMPLATE_ORDER_RETURN = 'OrderReturn';
+@@ -56,6 +57,10 @@ public function __construct($objects, $template, $smarty, $orientation = 'P')
+         if (!($objects instanceof Iterator) && !is_array($objects)) {
+             $this->objects = array($objects);
+         }
++        
++        if (count($this->objects)>1) { // when bulk mode only
++            $this->send_bulk_flag = true;
++        }
+     }
+ 
+     /**
+@@ -115,7 +120,9 @@ public function getTemplateObject($object)
+         $class_name = 'HTMLTemplate'.$this->template;
+ 
+         if (class_exists($class_name)) {
+-            $class = new $class_name($object, $this->smarty);
++            // Some HTMLTemplateXYZ implementations won't use the third param but this is not a problem (no warning in PHP),
++            // the third param is then ignored if not added to the method signature.
++            $class = new $class_name($object, $this->smarty, $this->send_bulk_flag);
+ 
+             if (!($class instanceof HTMLTemplate)) {
+                 throw new PrestaShopException('Invalid class. It should be an instance of HTMLTemplate');

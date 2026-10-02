@@ -1,0 +1,2161 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index bdc74e08cb797..77108742de623 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -28,7 +28,7 @@
+ use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+ use PrestaShop\PrestaShop\Adapter\Customer\CustomerDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Database;
+-use PrestaShop\PrestaShop\Adapter\Discount\Compatibility\DiscountCompatibilityService;
++use PrestaShop\PrestaShop\Adapter\Discount\Application\DiscountApplicationService;
+ use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
+ use PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceCalculator;
+@@ -36,6 +36,7 @@
+ use PrestaShop\PrestaShop\Core\Cart\Calculator;
+ use PrestaShop\PrestaShop\Core\Cart\CartRow;
+ use PrestaShop\PrestaShop\Core\Cart\CartRuleData;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountPriority;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Localization\Exception\LocalizationException;
+@@ -477,20 +478,48 @@ public function getCartRules($filter = CartRule::FILTER_ACTION_ALL, $autoAdd = t
+ 
+         $cache_key = 'Cart::getCartRules_' . $this->id . '-' . $filter;
+         if (!Cache::isStored($cache_key)) {
+-            $result = Db::getInstance()->executeS(
+-                'SELECT cr.*, crl.`id_lang`, crl.`name`, cd.`id_cart`
+-                FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
+-                LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
+-                LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_lang` crl ON (
+-                    cd.`id_cart_rule` = crl.`id_cart_rule`
+-                    AND crl.id_lang = ' . (int) $this->getAssociatedLanguage()->getId() . '
+-                )
+-                WHERE `id_cart` = ' . (int) $this->id . '
+-                ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
+-                ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
+-                ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
+-                . ' ORDER by cr.priority ASC, cr.gift_product DESC'
+-            );
++            // Check if new discount feature is enabled
++            $containerFinder = new ContainerFinder(Context::getContext());
++            $container = $containerFinder->getContainer();
++            $featureFlagManager = $container->get(FeatureFlagStateCheckerInterface::class);
++            $useNewDiscountSystem = $featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT);
++
++            if ($useNewDiscountSystem) {
++                $result = Db::getInstance()->executeS(
++                    'SELECT cr.*, crl.`id_lang`, crl.`name`, cd.`id_cart`, crt.`type` as discount_type
++                    FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_lang` crl ON (
++                        cd.`id_cart_rule` = crl.`id_cart_rule`
++                        AND crl.id_lang = ' . (int) $this->getAssociatedLanguage()->getId() . '
++                    )
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_type` crt ON cr.`id_cart_rule_type` = crt.`id_cart_rule_type`
++                    WHERE `id_cart` = ' . (int) $this->id . '
++                    ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
++                    . ' ORDER by cr.priority ASC, cr.gift_product DESC'
++                );
++
++                // Sort by the new 3-level priority system (Type → Priority Field → Creation Date)
++                $result = $this->sortCartRulesByPriority($result);
++            } else {
++                $result = Db::getInstance()->executeS(
++                    'SELECT cr.*, crl.`id_lang`, crl.`name`, cd.`id_cart`
++                    FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_lang` crl ON (
++                        cd.`id_cart_rule` = crl.`id_cart_rule`
++                        AND crl.id_lang = ' . (int) $this->getAssociatedLanguage()->getId() . '
++                    )
++                    WHERE `id_cart` = ' . (int) $this->id . '
++                    ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
++                    . ' ORDER by cr.priority ASC, cr.gift_product DESC'
++                );
++            }
++
+             Cache::store($cache_key, $result);
+         } else {
+             $result = Cache::retrieve($cache_key);
+@@ -548,20 +577,48 @@ public function getOrderedCartRulesIds($filter = CartRule::FILTER_ACTION_ALL)
+     {
+         $cache_key = 'Cart::getOrderedCartRulesIds_' . $this->id . '-' . $filter . '-ids';
+         if (!Cache::isStored($cache_key)) {
+-            $result = Db::getInstance()->executeS(
+-                'SELECT cr.`id_cart_rule`
+-                FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
+-                LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
+-                LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_lang` crl ON (
+-                    cd.`id_cart_rule` = crl.`id_cart_rule`
+-                    AND crl.id_lang = ' . (int) $this->getAssociatedLanguage()->getId() . '
+-                )
+-                WHERE `id_cart` = ' . (int) $this->id . '
+-                ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
+-                ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
+-                ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
+-                . ' ORDER BY cr.priority ASC, cr.gift_product DESC'
+-            );
++            // Check if new discount feature is enabled
++            $containerFinder = new ContainerFinder(Context::getContext());
++            $container = $containerFinder->getContainer();
++            $featureFlagManager = $container->get(FeatureFlagStateCheckerInterface::class);
++            $useNewDiscountSystem = $featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT);
++
++            if ($useNewDiscountSystem) {
++                $result = Db::getInstance()->executeS(
++                    'SELECT cr.`id_cart_rule`, crt.`type` as discount_type, cr.`priority`, cr.`date_add`
++                    FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_lang` crl ON (
++                        cd.`id_cart_rule` = crl.`id_cart_rule`
++                        AND crl.id_lang = ' . (int) $this->getAssociatedLanguage()->getId() . '
++                    )
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule_type` crt ON cr.`id_cart_rule_type` = crt.`id_cart_rule_type`
++                    WHERE `id_cart` = ' . (int) $this->id . '
++                    ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
++                );
++
++                // Sort by the new 3-level priority system (Type → Priority Field → Creation Date)
++                $result = $this->sortCartRulesByPriority($result);
++
++                // Extract only IDs for return
++                $result = array_map(function ($row) {
++                    return ['id_cart_rule' => $row['id_cart_rule']];
++                }, $result);
++            } else {
++                $result = Db::getInstance()->executeS(
++                    'SELECT cr.`id_cart_rule`
++                    FROM `' . _DB_PREFIX_ . 'cart_cart_rule` cd
++                    LEFT JOIN `' . _DB_PREFIX_ . 'cart_rule` cr ON cd.`id_cart_rule` = cr.`id_cart_rule`
++                    WHERE `id_cart` = ' . (int) $this->id . '
++                    ' . ($filter == CartRule::FILTER_ACTION_SHIPPING ? 'AND free_shipping = 1' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_GIFT ? 'AND gift_product != 0' : '') . '
++                    ' . ($filter == CartRule::FILTER_ACTION_REDUCTION ? 'AND (reduction_percent != 0 OR reduction_amount != 0)' : '')
++                    . ' ORDER by cr.priority ASC, cr.gift_product DESC'
++                );
++            }
++
+             Cache::store($cache_key, $result);
+         } else {
+             $result = Cache::retrieve($cache_key);
+@@ -1419,11 +1476,11 @@ public function addCartRule($id_cart_rule, bool $useOrderPrices = false)
+     }
+ 
+     /**
+-     * Check if a cart rule is compatible with existing cart rules
++     * Check if a cart rule is compatible with existing cart rules and determine priority order
+      *
+      * @param int $cartRuleId The cart rule ID to check
+      *
+-     * @return bool|string True if compatible, error if not compatible
++     * @return bool|string True if compatible, error message if not compatible
+      */
+     protected function checkCartRuleCompatibility($cartRuleId)
+     {
+@@ -1436,43 +1493,45 @@ protected function checkCartRuleCompatibility($cartRuleId)
+             AND id_cart_rule != ' . (int) $cartRuleId
+         );
+ 
+-        if (empty($existingCartRuleIds)) {
+-            return true;
+-        }
+-
+         // Extract just the IDs
+-        $existingCartRuleIds = array_column($existingCartRuleIds, 'id_cart_rule');
++        $existingCartRuleIds = !empty($existingCartRuleIds) ? array_column($existingCartRuleIds, 'id_cart_rule') : [];
+ 
+-        $compatibilityService = $this->getDiscountCompatibilityService();
+-        if (!$compatibilityService) {
++        $applicationService = $this->getDiscountApplicationService();
++        if (!$applicationService) {
+             // Service not available, skip compatibility check for backward compatibility
+             return true;
+         }
+ 
+-        $result = $compatibilityService->validateCompatibility($cartRuleId, $existingCartRuleIds);
++        $result = $applicationService->determineDiscountsToApply($cartRuleId, $existingCartRuleIds);
+ 
+         if (!$result->canApply()) {
++            $errorMessage = $result->getRejectionReason()
++                ?? 'This voucher can not be combined with other vouchers in your cart';
++
+             return Context::getContext()->getTranslator()->trans(
+-                'This voucher can not be combined with other vouchers in your cart',
++                $errorMessage,
+                 [],
+                 'Shop.Notifications.Error'
+             );
+         }
+ 
+-        // Remove cart rules which are not compatible
+-        foreach ($result->getRulesToRemove() as $ruleIdToRemove) {
++        // Remove cart rules which are replaced by higher priority ones
++        foreach ($result->getDiscountsToRemove() as $ruleIdToRemove) {
+             $this->removeCartRule($ruleIdToRemove);
+         }
+ 
++        // Note: The priority order of discounts is determined by $result->getDiscountsToApply()
++        // The actual calculation will apply discounts in this priority order
++
+         return true;
+     }
+ 
+     /**
+-     * Get the cart rule compatibility service
++     * Get the discount application service (handles compatibility and priority)
+      *
+-     * @return DiscountCompatibilityService|null
++     * @return DiscountApplicationService|null
+      */
+-    protected function getDiscountCompatibilityService()
++    protected function getDiscountApplicationService()
+     {
+         static $service = null;
+ 
+@@ -1483,12 +1542,12 @@ protected function getDiscountCompatibilityService()
+                 $container = $containerFinder->getContainer();
+ 
+                 try {
+-                    $service = $container->get(DiscountCompatibilityService::class);
++                    $service = $container->get(DiscountApplicationService::class);
+                 } catch (Exception $e) {
+                     // Service not in container yet, instantiate directly
+                     $dbPrefix = _DB_PREFIX_;
+ 
+-                    // Get the DiscountTypeRepository from container or create it
++                    // Get dependencies from container or create them
+                     try {
+                         $discountTypeRepo = $container->get(DiscountTypeRepository::class);
+                     } catch (Exception $e2) {
+@@ -1499,7 +1558,7 @@ protected function getDiscountCompatibilityService()
+                         );
+                     }
+ 
+-                    $service = new DiscountCompatibilityService(
++                    $service = new DiscountApplicationService(
+                         $discountTypeRepo
+                     );
+                 }
+@@ -2381,6 +2440,59 @@ protected function getTotalCalculationCartRules($type, $withShipping)
+         return $cartRules;
+     }
+ 
++    /**
++     * Sort cart rules by priority using the 3-level system:
++     * 1. Type priority (product > cart/order > shipping > gift)
++     * 2. Priority field (lower number = higher priority)
++     * 3. Creation date (older = higher priority)
++     *
++     * @param array $cartRules
++     *
++     * @return array
++     */
++    protected function sortCartRulesByPriority(array $cartRules): array
++    {
++        if (empty($cartRules)) {
++            return $cartRules;
++        }
++
++        // Use DiscountPriority static methods to sort the cart rules
++        if (class_exists(DiscountPriority::class)) {
++            // Convert cart rule rows to the format expected by DiscountPriority
++            $discountsForSort = array_map(function ($cartRule) {
++                return [
++                    'id_cart_rule' => $cartRule['id_cart_rule'],
++                    'type' => $cartRule['discount_type'] ?? null,
++                    'priority' => $cartRule['priority'] ?? 0,
++                    'date_add' => $cartRule['date_add'] ?? null,
++                ];
++            }, $cartRules);
++
++            // Sort using DiscountPriority static method
++            $sortedDiscounts = DiscountPriority::sortByPriority($discountsForSort);
++
++            // Re-order the original cart rules array based on the sorted IDs
++            $sortedCartRules = [];
++            foreach ($sortedDiscounts as $sortedDiscount) {
++                foreach ($cartRules as $cartRule) {
++                    if ($cartRule['id_cart_rule'] == $sortedDiscount['id_cart_rule']) {
++                        $sortedCartRules[] = $cartRule;
++                        break;
++                    }
++                }
++            }
++
++            return $sortedCartRules;
++        }
++
++        // Fallback: sort by priority field only (legacy behavior)
++        usort($cartRules, function ($a, $b) {
++            return ($a['priority'] ?? 0) <=> ($b['priority'] ?? 0);
++        });
++
++        return $cartRules;
++    }
++
+     /**
+      * @param bool $withTaxes
+      * @param array $product
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index 46f92c2ecf614..9881cd6702a10 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -25,7 +25,7 @@
+  */
+ 
+ use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+-use PrestaShop\PrestaShop\Adapter\Discount\Compatibility\DiscountCompatibilityService;
++use PrestaShop\PrestaShop\Adapter\Discount\Application\DiscountApplicationService;
+ use PrestaShop\PrestaShop\Core\Domain\CartRule\CartRuleSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+@@ -1062,30 +1062,34 @@ public function checkValidity(Context $context, $alreadyInCart = false, $display
+         $container = $containerFinder->getContainer();
+         $featureFlagManager = $container->get(FeatureFlagStateCheckerInterface::class);
+         if ($featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT)) {
+-            // Check discount type compatibility using the DiscountCompatibilityService
+-            if ($nbOfCartRules >= 1) {
+-                $existingCartRuleIds = array_filter(
+-                    array_column($otherCartRules, 'id_cart_rule'),
+-                    function ($id) {
+-                        return $id != $this->id;
+-                    }
+-                );
++            // Use DiscountApplicationService to determine which discounts to apply and their priority order
++            $existingCartRuleIds = array_filter(
++                array_column($otherCartRules, 'id_cart_rule'),
++                function ($id) {
++                    return $id != $this->id;
++                }
++            );
+ 
+-                try {
+-                    $compatibilityService = $container->get(DiscountCompatibilityService::class);
+-                    $result = $compatibilityService->validateCompatibility($this->id, $existingCartRuleIds);
++            try {
++                $applicationService = $container->get(DiscountApplicationService::class);
++                $result = $applicationService->determineDiscountsToApply($this->id, $existingCartRuleIds);
+ 
+-                    if (!$result->canApply()) {
+-                        return (!$display_error) ? false : $this->trans('This voucher is not combinable with other vouchers in your cart', [], 'Shop.Notifications.Error');
+-                    }
++                if (!$result->canApply()) {
++                    $errorMessage = $result->getRejectionReason()
++                        ?? 'This voucher is not combinable with other vouchers in your cart';
+ 
+-                    // Remove lower-priority conflicting discounts
+-                    foreach ($result->getRulesToRemove() as $ruleIdToRemove) {
+-                        $cart->removeCartRule($ruleIdToRemove);
+-                    }
+-                } catch (Exception $e) {
+-                    // Fallback: if service is not available or discount has no type, skip compatibility check
++                    return (!$display_error) ? false : $this->trans($errorMessage, [], 'Shop.Notifications.Error');
++                }
++
++                // Remove conflicting discounts that were replaced by higher priority ones
++                foreach ($result->getDiscountsToRemove() as $ruleIdToRemove) {
++                    $cart->removeCartRule($ruleIdToRemove);
+                 }
++
++                // Note: The actual application order is determined by the result
++                // The cart will apply discounts in the priority order specified by $result->getDiscountsToApply()
++            } catch (Exception $e) {
++                // Fallback: if service is not available or discount has no type, skip compatibility check
+             }
+         }
+ 
+diff --git a/src/Adapter/Discount/Application/DiscountApplicationResult.php b/src/Adapter/Discount/Application/DiscountApplicationResult.php
+new file mode 100644
+index 0000000000000..d88c65b18541a
+--- /dev/null
++++ b/src/Adapter/Discount/Application/DiscountApplicationResult.php
+@@ -0,0 +1,95 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\Application;
++
++/**
++ * Result of discount application validation and priority ordering
++ *
++ * This is the single source of truth for which discounts should be applied to a cart
++ * and in what order they should be applied.
++ */
++class DiscountApplicationResult
++{
++    /**
++     * @param array<int> $discountsToApply List of discount IDs to apply, ordered by priority
++     * @param array<int> $discountsToRemove List of discount IDs that should be removed from cart
++     */
++    public function __construct(
++        private readonly bool $canApply,
++        private readonly array $discountsToApply,
++        private readonly array $discountsToRemove = [],
++        private readonly ?string $rejectionReason = null
++    ) {
++    }
++
++    /**
++     * Check if the new discount can be applied to the cart
++     */
++    public function canApply(): bool
++    {
++        return $this->canApply;
++    }
++
++    /**
++     * Get the ordered list of discount IDs that should be applied to the cart
++     * The order reflects the priority of application (first = applied first)
++     *
++     * @return array<int>
++     */
++    public function getDiscountsToApply(): array
++    {
++        return $this->discountsToApply;
++    }
++
++    /**
++     * Get the list of discount IDs that need to be removed from the cart
++     *
++     * @return array<int>
++     */
++    public function getDiscountsToRemove(): array
++    {
++        return $this->discountsToRemove;
++    }
++
++    /**
++     * Get the reason why the discount was rejected (if applicable)
++     */
++    public function getRejectionReason(): ?string
++    {
++        return $this->rejectionReason;
++    }
++
++    /**
++     * Check if any discounts need to be removed
++     */
++    public function hasDiscountsToRemove(): bool
++    {
++        return !empty($this->discountsToRemove);
++    }
++}
+diff --git a/src/Adapter/Discount/Application/DiscountApplicationService.php b/src/Adapter/Discount/Application/DiscountApplicationService.php
+new file mode 100644
+index 0000000000000..faf5ffd89757f
+--- /dev/null
++++ b/src/Adapter/Discount/Application/DiscountApplicationService.php
+@@ -0,0 +1,251 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\Application;
++
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountPriority;
++
++/**
++ * Service for determining which discounts should be applied to a cart and in what order
++ *
++ * This is the single source of truth for discount application logic.
++ * It handles:
++ * - Compatibility checking between discounts
++ * - Priority-based ordering of discounts
++ * - Resolving conflicts when incompatible discounts are added
++ */
++class DiscountApplicationService
++{
++    public function __construct(
++        private readonly DiscountTypeRepository $discountTypeRepository
++    ) {
++    }
++
++    /**
++     * Determine which discounts should be applied when adding a new discount to the cart
++     *
++     * @param array<int> $existingDiscountIds Array of discount IDs currently in the cart
++     */
++    public function determineDiscountsToApply(int $newDiscountId, array $existingDiscountIds): DiscountApplicationResult
++    {
++        // If cart is empty, simply add the new discount
++        if (empty($existingDiscountIds)) {
++            return new DiscountApplicationResult(
++                canApply: true,
++                discountsToApply: [$newDiscountId],
++                discountsToRemove: []
++            );
++        }
++
++        // Get full discount information (type, priority, date_add) for all discounts
++        $newDiscountInfo = $this->getDiscountInfo($newDiscountId);
++        if (!$newDiscountInfo) {
++            // If discount not found, reject it
++            return new DiscountApplicationResult(
++                canApply: false,
++                discountsToApply: $existingDiscountIds,
++                discountsToRemove: [],
++                rejectionReason: 'Discount not found'
++            );
++        }
++
++        $existingDiscountsWithInfo = $this->getDiscountsWithInfo($existingDiscountIds);
++
++        // Check compatibility between new discount and existing ones
++        $compatibilityResult = $this->checkAllCompatibilities(
++            $newDiscountId,
++            $existingDiscountsWithInfo
++        );
++
++        if (!$compatibilityResult['isCompatible']) {
++            // Incompatible discounts found - resolve by priority
++            return $this->resolveByPriority(
++                $newDiscountInfo,
++                $existingDiscountsWithInfo,
++                $compatibilityResult['incompatibleDiscounts']
++            );
++        }
++
++        // All discounts are compatible - return them all, sorted by priority
++        $allDiscounts = array_merge(
++            [$newDiscountInfo],
++            $existingDiscountsWithInfo
++        );
++
++        $sortedDiscounts = $this->sortDiscountsByPriority($allDiscounts);
++
++        return new DiscountApplicationResult(
++            canApply: true,
++            discountsToApply: array_column($sortedDiscounts, 'id'),
++            discountsToRemove: []
++        );
++    }
++
++    /**
++     * Check bidirectional compatibility between new discount and all existing discounts
++     *
++     * @param array $existingDiscountsWithTypes
++     *
++     * @return array{isCompatible: bool, incompatibleDiscounts: array}
++     */
++    private function checkAllCompatibilities(
++        int $newDiscountId,
++        array $existingDiscountsWithTypes
++    ): array {
++        $incompatibleDiscounts = [];
++
++        foreach ($existingDiscountsWithTypes as $existingDiscount) {
++            $existingId = $existingDiscount['id'];
++
++            // Check bidirectional compatibility
++            $newToExisting = $this->discountTypeRepository->areDiscountsCompatible($newDiscountId, $existingId);
++            $existingToNew = $this->discountTypeRepository->areDiscountsCompatible($existingId, $newDiscountId);
++
++            if (!$newToExisting || !$existingToNew) {
++                $incompatibleDiscounts[] = $existingDiscount;
++            }
++        }
++
++        return [
++            'isCompatible' => empty($incompatibleDiscounts),
++            'incompatibleDiscounts' => $incompatibleDiscounts,
++        ];
++    }
++
++    /**
++     * Resolve conflicts by priority when incompatible discounts are found
++     *
++     * Higher priority discount wins and incompatible lower priority discounts are removed
++     * Priority is determined by: 1) Type, 2) Priority field, 3) Creation date
++     *
++     * @param array $newDiscountInfo Full discount info with type, priority, date_add
++     * @param array $existingDiscountsWithTypes
++     * @param array $incompatibleDiscounts
++     *
++     * @return DiscountApplicationResult
++     */
++    private function resolveByPriority(
++        array $newDiscountInfo,
++        array $existingDiscountsWithTypes,
++        array $incompatibleDiscounts
++    ): DiscountApplicationResult {
++        $discountsToRemove = [];
++        $discountsToKeep = [];
++
++        // Check each incompatible discount using full priority comparison
++        foreach ($incompatibleDiscounts as $incompatibleDiscount) {
++            $comparisonResult = DiscountPriority::compareDiscounts($newDiscountInfo, $incompatibleDiscount);
++
++            if ($comparisonResult < 0) {
++                // New discount has higher priority - remove the existing one
++                $discountsToRemove[] = $incompatibleDiscount['id'];
++            } elseif ($comparisonResult > 0) {
++                // Existing discount has higher priority - reject the new one
++                return new DiscountApplicationResult(
++                    canApply: false,
++                    discountsToApply: array_column($existingDiscountsWithTypes, 'id'),
++                    discountsToRemove: [],
++                    rejectionReason: 'A higher priority incompatible discount is already applied to the cart'
++                );
++            } else {
++                // Exact same priority (extremely rare) - reject the new one (first come, first served)
++                return new DiscountApplicationResult(
++                    canApply: false,
++                    discountsToApply: array_column($existingDiscountsWithTypes, 'id'),
++                    discountsToRemove: [],
++                    rejectionReason: 'An incompatible discount with identical priority is already applied to the cart'
++                );
++            }
++        }
++
++        // Keep compatible discounts
++        foreach ($existingDiscountsWithTypes as $existingDiscount) {
++            if (!in_array($existingDiscount['id'], $discountsToRemove)) {
++                $discountsToKeep[] = $existingDiscount;
++            }
++        }
++
++        // Add new discount and sort all by priority
++        $allDiscountsToApply = array_merge(
++            [$newDiscountInfo],
++            $discountsToKeep
++        );
++
++        $sortedDiscounts = $this->sortDiscountsByPriority($allDiscountsToApply);
++
++        return new DiscountApplicationResult(
++            canApply: true,
++            discountsToApply: array_column($sortedDiscounts, 'id'),
++            discountsToRemove: $discountsToRemove
++        );
++    }
++
++    /**
++     * Get full discount information including type, priority field, and creation date
++     *
++     * @return array|null Array with keys: 'id', 'type', 'priority', 'date_add'
++     */
++    private function getDiscountInfo(int $discountId): ?array
++    {
++        return $this->discountTypeRepository->getDiscountInfoForPriority($discountId);
++    }
++
++    /**
++     * Get full discount information for multiple discounts
++     *
++     * @param array<int> $discountIds
++     *
++     * @return array Array of discount info arrays with keys: 'id', 'type', 'priority', 'date_add'
++     */
++    private function getDiscountsWithInfo(array $discountIds): array
++    {
++        $discountsWithInfo = [];
++
++        foreach ($discountIds as $discountId) {
++            $info = $this->getDiscountInfo($discountId);
++            if ($info) {
++                $discountsWithInfo[] = $info;
++            }
++        }
++
++        return $discountsWithInfo;
++    }
++
++    /**
++     * Sort discounts by their full priority (type, priority field, creation date)
++     *
++     * @param array $discounts Array of discount data with 'type', 'priority', 'date_add' keys
++     *
++     * @return array Sorted array of discounts
++     */
++    private function sortDiscountsByPriority(array $discounts): array
++    {
++        return DiscountPriority::sortByPriority($discounts);
++    }
++}
+diff --git a/src/Adapter/Discount/Compatibility/DiscountCompatibilityResult.php b/src/Adapter/Discount/Compatibility/DiscountCompatibilityResult.php
+deleted file mode 100644
+index 2065b09c06736..0000000000000
+--- a/src/Adapter/Discount/Compatibility/DiscountCompatibilityResult.php
++++ /dev/null
+@@ -1,57 +0,0 @@
+-<?php
+-/**
+- * Copyright since 2007 PrestaShop SA and Contributors
+- * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
+- *
+- * NOTICE OF LICENSE
+- *
+- * This source file is subject to the Open Software License (OSL 3.0)
+- * that is bundled with this package in the file LICENSE.md.
+- * It is also available through the world-wide-web at this URL:
+- * https://opensource.org/licenses/OSL-3.0
+- * If you did not receive a copy of the license and are unable to
+- * obtain it through the world-wide-web, please send an email
+- * to license@prestashop.com so we can send you a copy immediately.
+- *
+- * DISCLAIMER
+- *
+- * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
+- * versions in the future. If you wish to customize PrestaShop for your
+- * needs please refer to https://devdocs.prestashop.com/ for more information.
+- *
+- * @author    PrestaShop SA and Contributors <contact@prestashop.com>
+- * @copyright Since 2007 PrestaShop SA and Contributors
+- * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+- */
+-
+-namespace PrestaShop\PrestaShop\Adapter\Discount\Compatibility;
+-
+-/**
+- * Result of discount compatibility validation
+- */
+-class DiscountCompatibilityResult
+-{
+-    public function __construct(
+-        private readonly bool $isCompatible,
+-        private readonly array $conflictingDiscounts
+-    ) {
+-    }
+-
+-    /**
+-     * Check if the discount can be applied
+-     */
+-    public function canApply(): bool
+-    {
+-        return $this->isCompatible;
+-    }
+-
+-    /**
+-     * Get the list of discount IDs that need to be removed
+-     *
+-     * @return array<int>
+-     */
+-    public function getRulesToRemove(): array
+-    {
+-        return array_column($this->conflictingDiscounts, 'id');
+-    }
+-}
+diff --git a/src/Adapter/Discount/Compatibility/DiscountCompatibilityService.php b/src/Adapter/Discount/Compatibility/DiscountCompatibilityService.php
+deleted file mode 100644
+index f7ca6db8c58cd..0000000000000
+--- a/src/Adapter/Discount/Compatibility/DiscountCompatibilityService.php
++++ /dev/null
+@@ -1,67 +0,0 @@
+-<?php
+-/**
+- * Copyright since 2007 PrestaShop SA and Contributors
+- * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
+- *
+- * NOTICE OF LICENSE
+- *
+- * This source file is subject to the Open Software License (OSL 3.0)
+- * that is bundled with this package in the file LICENSE.md.
+- * It is also available through the world-wide-web at this URL:
+- * https://opensource.org/licenses/OSL-3.0
+- * If you did not receive a copy of the license and are unable to
+- * obtain it through the world-wide-web, please send an email
+- * to license@prestashop.com so we can send you a copy immediately.
+- *
+- * DISCLAIMER
+- *
+- * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
+- * versions in the future. If you wish to customize PrestaShop for your
+- * needs please refer to https://devdocs.prestashop.com/ for more information.
+- *
+- * @author    PrestaShop SA and Contributors <contact@prestashop.com>
+- * @copyright Since 2007 PrestaShop SA and Contributors
+- * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+- */
+-
+-namespace PrestaShop\PrestaShop\Adapter\Discount\Compatibility;
+-
+-use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
+-
+-/**
+- * Service for validating discount compatibility
+- */
+-class DiscountCompatibilityService
+-{
+-    public function __construct(
+-        private readonly DiscountTypeRepository $discountTypeRepository
+-    ) {
+-    }
+-
+-    /**
+-     * Check if a new discount is compatible with existing discounts in the cart
+-     *
+-     * @param int $newDiscountId The ID of the discount to be added
+-     * @param array $existingDiscountIds Array of existing discount IDs in the cart
+-     *
+-     * @return DiscountCompatibilityResult
+-     */
+-    public function validateCompatibility(int $newDiscountId, array $existingDiscountIds): DiscountCompatibilityResult
+-    {
+-        $conflictingDiscounts = [];
+-        $isIncompatible = false;
+-
+-        foreach ($existingDiscountIds as $existingDiscountId) {
+-            // Check compatibility in both directions
+-            if (!$this->discountTypeRepository->areDiscountsCompatible($newDiscountId, $existingDiscountId)
+-            || !$this->discountTypeRepository->areDiscountsCompatible($existingDiscountId, $newDiscountId)) {
+-                $isIncompatible = true;
+-            }
+-        }
+-
+-        return new DiscountCompatibilityResult(
+-            !$isIncompatible,
+-            $conflictingDiscounts
+-        );
+-    }
+-}
+diff --git a/src/Adapter/Discount/Repository/DiscountTypeRepository.php b/src/Adapter/Discount/Repository/DiscountTypeRepository.php
+index 0725ce49a3f97..11a046b26ce27 100644
+--- a/src/Adapter/Discount/Repository/DiscountTypeRepository.php
++++ b/src/Adapter/Discount/Repository/DiscountTypeRepository.php
+@@ -269,7 +269,7 @@ public function getTypeIdByString(string $typeString): ?int
+      *
+      * @return array|null
+      */
+-    private function getDiscountTypeForDiscount(int $discountId): ?array
++    public function getDiscountTypeForDiscount(int $discountId): ?array
+     {
+         $qb = $this->connection->createQueryBuilder();
+         $qb
+@@ -285,4 +285,34 @@ private function getDiscountTypeForDiscount(int $discountId): ?array
+ 
+         return empty($result) ? null : $result;
+     }
++
++    /**
++     * Get discount information including type, priority field, and creation date
++     *
++     * @return array|null Array with keys: 'id', 'type', 'priority', 'date_add'
++     */
++    public function getDiscountInfoForPriority(int $discountId): ?array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('cr.id_cart_rule', 'crt.type', 'cr.priority', 'cr.date_add')
++            ->from($this->dbPrefix . 'cart_rule', 'cr')
++            ->leftJoin('cr', $this->dbPrefix . 'cart_rule_type', 'crt', 'cr.id_cart_rule_type = crt.id_cart_rule_type')
++            ->where('cr.id_cart_rule = :discountId')
++            ->setParameter('discountId', $discountId)
++        ;
++
++        $result = $qb->executeQuery()->fetchAssociative();
++
++        if (!$result) {
++            return null;
++        }
++
++        return [
++            'id' => (int) $result['id_cart_rule'],
++            'type' => $result['type'] ?? '',
++            'priority' => (int) $result['priority'],
++            'date_add' => $result['date_add'],
++        ];
++    }
+ }
+diff --git a/src/Adapter/Discount/Update/Filler/DiscountFiller.php b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+index 7bc9c57d384a4..b7cc3b7d6290b 100644
+--- a/src/Adapter/Discount/Update/Filler/DiscountFiller.php
++++ b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+@@ -82,6 +82,10 @@ public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountComman
+             $cartRule->quantity_per_user = $command->getQuantityPerUser();
+             $updatableProperties[] = 'quantity_per_user';
+         }
++        if (null !== $command->getPriority()) {
++            $cartRule->priority = $command->getPriority();
++            $updatableProperties[] = 'priority';
++        }
+         if (null !== $command->getReductionProduct()) {
+             $cartRule->reduction_product = $command->getReductionProduct();
+             $updatableProperties[] = 'reduction_product';
+diff --git a/src/Core/Domain/Discount/ValueObject/DiscountPriority.php b/src/Core/Domain/Discount/ValueObject/DiscountPriority.php
+new file mode 100644
+index 0000000000000..49b7f4a0abdcb
+--- /dev/null
++++ b/src/Core/Domain/Discount/ValueObject/DiscountPriority.php
+@@ -0,0 +1,118 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject;
++
++/**
++ * Defines the priority order for discount application
++ *
++ * Lower priority value = applied first
++ * Priority order: 1. Catalog (product_level), 2. Cart (cart_level), 3. Shipping (free_shipping), 4. Free gift (free_gift)
++ */
++class DiscountPriority
++{
++    // Priority values - lower number = higher priority (applied first)
++    public const PRODUCT_LEVEL_PRIORITY = 1; // Catalog discounts
++    public const CART_LEVEL_PRIORITY = 2;    // Cart discounts
++    public const ORDER_LEVEL_PRIORITY = 2;   // Order discounts (same as cart)
++    public const FREE_SHIPPING_PRIORITY = 3; // Shipping discounts
++    public const FREE_GIFT_PRIORITY = 4;     // Free gift discounts
++
++    /**
++     * Get priority value for a discount type
++     */
++    public static function getPriorityForType(string $discountType): int
++    {
++        return match ($discountType) {
++            DiscountType::PRODUCT_LEVEL => self::PRODUCT_LEVEL_PRIORITY,
++            DiscountType::CART_LEVEL => self::CART_LEVEL_PRIORITY,
++            DiscountType::ORDER_LEVEL => self::ORDER_LEVEL_PRIORITY,
++            DiscountType::FREE_SHIPPING => self::FREE_SHIPPING_PRIORITY,
++            DiscountType::FREE_GIFT => self::FREE_GIFT_PRIORITY,
++            default => 999, // Unknown types go last
++        };
++    }
++
++    /**
++     * Compare two discount types and return which has higher priority
++     */
++    public static function compare(string $type1, string $type2): int
++    {
++        return self::getPriorityForType($type1) <=> self::getPriorityForType($type2);
++    }
++
++    /**
++     * Compare two discounts using full priority logic:
++     * 1. Type priority (product > cart > shipping > gift)
++     * 2. Priority field (lower number = higher priority)
++     * 3. Creation date (older = higher priority)
++     *
++     * @param array $discount1 Discount data with 'type', 'priority', 'date_add' keys
++     * @param array $discount2 Discount data with 'type', 'priority', 'date_add' keys
++     */
++    public static function compareDiscounts(array $discount1, array $discount2): int
++    {
++        // 1. Compare by type priority
++        $typePriority1 = self::getPriorityForType($discount1['type'] ?? '');
++        $typePriority2 = self::getPriorityForType($discount2['type'] ?? '');
++
++        if ($typePriority1 !== $typePriority2) {
++            return $typePriority1 <=> $typePriority2;
++        }
++
++        // 2. Compare by priority field (lower number = higher priority)
++        $priority1 = $discount1['priority'] ?? 1;
++        $priority2 = $discount2['priority'] ?? 1;
++
++        if ($priority1 !== $priority2) {
++            return $priority1 <=> $priority2;
++        }
++
++        // 3. Compare by creation date (older = higher priority)
++        $date1 = $discount1['date_add'] ?? '';
++        $date2 = $discount2['date_add'] ?? '';
++
++        return strcmp($date1, $date2);
++    }
++
++    /**
++     * Sort an array of discounts by their full priority (type, priority field, date)
++     *
++     * @param array $discounts Array of discount data with 'type', 'priority', 'date_add' keys
++     *
++     * @return array Sorted array of discounts
++     */
++    public static function sortByPriority(array $discounts): array
++    {
++        usort($discounts, function ($a, $b) {
++            return self::compareDiscounts($a, $b);
++        });
++
++        return $discounts;
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index bf46ecedb7542..a9cd6d4283292 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -112,7 +112,18 @@ public function create(array $data)
+                 } else {
+                     throw new RuntimeException('Unknown discount value type ' . $data['value']['reduction']['type']);
+                 }
+-                $command->setReductionProduct(1);
++
++                // Read selected product from Product Conditions → Cart Conditions → Specific Products
++                $reductionProduct = -2; // Default: use product conditions (selection of products)
++                if (!empty($data['conditions']['cart_conditions']['specific_products'])) {
++                    $specificProducts = $data['conditions']['cart_conditions']['specific_products'];
++                    if (count($specificProducts) === 1 && isset($specificProducts[0]['id'])) {
++                        // Single specific product selected
++                        $reductionProduct = (int) $specificProducts[0]['id'];
++                    }
++                    // If multiple products selected, keep -2 (selection of products)
++                }
++                $command->setReductionProduct($reductionProduct);
+                 break;
+             case DiscountType::FREE_GIFT:
+                 $command->setProductId((int) ($data['free_gift'][0]['product_id'] ?? 0));
+@@ -150,6 +161,10 @@ public function create(array $data)
+         $this->handleCustomerEligibility($command, $data);
+         $command->setTotalQuantity(100);
+ 
++        if (isset($data['usability']['priority']) && $data['usability']['priority'] > 0) {
++            $command->setPriority((int) $data['usability']['priority']);
++        }
++
+         /** @var DiscountId $discountId */
+         $discountId = $this->commandBus->handle($command);
+         $this->updateDiscountConditions($discountId->getValue(), $data);
+@@ -202,7 +217,18 @@ public function update($id, array $data): void
+                 } else {
+                     throw new RuntimeException('Unknown discount value type ' . $data['value']['reduction']['type']);
+                 }
+-                $command->setReductionProduct(1);
++
++                // Read selected product from Product Conditions → Cart Conditions → Specific Products
++                $reductionProduct = -2; // Default: use product conditions (selection of products)
++                if (!empty($data['conditions']['cart_conditions']['specific_products'])) {
++                    $specificProducts = $data['conditions']['cart_conditions']['specific_products'];
++                    if (count($specificProducts) === 1 && isset($specificProducts[0]['id'])) {
++                        // Single specific product selected
++                        $reductionProduct = (int) $specificProducts[0]['id'];
++                    }
++                    // If multiple products selected, keep -2 (selection of products)
++                }
++                $command->setReductionProduct($reductionProduct);
+                 break;
+             case DiscountType::FREE_GIFT:
+                 $command->setProductId((int) ($data['free_gift'][0]['product_id'] ?? 0));
+@@ -240,6 +266,10 @@ public function update($id, array $data): void
+ 
+         $this->handleCustomerEligibility($command, $data);
+ 
++        if (isset($data['usability']['priority']) && $data['usability']['priority'] > 0) {
++            $command->setPriority((int) $data['usability']['priority']);
++        }
++
+         $this->commandBus->handle($command);
+         $this->updateDiscountConditions($id, $data);
+         $this->updateDiscountCompatibility($id, $data);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index bc57d5cceec3b..fc0326cbbb41e 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -109,6 +109,7 @@ public function getDefaultData()
+                     'code' => '',
+                 ],
+                 'compatibility' => $this->getCompatibilityData(),
++                'priority' => 1,
+             ],
+         ];
+     }
+@@ -217,6 +218,7 @@ public function getData($id)
+                     'code' => $discountForEditing->getCode(),
+                 ],
+                 'compatibility' => $this->getCompatibilityData($id),
++                'priority' => $discountForEditing->getPriority(),
+             ],
+         ];
+     }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+index ffb39fce3da41..2a00916576863 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+@@ -30,8 +30,10 @@
+ 
+ use PrestaShopBundle\Form\Admin\Type\CardType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints as Assert;
+ 
+ class DiscountUsabilityType extends TranslatorAwareType
+ {
+@@ -48,6 +50,20 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'available_types' => $options['available_cart_rule_types'] ?? [],
+                 'required' => false,
+             ])
++            ->add('priority', IntegerType::class, [
++                'label' => $this->trans('Priority', 'Admin.Catalog.Feature'),
++                'label_tag_name' => 'h3',
++                'required' => false,
++                'label_help_box' => $this->trans('Lower numbers indicate higher priority. When multiple discounts are applied, lower priority numbers are processed first.', 'Admin.Catalog.Help'),
++                'attr' => [
++                    'min' => 1,
++                    'placeholder' => '1',
++                ],
++                'constraints' => [
++                    new Assert\GreaterThanOrEqual(1),
++                    new Assert\LessThanOrEqual(999),
++                ],
++            ])
+         ;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index ee702791f0c9f..f4eb7305df923 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -40,7 +40,11 @@ services:
+       $connection: '@doctrine.dbal.default_connection'
+       $dbPrefix: '%database_prefix%'
+ 
+-  PrestaShop\PrestaShop\Adapter\Discount\Compatibility\DiscountCompatibilityService:
++  PrestaShop\PrestaShop\Adapter\Discount\Application\DiscountApplicationService:
+     public: true
+     arguments:
+       $discountTypeRepository: '@PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository'
++
++  prestashop.adapter.discount.priority:
++    class: PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountPriority
++    public: true
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_compatibility.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_compatibility.feature
+index 2e1306c8651cb..44e27f3a8099c 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_compatibility.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_compatibility.feature
+@@ -24,21 +24,21 @@ Feature: Discount compatibility in cart
+   Scenario: Apply two compatible cart level discounts successfully
+     Given I create an empty cart "dummy_cart" for customer "testCustomer"
+     When I create a "cart_level" discount "cart_discount_10" with following properties:
+-      | name[en-US]        | Cart 10% Off        |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CART10              |
+-      | reduction_percent  | 10.0                |
++      | name[en-US]       | Cart 10% Off        |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CART10              |
++      | reduction_percent | 10.0                |
+     And I set compatible types for discount "cart_discount_10" to:
+       | cart_level |
+     When I create a "cart_level" discount "cart_discount_5" with following properties:
+-      | name[en-US]        | Cart 5% Off         |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CART5               |
+-      | reduction_percent  | 5.0                 |
++      | name[en-US]       | Cart 5% Off         |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CART5               |
++      | reduction_percent | 5.0                 |
+     And I set compatible types for discount "cart_discount_5" to:
+       | cart_level |
+     And I add 1 product "product1" to the cart "dummy_cart"
+@@ -49,21 +49,21 @@ Feature: Discount compatibility in cart
+   Scenario: Apply two incompatible cart level discounts and get an error
+     Given I create an empty cart "dummy_cart2" for customer "testCustomer"
+     When I create a "cart_level" discount "cart_discount_20" with following properties:
+-      | name[en-US]        | Cart 20% Off        |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CART20              |
+-      | reduction_percent  | 20.0                |
++      | name[en-US]       | Cart 20% Off        |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CART20              |
++      | reduction_percent | 20.0                |
+     And I set compatible types for discount "cart_discount_20" to:
+       | free_shipping |
+     When I create a "cart_level" discount "cart_discount_15" with following properties:
+-      | name[en-US]        | Cart 15% Off        |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CART15              |
+-      | reduction_percent  | 15.0                |
++      | name[en-US]       | Cart 15% Off        |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CART15              |
++      | reduction_percent | 15.0                |
+     And I set compatible types for discount "cart_discount_15" to:
+       | product_level |
+     And I add 1 product "product1" to the cart "dummy_cart2"
+@@ -74,12 +74,12 @@ Feature: Discount compatibility in cart
+   Scenario: Apply compatible cart level and free shipping discounts
+     Given I create an empty cart "dummy_cart3" for customer "testCustomer"
+     When I create a "cart_level" discount "cart_discount_combo" with following properties:
+-      | name[en-US]        | Cart Combo          |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CARTCOMBO           |
+-      | reduction_percent  | 10.0                |
++      | name[en-US]       | Cart Combo          |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CARTCOMBO           |
++      | reduction_percent | 10.0                |
+     And I set compatible types for discount "cart_discount_combo" to:
+       | free_shipping |
+     When I create a "free_shipping" discount "free_ship" with following properties:
+@@ -98,22 +98,22 @@ Feature: Discount compatibility in cart
+   Scenario: Apply compatible product level and cart level discounts
+     Given I create an empty cart "dummy_cart4" for customer "testCustomer"
+     When I create a "product_level" discount "product_discount" with following properties:
+-      | name[en-US]        | Product 15% Off     |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | PROD15              |
+-      | reduction_percent  | 15.0                |
+-      | reduction_product  | product1            |
++      | name[en-US]       | Product 15% Off     |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | PROD15              |
++      | reduction_percent | 15.0                |
++      | reduction_product | product1            |
+     And I set compatible types for discount "product_discount" to:
+       | cart_level |
+     When I create a "cart_level" discount "cart_for_product" with following properties:
+-      | name[en-US]        | Cart with Product   |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CARTWPROD           |
+-      | reduction_percent  | 5.0                 |
++      | name[en-US]       | Cart with Product   |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CARTWPROD           |
++      | reduction_percent | 5.0                 |
+     And I set compatible types for discount "cart_for_product" to:
+       | product_level |
+     And I add 1 product "product1" to the cart "dummy_cart4"
+@@ -124,21 +124,21 @@ Feature: Discount compatibility in cart
+   Scenario: Apply exclusive discount prevents other discounts
+     Given I create an empty cart "dummy_cart5" for customer "testCustomer"
+     When I create a "cart_level" discount "exclusive_50" with following properties:
+-      | name[en-US]        | Exclusive 50% Off   |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | EXCLUSIVE50         |
+-      | reduction_percent  | 50.0                |
++      | name[en-US]       | Exclusive 50% Off   |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | EXCLUSIVE50         |
++      | reduction_percent | 50.0                |
+     And I set compatible types for discount "exclusive_50" to:
+-      ||
++      |  |
+     When I create a "cart_level" discount "cart_any" with following properties:
+-      | name[en-US]        | Cart Any            |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CARTANY             |
+-      | reduction_percent  | 10.0                |
++      | name[en-US]       | Cart Any            |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CARTANY             |
++      | reduction_percent | 10.0                |
+     And I set compatible types for discount "cart_any" to:
+       | cart_level |
+     And I add 1 product "product1" to the cart "dummy_cart5"
+@@ -149,23 +149,23 @@ Feature: Discount compatibility in cart
+   Scenario: Apply three compatible discounts together
+     Given I create an empty cart "dummy_cart6" for customer "testCustomer"
+     When I create a "cart_level" discount "multi_cart" with following properties:
+-      | name[en-US]        | Multi Cart 5%       |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | MULTI5              |
+-      | reduction_percent  | 5.0                 |
++      | name[en-US]       | Multi Cart 5%       |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | MULTI5              |
++      | reduction_percent | 5.0                 |
+     And I set compatible types for discount "multi_cart" to:
+       | product_level |
+       | free_shipping |
+     When I create a "product_level" discount "multi_product" with following properties:
+-      | name[en-US]        | Multi Product 10%   |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | MULTIPROD10         |
+-      | reduction_percent  | 10.0                |
+-      | reduction_product  | product1            |
++      | name[en-US]       | Multi Product 10%   |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | MULTIPROD10         |
++      | reduction_percent | 10.0                |
++      | reduction_product | product1            |
+     And I set compatible types for discount "multi_product" to:
+       | cart_level    |
+       | free_shipping |
+@@ -187,21 +187,21 @@ Feature: Discount compatibility in cart
+   Scenario: Apply incompatible discount to cart with existing discount
+     Given I create an empty cart "dummy_cart7" for customer "testCustomer"
+     When I create a "cart_level" discount "first_discount" with following properties:
+-      | name[en-US]        | First Discount      |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | FIRST               |
+-      | reduction_percent  | 10.0                |
++      | name[en-US]       | First Discount      |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | FIRST               |
++      | reduction_percent | 10.0                |
+     And I set compatible types for discount "first_discount" to:
+       | free_shipping |
+     When I create a "order_level" discount "order_discount" with following properties:
+-      | name[en-US]        | Order Discount      |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | ORDERDISC           |
+-      | reduction_percent  | 15.0                |
++      | name[en-US]       | Order Discount      |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | ORDERDISC           |
++      | reduction_percent | 15.0                |
+     And I set compatible types for discount "order_discount" to:
+       | free_gift |
+     And I add 1 product "product1" to the cart "dummy_cart7"
+@@ -221,12 +221,12 @@ Feature: Discount compatibility in cart
+     And I set compatible types for discount "gift_promo" to:
+       | cart_level |
+     When I create a "cart_level" discount "cart_with_gift" with following properties:
+-      | name[en-US]        | Cart with Gift      |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | CARTWGIFT           |
+-      | reduction_percent  | 10.0                |
++      | name[en-US]       | Cart with Gift      |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | CARTWGIFT           |
++      | reduction_percent | 10.0                |
+     And I set compatible types for discount "cart_with_gift" to:
+       | free_gift |
+     And I add 1 product "product1" to the cart "dummy_cart8"
+@@ -237,22 +237,22 @@ Feature: Discount compatibility in cart
+   Scenario: Apply product discount with incompatible order level discount
+     Given I create an empty cart "dummy_cart9" for customer "testCustomer"
+     When I create a "order_level" discount "order_20" with following properties:
+-      | name[en-US]        | Order 20% Off       |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | ORDER20             |
+-      | reduction_percent  | 20.0                |
++      | name[en-US]       | Order 20% Off       |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | ORDER20             |
++      | reduction_percent | 20.0                |
+     And I set compatible types for discount "order_20" to:
+       | cart_level |
+     When I create a "product_level" discount "product_25" with following properties:
+-      | name[en-US]        | Product 25% Off     |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | PROD25              |
+-      | reduction_percent  | 25.0                |
+-      | reduction_product  | product1            |
++      | name[en-US]       | Product 25% Off     |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | PROD25              |
++      | reduction_percent | 25.0                |
++      | reduction_product | product1            |
+     And I set compatible types for discount "product_25" to:
+       | free_shipping |
+     And I add 1 product "product1" to the cart "dummy_cart9"
+@@ -274,12 +274,12 @@ Feature: Discount compatibility in cart
+     And I set compatible types for discount "amount_discount" to:
+       | cart_level |
+     When I create a "cart_level" discount "percent_discount" with following properties:
+-      | name[en-US]        | Percent 5% Off      |
+-      | active             | true                |
+-      | valid_from         | 2025-01-01 00:00:00 |
+-      | valid_to           | 2025-12-31 23:59:59 |
+-      | code               | PERCENT5            |
+-      | reduction_percent  | 5.0                 |
++      | name[en-US]       | Percent 5% Off      |
++      | active            | true                |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | PERCENT5            |
++      | reduction_percent | 5.0                 |
+     And I set compatible types for discount "percent_discount" to:
+       | cart_level |
+     And I add 2 products "product1" to the cart "dummy_cart10"
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_by_type.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_by_type.feature
+new file mode 100644
+index 0000000000000..26e4ab8e758d1
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_by_type.feature
+@@ -0,0 +1,167 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-by-type
++@restore-all-tables-before-feature
++@discount-priority-by-type
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority by type
++    Test that discounts are sorted by their TYPE priority (product > cart > shipping)
++
++    Background:
++        Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++        Given language with iso code "en" is the default one
++        Given shop "shop1" with name "test_shop" exists
++        And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++        And currency "usd" is the default one
++        And I enable feature flag "discount"
++        And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++    @restore-cart-rules-before-scenario
++    Scenario: Different discount types - Product level applies before Cart level
++        # PRODUCT_LEVEL Discount - Priority 5 (lower field priority): 10% OFF product
++        When I create a "product_level" discount "product_10pct_prio5" with following properties:
++            | name[en-US]       | Product 10% OFF     |
++            | active            | true                |
++            | priority          | 5                   |
++            | valid_from        | 2025-01-01 10:00:00 |
++            | valid_to          | 2025-12-31 23:59:59 |
++            | code              | PROD10              |
++            | reduction_percent | 10.0                |
++            | reduction_product | -1                  |
++        And I set compatible types for discount "product_10pct_prio5" to:
++            | cart_level |
++
++        # CART_LEVEL Discount - Priority 1 (higher field priority): $20 OFF cart
++        When I create a "cart_level" discount "cart_20dollar_prio1" with following properties:
++            | name[en-US]        | Cart \$20 OFF       |
++            | active             | true                |
++            | priority           | 1                   |
++            | valid_from         | 2025-01-01 10:00:00 |
++            | valid_to           | 2025-12-31 23:59:59 |
++            | code               | CART20              |
++            | reduction_amount   | 20.0                |
++            | reduction_currency | usd                 |
++            | taxIncluded        | true                |
++        And I set compatible types for discount "cart_20dollar_prio1" to:
++            | product_level |
++
++        # Create cart and add products BEFORE applying discounts
++        Given I create an empty cart "cart_type_test" for customer "testCustomer"
++        When I add 1 product "product1" to the cart "cart_type_test"
++
++        # Check initial cart state
++        And cart "cart_type_test" total with tax included should be '$107.00'
++
++        # Apply both discounts
++        When I use a voucher "product_10pct_prio5" on the cart "cart_type_test"
++        When I use a voucher "cart_20dollar_prio1" on the cart "cart_type_test"
++
++        # Expected order by TYPE priority (not field priority):
++        # 1. product_10pct_prio5 (Product level - type priority 1) - applied FIRST
++        # 2. cart_20dollar_prio1 (Cart level - type priority 2, but field priority 1) - applied SECOND
++        #
++        # Calculation with proper type priority:
++        # Product discount: $100 - 10% = $90 (applied at product level)
++        # Cart discount: $90 - $20 = $70
++        # Shipping: $7
++        # Total: $77
++
++        # PROOF: If cart discount applied first (WRONG): $100 - $20 = $80, then $80 - 10% = $72 + $7 = $79
++        #        If product discount applied first (CORRECT): $100 - 10% = $90, then $90 - $20 = $70 + $7 = $77
++
++        # Note: Product discounts show differently in cart - total products remains original price
++        # The discount is shown separately in total_discount
++        And my cart "cart_type_test" should have the following details:
++            | shipping | $7.00  |
++            | total    | $77.00 |
++
++    @restore-cart-rules-before-scenario
++    Scenario: Complex type mixing - Product + Cart + Free shipping with different priorities
++        # Create multiple discounts of different types to test comprehensive type priority
++
++        # PRODUCT_LEVEL Discount 1 - Priority 3: 5% OFF product
++        When I create a "product_level" discount "product_5pct_prio3" with following properties:
++            | name[en-US]       | Product 5% OFF (Prio 3) |
++            | active            | true                    |
++            | priority          | 3                       |
++            | valid_from        | 2025-01-01 10:00:00     |
++            | valid_to          | 2025-12-31 23:59:59     |
++            | code              | PROD5                   |
++            | reduction_percent | 5.0                     |
++            | reduction_product | -1                      |
++        And I set compatible types for discount "product_5pct_prio3" to:
++            | cart_level |
++
++        # CART_LEVEL Discount 1 - Priority 2: $10 OFF cart (higher field priority)
++        When I create a "cart_level" discount "cart_10dollar_prio2" with following properties:
++            | name[en-US]        | Cart \$10 OFF (Prio 2) |
++            | active             | true                   |
++            | priority           | 2                      |
++            | valid_from         | 2025-01-01 10:00:00    |
++            | valid_to           | 2025-12-31 23:59:59    |
++            | code               | CART10                 |
++            | reduction_amount   | 10.0                   |
++            | reduction_currency | usd                    |
++            | taxIncluded        | true                   |
++        And I set compatible types for discount "cart_10dollar_prio2" to:
++            | product_level |
++            | cart_level    |
++
++        # CART_LEVEL Discount 2 - Priority 4: $5 OFF cart (lower field priority, same type)
++        When I create a "cart_level" discount "cart_5dollar_prio4" with following properties:
++            | name[en-US]        | Cart \$5 OFF (Prio 4) |
++            | active             | true                  |
++            | priority           | 4                     |
++            | valid_from         | 2025-01-01 10:00:00   |
++            | valid_to           | 2025-12-31 23:59:59   |
++            | code               | CART5                 |
++            | reduction_amount   | 5.0                   |
++            | reduction_currency | usd                   |
++            | taxIncluded        | true                  |
++        And I set compatible types for discount "cart_5dollar_prio4" to:
++            | product_level |
++            | cart_level    |
++
++        # FREE_SHIPPING Discount - Priority 1 (highest field priority)
++        When I create a "free_shipping" discount "free_ship_prio1" with following properties:
++            | name[en-US] | Free Shipping (Prio 1) |
++            | active      | true                   |
++            | priority    | 1                      |
++            | valid_from  | 2025-01-01 10:00:00    |
++            | valid_to    | 2025-12-31 23:59:59    |
++            | code        | FREESHIP               |
++        And I set compatible types for discount "free_ship_prio1" to:
++            | product_level |
++            | cart_level    |
++
++        # Create cart
++        Given I create an empty cart "cart_complex_types" for customer "testCustomer"
++        When I add 1 product "product1" to the cart "cart_complex_types"
++        And cart "cart_complex_types" total with tax included should be '$107.00'
++
++        # Apply all discounts
++        When I use a voucher "product_5pct_prio3" on the cart "cart_complex_types"
++        When I use a voucher "cart_10dollar_prio2" on the cart "cart_complex_types"
++        When I use a voucher "cart_5dollar_prio4" on the cart "cart_complex_types"
++
++        # Try to add free shipping - may be incompatible with existing discounts
++        When I use a voucher "free_ship_prio1" on the cart "cart_complex_types"
++        Then I should get an error that the discount is invalid
++
++        # Expected order by TYPE priority, then FIELD priority:
++        # 1. product_5pct_prio3 (Product level - type 1, field 3) - applied FIRST
++        # 2. cart_10dollar_prio2 (Cart level - type 2, field 2) - applied SECOND
++        # 3. cart_5dollar_prio4 (Cart level - type 2, field 4) - applied THIRD
++        # 4. free_ship_prio1 - rejected as incompatible
++        #
++        # Calculation with proper order:
++        # Step 1 - Product discount: $100 - 5% = $95
++        # Step 2 - Cart discount ($10): $95 - $10 = $85
++        # Step 3 - Cart discount ($5): $85 - $5 = $80
++        # Shipping: $7 (not waived)
++        # Total: $87
++
++        And my cart "cart_complex_types" should have the following details:
++            | shipping | $7.00  |
++            | total    | $87.00 |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible.feature
+new file mode 100644
+index 0000000000000..2162cde69bdc3
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible.feature
+@@ -0,0 +1,59 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-compatible
++@restore-all-tables-before-feature
++@discount-priority-compatible
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Compatible discounts
++    Test that compatible discounts are all applied in correct priority order
++
++    Background:
++        Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++        Given language with iso code "en" is the default one
++        Given shop "shop1" with name "test_shop" exists
++        And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++        And currency "usd" is the default one
++        And I enable feature flag "discount"
++        And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++    Scenario: Compatible cart discounts - order matters (amount + percent) - both codes
++        Given I create an empty cart "cart1" for customer "testCustomer"
++        And I add 1 product "product1" to the cart "cart1"
++        # Priority 5 (applied second): Fixed $20 amount discount
++        When I create a "cart_level" discount "code_amount_prio5" with following properties:
++            | name[en-US]        | Code Amount Priority 5 |
++            | active             | true                   |
++            | priority           | 5                      |
++            | valid_from         | 2025-01-01 10:00:00    |
++            | valid_to           | 2025-12-31 23:59:59    |
++            | code               | AMOUNT_CODE5           |
++            | reduction_amount   | 20.0                   |
++            | reduction_currency | usd                    |
++            | taxIncluded        | true                   |
++        And I set compatible types for discount "code_amount_prio5" to:
++            | cart_level |
++        # Priority 3 (applied first): 10% percentage discount
++        When I create a "cart_level" discount "code_percent_prio3" with following properties:
++            | name[en-US]       | Code Percent Priority 3 |
++            | active            | true                    |
++            | priority          | 3                       |
++            | valid_from        | 2025-01-01 10:00:00     |
++            | valid_to          | 2025-12-31 23:59:59     |
++            | code              | PERCENT_CODE3           |
++            | reduction_percent | 10.0                    |
++        And I set compatible types for discount "code_percent_prio3" to:
++            | cart_level |
++        When I use a voucher "code_amount_prio5" on the cart "cart1"
++        And I use a voucher "code_percent_prio3" on the cart "cart1"
++        Then cart "cart1" should have 2 cart rules applied
++        And discount "code_percent_prio3" is applied to my cart
++        And discount "code_amount_prio5" is applied to my cart
++        # If priority 3 applied first (CORRECT): $100 - 10% = $90, then $90 - $20 = $70 + $7 shipping = $77
++        # If priority 5 applied first (WRONG): $100 - $20 = $80, then $80 - 10% = $72 + $7 shipping = $79
++        And cart "cart1" total with tax included should be '$77.00'
++        And my cart "cart1" should have the following details:
++            | total_products | $100.00 |
++            | shipping       | $7.00   |
++            | total_discount | -$30.00 |
++            | total          | $77.00  |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible_auto.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible_auto.feature
+new file mode 100644
+index 0000000000000..06ad2e108363e
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_compatible_auto.feature
+@@ -0,0 +1,65 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-compatible-auto
++@restore-all-tables-before-feature
++@discount-priority-compatible-auto
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Compatible auto discounts
++    Test that compatible auto discounts are all applied in correct priority order
++
++    Background:
++        Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++        Given language with iso code "en" is the default one
++        Given shop "shop1" with name "test_shop" exists
++        And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++        And currency "usd" is the default one
++        And I enable feature flag "discount"
++        And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++    Scenario: Compatible auto discounts - order matters (amount + percent)
++        # Priority 5 (applied second): Fixed $20 amount discount
++        When I create a "cart_level" discount "auto_amount_prio5" with following properties:
++            | name[en-US]        | Auto Amount Priority 5 |
++            | active             | true                   |
++            | priority           | 5                      |
++            | valid_from         | 2025-01-01 10:00:00    |
++            | valid_to           | 2025-12-31 23:59:59    |
++            | reduction_amount   | 20.0                   |
++            | reduction_currency | usd                    |
++            | taxIncluded        | true                   |
++        And I update discount "auto_amount_prio5" with the condition of a minimum amount:
++            | minimum_amount                   | 1.00  |
++            | minimum_amount_currency          | usd   |
++            | minimum_amount_tax_included      | true  |
++            | minimum_amount_shipping_included | false |
++        And I set compatible types for discount "auto_amount_prio5" to:
++            | cart_level |
++        # Priority 3 (applied first): 10% percentage discount
++        When I create a "cart_level" discount "auto_percent_prio3" with following properties:
++            | name[en-US]       | Auto Percent Priority 3 |
++            | active            | true                    |
++            | priority          | 3                       |
++            | valid_from        | 2025-01-01 10:00:00     |
++            | valid_to          | 2025-12-31 23:59:59     |
++            | reduction_percent | 10.0                    |
++        And I update discount "auto_percent_prio3" with the condition of a minimum amount:
++            | minimum_amount                   | 1.00  |
++            | minimum_amount_currency          | usd   |
++            | minimum_amount_tax_included      | true  |
++            | minimum_amount_shipping_included | false |
++        And I set compatible types for discount "auto_percent_prio3" to:
++            | cart_level |
++        Given I create an empty cart "cart_auto" for customer "testCustomer"
++        When I add 1 product "product1" to the cart "cart_auto"
++        Then cart "cart_auto" should have 2 cart rules applied
++        And discount "auto_percent_prio3" is applied to my cart
++        And discount "auto_amount_prio5" is applied to my cart
++        # If priority 3 applied first (CORRECT): $100 - 10% = $90, then $90 - $20 = $70 + $7 shipping = $77
++        # If priority 5 applied first (WRONG): $100 - $20 = $80, then $80 - 10% = $72 + $7 shipping = $79
++        And cart "cart_auto" total with tax included should be '$77.00'
++        And my cart "cart_auto" should have the following details:
++            | total_products | $100.00 |
++            | shipping       | $7.00   |
++            | total_discount | -$30.00 |
++            | total          | $77.00  |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_creation_date.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_creation_date.feature
+new file mode 100644
+index 0000000000000..f6f8f1728fb62
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_creation_date.feature
+@@ -0,0 +1,102 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-creation-date
++@restore-all-tables-before-feature
++@discount-priority-creation-date
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Creation date ordering
++  Test that when type and priority field are same, older discount has higher priority
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And currency "usd" is the default one
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++  Scenario: Compatible discounts - same type, same priority, creation date determines order
++    # Create FIRST discount (older) - will have earlier date_add
++    When I create a "cart_level" discount "older_percent" with following properties:
++      | name[en-US]       | Older Percent Discount |
++      | active            | true                   |
++      | priority          | 1                      |
++      | valid_from        | 2025-01-01 10:00:00    |
++      | valid_to          | 2025-12-31 23:59:59    |
++      | code              | OLDER_PCT              |
++      | reduction_percent | 15.0                   |
++    And I set compatible types for discount "older_percent" to:
++      | cart_level |
++    # Create SECOND discount (newer) - will have later date_add
++    When I create a "cart_level" discount "newer_amount" with following properties:
++      | name[en-US]        | Newer Amount Discount |
++      | active             | true                  |
++      | priority           | 1                     |
++      | valid_from         | 2025-01-01 10:00:00   |
++      | valid_to           | 2025-12-31 23:59:59   |
++      | code               | NEWER_AMT             |
++      | reduction_amount   | 25.0                  |
++      | reduction_currency | usd                   |
++      | taxIncluded        | true                  |
++    And I set compatible types for discount "newer_amount" to:
++      | cart_level |
++    Given I create an empty cart "cart_date" for customer "testCustomer"
++    When I add 1 product "product1" to the cart "cart_date"
++    And I use a voucher "older_percent" on the cart "cart_date"
++    And I use a voucher "newer_amount" on the cart "cart_date"
++    Then cart "cart_date" should have 2 cart rules applied
++    And discount "older_percent" is applied to my cart
++    And discount "newer_amount" is applied to my cart
++    # PROOF: Older discount (15%) applied FIRST, newer ($25) applied SECOND
++    # Correct order (older first): $100 - 15% = $85, then $85 - $25 = $60 + $7 = $67
++    # Wrong order (newer first): $100 - $25 = $75, then $75 - 15% = $63.75 + $7 = $70.75
++    And cart "cart_date" total with tax included should be '$67.00'
++    And my cart "cart_date" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00   |
++      | total_discount | -$40.00 |
++      | total          | $67.00  |
++
++  Scenario: Incompatible discounts - same type, same priority, older wins
++    # Create FIRST discount (older) - $35 amount
++    When I create a "cart_level" discount "older_amount_incompat" with following properties:
++      | name[en-US]        | Older Amount Incompatible |
++      | active             | true                      |
++      | priority           | 1                         |
++      | valid_from         | 2025-01-01 10:00:00       |
++      | valid_to           | 2025-12-31 23:59:59       |
++      | code               | OLDER_AMT_IC              |
++      | reduction_amount   | 35.0                      |
++      | reduction_currency | usd                       |
++      | taxIncluded        | true                      |
++    And I set compatible types for discount "older_amount_incompat" to:
++      | free_shipping |
++    # Create SECOND discount (newer) - 25% percentage
++    When I create a "cart_level" discount "newer_percent_incompat" with following properties:
++      | name[en-US]       | Newer Percent Incompatible |
++      | active            | true                       |
++      | priority          | 1                          |
++      | valid_from        | 2025-01-01 10:00:00        |
++      | valid_to          | 2025-12-31 23:59:59        |
++      | code              | NEWER_PCT_IC               |
++      | reduction_percent | 25.0                       |
++    And I set compatible types for discount "newer_percent_incompat" to:
++      | free_shipping |
++    Given I create an empty cart "cart_date_incompat" for customer "testCustomer"
++    When I add 1 product "product1" to the cart "cart_date_incompat"
++    And I use a voucher "older_amount_incompat" on the cart "cart_date_incompat"
++    And I use a voucher "newer_percent_incompat" on the cart "cart_date_incompat"
++    # Older discount should win when both have same type and priority
++    Then I should get an error that the discount is invalid
++    Then cart "cart_date_incompat" should have 1 cart rules applied
++    And discount "older_amount_incompat" is applied to my cart
++    # PROOF: Only older discount ($35) applied: $100 - $35 = $65 + $7 = $72
++    # (If newer 25% was applied: $100 - 25% = $75 + $7 = $82 - would prove wrong)
++    And cart "cart_date_incompat" total with tax included should be '$72.00'
++    And my cart "cart_date_incompat" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00   |
++      | total_discount | -$35.00 |
++      | total          | $72.00  |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible.feature
+new file mode 100644
+index 0000000000000..8df2c798cd950
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible.feature
+@@ -0,0 +1,60 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-incompatible
++@restore-all-tables-before-feature
++@discount-priority-incompatible
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Incompatible discounts
++    Test that incompatible discounts are resolved by priority
++
++    Background:
++        Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++        Given language with iso code "en" is the default one
++        Given shop "shop1" with name "test_shop" exists
++        And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++        And currency "usd" is the default one
++        And I enable feature flag "discount"
++        And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++    Scenario: Incompatible cart discounts - higher priority field wins - both codes
++        Given I create an empty cart "cart1" for customer "testCustomer"
++        And I add 1 product "product1" to the cart "cart1"
++        # Priority 5 (lower priority): $15 amount discount
++        When I create a "cart_level" discount "incompat_amount_prio5" with following properties:
++            | name[en-US]        | Incompatible Amount Priority 5 |
++            | active             | true                           |
++            | priority           | 5                              |
++            | valid_from         | 2025-01-01 10:00:00            |
++            | valid_to           | 2025-12-31 23:59:59            |
++            | code               | INCOMPAT_AMT5                  |
++            | reduction_amount   | 15.0                           |
++            | reduction_currency | usd                            |
++            | taxIncluded        | true                           |
++        And I set compatible types for discount "incompat_amount_prio5" to:
++            | product_level |
++        # Priority 3 (higher priority): 20% percentage discount
++        When I create a "cart_level" discount "incompat_percent_prio3" with following properties:
++            | name[en-US]       | Incompatible Percent Priority 3 |
++            | active            | true                            |
++            | priority          | 3                               |
++            | valid_from        | 2025-01-01 10:00:00             |
++            | valid_to          | 2025-12-31 23:59:59             |
++            | code              | INCOMPAT_PCT3                   |
++            | reduction_percent | 20.0                            |
++        And I set compatible types for discount "incompat_percent_prio3" to:
++            | product_level |
++        When I use a voucher "incompat_amount_prio5" on the cart "cart1"
++        And I use a voucher "incompat_percent_prio3" on the cart "cart1"
++        # Priority 3 (20%) should win and replace priority 5 ($15)
++        Then cart "cart1" should have 1 cart rules applied
++        And discount "incompat_percent_prio3" is applied to my cart
++        And discount code "incompat_amount_prio5" is not applied to my cart
++        # Only 20% discount: $100 - 20% = $80 + $7 shipping = $87
++        # (If $15 amount was applied: $100 - $15 = $85 + $7 = $92 - would be wrong)
++        And cart "cart1" total with tax included should be '$87.00'
++        And my cart "cart1" should have the following details:
++            | total_products | $100.00 |
++            | shipping       | $7.00   |
++            | total_discount | -$20.00 |
++            | total          | $87.00  |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible_auto.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible_auto.feature
+new file mode 100644
+index 0000000000000..40450b48c6ec6
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_incompatible_auto.feature
+@@ -0,0 +1,65 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-incompatible-auto
++@restore-all-tables-before-feature
++@discount-priority-incompatible-auto
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Incompatible auto discounts
++  Test that incompatible auto discounts are resolved by priority
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And currency "usd" is the default one
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++  Scenario: Incompatible auto discounts - higher priority field wins
++    # Priority 5 (lower priority): $25 amount discount
++    When I create a "cart_level" discount "auto_incompat_amount_prio5" with following properties:
++      | name[en-US]        | Auto Incompatible Amount Priority 5 |
++      | active             | true                                |
++      | priority           | 5                                   |
++      | valid_from         | 2025-01-01 10:00:00                 |
++      | valid_to           | 2025-12-31 23:59:59                 |
++      | reduction_amount   | 25.0                                |
++      | reduction_currency | usd                                 |
++      | taxIncluded        | true                                |
++    And I update discount "auto_incompat_amount_prio5" with the condition of a minimum amount:
++      | minimum_amount                   | 1.00  |
++      | minimum_amount_currency          | usd   |
++      | minimum_amount_tax_included      | true  |
++      | minimum_amount_shipping_included | false |
++    And I set compatible types for discount "auto_incompat_amount_prio5" to:
++      | product_level |
++    # Priority 3 (higher priority): 15% percentage discount
++    When I create a "cart_level" discount "auto_incompat_percent_prio3" with following properties:
++      | name[en-US]       | Auto Incompatible Percent Priority 3 |
++      | active            | true                                 |
++      | priority          | 3                                    |
++      | valid_from        | 2025-01-01 10:00:00                  |
++      | valid_to          | 2025-12-31 23:59:59                  |
++      | reduction_percent | 15.0                                 |
++    And I update discount "auto_incompat_percent_prio3" with the condition of a minimum amount:
++      | minimum_amount                   | 1.00  |
++      | minimum_amount_currency          | usd   |
++      | minimum_amount_tax_included      | true  |
++      | minimum_amount_shipping_included | false |
++    And I set compatible types for discount "auto_incompat_percent_prio3" to:
++      | product_level |
++    Given I create an empty cart "cart_auto_incompat" for customer "testCustomer"
++    When I add 1 product "product1" to the cart "cart_auto_incompat"
++    # Only priority 3 (15% percent) should be applied, not priority 5 ($25 amount)
++    Then cart "cart_auto_incompat" should have 1 cart rules applied
++    And discount "auto_incompat_percent_prio3" is applied to my cart
++    # Only 15% discount: $100 - 15% = $85 + $7 shipping = $92
++    # (If $25 amount was applied: $100 - $25 = $75 + $7 = $82 - would be wrong)
++    And cart "cart_auto_incompat" total with tax included should be '$92.00'
++    And my cart "cart_auto_incompat" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00   |
++      | total_discount | -$15.00 |
++      | total          | $92.00  |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_order_verification.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_order_verification.feature
+new file mode 100644
+index 0000000000000..7e71717ac92f7
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_priority_order_verification.feature
+@@ -0,0 +1,101 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-priority-order
++@restore-all-tables-before-feature
++@discount-priority-order
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Discount priority - Verify application order
++  Test that discounts are applied in the correct priority order using amount-based discounts
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "customer@prestashop.com"
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And currency "usd" is the default one
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 100.0 and 1000 items in stock
++
++  Scenario: Verify priority field determines order - amount-based discounts
++    Given I create an empty cart "cart_order" for customer "testCustomer"
++    And I add 1 product "product1" to the cart "cart_order"
++    # Create discount with priority 5 - fixed $20 off
++    When I create a "cart_level" discount "amount_prio5" with following properties:
++      | name[en-US]        | Amount Priority 5   |
++      | active             | true                |
++      | priority           | 5                   |
++      | valid_from         | 2025-01-01 10:00:00 |
++      | valid_to           | 2025-12-31 23:59:59 |
++      | code               | AMOUNT5             |
++      | reduction_amount   | 20.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    And I set compatible types for discount "amount_prio5" to:
++      | cart_level |
++    # Create discount with priority 3 - 10% off
++    When I create a "cart_level" discount "percent_prio3" with following properties:
++      | name[en-US]       | Percent Priority 3  |
++      | active            | true                |
++      | priority          | 3                   |
++      | valid_from        | 2025-01-01 10:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | PERCENT3            |
++      | reduction_percent | 10.0                |
++    And I set compatible types for discount "percent_prio3" to:
++      | cart_level |
++    When I use a voucher "amount_prio5" on the cart "cart_order"
++    And I use a voucher "percent_prio3" on the cart "cart_order"
++    Then cart "cart_order" should have 2 cart rules applied
++    And discount "percent_prio3" is applied to my cart
++    And discount "amount_prio5" is applied to my cart
++    # MATHEMATICAL PROOF OF CORRECT ORDER:
++    # If priority 3 first (CORRECT): $100 - 10% = $90, then $90 - $20 = $70 + $7 shipping = $77
++    # If priority 5 first (WRONG): $100 - $20 = $80, then $80 - 10% = $72 + $7 shipping = $79
++    And cart "cart_order" total with tax included should be '$77.00'
++    And my cart "cart_order" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00   |
++      | total_discount | -$30.00 |
++      | total          | $77.00  |
++
++  Scenario: Verify only higher priority discount is applied when incompatible
++    Given I create an empty cart "cart_single" for customer "testCustomer"
++    And I add 1 product "product1" to the cart "cart_single"
++    # Priority 5 (lower priority): $30 amount discount
++    When I create a "cart_level" discount "incompat_amount30" with following properties:
++      | name[en-US]        | Incompatible Amount $30 |
++      | active             | true                    |
++      | priority           | 5                       |
++      | valid_from         | 2025-01-01 10:00:00     |
++      | valid_to           | 2025-12-31 23:59:59     |
++      | code               | INCOMPAT_AMT30          |
++      | reduction_amount   | 30.0                    |
++      | reduction_currency | usd                     |
++      | taxIncluded        | true                    |
++    And I set compatible types for discount "incompat_amount30" to:
++      | free_shipping |
++    # Priority 3 (higher priority): 15% percentage discount
++    When I create a "cart_level" discount "incompat_percent15" with following properties:
++      | name[en-US]       | Incompatible Percent 15% |
++      | active            | true                     |
++      | priority          | 3                        |
++      | valid_from        | 2025-01-01 10:00:00      |
++      | valid_to          | 2025-12-31 23:59:59      |
++      | code              | INCOMPAT_PCT15           |
++      | reduction_percent | 15.0                     |
++    And I set compatible types for discount "incompat_percent15" to:
++      | free_shipping |
++    When I use a voucher "incompat_amount30" on the cart "cart_single"
++    And I use a voucher "incompat_percent15" on the cart "cart_single"
++    Then cart "cart_single" should have 1 cart rules applied
++    And discount "incompat_percent15" is applied to my cart
++    And discount code "incompat_amount30" is not applied to my cart
++    # PROOF: Only 15% discount applied: $100 - 15% = $85 + $7 shipping = $92
++    # (If $30 amount was applied: $100 - $30 = $70 + $7 = $77 - would prove wrong discount)
++    And cart "cart_single" total with tax included should be '$92.00'
++    And my cart "cart_single" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00   |
++      | total_discount | -$15.00 |
++      | total          | $92.00  |
++

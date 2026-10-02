@@ -1,0 +1,224 @@
+diff --git a/Makefile b/Makefile
+index 273dec356beb0..bb40ab95fc5e7 100644
+--- a/Makefile
++++ b/Makefile
+@@ -17,7 +17,7 @@ SYMFONY  = $(PHP_CONT) bin/console
+ 
+ # Misc
+ .DEFAULT_GOAL = install
+-.PHONY        : help docker-build docker-up docker-start docker-restart docker-down docker-logs docker-sh composer cc test test-unit test-integration test-integration-behaviour test-api-module assets wait-assets admin front admin-default admin-new-theme front-core front-classic front-hummingbird install install-prestashop cs-fixer cs-fixer-dry phpstan scss-fixer es-linter
++.PHONY        : help docker-build docker-up docker-start docker-restart docker-down docker-logs docker-sh composer cc test test-unit test-integration test-integration-behaviour test-api-module assets assets-clean wait-assets admin front admin-default admin-new-theme front-core front-classic front-hummingbird install install-prestashop cs-fixer cs-fixer-dry phpstan scss-fixer es-linter
+ 
+ ## —— 🎵 🐳 PrestaShop Docker Makefile 🐳 🎵 ———————————————————————————————————
+ help: ## Outputs this help screen
+@@ -53,6 +53,9 @@ install-prestashop: ## Install fresh PrestaShop database (requires containers to
+ assets: ## Build all assets
+ 	$(PHP_CONT_WITH_LOGIN) ./tools/assets/build.sh all --force
+ 
++assets-clean: ## Build all assets, forcing a clean reinstall of node_modules
++	$(PHP_CONT_WITH_LOGIN) ./tools/assets/build.sh all --force-install
++
+ wait-assets: ## Wait for assets to be built
+ 	$(PHP_CONT_WITH_LOGIN) ./tools/assets/wait-build.sh
+ 
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index 415511376c7b1..0d23d05674a3f 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -36,6 +36,32 @@ const FontPreloadPlugin = require('webpack-font-preload-plugin');
+ const CssoWebpackPlugin = require('csso-webpack-plugin').default;
+ 
+ module.exports = {
++  // Webpack 5 defaults to no cache at all in production, so every `npm run build`
++  // recompiled and re-minified the whole tree from scratch. Persisting it between runs
++  // is the bulk of this theme's build time.
++  //
++  // cacheDirectory is deliberately left at its default, node_modules/.cache/webpack:
++  // `npm ci` wipes it along with the dependencies it was built against, and the release
++  // packager already excludes node_modules from the shipped archive.
++  cache: {
++    type: 'filesystem',
++    // Default maxAge is 60 days, which lets packs from long-gone branches pile up
++    // (dev and prod keep separate caches, so the directory grows twice as fast).
++    // A week is plenty to cover day-to-day work.
++    maxAge: 7 * 24 * 60 * 60 * 1000,
++    buildDependencies: {
++      // webpack.config.js requires prod.js/dev.js, which require this file; webpack
++      // hashes each entry together with its dependencies, so it covers all three.
++      //
++      // tsconfig.json is listed separately: esbuild-loader reads it directly and never
++      // calls addDependency, so without this a change to compilerOptions would leave
++      // every cached TypeScript module valid and silently produce a stale build.
++      config: [
++        path.resolve(__dirname, '../webpack.config.js'),
++        path.resolve(__dirname, '../tsconfig.json'),
++      ],
++    },
++  },
+   externals: {
+     jquery: 'jQuery',
+   },
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index 950780962b9c0..6debabeb905e2 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -183,12 +183,14 @@ The asset build system provides a simple and reliable way to build all assets:
+ 
+ - **Always Fresh**: Assets are always rebuilt to ensure consistency
+ - **Parallel Execution**: Multiple assets build in parallel for faster builds
+-- **Clean Builds**: Node modules are cleaned and reinstalled for each build
++- **Incremental Installs**: `npm ci` only runs when a theme's dependencies actually changed, so repeated builds are much faster
+ 
+ **Examples:**
+ ```bash
+ # Build all assets
+ make assets
++# Build all assets, forcing a clean reinstall of node_modules
++make assets-clean
+ # Build Admin default theme
+ make admin-default
+ 
+@@ -196,11 +198,15 @@ make admin-default
+ 
+ # All assets
+ ./tools/assets/build.sh # dry-run
+-./tools/assets/build/sh --force
++./tools/assets/build.sh --force
+ 
+ # Specific asset
+ ./tools/assets/build.sh admin-default # dry-run
+ ./tools/assets/build.sh admin-default --force
++
++# Force a clean reinstall of node_modules (implies --force)
++./tools/assets/build.sh --force-install
++./tools/assets/build.sh admin-default --force-install
+ ```
+ 
+ ### Performance Tips
+diff --git a/tools/assets/build.sh b/tools/assets/build.sh
+index bcb9792b5e2ad..b3c996f7bb6db 100755
+--- a/tools/assets/build.sh
++++ b/tools/assets/build.sh
+@@ -1,10 +1,11 @@
+ #!/bin/bash
+ 
+ ###
+-# This script rebuilds all the static assets, running npm install-clean as needed
+-# Usage: ./tools/assets/build.sh [asset-name] [--force]
++# This script rebuilds all the static assets, reinstalling dependencies when they changed
++# Usage: ./tools/assets/build.sh [asset-name] [--force] [--force-install]
+ #   asset-name: admin-default, admin-new-theme, front-core, front-classic, front-hummingbird, or all
+ #   --force: Force rebuild even if assets already exist
++#   --force-install: Force a clean reinstall of node_modules (implies --force)
+ #
+ 
+ #http://redsymbol.net/articles/unofficial-bash-strict-mode/
+@@ -14,6 +15,7 @@ ADMIN_DIR="${PROJECT_PATH}/${ADMIN_DIR:-admin-dev}"
+ 
+ # Parse command line arguments
+ FORCE_BUILD=false
++FORCE_INSTALL=false
+ ASSET_NAME=""
+ 
+ for arg in "$@"; do
+@@ -21,6 +23,12 @@ for arg in "$@"; do
+     --force)
+       FORCE_BUILD=true
+       ;;
++    --force-install)
++      FORCE_INSTALL=true
++      # Dependencies are only installed as part of a build, and reinstalling them
++      # without rebuilding would leave the previous assets in place, so this implies --force.
++      FORCE_BUILD=true
++      ;;
+     *)
+       if [[ -z "$ASSET_NAME" ]]; then
+         ASSET_NAME="$arg"
+@@ -34,6 +42,72 @@ if [[ ! -d $ADMIN_DIR ]]; then
+   return 1
+ fi
+ 
++# Portable sha256 of stdin (sha256sum on Linux, shasum on macOS)
++function sha256_stdin {
++  if command -v sha256sum > /dev/null 2>&1; then
++    sha256sum | cut -d' ' -f1
++  else
++    shasum -a 256 | cut -d' ' -f1
++  fi
++}
++
++# Fingerprint of everything the content of node_modules depends on.
++#
++# - package-lock.json: the resolved dependency tree.
++# - package.json: so a dependency bumped without regenerating the lockfile still runs
++#   `npm ci`, which is what reports the two files being out of sync.
++# - NODE_ENV: npm omits devDependencies when it is `production`, which yields a tree
++#   that cannot build at all.
++# - platform, libc, Node and npm versions, and whether we are inside the container:
++#   native dependencies such as sass-embedded ship a prebuilt per-platform binary, and
++#   docker-compose.yml bind-mounts the repository into the container, so the host and
++#   the container share a single node_modules directory. `uname -sm` alone does not
++#   separate a Linux host from the container running on it.
++#
++# Prints nothing when a manifest is missing, so install_dependencies falls through to
++# `npm ci` and lets it report the real problem.
++function install_stamp_value {
++  if [[ ! -f package.json || ! -f package-lock.json ]]; then
++    return 0
++  fi
++
++  {
++    sha256_stdin < package.json
++    sha256_stdin < package-lock.json
++    uname -sm
++    # Tolerate a missing toolchain: the point here is to fingerprint it, and letting
++    # `npm ci` fail with its own message beats aborting mid-fingerprint under `set -e`.
++    node -v || true
++    npm -v || true
++    echo "NODE_ENV=${NODE_ENV:-}"
++    if [[ -f /.dockerenv ]]; then echo 'container'; else echo 'host'; fi
++    if command -v ldd > /dev/null 2>&1; then
++      ldd --version 2>&1 | head -1 || true
++    fi
++  } | sha256_stdin
++}
++
++# Install dependencies only when they are actually out of date.
++#
++# `npm ci` wipes and repopulates node_modules from scratch, which on large themes means
++# tens of thousands of files, so it should only run when something it depends on changed.
++# Note: `npm ci` removes node_modules itself, so no explicit `rm -rf` is needed.
++function install_dependencies {
++  local stamp="node_modules/.ps-install-stamp"
++  local expected
++  expected=$(install_stamp_value)
++
++  if [[ -n "$expected" && "$FORCE_INSTALL" == "false" && -d "node_modules" && -f "$stamp" && "$(cat "$stamp")" == "$expected" ]]; then
++    echo "> Dependencies already up to date, skipping npm ci (use --force-install to reinstall)"
++    return 0
++  fi
++
++  npm ci
++  if [[ -n "$expected" ]]; then
++    echo "$expected" > "$stamp"
++  fi
++}
++
+ function build {
+   if [[ -z "$1" ]]; then
+     echo "Parameter is empty"
+@@ -45,13 +119,10 @@ function build {
+   fi
+ 
+   pushd $1
+-  if [[ -d "node_modules" ]]; then
+-    rm -rf node_modules
+-  fi
+ 
+   touch buildLock
+   chmod 664 buildLock
+-  npm ci
++  install_dependencies
+   npm run build
+   rm buildLock
+   popd

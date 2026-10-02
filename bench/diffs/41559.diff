@@ -1,0 +1,3941 @@
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index b8ae739c900e9..d8dfe7225e348 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -162,6 +162,7 @@ module.exports = {
+     tag_form: './js/pages/tag/form',
+     tax: './js/pages/tax',
+     tax_rules: './js/pages/tax-rules',
++    tax_rules_form: './js/pages/tax-rules/form',
+     tax_rules_group: './js/pages/tax-rules-group',
+     theme: './scss/theme.scss',
+     themes: './js/pages/themes',
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/country-state-selector.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/country-state-selector.ts
+new file mode 100644
+index 0000000000000..861b78bbd5ae9
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/country-state-selector.ts
+@@ -0,0 +1,112 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++interface StateData {
++  id_state: string;
++  name: string;
++}
++
++/**
++ * Dynamically loads states for the selected country in the tax rule form.
++ * Reads the states API URL from data-states-url on the form element.
++ */
++export default class CountryStateSelector {
++  private readonly countrySelect: HTMLSelectElement;
++
++  private readonly stateSelect: HTMLSelectElement;
++
++  private readonly stateFormGroup: HTMLElement;
++
++  private readonly statesUrlTemplate: string;
++
++  private initialStateValue: string | null;
++
++  constructor(formSelector: string = 'form[data-states-url]') {
++    const form = document.querySelector<HTMLFormElement>(formSelector);
++
++    if (!form) {
++      throw new Error(`CountryStateSelector: form "${formSelector}" not found`);
++    }
++
++    this.statesUrlTemplate = form.dataset.statesUrl || '';
++
++    const countrySelect = form.querySelector<HTMLSelectElement>('[name$="[country]"]');
++    const stateSelect = form.querySelector<HTMLSelectElement>('[name$="[state]"]');
++
++    if (!countrySelect || !stateSelect) {
++      throw new Error('CountryStateSelector: country or state select not found');
++    }
++
++    this.countrySelect = countrySelect;
++    this.stateSelect = stateSelect;
++    this.stateFormGroup = stateSelect.closest('.form-group') as HTMLElement;
++    this.initialStateValue = stateSelect.value || null;
++
++    this.init();
++  }
++
++  private init(): void {
++    this.countrySelect.addEventListener('change', () => {
++      this.loadStates(this.countrySelect.value);
++    });
++
++    if (this.countrySelect.value && this.countrySelect.value !== '0') {
++      this.loadStates(this.countrySelect.value);
++    } else {
++      this.toggleStateVisibility(false);
++    }
++  }
++
++  private async loadStates(countryId: string): Promise<void> {
++    while (this.stateSelect.options.length > 1) {
++      this.stateSelect.remove(1);
++    }
++
++    if (!countryId || countryId === '0') {
++      this.toggleStateVisibility(false);
++
++      return;
++    }
++
++    const url = this.statesUrlTemplate.replace('/0', `/${countryId}`);
++
++    try {
++      const response = await fetch(url, {
++        headers: {'X-Requested-With': 'XMLHttpRequest'},
++      });
++      const states: StateData[] = await response.json();
++
++      if (states.length === 0) {
++        this.toggleStateVisibility(false);
++
++        return;
++      }
++
++      this.toggleStateVisibility(true);
++
++      states.forEach((state: StateData) => {
++        const option = document.createElement('option');
++        option.value = state.id_state;
++        option.textContent = state.name;
++
++        if (this.initialStateValue && String(state.id_state) === String(this.initialStateValue)) {
++          option.selected = true;
++        }
++
++        this.stateSelect.appendChild(option);
++      });
++
++      this.initialStateValue = null;
++    } catch {
++      this.toggleStateVisibility(false);
++    }
++  }
++
++  private toggleStateVisibility(visible: boolean): void {
++    if (this.stateFormGroup) {
++      this.stateFormGroup.style.display = visible ? '' : 'none';
++    }
++  }
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/form.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/form.ts
+new file mode 100644
+index 0000000000000..54969b974861d
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/form.ts
+@@ -0,0 +1,14 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++import CountryStateSelector from './country-state-selector';
++
++document.addEventListener('DOMContentLoaded', () => {
++  try {
++    new CountryStateSelector();
++  } catch {
++    // Form not present on page — nothing to initialize
++  }
++});
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
+index a281320f53f9b..4a0f1fd123c5c 100644
+--- a/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
+@@ -4,17 +4,92 @@
+  */
+ 
+ import FormSubmitButton from '@components/form-submit-button';
++import IframeModal from '@components/modal/iframe-modal';
+ 
+ const {$} = window;
+ 
++const TAX_RULE_MODAL_ID = 'tax-rule-form-modal';
++
+ $(() => {
+-  const taxRuleGrid = new window.prestashop.component.Grid('tax_rule');
++  const taxRuleGrid = new window.prestashop.component.Grid('tax_rules');
+ 
++  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersResetExtension());
++  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SortingExtension());
+   taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ExportToSqlManagerExtension());
+   taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ReloadListExtension());
+   taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.BulkActionCheckboxExtension());
+   taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitBulkActionExtension());
+   taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitRowActionExtension());
++  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.LinkRowActionExtension());
++  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
++  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ColumnTogglingExtension());
+ 
+   new FormSubmitButton();
++  initTaxRuleModals();
+ });
++
++/**
++ * Intercept add and edit tax rule links to open them in a modal.
++ */
++function initTaxRuleModals(): void {
++  // "Add new tax rule" toolbar button
++  document.querySelectorAll<HTMLAnchorElement>('[href*="tax-rules/new"]').forEach((button) => {
++    button.addEventListener('click', (event: MouseEvent) => {
++      event.preventDefault();
++      const href = button.getAttribute('href');
++
++      if (href) {
++        openTaxRuleModal(`${href}${href.includes('?') ? '&' : '?'}liteDisplaying=1`);
++      }
++    });
++  });
++
++  // Edit links in grid rows
++  document.querySelectorAll<HTMLAnchorElement>('#tax_rules_grid_table a.btn[href*="/edit"]').forEach((link) => {
++    link.addEventListener('click', (event: MouseEvent) => {
++      event.preventDefault();
++      event.stopPropagation();
++      const href = link.getAttribute('href');
++
++      if (href) {
++        openTaxRuleModal(`${href}${href.includes('?') ? '&' : '?'}liteDisplaying=1`);
++      }
++    });
++  });
++}
++
++function openTaxRuleModal(formUrl: string): void {
++  const iframeModal = new IframeModal({
++    id: TAX_RULE_MODAL_ID,
++    iframeUrl: formUrl,
++    closable: true,
++    onLoaded: (iframe: HTMLIFrameElement): void => {
++      if (!iframe.contentWindow) {
++        return;
++      }
++
++      const iframeDoc = iframe.contentWindow.document;
++
++      // Check for success marker — controller returns <div data-modal-close="true"> after save
++      const closeMarker = iframeDoc.querySelector('[data-modal-close]');
++
++      if (closeMarker) {
++        // Save succeeded — close modal and reload parent to show flash message + updated grid
++        iframeModal.hide();
++        window.location.reload();
++
++        return;
++      }
++
++      // Form page loaded — wire cancel button to close modal
++      const cancelButtons = iframeDoc.querySelectorAll('.cancel-btn');
++      cancelButtons.forEach((btn) => {
++        btn.addEventListener('click', (e) => {
++          e.preventDefault();
++          iframeModal.hide();
++        });
++      });
++    },
++  });
++  iframeModal.show();
++}
+diff --git a/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php b/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php
+new file mode 100644
+index 0000000000000..717b8ca27c01a
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php
+@@ -0,0 +1,120 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler;
++
++use Context;
++use Country;
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository;
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRulesGroupRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\AddTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler\AddTaxRuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult\AddTaxRuleResult;
++use TaxRule;
++
++/**
++ * Handles adding tax rules to a tax rules group.
++ * When countryId is 0, creates rules for all active countries.
++ */
++#[AsCommandHandler]
++final class AddTaxRuleHandler implements AddTaxRuleHandlerInterface
++{
++    public function __construct(
++        private readonly TaxRulesGroupRepository $taxRulesGroupRepository,
++        private readonly TaxRuleRepository $taxRuleRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(AddTaxRuleCommand $command): AddTaxRuleResult
++    {
++        // Historize the group if it's used in orders (creates a new copy)
++        $newGroupId = $this->taxRulesGroupRepository->historizeIfUsed($command->getTaxRulesGroupId());
++
++        // Determine which countries to create rules for
++        $countryIds = $this->resolveCountryIds($command->getCountryId());
++        $stateIds = $command->getStateIds();
++
++        $taxRulesGroup = $this->taxRulesGroupRepository->get($newGroupId);
++
++        foreach ($countryIds as $countryId) {
++            foreach ($stateIds as $stateId) {
++                if ($taxRulesGroup->hasUniqueTaxRuleForCountry($countryId, $stateId)) {
++                    continue;
++                }
++
++                $this->createTaxRule(
++                    $newGroupId->getValue(),
++                    $countryId,
++                    $stateId,
++                    $command
++                );
++            }
++        }
++
++        return new AddTaxRuleResult($newGroupId);
++    }
++
++    /**
++     * @param int $countryId 0 means all active countries
++     *
++     * @return int[]
++     */
++    private function resolveCountryIds(int $countryId): array
++    {
++        if ($countryId !== 0) {
++            return [$countryId];
++        }
++
++        $countries = Country::getCountries((int) Context::getContext()->language->id);
++        $ids = [];
++        foreach ($countries as $country) {
++            $ids[] = (int) $country['id_country'];
++        }
++
++        return $ids;
++    }
++
++    /**
++     * @param int $taxRulesGroupId
++     * @param int $countryId
++     * @param int $stateId
++     * @param AddTaxRuleCommand $command
++     */
++    private function createTaxRule(
++        int $taxRulesGroupId,
++        int $countryId,
++        int $stateId,
++        AddTaxRuleCommand $command
++    ): void {
++        $taxRule = new TaxRule();
++        $taxRule->id_tax_rules_group = $taxRulesGroupId;
++        $taxRule->id_country = $countryId;
++        $taxRule->id_state = $stateId;
++        $taxRule->id_tax = $command->getTaxId();
++        $taxRule->behavior = $command->getBehavior();
++        $taxRule->description = $command->getDescription();
++
++        // Parse zipcode range — empty input means no zip filter (store as 0/0)
++        $zipCode = $command->getZipCode();
++
++        if ($zipCode === '' || $zipCode === '0') {
++            $taxRule->zipcode_from = '0';
++            $taxRule->zipcode_to = '0';
++        } else {
++            [$zipcodeFrom, $zipcodeTo] = $taxRule->breakDownZipCode($zipCode);
++            $taxRule->zipcode_from = $zipcodeFrom;
++            $taxRule->zipcode_to = $zipcodeTo;
++        }
++
++        $this->taxRuleRepository->add($taxRule);
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/CommandHandler/BulkDeleteTaxRuleHandler.php b/src/Adapter/TaxRulesGroup/CommandHandler/BulkDeleteTaxRuleHandler.php
+new file mode 100644
+index 0000000000000..f5c20372a15c7
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/CommandHandler/BulkDeleteTaxRuleHandler.php
+@@ -0,0 +1,63 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository;
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRulesGroupRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\BulkDeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler\BulkDeleteTaxRuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotBulkDeleteTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleException;
++
++/**
++ * Handles bulk deletion of tax rules within a group
++ */
++#[AsCommandHandler]
++final class BulkDeleteTaxRuleHandler implements BulkDeleteTaxRuleHandlerInterface
++{
++    public function __construct(
++        private readonly TaxRulesGroupRepository $taxRulesGroupRepository,
++        private readonly TaxRuleRepository $taxRuleRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(BulkDeleteTaxRuleCommand $command): void
++    {
++        // Historize the group once for the entire bulk operation
++        $newGroupId = $this->taxRulesGroupRepository->historizeIfUsed($command->getTaxRulesGroupId());
++        $historized = $newGroupId->getValue() !== $command->getTaxRulesGroupId()->getValue();
++
++        $errors = [];
++
++        foreach ($command->getTaxRuleIds() as $taxRuleId) {
++            try {
++                $effectiveId = $taxRuleId;
++                if ($historized) {
++                    $effectiveId = $this->taxRulesGroupRepository->remapTaxRuleId($newGroupId, $taxRuleId);
++                }
++
++                $taxRule = $this->taxRuleRepository->get($effectiveId);
++                $this->taxRuleRepository->delete($taxRule);
++            } catch (TaxRuleException) {
++                $errors[] = $taxRuleId->getValue();
++            }
++        }
++
++        if (!empty($errors)) {
++            throw new CannotBulkDeleteTaxRuleException(
++                $errors,
++                'Failed to delete all tax rules without errors'
++            );
++        }
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/CommandHandler/DeleteTaxRuleHandler.php b/src/Adapter/TaxRulesGroup/CommandHandler/DeleteTaxRuleHandler.php
+new file mode 100644
+index 0000000000000..014ec27c440b7
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/CommandHandler/DeleteTaxRuleHandler.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository;
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRulesGroupRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\DeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler\DeleteTaxRuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Handles deletion of a single tax rule
++ */
++#[AsCommandHandler]
++final class DeleteTaxRuleHandler implements DeleteTaxRuleHandlerInterface
++{
++    public function __construct(
++        private readonly TaxRulesGroupRepository $taxRulesGroupRepository,
++        private readonly TaxRuleRepository $taxRuleRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(DeleteTaxRuleCommand $command): void
++    {
++        $taxRule = $this->taxRuleRepository->get($command->getTaxRuleId());
++        $groupId = new TaxRulesGroupId((int) $taxRule->id_tax_rules_group);
++
++        // Historize the group if used in orders
++        $newGroupId = $this->taxRulesGroupRepository->historizeIfUsed($groupId);
++
++        // Remap and reload if historization occurred
++        $taxRuleId = $command->getTaxRuleId();
++        if ($newGroupId->getValue() !== $groupId->getValue()) {
++            $taxRuleId = $this->taxRulesGroupRepository->remapTaxRuleId($newGroupId, $taxRuleId);
++        }
++
++        $taxRule = $this->taxRuleRepository->get($taxRuleId);
++        $this->taxRuleRepository->delete($taxRule);
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/CommandHandler/EditTaxRuleHandler.php b/src/Adapter/TaxRulesGroup/CommandHandler/EditTaxRuleHandler.php
+new file mode 100644
+index 0000000000000..22cc394b5f96d
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/CommandHandler/EditTaxRuleHandler.php
+@@ -0,0 +1,79 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository;
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRulesGroupRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\EditTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler\EditTaxRuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Handles editing a tax rule
++ */
++#[AsCommandHandler]
++final class EditTaxRuleHandler implements EditTaxRuleHandlerInterface
++{
++    public function __construct(
++        private readonly TaxRulesGroupRepository $taxRulesGroupRepository,
++        private readonly TaxRuleRepository $taxRuleRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(EditTaxRuleCommand $command): void
++    {
++        $taxRule = $this->taxRuleRepository->get($command->getTaxRuleId());
++        $groupId = new TaxRulesGroupId((int) $taxRule->id_tax_rules_group);
++
++        // Historize the group if used in orders
++        $newGroupId = $this->taxRulesGroupRepository->historizeIfUsed($groupId);
++
++        // Remap the tax rule id if historization occurred
++        $taxRuleId = $command->getTaxRuleId();
++        if ($newGroupId->getValue() !== $groupId->getValue()) {
++            $taxRuleId = $this->taxRulesGroupRepository->remapTaxRuleId($newGroupId, $taxRuleId);
++        }
++
++        // Load the (potentially remapped) tax rule
++        $taxRule = $this->taxRuleRepository->get($taxRuleId);
++
++        // Apply partial updates
++        if (null !== $command->getCountryId()) {
++            $taxRule->id_country = $command->getCountryId();
++        }
++        if (null !== $command->getStateId()) {
++            $taxRule->id_state = $command->getStateId();
++        }
++        if (null !== $command->getTaxId()) {
++            $taxRule->id_tax = $command->getTaxId();
++        }
++        if (null !== $command->getBehavior()) {
++            $taxRule->behavior = $command->getBehavior();
++        }
++        if (null !== $command->getZipCode()) {
++            $zipCode = $command->getZipCode();
++
++            if ($zipCode === '' || $zipCode === '0') {
++                $taxRule->zipcode_from = '0';
++                $taxRule->zipcode_to = '0';
++            } else {
++                [$taxRule->zipcode_from, $taxRule->zipcode_to] = $taxRule->breakDownZipCode($zipCode);
++            }
++        }
++        if (null !== $command->getDescription()) {
++            $taxRule->description = $command->getDescription();
++        }
++
++        $this->taxRuleRepository->update($taxRule);
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleForEditingHandler.php b/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleForEditingHandler.php
+new file mode 100644
+index 0000000000000..7b55e090a33e0
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleForEditingHandler.php
+@@ -0,0 +1,49 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryHandler\GetTaxRuleForEditingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Handles query which gets tax rule data for editing
++ */
++#[AsQueryHandler]
++final class GetTaxRuleForEditingHandler implements GetTaxRuleForEditingHandlerInterface
++{
++    public function __construct(
++        private readonly TaxRuleRepository $taxRuleRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(GetTaxRuleForEditing $query): EditableTaxRule
++    {
++        $taxRule = $this->taxRuleRepository->get($query->getTaxRuleId());
++
++        return new EditableTaxRule(
++            new TaxRuleId((int) $taxRule->id),
++            new TaxRulesGroupId((int) $taxRule->id_tax_rules_group),
++            (int) $taxRule->id_country,
++            (int) $taxRule->id_state,
++            (string) $taxRule->zipcode_from,
++            (string) $taxRule->zipcode_to,
++            (int) $taxRule->id_tax,
++            (int) $taxRule->behavior,
++            (string) $taxRule->description
++        );
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/Repository/TaxRuleRepository.php b/src/Adapter/TaxRulesGroup/Repository/TaxRuleRepository.php
+new file mode 100644
+index 0000000000000..faa0bbd8008fb
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/Repository/TaxRuleRepository.php
+@@ -0,0 +1,93 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotAddTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotDeleteTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotUpdateTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++use PrestaShop\PrestaShop\Core\Exception\CoreException;
++use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
++use TaxRule;
++
++/**
++ * Provides access to TaxRule data source
++ */
++class TaxRuleRepository extends AbstractObjectModelRepository
++{
++    /**
++     * @param TaxRuleId $taxRuleId
++     *
++     * @return TaxRule
++     *
++     * @throws CoreException
++     * @throws TaxRuleNotFoundException
++     */
++    public function get(TaxRuleId $taxRuleId): TaxRule
++    {
++        /** @var TaxRule $taxRule */
++        $taxRule = $this->getObjectModel(
++            $taxRuleId->getValue(),
++            TaxRule::class,
++            TaxRuleNotFoundException::class
++        );
++
++        return $taxRule;
++    }
++
++    /**
++     * @param TaxRuleId $taxRuleId
++     *
++     * @throws CoreException
++     * @throws TaxRuleNotFoundException
++     */
++    public function assertTaxRuleExists(TaxRuleId $taxRuleId): void
++    {
++        $this->assertObjectModelExists(
++            $taxRuleId->getValue(),
++            'tax_rule',
++            TaxRuleNotFoundException::class
++        );
++    }
++
++    /**
++     * @param TaxRule $taxRule
++     *
++     * @return TaxRuleId
++     *
++     * @throws CannotAddTaxRuleException
++     */
++    public function add(TaxRule $taxRule): TaxRuleId
++    {
++        $id = $this->addObjectModel($taxRule, CannotAddTaxRuleException::class);
++
++        return new TaxRuleId($id);
++    }
++
++    /**
++     * @param TaxRule $taxRule
++     *
++     * @throws CannotUpdateTaxRuleException
++     */
++    public function update(TaxRule $taxRule): void
++    {
++        $this->updateObjectModel($taxRule, CannotUpdateTaxRuleException::class);
++    }
++
++    /**
++     * @param TaxRule $taxRule
++     *
++     * @throws CannotDeleteTaxRuleException
++     */
++    public function delete(TaxRule $taxRule): void
++    {
++        $this->deleteObjectModel($taxRule, CannotDeleteTaxRuleException::class);
++    }
++}
+diff --git a/src/Adapter/TaxRulesGroup/Repository/TaxRulesGroupRepository.php b/src/Adapter/TaxRulesGroup/Repository/TaxRulesGroupRepository.php
+index 63c5ba695928c..58fb3d4044726 100644
+--- a/src/Adapter/TaxRulesGroup/Repository/TaxRulesGroupRepository.php
++++ b/src/Adapter/TaxRulesGroup/Repository/TaxRulesGroupRepository.php
+@@ -16,6 +16,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Exception\CannotAddTaxRulesGroupException;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Exception\CannotUpdateTaxRulesGroupException;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Exception\TaxRulesGroupNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractMultiShopObjectModelRepository;
+@@ -179,6 +180,48 @@ public function partialUpdate(
+         );
+     }
+ 
++    /**
++     * Triggers historization if the group is used in orders.
++     * When a group is used, it is duplicated: old group is soft-deleted,
++     * rules are copied to the new group, and product/carrier references are updated.
++     *
++     * @param TaxRulesGroupId $taxRulesGroupId
++     *
++     * @return TaxRulesGroupId the (potentially new) group id
++     */
++    public function historizeIfUsed(TaxRulesGroupId $taxRulesGroupId): TaxRulesGroupId
++    {
++        $taxRulesGroup = $this->get($taxRulesGroupId);
++
++        // TaxRulesGroup::update() handles historization internally:
++        // if the group is used in orders, it duplicates the group and all its rules
++        $taxRulesGroup->update();
++
++        // After update(), the id may have changed if historization occurred
++        return new TaxRulesGroupId((int) $taxRulesGroup->id);
++    }
++
++    /**
++     * After historization, maps an old tax rule id to the new one in the new group.
++     *
++     * @param TaxRulesGroupId $newGroupId the new group id (after historization)
++     * @param TaxRuleId $oldTaxRuleId the old tax rule id
++     *
++     * @return TaxRuleId the remapped tax rule id in the new group
++     */
++    public function remapTaxRuleId(TaxRulesGroupId $newGroupId, TaxRuleId $oldTaxRuleId): TaxRuleId
++    {
++        $taxRulesGroup = $this->get($newGroupId);
++        $newId = (int) $taxRulesGroup->getIdTaxRuleGroupFromHistorizedId($oldTaxRuleId->getValue());
++
++        if ($newId <= 0) {
++            // If no remap is found, the rule was not historized (group wasn't used)
++            return $oldTaxRuleId;
++        }
++
++        return new TaxRuleId($newId);
++    }
++
+     /**
+      * Get most used Tax.
+      *
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Command/AddTaxRuleCommand.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/AddTaxRuleCommand.php
+new file mode 100644
+index 0000000000000..ab22b24c5cda6
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/AddTaxRuleCommand.php
+@@ -0,0 +1,179 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Command responsible for adding a tax rule to a tax rules group.
++ * When countryId is 0, the handler creates rules for all active countries.
++ */
++class AddTaxRuleCommand
++{
++    /**
++     * @var TaxRulesGroupId
++     */
++    private TaxRulesGroupId $taxRulesGroupId;
++
++    /**
++     * @var int
++     */
++    private int $countryId;
++
++    /**
++     * @var int
++     */
++    private int $taxId;
++
++    /**
++     * @var int[]
++     */
++    private array $stateIds = [0];
++
++    /**
++     * @var int
++     */
++    private int $behavior = 0;
++
++    /**
++     * @var string
++     */
++    private string $zipCode = '';
++
++    /**
++     * @var string
++     */
++    private string $description = '';
++
++    /**
++     * @param int $taxRulesGroupId
++     * @param int $countryId 0 means all countries
++     * @param int $taxId 0 means no tax
++     */
++    public function __construct(int $taxRulesGroupId, int $countryId, int $taxId)
++    {
++        $this->taxRulesGroupId = new TaxRulesGroupId($taxRulesGroupId);
++        $this->countryId = $countryId;
++        $this->taxId = $taxId;
++    }
++
++    /**
++     * @return TaxRulesGroupId
++     */
++    public function getTaxRulesGroupId(): TaxRulesGroupId
++    {
++        return $this->taxRulesGroupId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getCountryId(): int
++    {
++        return $this->countryId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getTaxId(): int
++    {
++        return $this->taxId;
++    }
++
++    /**
++     * @return int[]
++     */
++    public function getStateIds(): array
++    {
++        return $this->stateIds;
++    }
++
++    /**
++     * @param int[] $stateIds
++     *
++     * @return self
++     */
++    public function setStateIds(array $stateIds): self
++    {
++        $this->stateIds = $stateIds;
++
++        return $this;
++    }
++
++    /**
++     * @return int
++     */
++    public function getBehavior(): int
++    {
++        return $this->behavior;
++    }
++
++    /**
++     * @param int $behavior
++     *
++     * @return self
++     *
++     * @throws TaxRuleConstraintException
++     */
++    public function setBehavior(int $behavior): self
++    {
++        if ($behavior < 0 || $behavior > 2) {
++            throw new TaxRuleConstraintException(
++                sprintf('Invalid tax rule behavior "%d". Expected value between 0 and 2.', $behavior),
++                TaxRuleConstraintException::INVALID_BEHAVIOR
++            );
++        }
++
++        $this->behavior = $behavior;
++
++        return $this;
++    }
++
++    /**
++     * @return string
++     */
++    public function getZipCode(): string
++    {
++        return $this->zipCode;
++    }
++
++    /**
++     * @param string $zipCode
++     *
++     * @return self
++     */
++    public function setZipCode(string $zipCode): self
++    {
++        $this->zipCode = $zipCode;
++
++        return $this;
++    }
++
++    /**
++     * @return string
++     */
++    public function getDescription(): string
++    {
++        return $this->description;
++    }
++
++    /**
++     * @param string $description
++     *
++     * @return self
++     */
++    public function setDescription(string $description): self
++    {
++        $this->description = $description;
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Command/BulkDeleteTaxRuleCommand.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/BulkDeleteTaxRuleCommand.php
+new file mode 100644
+index 0000000000000..167cba0e42988
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/BulkDeleteTaxRuleCommand.php
+@@ -0,0 +1,64 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Command responsible for bulk deletion of tax rules within a group
++ */
++class BulkDeleteTaxRuleCommand
++{
++    /**
++     * @var TaxRulesGroupId
++     */
++    private TaxRulesGroupId $taxRulesGroupId;
++
++    /**
++     * @var TaxRuleId[]
++     */
++    private array $taxRuleIds;
++
++    /**
++     * @param int $taxRulesGroupId
++     * @param int[] $taxRuleIds
++     */
++    public function __construct(int $taxRulesGroupId, array $taxRuleIds)
++    {
++        $this->taxRulesGroupId = new TaxRulesGroupId($taxRulesGroupId);
++        $this->setTaxRuleIds($taxRuleIds);
++    }
++
++    /**
++     * @return TaxRulesGroupId
++     */
++    public function getTaxRulesGroupId(): TaxRulesGroupId
++    {
++        return $this->taxRulesGroupId;
++    }
++
++    /**
++     * @return TaxRuleId[]
++     */
++    public function getTaxRuleIds(): array
++    {
++        return $this->taxRuleIds;
++    }
++
++    /**
++     * @param int[] $taxRuleIds
++     */
++    private function setTaxRuleIds(array $taxRuleIds): void
++    {
++        foreach ($taxRuleIds as $taxRuleId) {
++            $this->taxRuleIds[] = new TaxRuleId($taxRuleId);
++        }
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Command/DeleteTaxRuleCommand.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/DeleteTaxRuleCommand.php
+new file mode 100644
+index 0000000000000..f7c5fef9e55bd
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/DeleteTaxRuleCommand.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++
++/**
++ * Command responsible for deleting a single tax rule
++ */
++class DeleteTaxRuleCommand
++{
++    /**
++     * @var TaxRuleId
++     */
++    private TaxRuleId $taxRuleId;
++
++    /**
++     * @param int $taxRuleId
++     */
++    public function __construct(int $taxRuleId)
++    {
++        $this->taxRuleId = new TaxRuleId($taxRuleId);
++    }
++
++    /**
++     * @return TaxRuleId
++     */
++    public function getTaxRuleId(): TaxRuleId
++    {
++        return $this->taxRuleId;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Command/EditTaxRuleCommand.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/EditTaxRuleCommand.php
+new file mode 100644
+index 0000000000000..7032f58565786
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Command/EditTaxRuleCommand.php
+@@ -0,0 +1,198 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++
++/**
++ * Command responsible for editing a tax rule
++ */
++class EditTaxRuleCommand
++{
++    /**
++     * @var TaxRuleId
++     */
++    private TaxRuleId $taxRuleId;
++
++    /**
++     * @var int|null
++     */
++    private ?int $countryId = null;
++
++    /**
++     * @var int|null
++     */
++    private ?int $stateId = null;
++
++    /**
++     * @var int|null
++     */
++    private ?int $taxId = null;
++
++    /**
++     * @var int|null
++     */
++    private ?int $behavior = null;
++
++    /**
++     * @var string|null
++     */
++    private ?string $zipCode = null;
++
++    /**
++     * @var string|null
++     */
++    private ?string $description = null;
++
++    /**
++     * @param int $taxRuleId
++     */
++    public function __construct(int $taxRuleId)
++    {
++        $this->taxRuleId = new TaxRuleId($taxRuleId);
++    }
++
++    /**
++     * @return TaxRuleId
++     */
++    public function getTaxRuleId(): TaxRuleId
++    {
++        return $this->taxRuleId;
++    }
++
++    /**
++     * @return int|null
++     */
++    public function getCountryId(): ?int
++    {
++        return $this->countryId;
++    }
++
++    /**
++     * @param int $countryId
++     *
++     * @return self
++     */
++    public function setCountryId(int $countryId): self
++    {
++        $this->countryId = $countryId;
++
++        return $this;
++    }
++
++    /**
++     * @return int|null
++     */
++    public function getStateId(): ?int
++    {
++        return $this->stateId;
++    }
++
++    /**
++     * @param int $stateId
++     *
++     * @return self
++     */
++    public function setStateId(int $stateId): self
++    {
++        $this->stateId = $stateId;
++
++        return $this;
++    }
++
++    /**
++     * @return int|null
++     */
++    public function getTaxId(): ?int
++    {
++        return $this->taxId;
++    }
++
++    /**
++     * @param int $taxId
++     *
++     * @return self
++     */
++    public function setTaxId(int $taxId): self
++    {
++        $this->taxId = $taxId;
++
++        return $this;
++    }
++
++    /**
++     * @return int|null
++     */
++    public function getBehavior(): ?int
++    {
++        return $this->behavior;
++    }
++
++    /**
++     * @param int $behavior
++     *
++     * @return self
++     *
++     * @throws TaxRuleConstraintException
++     */
++    public function setBehavior(int $behavior): self
++    {
++        if ($behavior < 0 || $behavior > 2) {
++            throw new TaxRuleConstraintException(
++                sprintf('Invalid tax rule behavior "%d". Expected value between 0 and 2.', $behavior),
++                TaxRuleConstraintException::INVALID_BEHAVIOR
++            );
++        }
++
++        $this->behavior = $behavior;
++
++        return $this;
++    }
++
++    /**
++     * @return string|null
++     */
++    public function getZipCode(): ?string
++    {
++        return $this->zipCode;
++    }
++
++    /**
++     * @param string $zipCode
++     *
++     * @return self
++     */
++    public function setZipCode(string $zipCode): self
++    {
++        $this->zipCode = $zipCode;
++
++        return $this;
++    }
++
++    /**
++     * @return string|null
++     */
++    public function getDescription(): ?string
++    {
++        return $this->description;
++    }
++
++    /**
++     * @param string $description
++     *
++     * @return self
++     */
++    public function setDescription(string $description): self
++    {
++        $this->description = $description;
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/AddTaxRuleHandlerInterface.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/AddTaxRuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..4e301cb7dd171
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/AddTaxRuleHandlerInterface.php
+@@ -0,0 +1,25 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\AddTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult\AddTaxRuleResult;
++
++/**
++ * Defines contract for adding a tax rule
++ */
++interface AddTaxRuleHandlerInterface
++{
++    /**
++     * @param AddTaxRuleCommand $command
++     *
++     * @return AddTaxRuleResult
++     */
++    public function handle(AddTaxRuleCommand $command): AddTaxRuleResult;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/BulkDeleteTaxRuleHandlerInterface.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/BulkDeleteTaxRuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..34511f9ea9d5d
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/BulkDeleteTaxRuleHandlerInterface.php
+@@ -0,0 +1,22 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\BulkDeleteTaxRuleCommand;
++
++/**
++ * Defines contract for bulk deleting tax rules
++ */
++interface BulkDeleteTaxRuleHandlerInterface
++{
++    /**
++     * @param BulkDeleteTaxRuleCommand $command
++     */
++    public function handle(BulkDeleteTaxRuleCommand $command): void;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/DeleteTaxRuleHandlerInterface.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/DeleteTaxRuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..c44480087ee18
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/DeleteTaxRuleHandlerInterface.php
+@@ -0,0 +1,22 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\DeleteTaxRuleCommand;
++
++/**
++ * Defines contract for deleting a tax rule
++ */
++interface DeleteTaxRuleHandlerInterface
++{
++    /**
++     * @param DeleteTaxRuleCommand $command
++     */
++    public function handle(DeleteTaxRuleCommand $command): void;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/EditTaxRuleHandlerInterface.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/EditTaxRuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..a8d034245253a
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandHandler/EditTaxRuleHandlerInterface.php
+@@ -0,0 +1,22 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\EditTaxRuleCommand;
++
++/**
++ * Defines contract for editing a tax rule
++ */
++interface EditTaxRuleHandlerInterface
++{
++    /**
++     * @param EditTaxRuleCommand $command
++     */
++    public function handle(EditTaxRuleCommand $command): void;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php
+new file mode 100644
+index 0000000000000..1a777e8602407
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Result of adding a tax rule.
++ * Contains the tax rules group id which may have changed due to historization.
++ */
++class AddTaxRuleResult
++{
++    /**
++     * @var TaxRulesGroupId
++     */
++    private TaxRulesGroupId $taxRulesGroupId;
++
++    /**
++     * @param TaxRulesGroupId $taxRulesGroupId the (potentially new) group id after historization
++     */
++    public function __construct(TaxRulesGroupId $taxRulesGroupId)
++    {
++        $this->taxRulesGroupId = $taxRulesGroupId;
++    }
++
++    /**
++     * @return TaxRulesGroupId
++     */
++    public function getTaxRulesGroupId(): TaxRulesGroupId
++    {
++        return $this->taxRulesGroupId;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotAddTaxRuleException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotAddTaxRuleException.php
+new file mode 100644
+index 0000000000000..edfd3e3ad6db6
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotAddTaxRuleException.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++/**
++ * Thrown on failure to add a tax rule
++ */
++class CannotAddTaxRuleException extends TaxRuleException
++{
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotBulkDeleteTaxRuleException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotBulkDeleteTaxRuleException.php
+new file mode 100644
+index 0000000000000..c17c0a563bcdb
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotBulkDeleteTaxRuleException.php
+@@ -0,0 +1,42 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++use Throwable;
++
++/**
++ * Thrown on failure to delete all selected tax rules
++ */
++class CannotBulkDeleteTaxRuleException extends TaxRuleException
++{
++    /**
++     * @var int[]
++     */
++    private array $taxRuleIds;
++
++    /**
++     * @param int[] $taxRuleIds
++     * @param string $message
++     * @param int $code
++     * @param Throwable|null $previous
++     */
++    public function __construct(array $taxRuleIds, string $message = '', int $code = 0, ?Throwable $previous = null)
++    {
++        parent::__construct($message, $code, $previous);
++        $this->taxRuleIds = $taxRuleIds;
++    }
++
++    /**
++     * @return int[]
++     */
++    public function getTaxRuleIds(): array
++    {
++        return $this->taxRuleIds;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotDeleteTaxRuleException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotDeleteTaxRuleException.php
+new file mode 100644
+index 0000000000000..be93b4f49669c
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotDeleteTaxRuleException.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++/**
++ * Thrown on failure to delete a tax rule
++ */
++class CannotDeleteTaxRuleException extends TaxRuleException
++{
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotUpdateTaxRuleException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotUpdateTaxRuleException.php
+new file mode 100644
+index 0000000000000..f04afacaf386b
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/CannotUpdateTaxRuleException.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++/**
++ * Thrown on failure to update a tax rule
++ */
++class CannotUpdateTaxRuleException extends TaxRuleException
++{
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleConstraintException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleConstraintException.php
+new file mode 100644
+index 0000000000000..8300c4193c01a
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleConstraintException.php
+@@ -0,0 +1,40 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++/**
++ * Thrown when tax rule constraint is violated
++ */
++class TaxRuleConstraintException extends TaxRuleException
++{
++    /**
++     * Thrown when provided tax rule id value is not valid
++     */
++    public const INVALID_ID = 1;
++
++    /**
++     * Thrown when provided country id value is not valid
++     */
++    public const INVALID_COUNTRY_ID = 2;
++
++    /**
++     * Thrown when provided tax id value is not valid
++     */
++    public const INVALID_TAX_ID = 3;
++
++    /**
++     * Thrown when provided behavior value is not valid
++     */
++    public const INVALID_BEHAVIOR = 4;
++
++    /**
++     * Thrown when provided zipcode value is not valid
++     */
++    public const INVALID_ZIPCODE = 5;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleException.php
+new file mode 100644
+index 0000000000000..749835cad4e60
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleException.php
+@@ -0,0 +1,18 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Exception\TaxRulesGroupException;
++
++/**
++ * Base exception for tax rule subdomain
++ */
++class TaxRuleException extends TaxRulesGroupException
++{
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleNotFoundException.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleNotFoundException.php
+new file mode 100644
+index 0000000000000..48576ae365d5c
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Exception/TaxRuleNotFoundException.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception;
++
++/**
++ * Thrown on failure to find existing tax rule
++ */
++class TaxRuleNotFoundException extends TaxRuleException
++{
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleForEditing.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleForEditing.php
+new file mode 100644
+index 0000000000000..f1ce27c0d04b8
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleForEditing.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++
++/**
++ * Query to get tax rule data for editing
++ */
++class GetTaxRuleForEditing
++{
++    /**
++     * @var TaxRuleId
++     */
++    private TaxRuleId $taxRuleId;
++
++    /**
++     * @param int $taxRuleId
++     */
++    public function __construct(int $taxRuleId)
++    {
++        $this->taxRuleId = new TaxRuleId($taxRuleId);
++    }
++
++    /**
++     * @return TaxRuleId
++     */
++    public function getTaxRuleId(): TaxRuleId
++    {
++        return $this->taxRuleId;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/QueryHandler/GetTaxRuleForEditingHandlerInterface.php b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryHandler/GetTaxRuleForEditingHandlerInterface.php
+new file mode 100644
+index 0000000000000..ca346a27ef77d
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryHandler/GetTaxRuleForEditingHandlerInterface.php
+@@ -0,0 +1,25 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
++
++/**
++ * Defines contract for getting tax rule data for editing
++ */
++interface GetTaxRuleForEditingHandlerInterface
++{
++    /**
++     * @param GetTaxRuleForEditing $query
++     *
++     * @return EditableTaxRule
++     */
++    public function handle(GetTaxRuleForEditing $query): EditableTaxRule;
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/EditableTaxRule.php b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/EditableTaxRule.php
+new file mode 100644
+index 0000000000000..d1467e36382ac
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/EditableTaxRule.php
+@@ -0,0 +1,157 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Transfers tax rule data for editing
++ */
++class EditableTaxRule
++{
++    /**
++     * @var TaxRuleId
++     */
++    private TaxRuleId $taxRuleId;
++
++    /**
++     * @var TaxRulesGroupId
++     */
++    private TaxRulesGroupId $taxRulesGroupId;
++
++    /**
++     * @var int
++     */
++    private int $countryId;
++
++    /**
++     * @var int
++     */
++    private int $stateId;
++
++    /**
++     * @var string
++     */
++    private string $zipcodeFrom;
++
++    /**
++     * @var string
++     */
++    private string $zipcodeTo;
++
++    /**
++     * @var int
++     */
++    private int $taxId;
++
++    /**
++     * @var int
++     */
++    private int $behavior;
++
++    /**
++     * @var string
++     */
++    private string $description;
++
++    public function __construct(
++        TaxRuleId $taxRuleId,
++        TaxRulesGroupId $taxRulesGroupId,
++        int $countryId,
++        int $stateId,
++        string $zipcodeFrom,
++        string $zipcodeTo,
++        int $taxId,
++        int $behavior,
++        string $description
++    ) {
++        $this->taxRuleId = $taxRuleId;
++        $this->taxRulesGroupId = $taxRulesGroupId;
++        $this->countryId = $countryId;
++        $this->stateId = $stateId;
++        $this->zipcodeFrom = $zipcodeFrom;
++        $this->zipcodeTo = $zipcodeTo;
++        $this->taxId = $taxId;
++        $this->behavior = $behavior;
++        $this->description = $description;
++    }
++
++    /**
++     * @return TaxRuleId
++     */
++    public function getTaxRuleId(): TaxRuleId
++    {
++        return $this->taxRuleId;
++    }
++
++    /**
++     * @return TaxRulesGroupId
++     */
++    public function getTaxRulesGroupId(): TaxRulesGroupId
++    {
++        return $this->taxRulesGroupId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getCountryId(): int
++    {
++        return $this->countryId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getStateId(): int
++    {
++        return $this->stateId;
++    }
++
++    /**
++     * @return string
++     */
++    public function getZipcodeFrom(): string
++    {
++        return $this->zipcodeFrom;
++    }
++
++    /**
++     * @return string
++     */
++    public function getZipcodeTo(): string
++    {
++        return $this->zipcodeTo;
++    }
++
++    /**
++     * @return int
++     */
++    public function getTaxId(): int
++    {
++        return $this->taxId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getBehavior(): int
++    {
++        return $this->behavior;
++    }
++
++    /**
++     * @return string
++     */
++    public function getDescription(): string
++    {
++        return $this->description;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/ValueObject/TaxRuleId.php b/src/Core/Domain/TaxRulesGroup/TaxRule/ValueObject/TaxRuleId.php
+new file mode 100644
+index 0000000000000..f98051b3e8d60
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/ValueObject/TaxRuleId.php
+@@ -0,0 +1,56 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleConstraintException;
++
++/**
++ * Provides tax rule identity
++ */
++class TaxRuleId
++{
++    /**
++     * @var int
++     */
++    private int $id;
++
++    /**
++     * @param int $id
++     *
++     * @throws TaxRuleConstraintException
++     */
++    public function __construct(int $id)
++    {
++        $this->assertPositiveInt($id);
++        $this->id = $id;
++    }
++
++    /**
++     * @return int
++     */
++    public function getValue(): int
++    {
++        return $this->id;
++    }
++
++    /**
++     * @param int $value
++     *
++     * @throws TaxRuleConstraintException
++     */
++    private function assertPositiveInt(int $value): void
++    {
++        if (0 >= $value) {
++            throw new TaxRuleConstraintException(
++                sprintf('Invalid tax rule id "%s".', var_export($value, true)),
++                TaxRuleConstraintException::INVALID_ID
++            );
++        }
++    }
++}
+diff --git a/src/Core/Form/ChoiceProvider/TaxByIdChoiceProvider.php b/src/Core/Form/ChoiceProvider/TaxByIdChoiceProvider.php
+new file mode 100644
+index 0000000000000..a6951858eeaaa
+--- /dev/null
++++ b/src/Core/Form/ChoiceProvider/TaxByIdChoiceProvider.php
+@@ -0,0 +1,51 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\ChoiceProvider;
++
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
++
++/**
++ * Provides individual tax choices (id => "name (rate%)").
++ */
++final class TaxByIdChoiceProvider implements FormChoiceProviderInterface
++{
++    public function __construct(
++        private readonly Connection $connection,
++        private readonly string $dbPrefix,
++        private readonly int $langId,
++    ) {
++    }
++
++    /**
++     * @return array<string, int>
++     */
++    public function getChoices(): array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('t.id_tax', 'tl.name', 't.rate')
++            ->from($this->dbPrefix . 'tax', 't')
++            ->innerJoin('t', $this->dbPrefix . 'tax_lang', 'tl', 't.id_tax = tl.id_tax AND tl.id_lang = :langId')
++            ->where('t.active = 1')
++            ->setParameter('langId', $this->langId)
++            ->orderBy('tl.name', 'ASC')
++        ;
++
++        $taxes = $qb->executeQuery()->fetchAllAssociative();
++        $choices = [];
++
++        foreach ($taxes as $tax) {
++            $label = sprintf('%s (%s%%)', $tax['name'], $tax['rate']);
++            $choices[$label] = (int) $tax['id_tax'];
++        }
++
++        return $choices;
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/TaxRuleFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/TaxRuleFormDataHandler.php
+new file mode 100644
+index 0000000000000..05e30e172f66e
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataHandler/TaxRuleFormDataHandler.php
+@@ -0,0 +1,89 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\AddTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\EditTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult\AddTaxRuleResult;
++
++/**
++ * Handles submitted tax rule form data
++ */
++class TaxRuleFormDataHandler implements FormDataHandlerInterface
++{
++    public function __construct(
++        private readonly CommandBusInterface $commandBus,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function create(array $data)
++    {
++        $command = new AddTaxRuleCommand(
++            (int) $data['tax_rules_group_id'],
++            (int) $data['country'],
++            (int) $data['tax']
++        );
++
++        if (!empty($data['state'])) {
++            $stateIds = is_array($data['state']) ? array_map('intval', $data['state']) : [(int) $data['state']];
++            $command->setStateIds($stateIds);
++        }
++
++        if (array_key_exists('zipcode', $data)) {
++            $command->setZipCode((string) ($data['zipcode'] ?? ''));
++        }
++
++        if (array_key_exists('behavior', $data)) {
++            $command->setBehavior((int) $data['behavior']);
++        }
++
++        if (array_key_exists('description', $data)) {
++            $command->setDescription((string) ($data['description'] ?? ''));
++        }
++
++        /** @var AddTaxRuleResult $result */
++        $result = $this->commandBus->handle($command);
++
++        // Return the (potentially new) group id after historization
++        return $result->getTaxRulesGroupId()->getValue();
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function update($id, array $data)
++    {
++        $command = new EditTaxRuleCommand((int) $id);
++
++        if (array_key_exists('country', $data)) {
++            $command->setCountryId((int) $data['country']);
++        }
++        if (array_key_exists('state', $data)) {
++            $command->setStateId((int) ($data['state'] ?? 0));
++        }
++        if (array_key_exists('zipcode', $data)) {
++            $command->setZipCode((string) ($data['zipcode'] ?? ''));
++        }
++        if (array_key_exists('behavior', $data)) {
++            $command->setBehavior((int) $data['behavior']);
++        }
++        if (array_key_exists('tax', $data)) {
++            $command->setTaxId((int) $data['tax']);
++        }
++        if (array_key_exists('description', $data)) {
++            $command->setDescription((string) ($data['description'] ?? ''));
++        }
++
++        $this->commandBus->handle($command);
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/TaxRuleFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/TaxRuleFormDataProvider.php
+new file mode 100644
+index 0000000000000..2160fcb10463a
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataProvider/TaxRuleFormDataProvider.php
+@@ -0,0 +1,69 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
++
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
++
++/**
++ * Provides data for tax rule add/edit form.
++ */
++class TaxRuleFormDataProvider implements FormDataProviderInterface
++{
++    public function __construct(
++        private readonly CommandBusInterface $queryBus,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getData($id): array
++    {
++        /** @var EditableTaxRule $editableTaxRule */
++        $editableTaxRule = $this->queryBus->handle(new GetTaxRuleForEditing($id));
++
++        $from = $editableTaxRule->getZipcodeFrom();
++        $to = $editableTaxRule->getZipcodeTo();
++
++        $zipcode = '';
++        if ($from !== '' && $from !== '0') {
++            $zipcode = $from;
++            if ($to !== '' && $to !== '0') {
++                $zipcode .= '-' . $to;
++            }
++        }
++
++        return [
++            'country' => $editableTaxRule->getCountryId(),
++            'state' => $editableTaxRule->getStateId(),
++            'zipcode' => $zipcode,
++            'behavior' => $editableTaxRule->getBehavior(),
++            'tax' => $editableTaxRule->getTaxId(),
++            'description' => $editableTaxRule->getDescription(),
++        ];
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getDefaultData(): array
++    {
++        return [
++            'tax_rules_group_id' => 0,
++            'country' => 0,
++            'state' => null,
++            'zipcode' => '',
++            'behavior' => 0,
++            'tax' => 0,
++            'description' => '',
++        ];
++    }
++}
+diff --git a/src/Core/Grid/Definition/Factory/TaxRuleGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/TaxRuleGridDefinitionFactory.php
+index 7a60e1a22693b..393a6658cae82 100644
+--- a/src/Core/Grid/Definition/Factory/TaxRuleGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/TaxRuleGridDefinitionFactory.php
+@@ -8,14 +8,25 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Grid\Definition\Factory;
+ 
++use PrestaShop\PrestaShop\Core\Domain\TaxRule\TaxRuleSettings;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\BulkActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\GridActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Row\RowActionCollection;
++use PrestaShop\PrestaShop\Core\Grid\Action\Row\Type\LinkRowAction;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Type\SimpleGridAction;
+ use PrestaShop\PrestaShop\Core\Grid\Column\ColumnCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\BulkActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\DataColumn;
++use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
++use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
++use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollectionInterface;
++use PrestaShopBundle\Form\Admin\Type\SearchAndResetType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Contracts\Service\Attribute\Required;
+ 
+ /**
+  * Defines tax rules grid
+@@ -27,6 +38,14 @@ class TaxRuleGridDefinitionFactory extends AbstractFilterableGridDefinitionFacto
+ 
+     public const GRID_ID = 'tax_rules';
+ 
++    private RequestStack $requestStack;
++
++    #[Required]
++    public function setRequestStack(RequestStack $requestStack): void
++    {
++        $this->requestStack = $requestStack;
++    }
++
+     /**
+      * {@inheritdoc}
+      */
+@@ -101,30 +120,130 @@ protected function getColumns()
+                 (new ActionColumn('actions'))
+                     ->setName($this->trans('Actions', [], 'Admin.Global'))
+                     ->setOptions([
+-                        'actions' => (new RowActionCollection())
+-                        /*
+-                            ->add(
+-                                (new LinkRowAction('edit'))
+-                                    ->setName($this->trans('Edit', [], 'Admin.Actions'))
+-                                    ->setIcon('edit')
+-                                    ->setOptions([
+-                                        'route' => 'admin_tax_rule_edit',
+-                                        'route_param_name' => 'taxRuleId',
+-                                        'route_param_field' => 'id_tax_rule',
+-                                    ])
+-                            )
+-                            ->add(
+-                                $this->buildDeleteAction(
+-                                    'admin_tax_rule_delete',
+-                                    'taxRuleId',
+-                                    'id_tax_rule',
+-                                    Request::METHOD_DELETE
+-                                )
+-                            )*/,
++                        'actions' => $this->getRowActions(),
+                     ])
+             );
+     }
+ 
++    /**
++     * {@inheritdoc}
++     */
++    protected function getFilters(): FilterCollectionInterface
++    {
++        $taxRulesGroupId = $this->getTaxRulesGroupIdFromRequest();
++
++        return (new FilterCollection())
++            ->add(
++                (new Filter('country', TextType::class))
++                    ->setAssociatedColumn('country')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search country', [], 'Admin.Actions'),
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('state', TextType::class))
++                    ->setAssociatedColumn('state')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search state', [], 'Admin.Actions'),
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('zipcode', TextType::class))
++                    ->setAssociatedColumn('zipcode')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search zip code', [], 'Admin.Actions'),
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('behavior', ChoiceType::class))
++                    ->setAssociatedColumn('behavior')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'placeholder' => $this->trans('All', [], 'Admin.Global'),
++                        'choices' => [
++                            $this->trans('This tax only', [], 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_TAX_ONLY,
++                            $this->trans('Combine', [], 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_COMBINE,
++                            $this->trans('One after another', [], 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_ONE_AFTER_ANOTHER,
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('rate', TextType::class))
++                    ->setAssociatedColumn('rate')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search rate', [], 'Admin.Actions'),
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('description', TextType::class))
++                    ->setAssociatedColumn('description')
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search description', [], 'Admin.Actions'),
++                        ],
++                    ])
++            )
++            ->add(
++                (new Filter('actions', SearchAndResetType::class))
++                    ->setAssociatedColumn('actions')
++                    ->setTypeOptions([
++                        'reset_route' => 'admin_common_reset_search_by_filter_id',
++                        'reset_route_params' => [
++                            'filterId' => self::GRID_ID,
++                        ],
++                        'redirect_route' => 'admin_tax_rules_groups_edit',
++                        'redirect_route_params' => [
++                            'taxRulesGroupId' => $taxRulesGroupId,
++                        ],
++                    ])
++            );
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    protected function getRowActions()
++    {
++        return (new RowActionCollection())
++            ->add(
++                (new LinkRowAction('edit'))
++                    ->setName($this->trans('Edit', [], 'Admin.Actions'))
++                    ->setIcon('edit')
++                    ->setOptions([
++                        'route' => 'admin_tax_rules_edit',
++                        'route_param_name' => 'taxRuleId',
++                        'route_param_field' => 'id_tax_rule',
++                        'extra_route_params' => [
++                            'taxRulesGroupId' => 'id_tax_rules_group',
++                        ],
++                    ])
++            )
++            ->add(
++                $this->buildDeleteAction(
++                    'admin_tax_rules_delete',
++                    'taxRuleId',
++                    'id_tax_rule',
++                    Request::METHOD_DELETE,
++                    [
++                        'taxRulesGroupId' => 'id_tax_rules_group',
++                    ]
++                )
++            );
++    }
++
+     /**
+      * {@inheritdoc}
+      */
+@@ -153,11 +272,20 @@ protected function getGridActions()
+      */
+     protected function getBulkActions()
+     {
+-        return new BulkActionCollection()
+-            /*
++        return (new BulkActionCollection())
+             ->add(
+                 $this->buildBulkDeleteAction('admin_tax_rules_bulk_delete')
+-            )
+-            */;
++            );
++    }
++
++    private function getTaxRulesGroupIdFromRequest(): int
++    {
++        $request = $this->requestStack->getCurrentRequest();
++
++        if (null === $request) {
++            return 0;
++        }
++
++        return (int) $request->attributes->get('taxRulesGroupId', 0);
+     }
+ }
+diff --git a/src/Core/Grid/Query/TaxRuleQueryBuilder.php b/src/Core/Grid/Query/TaxRuleQueryBuilder.php
+index ad91f0a3ab375..b87117014bed3 100644
+--- a/src/Core/Grid/Query/TaxRuleQueryBuilder.php
++++ b/src/Core/Grid/Query/TaxRuleQueryBuilder.php
+@@ -50,6 +50,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+         $qb
+             ->select([
+                 'tr.`id_tax_rule`',
++                'tr.`id_tax_rules_group`',
+                 'tr.`description`',
+                 'cl.`name` AS country_name',
+                 'IFNULL(s.`name`, \'--\') AS state_name',
+@@ -89,7 +90,7 @@ public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria)
+      */
+     private function getQueryBuilder(array $filters): QueryBuilder
+     {
+-        return $this->connection
++        $qb = $this->connection
+             ->createQueryBuilder()
+             ->from($this->dbPrefix . 'tax_rule', 'tr')
+             ->leftJoin(
+@@ -119,5 +120,51 @@ private function getQueryBuilder(array $filters): QueryBuilder
+             ->andWhere('tr.`id_tax_rules_group` = :idTaxRulesGroup')
+             ->setParameter('idLang', $this->languageContext->getId())
+             ->setParameter('idTaxRulesGroup', $filters['taxRulesGroupId']);
++
++        $this->applyFilters($qb, $filters);
++
++        return $qb;
++    }
++
++    /**
++     * @param QueryBuilder $qb
++     * @param array $filters
++     */
++    private function applyFilters(QueryBuilder $qb, array $filters): void
++    {
++        $allowedFilters = ['country', 'state', 'zipcode', 'behavior', 'rate', 'description'];
++
++        foreach ($filters as $filterName => $filterValue) {
++            if (!in_array($filterName, $allowedFilters) || ($filterValue === '' || $filterValue === null)) {
++                continue;
++            }
++
++            switch ($filterName) {
++                case 'country':
++                    $qb->andWhere('cl.`name` LIKE :country');
++                    $qb->setParameter('country', '%' . $filterValue . '%');
++                    break;
++                case 'state':
++                    $qb->andWhere('s.`name` LIKE :state');
++                    $qb->setParameter('state', '%' . $filterValue . '%');
++                    break;
++                case 'zipcode':
++                    $qb->andWhere('(tr.`zipcode_from` LIKE :zipcode OR tr.`zipcode_to` LIKE :zipcode)');
++                    $qb->setParameter('zipcode', '%' . $filterValue . '%');
++                    break;
++                case 'behavior':
++                    $qb->andWhere('tr.`behavior` = :behavior');
++                    $qb->setParameter('behavior', (int) $filterValue);
++                    break;
++                case 'rate':
++                    $qb->andWhere('t.`rate` LIKE :rate');
++                    $qb->setParameter('rate', '%' . $filterValue . '%');
++                    break;
++                case 'description':
++                    $qb->andWhere('tr.`description` LIKE :description');
++                    $qb->setParameter('description', '%' . $filterValue . '%');
++                    break;
++            }
++        }
+     }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
+index 3968a449a7558..7f87fa44f1462 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
+@@ -20,14 +20,27 @@
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Exception\TaxRulesGroupNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Query\GetTaxRulesGroupForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\QueryResult\EditableTaxRulesGroup;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\BulkDeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\DeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotAddTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotBulkDeleteTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotDeleteTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\CannotUpdateTaxRuleException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\GridDefinitionFactoryInterface;
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\TaxRuleGridDefinitionFactory;
+ use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
+ use PrestaShop\PrestaShop\Core\Search\Filters\TaxRuleFilters;
+ use PrestaShop\PrestaShop\Core\Search\Filters\TaxRulesGroupFilters;
+ use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
+ use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\HttpFoundation\JsonResponse;
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+@@ -150,6 +163,232 @@ public function editAction(
+             'taxRulesGroupForm' => $taxRulesGroupForm->createView(),
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+             'taxRuleGrid' => $this->presentGrid($taxRuleGrid),
++            'taxRulesGroupId' => $taxRulesGroupId,
++            'layoutHeaderToolbarBtn' => $this->getTaxRuleToolbarButtons($taxRulesGroupId),
++        ]);
++    }
++
++    /**
++     * Returns states for a given country as JSON.
++     *
++     * @param int $countryId
++     *
++     * @return JsonResponse
++     */
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function getStatesForCountryAction(
++        int $countryId,
++        #[Autowire(service: 'doctrine.dbal.default_connection')]
++        \Doctrine\DBAL\Connection $connection,
++        #[Autowire(param: 'database_prefix')]
++        string $dbPrefix,
++    ): JsonResponse {
++        $qb = $connection->createQueryBuilder();
++        $states = $qb
++            ->select('s.id_state', 's.name')
++            ->from($dbPrefix . 'state', 's')
++            ->where('s.id_country = :countryId')
++            ->andWhere('s.active = 1')
++            ->setParameter('countryId', $countryId)
++            ->orderBy('s.name', 'ASC')
++            ->executeQuery()
++            ->fetchAllAssociative();
++
++        return new JsonResponse($states);
++    }
++
++    /**
++     * Handles tax rules grid search (filters).
++     *
++     * @param Request $request
++     * @param int $taxRulesGroupId
++     *
++     * @return RedirectResponse
++     */
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function searchTaxRulesAction(
++        Request $request,
++        int $taxRulesGroupId,
++        #[Autowire(service: 'PrestaShop\\PrestaShop\\Core\\Grid\\Definition\\Factory\\TaxRuleGridDefinitionFactory')]
++        GridDefinitionFactoryInterface $definitionFactory,
++    ): RedirectResponse {
++        return $this->buildSearchResponse(
++            $definitionFactory,
++            $request,
++            TaxRuleGridDefinitionFactory::GRID_ID,
++            'admin_tax_rules_groups_edit',
++            ['taxRulesGroupId']
++        );
++    }
++
++    /**
++     * Creates a tax rule within a group.
++     *
++     * @param Request $request
++     * @param int $taxRulesGroupId
++     *
++     * @return Response
++     */
++    #[AdminSecurity("is_granted('create', request.get('_legacy_controller'))", redirectRoute: 'admin_tax_rules_groups_index')]
++    public function createTaxRuleAction(
++        Request $request,
++        int $taxRulesGroupId,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.tax_rule_form_builder')]
++        FormBuilderInterface $formBuilder,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.handler.tax_rule_form_handler')]
++        FormHandlerInterface $formHandler
++    ): Response {
++        $isLiteDisplaying = $request->query->has('liteDisplaying');
++        $taxRuleForm = $formBuilder->getForm(['tax_rules_group_id' => $taxRulesGroupId]);
++        $taxRuleForm->handleRequest($request);
++
++        try {
++            $handlerResult = $formHandler->handle($taxRuleForm);
++            if ($handlerResult->isSubmitted() && $handlerResult->isValid()) {
++                $this->addFlash('success', $this->trans('Successful creation', [], 'Admin.Notifications.Success'));
++
++                if ($isLiteDisplaying) {
++                    return new Response('<div data-modal-close="true"></div>');
++                }
++
++                $newGroupId = $handlerResult->getIdentifiableObjectId();
++
++                return $this->redirectToRoute('admin_tax_rules_groups_edit', [
++                    'taxRulesGroupId' => $newGroupId,
++                ]);
++            }
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->render('@PrestaShop/Admin/Improve/International/TaxRulesGroup/create_tax_rule.html.twig', [
++            'enableSidebar' => true,
++            'layoutTitle' => $this->trans('New tax rule', [], 'Admin.Navigation.Menu'),
++            'taxRuleForm' => $taxRuleForm->createView(),
++            'taxRulesGroupId' => $taxRulesGroupId,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'lightDisplay' => $isLiteDisplaying,
++        ]);
++    }
++
++    /**
++     * Edits a tax rule.
++     *
++     * @param Request $request
++     * @param int $taxRulesGroupId
++     * @param int $taxRuleId
++     *
++     * @return Response
++     */
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_tax_rules_groups_index')]
++    public function editTaxRuleAction(
++        Request $request,
++        int $taxRulesGroupId,
++        int $taxRuleId,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.tax_rule_form_builder')]
++        FormBuilderInterface $formBuilder,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.handler.tax_rule_form_handler')]
++        FormHandlerInterface $formHandler
++    ): Response {
++        $isLiteDisplaying = $request->query->has('liteDisplaying');
++
++        try {
++            $taxRuleForm = $formBuilder->getFormFor($taxRuleId, [], [
++                'is_edit' => true,
++            ]);
++            $taxRuleForm->handleRequest($request);
++            $result = $formHandler->handleFor($taxRuleId, $taxRuleForm);
++            if ($result->isSubmitted() && $result->isValid()) {
++                $this->addFlash('success', $this->trans('Update successful', [], 'Admin.Notifications.Success'));
++
++                if ($isLiteDisplaying) {
++                    return new Response('<div data-modal-close="true"></div>');
++                }
++
++                return $this->redirectToRoute('admin_tax_rules_groups_edit', [
++                    'taxRulesGroupId' => $taxRulesGroupId,
++                ]);
++            }
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++
++            return $this->redirectToRoute('admin_tax_rules_groups_edit', [
++                'taxRulesGroupId' => $taxRulesGroupId,
++            ]);
++        }
++
++        return $this->render('@PrestaShop/Admin/Improve/International/TaxRulesGroup/edit_tax_rule.html.twig', [
++            'enableSidebar' => true,
++            'layoutTitle' => $this->trans('Edit tax rule', [], 'Admin.Navigation.Menu'),
++            'taxRuleForm' => $taxRuleForm->createView(),
++            'taxRulesGroupId' => $taxRulesGroupId,
++            'taxRuleId' => $taxRuleId,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'lightDisplay' => $isLiteDisplaying,
++        ]);
++    }
++
++    /**
++     * Deletes a single tax rule.
++     *
++     * @param int $taxRulesGroupId
++     * @param int $taxRuleId
++     *
++     * @return RedirectResponse
++     */
++    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_tax_rules_groups_index')]
++    public function deleteTaxRuleAction(int $taxRulesGroupId, int $taxRuleId): RedirectResponse
++    {
++        try {
++            $this->dispatchCommand(new DeleteTaxRuleCommand($taxRuleId));
++            $this->addFlash('success', $this->trans('Successful deletion', [], 'Admin.Notifications.Success'));
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->redirectToRoute('admin_tax_rules_groups_edit', [
++            'taxRulesGroupId' => $taxRulesGroupId,
++        ]);
++    }
++
++    /**
++     * Bulk deletes tax rules within a group.
++     *
++     * @param Request $request
++     *
++     * @return RedirectResponse
++     */
++    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_tax_rules_groups_index')]
++    public function bulkDeleteTaxRulesAction(Request $request): RedirectResponse
++    {
++        $taxRuleIds = $this->getBulkTaxRulesFromRequest($request);
++
++        // Resolve the group ID from the first tax rule
++        $taxRulesGroupId = 0;
++        if (!empty($taxRuleIds)) {
++            try {
++                /** @var EditableTaxRule $editableTaxRule */
++                $editableTaxRule = $this->dispatchQuery(
++                    new GetTaxRuleForEditing($taxRuleIds[0])
++                );
++                $taxRulesGroupId = $editableTaxRule->getTaxRulesGroupId()->getValue();
++            } catch (Exception) {
++                // Fallback: redirect to index if we can't determine the group
++                $this->addFlash('error', $this->trans('An error occurred while deleting this selection.', [], 'Admin.Notifications.Error'));
++
++                return $this->redirectToRoute('admin_tax_rules_groups_index');
++            }
++        }
++
++        try {
++            $this->dispatchCommand(new BulkDeleteTaxRuleCommand($taxRulesGroupId, $taxRuleIds));
++            $this->addFlash('success', $this->trans('Successful deletion', [], 'Admin.Notifications.Success'));
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
++        }
++
++        return $this->redirectToRoute('admin_tax_rules_groups_edit', [
++            'taxRulesGroupId' => $taxRulesGroupId,
+         ]);
+     }
+ 
+@@ -295,19 +534,45 @@ private function getBulkTaxRulesGroupFromRequest(Request $request): array
+     }
+ 
+     /**
++     * @param Request $request
++     *
+      * @return array
+      */
+-    private function getTaxRulesGroupToolbarButtons(): array
++    private function getBulkTaxRulesFromRequest(Request $request): array
+     {
+-        $toolbarButtons = [];
++        $taxRuleIds = $request->request->all('tax_rules_bulk');
++
++        return array_map('intval', $taxRuleIds);
++    }
+ 
+-        $toolbarButtons['add'] = [
+-            'href' => $this->generateUrl('admin_tax_rules_groups_create'),
+-            'desc' => $this->trans('Add new tax rule', [], 'Admin.International.Feature'),
+-            'icon' => 'add_circle_outline',
++    /**
++     * @return array
++     */
++    private function getTaxRulesGroupToolbarButtons(): array
++    {
++        return [
++            'add' => [
++                'href' => $this->generateUrl('admin_tax_rules_groups_create'),
++                'desc' => $this->trans('Add new tax rules group', [], 'Admin.International.Feature'),
++                'icon' => 'add_circle_outline',
++            ],
+         ];
++    }
+ 
+-        return $toolbarButtons;
++    /**
++     * @param int $taxRulesGroupId
++     *
++     * @return array
++     */
++    private function getTaxRuleToolbarButtons(int $taxRulesGroupId): array
++    {
++        return [
++            'add' => [
++                'href' => $this->generateUrl('admin_tax_rules_create', ['taxRulesGroupId' => $taxRulesGroupId]),
++                'desc' => $this->trans('Add new tax rule', [], 'Admin.International.Feature'),
++                'icon' => 'add_circle_outline',
++            ],
++        ];
+     }
+ 
+     /**
+@@ -362,6 +627,48 @@ private function getErrorMessages(?Exception $e = null): array
+                     'Admin.Notifications.Error'
+                 ),
+             ],
++            // TaxRule exceptions
++            TaxRuleNotFoundException::class => $this->trans(
++                'The object cannot be loaded (or found).',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotAddTaxRuleException::class => $this->trans(
++                'An error occurred while creating an object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotUpdateTaxRuleException::class => $this->trans(
++                'An error occurred while updating an object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotDeleteTaxRuleException::class => $this->trans(
++                'An error occurred while deleting the object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotBulkDeleteTaxRuleException::class => sprintf(
++                '%s: %s',
++                $this->trans(
++                    'An error occurred while deleting this selection.',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                $e instanceof CannotBulkDeleteTaxRuleException ? implode(', ', $e->getTaxRuleIds()) : ''
++            ),
++            TaxRuleConstraintException::class => [
++                TaxRuleConstraintException::INVALID_ID => $this->trans(
++                    'The object cannot be loaded (the identifier is missing or invalid)',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                TaxRuleConstraintException::INVALID_ZIPCODE => $this->trans(
++                    'The Zip/Postal code is invalid.',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++            ],
+         ];
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRuleType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRuleType.php
+new file mode 100644
+index 0000000000000..b953d934073df
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRuleType.php
+@@ -0,0 +1,260 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Tax;
++
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Core\Domain\TaxRule\TaxRuleSettings;
++use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
++use PrestaShopBundle\Form\Admin\Type\CountryChoiceType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormEvent;
++use Symfony\Component\Form\FormEvents;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\Callback;
++use Symfony\Component\Validator\Constraints\Length;
++use Symfony\Component\Validator\Context\ExecutionContextInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++/**
++ * Form type for creating/editing a tax rule within a tax rules group
++ */
++class TaxRuleType extends TranslatorAwareType
++{
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++        private readonly FormChoiceProviderInterface $taxByIdChoiceProvider,
++        private readonly Connection $connection,
++        private readonly string $dbPrefix,
++    ) {
++        parent::__construct($translator, $locales);
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder
++            ->add('tax_rules_group_id', HiddenType::class)
++            ->add('country', CountryChoiceType::class, [
++                'label' => $this->trans('Country', 'Admin.Global'),
++                'required' => true,
++                'add_all_countries_option' => true,
++            ])
++            ->add('state', ChoiceType::class, [
++                'label' => $this->trans('State', 'Admin.Global'),
++                'required' => false,
++                'choices' => [],
++                'multiple' => false,
++                'placeholder' => $this->trans('All', 'Admin.Global'),
++            ])
++            ->add('zipcode', TextType::class, [
++                'label' => $this->trans('Zip/Postal code', 'Admin.Global'),
++                'required' => false,
++                'help' => $this->trans('You can define a range of Zip/Postal codes (e.g., 44000-44100) or simply use one Zip/Postal code.', 'Admin.International.Help'),
++                'attr' => [
++                    'placeholder' => $this->trans('e.g. 44000 or 44000-44100', 'Admin.International.Help'),
++                ],
++            ])
++            ->add('behavior', ChoiceType::class, [
++                'label' => $this->trans('Behavior', 'Admin.Global'),
++                'required' => true,
++                'choices' => [
++                    $this->trans('This tax only', 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_TAX_ONLY,
++                    $this->trans('Combine', 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_COMBINE,
++                    $this->trans('One after another', 'Admin.International.Feature') => TaxRuleSettings::BEHAVIOR_ONE_AFTER_ANOTHER,
++                ],
++            ])
++            ->add('tax', ChoiceType::class, [
++                'label' => $this->trans('Tax', 'Admin.Global'),
++                'required' => true,
++                'choices' => array_merge(
++                    [$this->trans('No Tax', 'Admin.International.Notification') => 0],
++                    $this->taxByIdChoiceProvider->getChoices()
++                ),
++            ])
++            ->add('description', TextType::class, [
++                'label' => $this->trans('Description', 'Admin.Global'),
++                'required' => false,
++                'constraints' => [
++                    new Length([
++                        'max' => 100,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters.',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => 100]
++                        ),
++                    ]),
++                ],
++            ])
++        ;
++
++        $rebuildStateChoices = function (FormEvent $event): void {
++            $data = $event->getData();
++
++            // POST_SET_DATA: data is an array (from DataProvider), PRE_SUBMIT: data is raw form data
++            $countryId = (int) ($data['country'] ?? 0);
++
++            if ($countryId === 0) {
++                return;
++            }
++
++            $states = $this->getStatesForCountry($countryId);
++
++            if (empty($states)) {
++                return;
++            }
++
++            $event->getForm()->add('state', ChoiceType::class, [
++                'label' => $this->trans('State', 'Admin.Global'),
++                'required' => false,
++                'choices' => $states,
++                'multiple' => false,
++                'placeholder' => $this->trans('All', 'Admin.Global'),
++            ]);
++        };
++
++        // Load state choices on initial form render (edit mode with existing data)
++        $builder->addEventListener(FormEvents::POST_SET_DATA, $rebuildStateChoices);
++
++        // Rebuild state choices on submit so Symfony's ChoiceType validation accepts the dynamically loaded value
++        $builder->addEventListener(FormEvents::PRE_SUBMIT, $rebuildStateChoices);
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver->setDefaults([
++            'is_edit' => false,
++            'constraints' => [
++                new Callback([
++                    'callback' => [$this, 'validateZipCode'],
++                ]),
++            ],
++        ]);
++        $resolver->setAllowedTypes('is_edit', 'bool');
++    }
++
++    /**
++     * Validates the zip code against the selected country's format.
++     *
++     * @param array $data form data
++     * @param ExecutionContextInterface $context
++     */
++    public function validateZipCode(array $data, ExecutionContextInterface $context): void
++    {
++        $zipcode = $data['zipcode'] ?? null;
++
++        if (empty($zipcode)) {
++            return;
++        }
++
++        $countryId = (int) ($data['country'] ?? 0);
++
++        // "All countries" selected — skip per-country validation
++        if ($countryId === 0) {
++            return;
++        }
++
++        $country = $this->connection->createQueryBuilder()
++            ->select('c.need_zip_code', 'c.zip_code_format', 'c.iso_code', 'cl.name')
++            ->from($this->dbPrefix . 'country', 'c')
++            ->leftJoin('c', $this->dbPrefix . 'country_lang', 'cl', 'c.id_country = cl.id_country AND cl.id_lang = 1')
++            ->where('c.id_country = :countryId')
++            ->setParameter('countryId', $countryId)
++            ->executeQuery()
++            ->fetchAssociative();
++
++        if (!$country || !$country['need_zip_code'] || empty($country['zip_code_format'])) {
++            return;
++        }
++
++        // Parse range: "75000-75015" → ["75000", "75015"]
++        $codes = preg_split('/-/', $zipcode);
++
++        foreach ($codes as $code) {
++            $code = trim($code);
++
++            if ($code === '') {
++                continue;
++            }
++
++            if (!$this->matchesZipFormat($code, $country['zip_code_format'], $country['iso_code'])) {
++                $context->buildViolation(
++                    'The Zip/Postal code is invalid. It must be typed as follows: %format% for %country%.'
++                )
++                    ->atPath('zipcode')
++                    ->setParameter('%format%', $this->humanReadableFormat($country['zip_code_format'], $country['iso_code']))
++                    ->setParameter('%country%', $country['name'] ?? '')
++                    ->addViolation();
++
++                return;
++            }
++        }
++    }
++
++    /**
++     * Checks if a zip code matches the country's format pattern.
++     */
++    private function matchesZipFormat(string $zipCode, string $format, string $isoCode): bool
++    {
++        $zipRegexp = '/^' . $format . '$/ui';
++        $zipRegexp = str_replace('N', '[0-9]', $zipRegexp);
++        $zipRegexp = str_replace('L', '[a-zA-Z]', $zipRegexp);
++        $zipRegexp = str_replace('C', $isoCode, $zipRegexp);
++
++        return (bool) preg_match($zipRegexp, $zipCode);
++    }
++
++    /**
++     * Converts zip format pattern to human-readable example (N→0, L→A, C→ISO).
++     */
++    private function humanReadableFormat(string $format, string $isoCode): string
++    {
++        return str_replace(
++            ['N', 'L', 'C'],
++            ['0', 'A', $isoCode],
++            $format
++        );
++    }
++
++    /**
++     * Returns states for a country as [name => id] for ChoiceType.
++     *
++     * @param int $countryId
++     *
++     * @return array<string, int>
++     */
++    private function getStatesForCountry(int $countryId): array
++    {
++        $rows = $this->connection->createQueryBuilder()
++            ->select('s.id_state', 's.name')
++            ->from($this->dbPrefix . 'state', 's')
++            ->where('s.id_country = :countryId')
++            ->andWhere('s.active = 1')
++            ->setParameter('countryId', $countryId)
++            ->orderBy('s.name', 'ASC')
++            ->executeQuery()
++            ->fetchAllAssociative();
++
++        $choices = [];
++        foreach ($rows as $row) {
++            $choices[$row['name']] = (int) $row['id_state'];
++        }
++
++        return $choices;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
+index aae17a38df16f..bda823d4de96d 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
+@@ -92,3 +92,73 @@ admin_tax_rules_groups_bulk_delete:
+     _legacy_controller: AdminTaxRulesGroup
+     _legacy_link: AdminTaxRulesGroup:submitBulkdeletetax_rules_group
+     _legacy_feature_flag: tax_rules_group
++
++# Tax Rule routes (individual rules within a group)
++
++admin_tax_rules_states_for_country:
++  path: /tax-rules/states/{countryId}
++  methods: [ GET ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::getStatesForCountryAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup
++    _legacy_feature_flag: tax_rules_group
++  requirements:
++    countryId: \d+
++
++admin_tax_rules_search:
++  path: /{taxRulesGroupId}/tax-rules
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::searchTaxRulesAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup
++    _legacy_feature_flag: tax_rules_group
++  requirements:
++    taxRulesGroupId: \d+
++
++admin_tax_rules_create:
++  path: /{taxRulesGroupId}/tax-rules/new
++  methods: [ GET, POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::createTaxRuleAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup
++    _legacy_feature_flag: tax_rules_group
++  requirements:
++    taxRulesGroupId: \d+
++
++admin_tax_rules_edit:
++  path: /{taxRulesGroupId}/tax-rules/{taxRuleId}/edit
++  methods: [ GET, POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::editTaxRuleAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup
++    _legacy_feature_flag: tax_rules_group
++  requirements:
++    taxRulesGroupId: \d+
++    taxRuleId: \d+
++
++admin_tax_rules_delete:
++  path: /{taxRulesGroupId}/tax-rules/{taxRuleId}/delete
++  methods: [ POST, DELETE ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::deleteTaxRuleAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup:deletetax_rule
++    _legacy_feature_flag: tax_rules_group
++    _legacy_parameters:
++      id_tax_rule: taxRuleId
++  requirements:
++    taxRulesGroupId: \d+
++    taxRuleId: \d+
++
++admin_tax_rules_bulk_delete:
++  path: /tax-rules/bulk-delete
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::bulkDeleteTaxRulesAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup:submitBulkdeletetax_rule
++    _legacy_feature_flag: tax_rules_group
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml b/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
+index 88a218eebb042..5719d839e939b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
+@@ -37,3 +37,26 @@ services:
+       - '@PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Validate\TaxRulesGroupValidator'
+ 
+   PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Validate\TaxRulesGroupValidator: ~
++
++  # TaxRule handlers
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler\AddTaxRuleHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler\EditTaxRuleHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler\DeleteTaxRuleHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\CommandHandler\BulkDeleteTaxRuleHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\QueryHandler\GetTaxRuleForEditingHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository: ~
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 8b4756f146683..0045529aa2339 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -631,6 +631,13 @@ services:
+       $permissionChoices: '@=service("prestashop.core.form.choice_provider.permissions_choice_provider").getChoices()'
+ 
+   PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRulesGroupType:
++
++  PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRuleType:
++    arguments:
++      $taxByIdChoiceProvider: '@PrestaShop\PrestaShop\Core\Form\ChoiceProvider\TaxByIdChoiceProvider'
++      $connection: '@doctrine.dbal.default_connection'
++      $dbPrefix: '%database_prefix%'
++
+   PrestaShopBundle\Form\Admin\Type\FeatureChoiceType:
+     arguments:
+       $featureChoiceProvider: '@PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\FeaturesChoiceProvider'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+index 8307a63913b1d..2d1d6df8b7f56 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+@@ -9,6 +9,10 @@ services:
+   PrestaShop\PrestaShop\Core\Form\ChoiceProvider\:
+     resource: '../../../Core/Form/ChoiceProvider/*'
+ 
++  PrestaShop\PrestaShop\Core\Form\ChoiceProvider\TaxByIdChoiceProvider:
++    arguments:
++      $dbPrefix: '%database_prefix%'
++
+   # Todo, place this service into the correct place, one day
+   PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\ZoneByIdChoiceProvider: ~
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+index 3477b28f5ddf2..ea4549cfd372e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+@@ -316,6 +316,13 @@ services:
+       - 'PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRulesGroupType'
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\TaxRulesGroupFormDataProvider'
+ 
++  prestashop.core.form.identifiable_object.builder.tax_rule_form_builder:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
++    factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
++    arguments:
++      - 'PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRuleType'
++      - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\TaxRuleFormDataProvider'
++
+   prestashop.core.form.identifiable_object.builder.discount_form_builder:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+     factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+index 20044d4e273ab..ff8ea05f22493 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+@@ -271,6 +271,10 @@ services:
+     arguments:
+       - '@prestashop.core.command_bus'
+ 
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TaxRuleFormDataHandler:
++    arguments:
++      - '@prestashop.core.command_bus'
++
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\DiscountFormDataHandler:
+     autowire: true
+     public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+index 54d70f6fcb676..04de2778aa2a5 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+@@ -244,6 +244,10 @@ services:
+     arguments:
+       - '@prestashop.core.query_bus'
+ 
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\TaxRuleFormDataProvider:
++    arguments:
++      - '@prestashop.core.query_bus'
++
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\DiscountFormDataProvider:
+     autowire: true
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+index f98614f910853..9dbede22fe5c2 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+@@ -292,6 +292,12 @@ services:
+     arguments:
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TaxRulesGroupFormDataHandler'
+ 
++  prestashop.core.form.identifiable_object.handler.tax_rule_form_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
++    factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TaxRuleFormDataHandler'
++
+   prestashop.core.form.identifiable_object.handler.discount_form_handler:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
+     factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig
+new file mode 100644
+index 0000000000000..e3c9a6455e5ac
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig
+@@ -0,0 +1,35 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% form_theme taxRuleForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
++
++{{ form_start(taxRuleForm, {attr: {'data-states-url': path('admin_tax_rules_states_for_country', {countryId: 0})}}) }}
++<div class="card">
++  <h3 class="card-header">
++    <i class="material-icons">payments</i>
++    {{ 'Tax Rule'|trans({}, 'Admin.International.Feature') }}
++  </h3>
++
++  <div class="card-body">
++    <div class="form-wrapper">
++      {% block tax_rule_form_widget %}
++        {{ form_widget(taxRuleForm) }}
++      {% endblock %}
++    </div>
++  </div>
++
++  <div class="card-footer">
++    <div class="d-inline-flex">
++      <a href="{{ path('admin_tax_rules_groups_edit', {taxRulesGroupId: taxRulesGroupId}) }}" class="btn btn-outline-secondary cancel-btn">
++        {{ 'Cancel'|trans({}, 'Admin.Actions') }}
++      </a>
++    </div>
++    <div class="d-inline-flex float-right">
++      <button class="btn btn-primary">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++    </div>
++  </div>
++
++</div>
++{{ form_end(taxRuleForm) }}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_grid_panel.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_grid_panel.html.twig
+new file mode 100644
+index 0000000000000..87ed2e0e0d5bb
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_grid_panel.html.twig
+@@ -0,0 +1,111 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% set displayName = true %}
++{% if (grid.view_options.display_name is defined) %}
++    {% set displayName = grid.view_options.display_name %}
++{% endif %}
++
++<div class="card js-grid-panel" id="{{ grid.id }}_grid_panel">
++  {% block grid_panel_header %}
++    {% if displayName is not same as(false) or grid.actions.grid|length > 0 %}
++    <div class="card-header js-grid-header">
++      {% if displayName is not same as(false) %}
++        <h3 class="d-inline-block card-header-title">
++          {{ grid.name }} ({{ grid.data.records_total }})
++        </h3>
++      {% endif %}
++      {% block grid_actions_block %}
++        <div class="d-inline-block float-right">
++          {{ include('@PrestaShop/Admin/Common/Grid/Blocks/grid_actions.html.twig', {grid: grid}) }}
++        </div>
++      {% endblock %}
++    </div>
++    {% endif %}
++  {% endblock %}
++
++  {% block grid_panel_body %}
++    <div class="card-body">
++      {% block grid_view_block %}
++        {# Override the grid template to inject our custom form action #}
++        <div class="grid js-grid" id="{{ grid.id }}_grid" data-grid-id="{{ grid.id }}">
++          {% block grid_header_row %}
++            {% block grid_bulk_actions_block %}
++              {{ include('@PrestaShop/Admin/Common/Grid/Blocks/bulk_actions.html.twig', {grid: grid}) }}
++            {% endblock %}
++          {% endblock %}
++
++          {% block grid_table_row %}
++            {# Override table.html.twig to set the form action to the search route with taxRulesGroupId #}
++            {{ renderhook('displayAdminGridTableBefore', {
++                grid: grid,
++                legacy_controller: app.request.attributes.get('_legacy_controller'),
++                controller: app.request.attributes.get('_controller'),
++              })
++            }}
++
++            {{ form_start(grid.filter_form, {
++              attr: {
++                id: grid.id ~ '_filter_form',
++                class: 'table-responsive',
++              },
++              action: path('admin_tax_rules_search', {taxRulesGroupId: taxRulesGroupId}),
++            }) }}
++
++            <table class="grid-table js-grid-table table {% if is_ordering_column(grid) %}grid-ordering-column{% endif %} {% if grid.attributes.is_empty_state %}border-0{% endif %}"
++                   id="{{ grid.id }}_grid_table"
++                   data-query="{{ grid.data.query }}"
++                   data-limit="{{ grid.pagination.limit }}"
++                   data-offset="{{ grid.pagination.offset }}"
++                   data-total="{{ grid.data.records_total }}"
++            >
++              <thead class="thead-default">
++              {% block grid_table_head %}
++                {{ include('@PrestaShop/Admin/Common/Grid/Blocks/Table/headers_row.html.twig', {grid: grid}) }}
++                {% if grid.actions.bulk|length > 0 or grid.filter_form|length > 1 %}
++                  {{ include('@PrestaShop/Admin/Common/Grid/Blocks/Table/filters_row.html.twig', {grid: grid}) }}
++                {% endif %}
++              {% endblock %}
++              </thead>
++              <tbody>
++              {% block grid_table_body %}
++                {% if grid.data.records is not empty %}
++                  {% for record in grid.data.records %}
++                    <tr>
++                      {% for column in grid.columns %}
++                        <td
++                          {% if column.type == 'identifier' %}data-identifier="{{ record[column.id] }}"{% endif %}
++                          class="{{ column.type }}-type column-{{ column.id }}{% if column.options.clickable is defined and column.options.clickable %} clickable{% endif %}{% if column.options.alignment is defined and column.options.alignment %} text-{{ column.options.alignment }}{% endif %}"
++                        >
++                          {{ column_content(record, column, grid) }}
++                        </td>
++                      {% endfor %}
++                    </tr>
++                  {% endfor %}
++                {% else %}
++                  {{ include('@PrestaShop/Admin/Common/Grid/Blocks/Table/empty_row.html.twig', {grid: grid}) }}
++                {% endif %}
++              {% endblock %}
++              </tbody>
++            </table>
++
++            {{ form_end(grid.filter_form) }}
++
++            {{ renderhook('displayAdminGridTableAfter', {
++                  grid: grid,
++                  legacy_controller: app.request.attributes.get('_legacy_controller'),
++                  controller: app.request.attributes.get('_controller'),
++                })
++            }}
++          {% endblock %}
++
++          {% block grid_footer_row %}
++            {{ include('@PrestaShop/Admin/Common/Grid/Blocks/pagination.html.twig', {grid: grid}) }}
++          {% endblock %}
++        </div>
++      {% endblock %}
++    </div>
++  {% endblock %}
++</div>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/create_tax_rule.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/create_tax_rule.html.twig
+new file mode 100644
+index 0000000000000..629e622775bed
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/create_tax_rule.html.twig
+@@ -0,0 +1,15 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% set legacyBaseLayout = lightDisplay|default(false) ? 'light_display_layout.tpl' : 'layout.tpl' %}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig', {taxRuleForm: taxRuleForm, taxRulesGroupId: taxRulesGroupId}) }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++  <script src="{{ asset('themes/new-theme/public/tax_rules_form.bundle.js') }}"></script>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
+index 1f8ba1bc35263..1285956ab7c37 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
+@@ -8,7 +8,7 @@
+   {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/form.html.twig', {taxRulesGroupForm: taxRulesGroupForm}) }}
+ 
+   {% block tax_rules_list_panel %}
+-    {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {grid: taxRuleGrid}) }}
++    {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_grid_panel.html.twig', {grid: taxRuleGrid, taxRulesGroupId: taxRulesGroupId}) }}
+   {% endblock %}
+ {% endblock %}
+ 
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit_tax_rule.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit_tax_rule.html.twig
+new file mode 100644
+index 0000000000000..629e622775bed
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit_tax_rule.html.twig
+@@ -0,0 +1,15 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% set legacyBaseLayout = lightDisplay|default(false) ? 'light_display_layout.tpl' : 'layout.tpl' %}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig', {taxRuleForm: taxRuleForm, taxRulesGroupId: taxRulesGroupId}) }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++  <script src="{{ asset('themes/new-theme/public/tax_rules_form.bundle.js') }}"></script>
++{% endblock %}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/TaxRuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/TaxRuleFeatureContext.php
+new file mode 100644
+index 0000000000000..3bad4d0c0a982
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/TaxRuleFeatureContext.php
+@@ -0,0 +1,280 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain;
++
++use Behat\Gherkin\Node\TableNode;
++use Db;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\AddTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\BulkDeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\DeleteTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\EditTaxRuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult\AddTaxRuleResult;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
++use RuntimeException;
++use Tests\Integration\Behaviour\Features\Context\SharedStorage;
++use Tests\Integration\Behaviour\Features\Context\Util\NoExceptionAlthoughExpectedException;
++use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
++
++class TaxRuleFeatureContext extends AbstractDomainFeatureContext
++{
++    /**
++     * @When I add a tax rule :taxRuleReference to group :groupReference with the following properties:
++     */
++    public function addTaxRule(string $taxRuleReference, string $groupReference, TableNode $table): void
++    {
++        $data = $table->getRowsHash();
++        $groupId = SharedStorage::getStorage()->get($groupReference);
++
++        $command = new AddTaxRuleCommand(
++            $groupId,
++            (int) $data['country'],
++            (int) $data['tax']
++        );
++
++        if (isset($data['behavior'])) {
++            $command->setBehavior((int) $data['behavior']);
++        }
++        if (isset($data['zipcode']) && $data['zipcode'] !== '') {
++            $command->setZipCode($data['zipcode']);
++        }
++        if (isset($data['description']) && $data['description'] !== '') {
++            $command->setDescription($data['description']);
++        }
++
++        /** @var AddTaxRuleResult $result */
++        $result = $this->getCommandBus()->handle($command);
++
++        // Update group reference in case historization changed the ID
++        SharedStorage::getStorage()->set($groupReference, $result->getTaxRulesGroupId()->getValue());
++
++        // Find the last created tax rule in this group to store its reference
++        $taxRuleId = $this->findLastTaxRuleInGroup($result->getTaxRulesGroupId()->getValue());
++        SharedStorage::getStorage()->set($taxRuleReference, $taxRuleId);
++    }
++
++    /**
++     * @When I edit tax rule :taxRuleReference with the following properties:
++     */
++    public function editTaxRule(string $taxRuleReference, TableNode $table): void
++    {
++        $data = $table->getRowsHash();
++        $taxRuleId = SharedStorage::getStorage()->get($taxRuleReference);
++
++        $command = new EditTaxRuleCommand($taxRuleId);
++
++        if (isset($data['country'])) {
++            $command->setCountryId((int) $data['country']);
++        }
++        if (isset($data['state'])) {
++            $command->setStateId((int) $data['state']);
++        }
++        if (isset($data['tax'])) {
++            $command->setTaxId((int) $data['tax']);
++        }
++        if (isset($data['behavior'])) {
++            $command->setBehavior((int) $data['behavior']);
++        }
++        if (isset($data['zipcode'])) {
++            $command->setZipCode($data['zipcode']);
++        }
++        if (isset($data['description'])) {
++            $command->setDescription($data['description']);
++        }
++
++        $this->getCommandBus()->handle($command);
++    }
++
++    /**
++     * @When I delete tax rule :taxRuleReference
++     */
++    public function deleteTaxRule(string $taxRuleReference): void
++    {
++        $taxRuleId = SharedStorage::getStorage()->get($taxRuleReference);
++        $this->getCommandBus()->handle(new DeleteTaxRuleCommand($taxRuleId));
++    }
++
++    /**
++     * @When I bulk delete tax rules :taxRuleReferences from group :groupReference
++     */
++    public function bulkDeleteTaxRules(string $taxRuleReferences, string $groupReference): void
++    {
++        $references = PrimitiveUtils::castStringArrayIntoArray($taxRuleReferences);
++        $groupId = SharedStorage::getStorage()->get($groupReference);
++
++        $ids = [];
++        foreach ($references as $reference) {
++            $ids[] = SharedStorage::getStorage()->get($reference);
++        }
++
++        $this->getCommandBus()->handle(new BulkDeleteTaxRuleCommand($groupId, $ids));
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference should exist in group :groupReference
++     */
++    public function assertTaxRuleExistsInGroup(string $taxRuleReference, string $groupReference): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++        $expectedGroupId = SharedStorage::getStorage()->get($groupReference);
++
++        if ($editableTaxRule->getTaxRulesGroupId()->getValue() !== $expectedGroupId) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" belongs to group %d, expected group %d',
++                $taxRuleReference,
++                $editableTaxRule->getTaxRulesGroupId()->getValue(),
++                $expectedGroupId
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference country should be :expectedCountryId
++     */
++    public function assertTaxRuleCountry(string $taxRuleReference, int $expectedCountryId): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getCountryId() !== $expectedCountryId) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has country %d, expected %d',
++                $taxRuleReference,
++                $editableTaxRule->getCountryId(),
++                $expectedCountryId
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference tax should be :expectedTaxId
++     */
++    public function assertTaxRuleTax(string $taxRuleReference, int $expectedTaxId): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getTaxId() !== $expectedTaxId) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has tax %d, expected %d',
++                $taxRuleReference,
++                $editableTaxRule->getTaxId(),
++                $expectedTaxId
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference behavior should be :expectedBehavior
++     */
++    public function assertTaxRuleBehavior(string $taxRuleReference, int $expectedBehavior): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getBehavior() !== $expectedBehavior) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has behavior %d, expected %d',
++                $taxRuleReference,
++                $editableTaxRule->getBehavior(),
++                $expectedBehavior
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference description should be :expectedDescription
++     */
++    public function assertTaxRuleDescription(string $taxRuleReference, string $expectedDescription): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getDescription() !== $expectedDescription) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has description "%s", expected "%s"',
++                $taxRuleReference,
++                $editableTaxRule->getDescription(),
++                $expectedDescription
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference zipcode from should be :expectedFrom
++     */
++    public function assertTaxRuleZipcodeFrom(string $taxRuleReference, string $expectedFrom): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getZipcodeFrom() !== $expectedFrom) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has zipcode_from "%s", expected "%s"',
++                $taxRuleReference,
++                $editableTaxRule->getZipcodeFrom(),
++                $expectedFrom
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference zipcode to should be :expectedTo
++     */
++    public function assertTaxRuleZipcodeTo(string $taxRuleReference, string $expectedTo): void
++    {
++        $editableTaxRule = $this->getEditableTaxRule($taxRuleReference);
++
++        if ($editableTaxRule->getZipcodeTo() !== $expectedTo) {
++            throw new RuntimeException(sprintf(
++                'Tax rule "%s" has zipcode_to "%s", expected "%s"',
++                $taxRuleReference,
++                $editableTaxRule->getZipcodeTo(),
++                $expectedTo
++            ));
++        }
++    }
++
++    /**
++     * @Then tax rule :taxRuleReference should not exist
++     */
++    public function assertTaxRuleNotExist(string $taxRuleReference): void
++    {
++        $taxRuleId = SharedStorage::getStorage()->get($taxRuleReference);
++
++        try {
++            $this->getQueryBus()->handle(new GetTaxRuleForEditing($taxRuleId));
++
++            throw new NoExceptionAlthoughExpectedException(sprintf(
++                'Tax rule "%s" was expected to be deleted, but it was found',
++                $taxRuleReference
++            ));
++        } catch (TaxRuleNotFoundException) {
++            SharedStorage::getStorage()->clear($taxRuleReference);
++        }
++    }
++
++    private function getEditableTaxRule(string $taxRuleReference): EditableTaxRule
++    {
++        $taxRuleId = SharedStorage::getStorage()->get($taxRuleReference);
++
++        /** @var EditableTaxRule $editableTaxRule */
++        $editableTaxRule = $this->getQueryBus()->handle(new GetTaxRuleForEditing($taxRuleId));
++
++        return $editableTaxRule;
++    }
++
++    /**
++     * Finds the last (highest ID) tax rule in a group.
++     */
++    private function findLastTaxRuleInGroup(int $groupId): int
++    {
++        $result = Db::getInstance()->getValue(
++            'SELECT MAX(id_tax_rule) FROM ' . _DB_PREFIX_ . 'tax_rule WHERE id_tax_rules_group = ' . (int) $groupId
++        );
++
++        return (int) $result;
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/TaxRulesGroup/tax_rule_management.feature b/tests/Integration/Behaviour/Features/Scenario/TaxRulesGroup/tax_rule_management.feature
+new file mode 100644
+index 0000000000000..e2ad9886b01c6
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/TaxRulesGroup/tax_rule_management.feature
+@@ -0,0 +1,95 @@
++@restore-all-tables-before-feature
++#./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s tax_rules_group
++Feature: Manage tax rules within a tax rules group
++  As an employee
++  I must be able to add, edit and delete tax rules within a tax rules group
++
++  Background:
++    Given I add a new tax rules group "test-group" with the following properties:
++      | name       | Test Tax Rules Group |
++      | is_enabled | true                 |
++
++  Scenario: Adding a tax rule to a group for a specific country
++    When I add a tax rule "us-rule" to group "test-group" with the following properties:
++      | country     | 8   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description | US tax rule |
++    Then tax rule "us-rule" should exist in group "test-group"
++    And tax rule "us-rule" country should be 8
++    And tax rule "us-rule" tax should be 1
++    And tax rule "us-rule" behavior should be 0
++    And tax rule "us-rule" description should be "US tax rule"
++
++  Scenario: Adding a tax rule with a zipcode range
++    When I add a tax rule "paris-rule" to group "test-group" with the following properties:
++      | country     | 6     |
++      | tax         | 1     |
++      | behavior    | 0     |
++      | zipcode     | 75000-75015 |
++      | description | Paris zip range |
++    Then tax rule "paris-rule" should exist in group "test-group"
++    And tax rule "paris-rule" zipcode from should be "75000"
++    And tax rule "paris-rule" zipcode to should be "75015"
++
++  Scenario: Adding a tax rule with empty zipcode stores 0/0
++    When I add a tax rule "no-zip-rule" to group "test-group" with the following properties:
++      | country     | 6   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description |     |
++    Then tax rule "no-zip-rule" should exist in group "test-group"
++    And tax rule "no-zip-rule" zipcode from should be "0"
++    And tax rule "no-zip-rule" zipcode to should be "0"
++
++  Scenario: Adding a tax rule with combine behavior
++    When I add a tax rule "combine-rule" to group "test-group" with the following properties:
++      | country     | 6   |
++      | tax         | 1   |
++      | behavior    | 1   |
++      | zipcode     |     |
++      | description |     |
++    Then tax rule "combine-rule" should exist in group "test-group"
++    And tax rule "combine-rule" behavior should be 1
++
++  Scenario: Editing a tax rule
++    When I add a tax rule "editable-rule" to group "test-group" with the following properties:
++      | country     | 6   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description | Original |
++    When I edit tax rule "editable-rule" with the following properties:
++      | description | Updated description |
++      | behavior    | 2                   |
++    Then tax rule "editable-rule" description should be "Updated description"
++    And tax rule "editable-rule" behavior should be 2
++
++  Scenario: Deleting a tax rule
++    When I add a tax rule "deletable-rule" to group "test-group" with the following properties:
++      | country     | 6   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description |     |
++    When I delete tax rule "deletable-rule"
++    Then tax rule "deletable-rule" should not exist
++
++  Scenario: Bulk deleting tax rules
++    When I add a tax rule "bulk-rule-1" to group "test-group" with the following properties:
++      | country     | 6   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description | Rule 1 |
++    And I add a tax rule "bulk-rule-2" to group "test-group" with the following properties:
++      | country     | 8   |
++      | tax         | 1   |
++      | behavior    | 0   |
++      | zipcode     |     |
++      | description | Rule 2 |
++    When I bulk delete tax rules "bulk-rule-1, bulk-rule-2" from group "test-group"
++    Then tax rule "bulk-rule-1" should not exist
++    And tax rule "bulk-rule-2" should not exist
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 3d460f92f7354..019710699b5d9 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -28,6 +28,7 @@ default:
+       contexts:
+         - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRuleFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+     title:
+       paths:

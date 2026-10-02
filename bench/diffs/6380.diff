@@ -1,0 +1,218 @@
+diff --git a/controllers/admin/AdminThemesController.php b/controllers/admin/AdminThemesController.php
+index 424c5d55b3e8f..af7052347c031 100644
+--- a/controllers/admin/AdminThemesController.php
++++ b/controllers/admin/AdminThemesController.php
+@@ -225,25 +225,37 @@ public function renderView()
+     public function postProcess()
+     {
+         if (Tools::isSubmit('submitAddconfiguration')) {
+-            if ($filename = Tools::getValue('theme_archive_server')) {
+-                $path = _PS_ALL_THEMES_DIR_.$filename;
+-                $this->theme_manager->install($path);
+-            } elseif ($filename = Tools::getValue('themearchive')) {
+-                $path = _PS_ALL_THEMES_DIR_.$filename;
+-                if ($this->processUploadFile($path)) {
++            try {
++                if ($filename = Tools::getValue('theme_archive_server')) {
++                    $path = _PS_ALL_THEMES_DIR_.$filename;
+                     $this->theme_manager->install($path);
+-                    @unlink($path);
++                } elseif ($filename = Tools::getValue('themearchive')) {
++                    $path = _PS_ALL_THEMES_DIR_.$filename;
++                    if ($this->processUploadFile($path)) {
++                        $this->theme_manager->install($path);
++                        @unlink($path);
++                    }
++                } elseif ($source = Tools::getValue('themearchiveUrl')) {
++                    $this->theme_manager->install($source);
+                 }
+-            } elseif ($source = Tools::getValue('themearchiveUrl')) {
+-                $this->theme_manager->install($source);
++            } catch (Exception $e) {
++                $this->errors[] = $e->getMessage();
++            }
++
++            if (empty($this->errors)) {
++                $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
+             }
+-            $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
+         } elseif (Tools::getValue('action') == 'submitConfigureLayouts') {
+             $this->processSubmitConfigureLayouts();
+             $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
+         } elseif (Tools::getValue('action') == 'enableTheme') {
+-            $this->theme_manager->enable(Tools::getValue('theme_name'));
+-            $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
++            $isThemeEnabled = $this->theme_manager->enable(Tools::getValue('theme_name'));
++            // get errors if theme wasn't enabled
++            if (!$isThemeEnabled) {
++                $this->errors[] = $this->theme_manager->getErrors(Tools::getValue('theme_name'));
++            } else {
++                $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
++            }
+         } elseif (Tools::getValue('action') == 'deleteTheme') {
+             $this->theme_manager->uninstall(Tools::getValue('theme_name'));
+             $this->redirect_after = $this->context->link->getAdminLink('AdminThemes');
+diff --git a/src/Core/Addon/Theme/ThemeManager.php b/src/Core/Addon/Theme/ThemeManager.php
+index c2036ab6fd10b..ba93700910ae6 100644
+--- a/src/Core/Addon/Theme/ThemeManager.php
++++ b/src/Core/Addon/Theme/ThemeManager.php
+@@ -190,27 +190,38 @@ public function disable($name)
+     /**
+      * Actions to perform to restore default settings.
+      *
+-     * @param string $theme_name The theme name to reset
++     * @param string $themeName The theme name to reset
+      *
+      * @return bool True for success
+      */
+-    public function reset($theme_name)
++    public function reset($themeName)
+     {
+-        return $this->disable($theme_name) && $this->enable($theme_name);
++        return $this->disable($themeName) && $this->enable($themeName);
+     }
+ 
+     /**
+      * Returns the last error, if found.
+      *
+-     * @param string $name The technical theme name
++     * @param string $themeName The technical theme name
+      *
+      * @return string|null The last error if found
+      */
+-    public function getError($theme_name)
++    public function getError($themeName)
+     {
+         return;
+     }
+ 
++    /**
++     * Get all errors of theme install
++     *
++     * @param string $themeName The technical theme name
++     * @return array|false
++     */
++    public function getErrors($themeName)
++    {
++        return $this->themeValidator->getErrors($themeName);
++    }
++
+     private function doCreateCustomHooks(array $hooks)
+     {
+         foreach ($hooks as $hook) {
+diff --git a/src/Core/Addon/Theme/ThemeManagerBuilder.php b/src/Core/Addon/Theme/ThemeManagerBuilder.php
+index e6649cf92a743..807a4c77ffe6a 100644
+--- a/src/Core/Addon/Theme/ThemeManagerBuilder.php
++++ b/src/Core/Addon/Theme/ThemeManagerBuilder.php
+@@ -52,7 +52,7 @@ public function build()
+         return new ThemeManager(
+             $this->context->shop,
+             new Configuration($this->context->shop),
+-            new ThemeValidator(),
++            new ThemeValidator($this->context->getTranslator()),
+             $this->context->employee,
+             new Filesystem(),
+             new Finder(),
+diff --git a/src/Core/Addon/Theme/ThemeValidator.php b/src/Core/Addon/Theme/ThemeValidator.php
+index 206b62b8df328..287ba91551b32 100644
+--- a/src/Core/Addon/Theme/ThemeValidator.php
++++ b/src/Core/Addon/Theme/ThemeValidator.php
+@@ -27,9 +27,28 @@
+ namespace PrestaShop\PrestaShop\Core\Addon\Theme;
+ 
+ use Shudrum\Component\ArrayFinder\ArrayFinder;
++use Symfony\Component\Translation\TranslatorInterface;
+ 
+ class ThemeValidator
+ {
++    /**
++     * Translator.
++     *
++     * @var \Symfony\Component\Translation\TranslatorInterface
++     */
++    private $translator;
++
++    private $errors = array();
++
++    public function __construct(TranslatorInterface $translator)
++    {
++        $this->translator = $translator;
++    }
++
++    public function getErrors($themeName) {
++        return array_key_exists($themeName, $this->errors) ? $this->errors[$themeName] : false;
++    }
++
+     public function isValid(Theme $theme)
+     {
+         return $this->hasRequiredFiles($theme)
+@@ -39,14 +58,20 @@ public function isValid(Theme $theme)
+     private function hasRequiredProperties($theme)
+     {
+         $attributes = new ArrayFinder($theme->get(null));
++        $themeName = $theme->getName();
+ 
+         foreach ($this->getRequiredProperties() as $prop) {
+             if (!$attributes->offsetExists($prop)) {
+-                return false;
++
++                if (!array_key_exists($themeName, $this->errors)) {
++                    $this->errors[$themeName] = array();
++                }
++
++                $this->errors[$themeName] = $this->translator->trans('An error occurred. The information "%s" is missing.', array($prop), 'Admin.Design.Notification');
+             }
+         }
+ 
+-        return true;
++        return !array_key_exists($themeName, $this->errors);
+     }
+ 
+     public function getRequiredProperties()
+@@ -70,13 +95,20 @@ public function getRequiredProperties()
+ 
+     private function hasRequiredFiles($theme)
+     {
++        $themeName = $theme->getName();
++
+         foreach ($this->getRequiredFiles() as $file) {
+             if (!file_exists($theme->getDirectory().$file)) {
+-                return false;
++
++                if (!array_key_exists($themeName, $this->errors)) {
++                    $this->errors[$themeName] = array();
++                }
++
++                $this->errors[$themeName] = $this->translator->trans('An error occurred. The template "%s" is missing.', array($file), 'Admin.Design.Notification');
+             }
+         }
+ 
+-        return true;
++        return !array_key_exists($themeName, $this->errors);
+     }
+ 
+     public function getRequiredFiles()
+diff --git a/tests/Unit/Core/Addon/Theme/ThemeValidatorTest.php b/tests/Unit/Core/Addon/Theme/ThemeValidatorTest.php
+index b1943ef4aa8e7..151a9a1664be9 100644
+--- a/tests/Unit/Core/Addon/Theme/ThemeValidatorTest.php
++++ b/tests/Unit/Core/Addon/Theme/ThemeValidatorTest.php
+@@ -28,6 +28,7 @@
+ use PrestaShop\PrestaShop\Core\Addon\Theme\Theme;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeValidator;
+ use Symfony\Component\Yaml\Parser;
++use Phake;
+ 
+ class ThemeValidatorTest extends \PHPUnit_Framework_TestCase
+ {
+@@ -37,8 +38,10 @@ class ThemeValidatorTest extends \PHPUnit_Framework_TestCase
+ 
+     protected function setUp()
+     {
++        $translator = Phake::mock('Symfony\Component\Translation\TranslatorInterface');
++
+         /* @var \PrestaShop\PrestaShop\Core\Addon\Theme\ThemeValidator */
+-        $this->validator = new ThemeValidator();
++        $this->validator = new ThemeValidator($translator);
+     }
+ 
+     protected function tearDown()

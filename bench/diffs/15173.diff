@@ -1,0 +1,139 @@
+diff --git a/classes/Currency.php b/classes/Currency.php
+index d6c60f186c4e8..b7a9e66932813 100644
+--- a/classes/Currency.php
++++ b/classes/Currency.php
+@@ -189,9 +189,9 @@ public function __construct($id = null, $idLang = null, $idShop = null)
+             }
+ 
+             if (is_array($this->name)) {
+-                $this->name = ucfirst($this->name[$idLang]);
++                $this->name = Tools::ucfirst($this->name[$idLang]);
+             } else {
+-                $this->name = ucfirst($this->name);
++                $this->name = Tools::ucfirst($this->name);
+             }
+ 
+             $this->iso_code_num = $this->numeric_iso_code;
+@@ -358,6 +358,27 @@ public function isInstalled($currencyId = null, $shopId = null)
+         return (bool) Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue($sql);
+     }
+ 
++    /**
++     * Returns the name of the currency (using the translated name base on the id_lang
++     * provided on creation). This method is useful when $this->name contains an array
++     * but you still need to get its name as a string.
++     *
++     * @return string
++     */
++    public function getName()
++    {
++        if (is_string($this->name)) {
++            return $this->name;
++        }
++
++        $id_lang = $this->id_lang;
++        if ($id_lang === null) {
++            $id_lang = Configuration::get('PS_LANG_DEFAULT');
++        }
++
++        return Tools::ucfirst($this->name[$id_lang]);
++    }
++
+     /**
+      * Return available currencies.
+      *
+@@ -378,14 +399,20 @@ public static function getCurrencies($object = false, $active = true, $groupBy =
+     /**
+      * Retrieve all currencies data from the database.
+      *
++     * @param bool $active If true only active are returned
++     * @param bool $groupBy Group by id_currency
++     * @param bool $currentShopOnly If true returns only currencies associated to current shop
++     *
+      * @return array Currency data from database
++     *
++     * @throws PrestaShopDatabaseException
+      */
+-    public static function findAll($active = true, $groupBy = false)
++    public static function findAll($active = true, $groupBy = false, $currentShopOnly = true)
+     {
+         $currencies = Db::getInstance()->executeS('
+             SELECT *
+             FROM `' . _DB_PREFIX_ . 'currency` c
+-            ' . Shop::addSqlAssociation('currency', 'c') . '
++            ' . ($currentShopOnly ? Shop::addSqlAssociation('currency', 'c') : '') . '
+                 WHERE `deleted` = 0' .
+                 ($active ? ' AND c.`active` = 1' : '') .
+                 ($groupBy ? ' GROUP BY c.`id_currency`' : '') .
+diff --git a/src/Adapter/Currency/CommandHandler/EditCurrencyHandler.php b/src/Adapter/Currency/CommandHandler/EditCurrencyHandler.php
+index 786c9f3126803..cd1ac18c5204f 100644
+--- a/src/Adapter/Currency/CommandHandler/EditCurrencyHandler.php
++++ b/src/Adapter/Currency/CommandHandler/EditCurrencyHandler.php
+@@ -226,7 +226,7 @@ private function assertDefaultCurrencyIsNotBeingRemovedOrDisabledFromShop(Curren
+             if (!in_array($shopId, $shopIds)) {
+                 $shop = new Shop($shopId);
+                 throw new DefaultCurrencyInMultiShopException(
+-                    $currency->name,
++                    $currency->getName(),
+                     $shop->name,
+                     sprintf(
+                         'Currency with id %s cannot be unassigned from shop with id %s because its the default currency.',
+@@ -240,7 +240,7 @@ private function assertDefaultCurrencyIsNotBeingRemovedOrDisabledFromShop(Curren
+             if (!$currency->active) {
+                 $shop = new Shop($shopId);
+                 throw new DefaultCurrencyInMultiShopException(
+-                    $currency->name,
++                    $currency->getName(),
+                     $shop->name,
+                     sprintf(
+                         'Currency with id %s cannot be disabled from shop with id %s because its the default currency.',
+diff --git a/src/Adapter/Currency/CurrencyDataProvider.php b/src/Adapter/Currency/CurrencyDataProvider.php
+index aa73725acea0c..e7e3d1df9a3be 100644
+--- a/src/Adapter/Currency/CurrencyDataProvider.php
++++ b/src/Adapter/Currency/CurrencyDataProvider.php
+@@ -70,9 +70,9 @@ public function getCurrencies($object = false, $active = true, $group_by = false
+     /**
+      * {@inheritdoc}
+      */
+-    public function findAll()
++    public function findAll($currentShopOnly = true)
+     {
+-        return Currency::findAll(false);
++        return Currency::findAll(false, false, $currentShopOnly);
+     }
+ 
+     /**
+diff --git a/src/Core/Currency/CurrencyDataProviderInterface.php b/src/Core/Currency/CurrencyDataProviderInterface.php
+index e97cbc8fddcfd..fa199f1c262e6 100644
+--- a/src/Core/Currency/CurrencyDataProviderInterface.php
++++ b/src/Core/Currency/CurrencyDataProviderInterface.php
+@@ -47,11 +47,13 @@ interface CurrencyDataProviderInterface
+     public function getCurrencies($object = false, $active = true, $group_by = false);
+ 
+     /**
+-     * Return raw currencies data from the database reated to the current shop.
++     * Return raw currencies data from the database.
+      *
+-     * @return array Installed currencies
++     * @param bool $currentShopOnly If true returns only currencies associated to current shop
++     *
++     * @return array[] Installed currencies
+      */
+-    public function findAll();
++    public function findAll($currentShopOnly = true);
+ 
+     /**
+      * Get a Currency entity instance by ISO code.
+diff --git a/src/Core/Localization/Currency/DataLayer/CurrencyInstalled.php b/src/Core/Localization/Currency/DataLayer/CurrencyInstalled.php
+index 081db7b4e5653..ac2431b18f68b 100644
+--- a/src/Core/Localization/Currency/DataLayer/CurrencyInstalled.php
++++ b/src/Core/Localization/Currency/DataLayer/CurrencyInstalled.php
+@@ -76,7 +76,7 @@ public function isAvailable($currencyCode)
+      */
+     public function getAvailableCurrencyCodes()
+     {
+-        $currencies = $this->dataProvider->findAll();
++        $currencies = $this->dataProvider->findAll(false);
+         $currencyIds = array_column($currencies, 'iso_code');
+ 
+         return $currencyIds;

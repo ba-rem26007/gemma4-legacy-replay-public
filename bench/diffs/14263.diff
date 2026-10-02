@@ -1,0 +1,146 @@
+diff --git a/src/Adapter/Presenter/Cart/CartPresenter.php b/src/Adapter/Presenter/Cart/CartPresenter.php
+index 8d5965d2fbc82..6aa0400b9898d 100644
+--- a/src/Adapter/Presenter/Cart/CartPresenter.php
++++ b/src/Adapter/Presenter/Cart/CartPresenter.php
+@@ -505,6 +505,20 @@ private function getTemplateVarVouchers(Cart $cart)
+                 $cartVoucher['reduction_formatted'] = $cartVoucher['reduction_percent'] . '%';
+             } elseif (isset($cartVoucher['reduction_amount']) && $cartVoucher['reduction_amount'] > 0) {
+                 $value = $this->includeTaxes() ? $cartVoucher['reduction_amount'] : $cartVoucher['value_tax_exc'];
++                $currencyFrom = new \Currency($cartVoucher['reduction_currency']);
++                $currencyTo = new \Currency($cart->id_currency);
++                if ($currencyFrom->conversion_rate == 0) {
++                    $value = 0;
++                } else {
++                    // convert to default currency
++                    $defaultCurrencyId = (int) Configuration::get('PS_CURRENCY_DEFAULT');
++                    $value /= $currencyFrom->conversion_rate;
++                    if ($defaultCurrencyId == $currencyTo->id) {
++                        // convert to destination currency
++                        $value *= $currencyTo->conversion_rate;
++                    }
++                }
++                // following will do currency conversion to current one
+                 $cartVoucher['reduction_formatted'] = $this->priceFormatter->convertAndFormat($value);
+             }
+ 
+diff --git a/src/Core/Cart/CartRuleCalculator.php b/src/Core/Cart/CartRuleCalculator.php
+index 46d8051d2d8d8..c6393113a2c97 100644
+--- a/src/Core/Cart/CartRuleCalculator.php
++++ b/src/Core/Cart/CartRuleCalculator.php
+@@ -122,65 +122,67 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+         }
+ 
+         // Discount (%) on the whole order
+-        if ($cartRule->reduction_percent && $cartRule->reduction_product == 0) {
+-            foreach ($this->cartRows as $cartRow) {
+-                $product = $cartRow->getRowData();
+-                if ((($cartRule->reduction_exclude_special && !$product['reduction_applies'])
++        if ((float) $cartRule->reduction_percent > 0) {
++            if ($cartRule->reduction_product == 0) {
++                foreach ($this->cartRows as $cartRow) {
++                    $product = $cartRow->getRowData();
++                    if ((($cartRule->reduction_exclude_special && !$product['reduction_applies'])
+                         || !$cartRule->reduction_exclude_special)) {
+-                    $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
+-                    $cartRuleData->addDiscountApplied($amount);
++                        $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
++                        $cartRuleData->addDiscountApplied($amount);
++                    }
+                 }
+             }
+-        }
+ 
+-        // Discount (%) on a specific product
+-        if ($cartRule->reduction_percent && $cartRule->reduction_product > 0) {
+-            foreach ($this->cartRows as $cartRow) {
+-                if ($cartRow->getRowData()['id_product'] == $cartRule->reduction_product) {
+-                    $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
+-                    $cartRuleData->addDiscountApplied($amount);
++            // Discount (%) on a specific product
++            if ($cartRule->reduction_product > 0) {
++                foreach ($this->cartRows as $cartRow) {
++                    if ($cartRow->getRowData()['id_product'] == $cartRule->reduction_product) {
++                        $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
++                        $cartRuleData->addDiscountApplied($amount);
++                    }
+                 }
+             }
+-        }
+ 
+-        // Discount (%) on the cheapest product
+-        if ($cartRule->reduction_percent && $cartRule->reduction_product == -1) {
+-            /** @var CartRow|null $cartRowCheapest */
+-            $cartRowCheapest = null;
+-            foreach ($this->cartRows as $cartRow) {
+-                $product = $cartRow->getRowData();
+-                if (((($cartRule->reduction_exclude_special && !$product['reduction_applies'])
+-                        || !$cartRule->reduction_exclude_special)) && ($cartRowCheapest === null
+-                        || $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded() > $cartRow->getInitialUnitPrice()
+-                            ->getTaxIncluded())
+-                ) {
+-                    $cartRowCheapest = $cartRow;
++            // Discount (%) on the cheapest product
++            if ($cartRule->reduction_product == -1) {
++                /** @var CartRow|null $cartRowCheapest */
++                $cartRowCheapest = null;
++                foreach ($this->cartRows as $cartRow) {
++                    $product = $cartRow->getRowData();
++                    if (((($cartRule->reduction_exclude_special && !$product['reduction_applies'])
++                            || !$cartRule->reduction_exclude_special)) && ($cartRowCheapest === null
++                            || $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded() > $cartRow->getInitialUnitPrice()
++                                ->getTaxIncluded())
++                    ) {
++                        $cartRowCheapest = $cartRow;
++                    }
++                }
++                if ($cartRowCheapest !== null) {
++                    // apply only on one product of the cheapest row
++                    $discountTaxIncluded = $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded()
++                        * $cartRule->reduction_percent / 100;
++                    $discountTaxExcluded = $cartRowCheapest->getInitialUnitPrice()->getTaxExcluded()
++                        * $cartRule->reduction_percent / 100;
++                    $amount = new AmountImmutable($discountTaxIncluded, $discountTaxExcluded);
++                    $cartRowCheapest->applyFlatDiscount($amount);
++                    $cartRuleData->addDiscountApplied($amount);
+                 }
+             }
+-            if ($cartRowCheapest !== null) {
+-                // apply only on one product of the cheapest row
+-                $discountTaxIncluded = $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded()
+-                                       * $cartRule->reduction_percent / 100;
+-                $discountTaxExcluded = $cartRowCheapest->getInitialUnitPrice()->getTaxExcluded()
+-                                       * $cartRule->reduction_percent / 100;
+-                $amount = new AmountImmutable($discountTaxIncluded, $discountTaxExcluded);
+-                $cartRowCheapest->applyFlatDiscount($amount);
+-                $cartRuleData->addDiscountApplied($amount);
+-            }
+-        }
+ 
+-        // Discount (%) on the selection of products
+-        if ($cartRule->reduction_percent && $cartRule->reduction_product == -2) {
+-            $selected_products = $cartRule->checkProductRestrictionsFromCart($cart, true);
+-            if (is_array($selected_products)) {
+-                foreach ($this->cartRows as $cartRow) {
+-                    $product = $cartRow->getRowData();
+-                    if (in_array($product['id_product'] . '-' . $product['id_product_attribute'], $selected_products)
+-                        || in_array($product['id_product'] . '-0', $selected_products)
+-                           && (($cartRule->reduction_exclude_special && !$product['reduction_applies'])
+-                               || !$cartRule->reduction_exclude_special)) {
+-                        $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
+-                        $cartRuleData->addDiscountApplied($amount);
++            // Discount (%) on the selection of products
++            if ($cartRule->reduction_product == -2) {
++                $selected_products = $cartRule->checkProductRestrictionsFromCart($cart, true);
++                if (is_array($selected_products)) {
++                    foreach ($this->cartRows as $cartRow) {
++                        $product = $cartRow->getRowData();
++                        if (in_array($product['id_product'] . '-' . $product['id_product_attribute'], $selected_products)
++                            || in_array($product['id_product'] . '-0', $selected_products)
++                            && (($cartRule->reduction_exclude_special && !$product['reduction_applies'])
++                                || !$cartRule->reduction_exclude_special)) {
++                            $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
++                            $cartRuleData->addDiscountApplied($amount);
++                        }
+                     }
+                 }
+             }

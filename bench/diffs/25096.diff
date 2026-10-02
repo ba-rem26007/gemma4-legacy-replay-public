@@ -1,0 +1,493 @@
+diff --git a/classes/Product.php b/classes/Product.php
+index 5352cabd362dc..8e0f95ddcd41e 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -5609,7 +5609,7 @@ public static function getProductProperties($id_lang, $row, Context $context = n
+             (int) $row['id_product'],
+             false,
+             $id_product_attribute,
+-            (self::$_taxCalculationMethod == PS_TAX_EXC ? 2 : 6),
++            (self::$_taxCalculationMethod == PS_TAX_EXC ? Context::getContext()->getComputingPrecision() : 6),
+             null,
+             false,
+             true,
+diff --git a/install-dev/upgrade/sql/1.7.7.6.sql b/install-dev/upgrade/sql/1.7.7.6.sql
+new file mode 100644
+index 0000000000000..1b842b4ea93c3
+--- /dev/null
++++ b/install-dev/upgrade/sql/1.7.7.6.sql
+@@ -0,0 +1,4 @@
++SET SESSION sql_mode='';
++SET NAMES 'utf8';
++
++ALTER TABLE `PREFIX_currency` MODIFY COLUMN `numeric_iso_code` varchar(3) DEFAULT NULL NULL;
+diff --git a/src/Core/Localization/Number/Formatter.php b/src/Core/Localization/Number/Formatter.php
+index 26f3fc42051d4..77c9e50f695b1 100644
+--- a/src/Core/Localization/Number/Formatter.php
++++ b/src/Core/Localization/Number/Formatter.php
+@@ -121,7 +121,7 @@ public function format($number, NumberSpecification $specification)
+ 
+         // Assemble the final number
+         $formattedNumber = $majorDigits;
+-        if ($minorDigits) {
++        if (strlen($minorDigits)) {
+             $formattedNumber .= self::DECIMAL_SEPARATOR_PLACEHOLDER . $minorDigits;
+         }
+ 
+diff --git a/tests/Unit/Core/Localization/Specification/FactoryTest.php b/tests/Unit/Core/Localization/Specification/FactoryTest.php
+index 38b5c6c892e23..dd0b464db126d 100644
+--- a/tests/Unit/Core/Localization/Specification/FactoryTest.php
++++ b/tests/Unit/Core/Localization/Specification/FactoryTest.php
+@@ -216,8 +216,57 @@ public function testBuildPriceSpecificationWithMax($data, $expected)
+         $this->assertEquals($specification->getMaxFractionDigits(), $maxFractionDigits);
+     }
+ 
+-    public function getPriceData()
++    /**
++     * Given a valid CLDR locale
++     * Given a Max Fractions digits to display in a number's decimal
++     * Given a boolean to define if we should group digits in a number's integer part
++     * Given an integer to specify max fraction digits
++     * Then calling buildPriceSpecification() should return an NumberSpecification
++     *
++     * @dataProvider getPriceDataWithPrecisions
++     */
++    public function testBuildPriceSpecificationWithPrecisionFallback(array $data, array $expected): void
+     {
++        $currencyPrecision = $data[4]['currencyPrecision'];
++        $maxFractionDigits = $data[4]['maxFractionDigits'];
++        $expectedMinFractionDigits = $data[4]['expectedMinFractionDigits'];
++
++        $specification = $this->factory->buildPriceSpecification(
++            $data[0],
++            $this->createLocale(
++                ...$data
++            ),
++            new Currency(
++                null,
++                null,
++                'EUR',
++                '978',
++                [
++                    $data[0] => '€',
++                ],
++                $currencyPrecision,
++                [
++                    $data[0] => 'Euro',
++                ]
++            ),
++            3,
++            true,
++            $maxFractionDigits
++        );
++        $expected['maxFractionDigits'] = $maxFractionDigits;
++        $expected['minFractionDigits'] = $expectedMinFractionDigits;
++        self::assertEquals(
++            $expected,
++            $specification->toArray()
++        );
++        self::assertEquals($specification->getMaxFractionDigits(), $maxFractionDigits);
++    }
++
++    public function getPriceDataWithPrecisions()
++    {
++        // if maxFractionDigits < minFractionDigits, minFractionDigits = maxFractionDigits
++        // see PrestaShop\PrestaShop\Core\Localization\Specification\Number
++        // The dataProvider provides minFractionDigits === 2
+         return [
+             [
+                 [
+@@ -225,6 +274,11 @@ public function getPriceData()
+                     '¤ #,##0.00;¤ -#,##0.00',
+                     '#,##0%',
+                     '#,##0.###',
++                    [
++                        'currencyPrecision' => 6,
++                        'maxFractionDigits' => 3,
++                        'expectedMinFractionDigits' => 3,
++                    ],
+                 ],
+                 [
+                     'positivePattern' => '¤ #,##0.00',
+@@ -257,6 +311,381 @@ public function getPriceData()
+                     '#,##0.00 ¤',
+                     '#,##0 %',
+                     '#,##0.###',
++                    [
++                        'currencyPrecision' => 6,
++                        'maxFractionDigits' => 3,
++                        'expectedMinFractionDigits' => 3,
++                    ],
++                ],
++                [
++                    'positivePattern' => '#,##0.00 ¤',
++                    'negativePattern' => '-#,##0.00 ¤',
++                    'maxFractionDigits' => 5,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'nl-NL',
++                    '¤ #,##0.00;¤ -#,##0.00',
++                    '#,##0%',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => 6,
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 6,
++                    ],
++                ],
++                [
++                    'positivePattern' => '¤ #,##0.00',
++                    'negativePattern' => '¤ -#,##0.00',
++                    'maxFractionDigits' => 2,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'fr-FR',
++                    '#,##0.00 ¤',
++                    '#,##0 %',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => 6,
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 6,
++                    ],
++                ],
++                [
++                    'positivePattern' => '#,##0.00 ¤',
++                    'negativePattern' => '-#,##0.00 ¤',
++                    'maxFractionDigits' => 5,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'nl-NL',
++                    '¤ #,##0.00;¤ -#,##0.00',
++                    '#,##0%',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => 1,
++                        'maxFractionDigits' => 3,
++                        'expectedMinFractionDigits' => 1,
++                    ],
++                ],
++                [
++                    'positivePattern' => '¤ #,##0.00',
++                    'negativePattern' => '¤ -#,##0.00',
++                    'maxFractionDigits' => 2,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'fr-FR',
++                    '#,##0.00 ¤',
++                    '#,##0 %',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => 1,
++                        'maxFractionDigits' => 3,
++                        'expectedMinFractionDigits' => 1,
++                    ],
++                ],
++                [
++                    'positivePattern' => '#,##0.00 ¤',
++                    'negativePattern' => '-#,##0.00 ¤',
++                    'maxFractionDigits' => 5,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'nl-NL',
++                    '¤ #,##0.00;¤ -#,##0.00',
++                    '#,##0%',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => '4',
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 4,
++                    ],
++                ],
++                [
++                    'positivePattern' => '¤ #,##0.00',
++                    'negativePattern' => '¤ -#,##0.00',
++                    'maxFractionDigits' => 2,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'fr-FR',
++                    '#,##0.00 ¤',
++                    '#,##0 %',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => '4',
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 4,
++                    ],
++                ],
++                [
++                    'positivePattern' => '#,##0.00 ¤',
++                    'negativePattern' => '-#,##0.00 ¤',
++                    'maxFractionDigits' => 5,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'nl-NL',
++                    '¤ #,##0.00;¤ -#,##0.00',
++                    '#,##0%',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => null,
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 2,
++                    ],
++                ],
++                [
++                    'positivePattern' => '¤ #,##0.00',
++                    'negativePattern' => '¤ -#,##0.00',
++                    'maxFractionDigits' => 2,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'fr-FR',
++                    '#,##0.00 ¤',
++                    '#,##0 %',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => null,
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 2,
++                    ],
++                ],
++                [
++                    'positivePattern' => '#,##0.00 ¤',
++                    'negativePattern' => '-#,##0.00 ¤',
++                    'maxFractionDigits' => 5,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'nl-NL',
++                    '¤ #,##0.00;¤ -#,##0.00',
++                    '#,##0%',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => [],
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 2,
++                    ],
++                ],
++                [
++                    'positivePattern' => '¤ #,##0.00',
++                    'negativePattern' => '¤ -#,##0.00',
++                    'maxFractionDigits' => 2,
++                    'minFractionDigits' => 2,
++                    'groupingUsed' => true,
++                    'primaryGroupSize' => 3,
++                    'secondaryGroupSize' => 3,
++                    'currencyCode' => 'EUR',
++                    'currencySymbol' => '€',
++                    'numberSymbols' => [
++                        ',',
++                        '.',
++                        ';',
++                        '%',
++                        '-',
++                        '+',
++                        'E',
++                        "\u{00d7}",
++                        "\u{2030}",
++                        "\u{221e}",
++                        'NaN',
++                    ],
++                ],
++            ],
++            [
++                [
++                    'fr-FR',
++                    '#,##0.00 ¤',
++                    '#,##0 %',
++                    '#,##0.###',
++                    [
++                        'currencyPrecision' => [],
++                        'maxFractionDigits' => 6,
++                        'expectedMinFractionDigits' => 2,
++                    ],
+                 ],
+                 [
+                     'positivePattern' => '#,##0.00 ¤',

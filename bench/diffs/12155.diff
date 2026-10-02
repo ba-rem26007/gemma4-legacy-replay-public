@@ -1,0 +1,154 @@
+diff --git a/install-dev/controllers/console/process.php b/install-dev/controllers/console/process.php
+index 8bf7493cc69ec..4e3e6a3b40bf8 100644
+--- a/install-dev/controllers/console/process.php
++++ b/install-dev/controllers/console/process.php
+@@ -131,12 +131,6 @@ public function process()
+             }
+         }
+ 
+-        if (in_array('fixtures', $steps)) {
+-            if (!$this->processInstallFixtures()) {
+-                $this->printErrors();
+-            }
+-        }
+-
+         if (in_array('modules', $steps)) {
+             if (!$this->processInstallModules()) {
+                 $this->printErrors();
+@@ -155,6 +149,12 @@ public function process()
+             }
+         }
+ 
++        if (in_array('fixtures', $steps)) {
++            if (!$this->processInstallFixtures()) {
++                $this->printErrors();
++            }
++        }
++
+         // Update fixtures lang
+         foreach (Language::getLanguages() as $lang) {
+             Language::updateMultilangTable($lang['iso_code']);
+diff --git a/install-dev/controllers/http/process.php b/install-dev/controllers/http/process.php
+index c96c0c24744d5..0692c8efb7b8f 100755
+--- a/install-dev/controllers/http/process.php
++++ b/install-dev/controllers/http/process.php
+@@ -100,14 +100,14 @@ public function process()
+                     ->setProcessFOThemes(array('classic'))
+                     ->process();
+                 $this->processConfigureShop();
+-            } elseif (Tools::getValue('installFixtures') && !empty($this->session->process_validated['configureShop'])) {
+-                $this->processInstallFixtures();
+-            } elseif (Tools::getValue('installModules') && (!empty($this->session->process_validated['installFixtures']) || $this->session->install_type != 'full')) {
++            } elseif (Tools::getValue('installModules') && (!empty($this->session->process_validated['configureShop']) || $this->session->install_type != 'full')) {
+                 $this->processInstallModules();
+             } elseif (Tools::getValue('installModulesAddons') && !empty($this->session->process_validated['installModules'])) {
+                 $this->processInstallAddonsModules();
+             } elseif (Tools::getValue('installTheme') && !empty($this->session->process_validated['installModulesAddons'])) {
+                 $this->processInstallTheme();
++            } elseif (Tools::getValue('installFixtures') && !empty($this->session->process_validated['installTheme'])) {
++                $this->processInstallFixtures();
+             }
+         } catch (\Exception $e) {
+             $this->ajaxJsonAnswer(false, $e->getMessage());
+@@ -322,21 +322,6 @@ public function display()
+         $this->process_steps[] = $populate_step;
+         $this->process_steps[] = array('key' => 'configureShop', 'lang' => $this->translator->trans('Configure shop information', array(), 'Install'));
+ 
+-        if ($this->session->install_type == 'full') {
+-            $fixtures_step = array('key' => 'installFixtures', 'lang' => $this->translator->trans('Install demonstration data', array(), 'Install'));
+-            if ($lowMemory || $this->hasLargeFixtures()) {
+-                $fixtures_step['subtasks'] = array();
+-                $xml_loader = new XmlLoader();
+-                $xml_loader->setTranslator($this->translator);
+-                $xml_loader->setFixturesPath();
+-
+-                foreach ($xml_loader->getSortedEntities() as $entity) {
+-                    $fixtures_step['subtasks'][] = array('entity' => $entity);
+-                }
+-            }
+-            $this->process_steps[] = $fixtures_step;
+-        }
+-
+         $install_modules = array('key' => 'installModules', 'lang' => $this->translator->trans('Install modules', array(), 'Install'));
+         if ($lowMemory) {
+             foreach ($this->model_install->getModulesList() as $module) {
+@@ -365,6 +350,21 @@ public function display()
+ 
+         $this->process_steps[] = array('key' => 'installTheme', 'lang' => $this->translator->trans('Install theme', array(), 'Install'));
+ 
++        if ($this->session->install_type == 'full') {
++            $fixtures_step = array('key' => 'installFixtures', 'lang' => $this->translator->trans('Install demonstration data', array(), 'Install'));
++            if ($lowMemory || $this->hasLargeFixtures()) {
++                $fixtures_step['subtasks'] = array();
++                $xml_loader = new XmlLoader();
++                $xml_loader->setTranslator($this->translator);
++                $xml_loader->setFixturesPath();
++
++                foreach ($xml_loader->getSortedEntities() as $entity) {
++                    $fixtures_step['subtasks'][] = array('entity' => $entity);
++                }
++            }
++            $this->process_steps[] = $fixtures_step;
++        }
++
+         $this->displayTemplate('process');
+     }
+ 
+diff --git a/src/PrestaShopBundle/Install/Install.php b/src/PrestaShopBundle/Install/Install.php
+index aa011bac54a21..a20d8cdf1847b 100644
+--- a/src/PrestaShopBundle/Install/Install.php
++++ b/src/PrestaShopBundle/Install/Install.php
+@@ -523,11 +523,6 @@ public function populateDatabase($entity = null)
+                     return false;
+                 }
+             }
+-
+-            // Copy language default images (we do this action after database in populated because we need image types information)
+-            foreach ($languages as $iso) {
+-                $this->copyLanguageImages($iso);
+-            }
+         } catch (PrestashopInstallerException $e) {
+             $this->setError($e->getMessage());
+ 
+@@ -682,9 +677,17 @@ public function copyLanguageImages($iso)
+             $types = ImageType::getImagesTypes($cat);
+             foreach ($types as $type) {
+                 if (file_exists($img_path . $iso . '-default-' . $type['name'] . '.jpg')) {
+-                    copy($img_path . $iso . '-default-' . $type['name'] . '.jpg', $dst_path . $iso . '-default-' . $type['name'] . '.jpg');
++                    copy(
++                        $img_path . $iso . '-default-' . $type['name'] . '.jpg',
++                        $dst_path . $iso . '-default-' . $type['name'] . '.jpg'
++                    );
+                 } else {
+-                    ImageManager::resize($img_path . $iso . '.jpg', $dst_path . $iso . '-default-' . $type['name'] . '.jpg', $type['width'], $type['height']);
++                    ImageManager::resize(
++                        $img_path . $iso . '.jpg',
++                        $dst_path . $iso . '-default-' . $type['name'] . '.jpg',
++                        $type['width'],
++                        $type['height']
++                    );
+                 }
+             }
+         }
+@@ -1171,6 +1174,20 @@ public function installTheme($themeName = null)
+ 
+         $theme_manager = $builder->build();
+ 
+-        return $theme_manager->install($themeName) && $theme_manager->enable($themeName);
++        if (!($theme_manager->install($themeName) && $theme_manager->enable($themeName))) {
++            return false;
++        }
++
++        /*
++         * Copy language default images.
++         * We do this action after install theme because we
++         * need image types information.
++         */
++        $languages = $this->language->getIsoList();
++        foreach ($languages as $iso) {
++            $this->copyLanguageImages($iso);
++        }
++
++        return true;
+     }
+ }

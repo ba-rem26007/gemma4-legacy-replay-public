@@ -1,0 +1,188 @@
+diff --git a/classes/checkout/CheckoutPaymentStep.php b/classes/checkout/CheckoutPaymentStep.php
+index 246f45c856fd3..18d7376094a8a 100644
+--- a/classes/checkout/CheckoutPaymentStep.php
++++ b/classes/checkout/CheckoutPaymentStep.php
+@@ -23,6 +23,9 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
++use PrestaShop\PrestaShop\Adapter\ContainerFinder;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ class CheckoutPaymentStepCore extends AbstractCheckoutStep
+@@ -50,7 +53,7 @@ public function __construct(
+         Context $context,
+         TranslatorInterface $translator,
+         PaymentOptionsFinder $paymentOptionsFinder,
+-        ConditionsToApproveFinder $conditionsToApproveFinder
++        ConditionsToApproveFinder $conditionsToApproveFinder,
+     ) {
+         parent::__construct($context, $translator);
+         $this->paymentOptionsFinder = $paymentOptionsFinder;
+@@ -95,6 +98,14 @@ public function render(array $extraParams = [])
+             unset($selectedDeliveryOption['product_list']);
+         }
+ 
++        $containerFinder = new ContainerFinder($this->context);
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $containerFinder->getContainer()->get(FeatureFlagStateCheckerInterface::class);
++
++        $productsCarrierMapping = $this->getCheckoutSession()->getProductsByCarrier();
++        $deliveryOptionKeys = array_filter(explode(',', $deliveryOptionKey));
++        $productsCarrierMapping = array_intersect_key($productsCarrierMapping, array_flip($deliveryOptionKeys));
++
+         $assignedVars = [
+             'is_free' => $isFree,
+             'payment_options' => $paymentOptions,
+@@ -102,6 +113,8 @@ public function render(array $extraParams = [])
+             'selected_payment_option' => $this->selected_payment_option,
+             'selected_delivery_option' => $selectedDeliveryOption,
+             'show_final_summary' => Configuration::get('PS_FINAL_SUMMARY_ENABLED'),
++            'is_multishipment_enabled' => $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT),
++            'products_carrier_mapping' => $productsCarrierMapping,
+             'is_recyclable_packaging' => $this->getCheckoutSession()->isRecyclable(),
+         ];
+ 
+diff --git a/classes/checkout/CheckoutSession.php b/classes/checkout/CheckoutSession.php
+index cb14eefd4328c..81e241ae01c20 100644
+--- a/classes/checkout/CheckoutSession.php
++++ b/classes/checkout/CheckoutSession.php
+@@ -25,6 +25,7 @@
+  */
+ 
+ use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsInterface;
++use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsProvider;
+ 
+ class CheckoutSessionCore
+ {
+@@ -156,6 +157,15 @@ public function getSelectedDeliveryOption()
+         return $this->deliveryOptions->getSelectedDeliveryOption();
+     }
+ 
++    public function getProductsByCarrier()
++    {
++        if ($this->deliveryOptions instanceof DeliveryOptionsProvider) {
++            return $this->deliveryOptions->getProductsByCarrier();
++        }
++
++        return [];
++    }
++
+     public function getDeliveryOptions()
+     {
+         return $this->deliveryOptions->getDeliveryOptions();
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index 8167adffa17c5..6b70e37548720 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -129,7 +129,8 @@ public function getCheckoutSession(): CheckoutSession
+                 $this->context,
+                 $this->getTranslator(),
+                 $this->objectPresenter,
+-                new PriceFormatter()
++                new PriceFormatter(),
++                $this->cart_presenter,
+             );
+         } else {
+             $deliveryOptionsFinder = new DeliveryOptionsFinder(
+@@ -439,7 +440,7 @@ protected function buildCheckoutProcess(CheckoutSession $session, $translator)
+                 new ConditionsToApproveFinder(
+                     $this->context,
+                     $translator
+-                )
++                ),
+             ));
+ 
+         return $checkoutProcess;
+diff --git a/src/Adapter/Shipment/DeliveryOptionsProvider.php b/src/Adapter/Shipment/DeliveryOptionsProvider.php
+index 6be872bb3a940..65b35d32fcce2 100644
+--- a/src/Adapter/Shipment/DeliveryOptionsProvider.php
++++ b/src/Adapter/Shipment/DeliveryOptionsProvider.php
+@@ -32,6 +32,7 @@
+ use DeliveryOptionsFinderCore;
+ use Hook;
+ use Module;
++use PrestaShop\PrestaShop\Adapter\Presenter\Cart\CartPresenter;
+ use PrestaShop\PrestaShop\Adapter\Presenter\Object\ObjectPresenter;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+@@ -40,14 +41,19 @@ class DeliveryOptionsProvider extends DeliveryOptionsFinderCore
+ {
+     private $context;
+ 
++    /** @var CartPresenter */
++    private $cartPresenter;
++
+     public function __construct(
+         Context $context,
+         TranslatorInterface $translator,
+         ObjectPresenter $objectPresenter,
+-        PriceFormatter $priceFormatter
++        PriceFormatter $priceFormatter,
++        CartPresenter $cartPresenter
+     ) {
+         parent::__construct($context, $translator, $objectPresenter, $priceFormatter);
+         $this->context = $context;
++        $this->cartPresenter = $cartPresenter;
+     }
+ 
+     public function getDeliveryOptions()
+@@ -72,6 +78,44 @@ public function getDeliveryOptions()
+         return $parentOutput;
+     }
+ 
++    /**
++     * @return array
++     */
++    public function getProductsByCarrier()
++    {
++        $deliveryOptions = $this->context->cart->getDeliveryOptionList();
++        $currentAddressDeliveryOptions = $deliveryOptions[$this->context->cart->id_address_delivery];
++        $carriers = [];
++
++        foreach ($currentAddressDeliveryOptions as $deliveryOption) {
++            foreach ($deliveryOption['carrier_list'] as $carrierId => $carrier) {
++                $carriers[$carrierId] = $this->formatCarrierWithProducts($carrier);
++            }
++        }
++
++        return $carriers;
++    }
++
++    private function formatCarrierWithProducts(array $carrierData): array
++    {
++        $carrierProductIds = array_map(function ($product) {
++            return $product['id_product'];
++        }, $carrierData['product_list']);
++
++        $cartProducts = $this->cartPresenter->present($this->context->cart);
++        $filteredProducts = array_filter($cartProducts->getProducts(), function ($product) use ($carrierProductIds) {
++            return in_array($product['id_product'], $carrierProductIds);
++        });
++
++        return [
++            'carrier' => [
++                'name' => $carrierData['instance']->name,
++                'delay' => $carrierData['instance']->delay[$this->context->language->id] ?? $carrierData['instance']->delay,
++            ],
++            'products' => $filteredProducts,
++        ];
++    }
++
+     private function getCarriersDetails(array $deliveryOption): array
+     {
+         $carriers = $deliveryOption['carrier_list'];
+diff --git a/var/class_stub.php b/var/class_stub.php
+index b7c584d39da8d..a5d78d557eeca 100644
+--- a/var/class_stub.php
++++ b/var/class_stub.php
+@@ -60,6 +60,7 @@ class CccReducer extends CccReducerCore {};
+ class Chart extends ChartCore {};
+ class CheckoutAddressesStep extends CheckoutAddressesStepCore {};
+ class CheckoutDeliveryStep extends CheckoutDeliveryStepCore {};
++class CheckoutShipmentStep extends CheckoutShipmentStepCore {};
+ class CheckoutPaymentStep extends CheckoutPaymentStepCore {};
+ class CheckoutPersonalInformationStep extends CheckoutPersonalInformationStepCore {};
+ class CheckoutProcess extends CheckoutProcessCore {};

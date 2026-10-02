@@ -1,0 +1,373 @@
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 10313f8b5da8b..c3167613cdde4 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -574,6 +574,9 @@
+   <configuration id="PS_TOKEN_ENABLE" name="PS_TOKEN_ENABLE">
+     <value>1</value>
+   </configuration>
++  <configuration id="PS_SHOP_MODE" name="PS_SHOP_MODE">
++    <value>b2c_only</value>
++  </configuration>
+   <configuration id="PS_STATS_RENDER" name="PS_STATS_RENDER">
+     <value>graphnvd3</value>
+   </configuration>
+diff --git a/src/Adapter/Preferences/PreferencesConfiguration.php b/src/Adapter/Preferences/PreferencesConfiguration.php
+index 46b2fdfabc409..3f88e7a76c7df 100644
+--- a/src/Adapter/Preferences/PreferencesConfiguration.php
++++ b/src/Adapter/Preferences/PreferencesConfiguration.php
+@@ -8,22 +8,20 @@
+ 
+ use PrestaShop\PrestaShop\Adapter\Configuration;
+ use PrestaShop\PrestaShop\Core\Configuration\DataConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Feature\Enum\ShopModeEnum;
++use PrestaShop\PrestaShop\Core\Feature\ShopModeFeature;
+ use PrestaShop\PrestaShop\Core\Http\CookieOptions;
++use PrestaShopBundle\Form\Admin\Configure\ShopParameters\General\PreferencesType;
++use PrestaShopLogger;
+ 
+ /**
+  * This class will provide Shop Preferences configuration.
+  */
+ class PreferencesConfiguration implements DataConfigurationInterface
+ {
+-    /**
+-     * @var Configuration
+-     */
+-    private $configuration;
+-
+     public function __construct(
+-        Configuration $configuration
++        private readonly Configuration $configuration,
+     ) {
+-        $this->configuration = $configuration;
+     }
+ 
+     /**
+@@ -31,9 +29,16 @@ public function __construct(
+      */
+     public function getConfiguration()
+     {
++        $shopMode = $this->configuration->getEnum(
++            ShopModeFeature::CONFIGURATION_NAME,
++            ShopModeEnum::class,
++            ShopModeFeature::DEFAULT_SHOP_MODE
++        );
++
+         return [
+             'enable_ssl' => $this->configuration->getBoolean('PS_SSL_ENABLED'),
+             'enable_token' => $this->configuration->getBoolean('PS_TOKEN_ENABLE'),
++            PreferencesType::SHOP_MODE => $shopMode,
+             'allow_html_iframes' => $this->configuration->getBoolean('PS_ALLOW_HTML_IFRAME'),
+             'use_htmlpurifier' => $this->configuration->getBoolean('PS_USE_HTMLPURIFIER'),
+             'price_round_mode' => $this->configuration->get('PS_PRICE_ROUND_MODE'),
+@@ -70,8 +75,30 @@ public function updateConfiguration(array $configuration)
+             ];
+         }
+ 
++        /** @var ShopModeEnum $newShopModeValue */
++        $newShopModeValue = $configuration[PreferencesType::SHOP_MODE];
++
++        /** @var ShopModeEnum $oldShopModeValue */
++        $oldShopModeValue = $this->configuration->getEnum(
++            ShopModeFeature::CONFIGURATION_NAME,
++            ShopModeEnum::class,
++            ShopModeFeature::DEFAULT_SHOP_MODE
++        );
++
++        if ($oldShopModeValue !== $newShopModeValue) {
++            PrestaShopLogger::addLog(
++                sprintf('Shop mode updated: from "%s" to "%s"', $oldShopModeValue->value, $newShopModeValue->value),
++                1,
++                null,
++                'Configuration',
++                0,
++                true
++            );
++        }
++
+         $this->configuration->set('PS_SSL_ENABLED', $configuration['enable_ssl']);
+         $this->configuration->set('PS_TOKEN_ENABLE', $configuration['enable_token']);
++        $this->configuration->set(ShopModeFeature::CONFIGURATION_NAME, $newShopModeValue->value);
+         $this->configuration->set('PS_ALLOW_HTML_IFRAME', $configuration['allow_html_iframes']);
+         $this->configuration->set('PS_USE_HTMLPURIFIER', $configuration['use_htmlpurifier']);
+         $this->configuration->set('PS_PRICE_ROUND_MODE', $configuration['price_round_mode']);
+@@ -105,6 +132,7 @@ public function validateConfiguration(array $configuration)
+         return isset(
+             $configuration['enable_ssl'],
+             $configuration['enable_token'],
++            $configuration[PreferencesType::SHOP_MODE],
+             $configuration['allow_html_iframes'],
+             $configuration['use_htmlpurifier'],
+             $configuration['price_round_mode'],
+diff --git a/src/Core/Feature/Enum/ShopModeEnum.php b/src/Core/Feature/Enum/ShopModeEnum.php
+new file mode 100644
+index 0000000000000..2fe16076d2fb6
+--- /dev/null
++++ b/src/Core/Feature/Enum/ShopModeEnum.php
+@@ -0,0 +1,26 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Feature\Enum;
++
++use Symfony\Contracts\Translation\TranslatableInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++enum ShopModeEnum: string implements TranslatableInterface
++{
++    case SHOP_MODE_B2C_ONLY = 'b2c_only';
++    case SHOP_MODE_B2B_ONLY = 'b2b_only';
++    case SHOP_MODE_B2B_AND_B2C = 'b2b_and_b2c';
++
++    public function trans(TranslatorInterface $translator, ?string $locale = null): string
++    {
++        return match ($this) {
++            self::SHOP_MODE_B2C_ONLY => $translator->trans('B2C only', [], 'Admin.Shopparameters.Feature', $locale),
++            self::SHOP_MODE_B2B_ONLY => $translator->trans('B2B only', [], 'Admin.Shopparameters.Feature', $locale),
++            self::SHOP_MODE_B2B_AND_B2C => $translator->trans('B2B and B2C', [], 'Admin.Shopparameters.Feature', $locale),
++        };
++    }
++}
+diff --git a/src/Core/Feature/ShopModeFeature.php b/src/Core/Feature/ShopModeFeature.php
+new file mode 100644
+index 0000000000000..bcadf04ffede1
+--- /dev/null
++++ b/src/Core/Feature/ShopModeFeature.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Feature;
++
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Core\Feature\Enum\ShopModeEnum;
++use Symfony\Component\HttpFoundation\Exception\UnexpectedValueException;
++
++class ShopModeFeature
++{
++    public const CONFIGURATION_NAME = 'PS_SHOP_MODE';
++
++    public const DEFAULT_SHOP_MODE = ShopModeEnum::SHOP_MODE_B2C_ONLY;
++
++    public function __construct(
++        protected readonly Configuration $configuration
++    ) {
++    }
++
++    public function getCurrentShopMode(): ShopModeEnum
++    {
++        try {
++            return $this->configuration->getEnum(self::CONFIGURATION_NAME, ShopModeEnum::class, self::DEFAULT_SHOP_MODE);
++        } catch (UnexpectedValueException) {
++            return ShopModeEnum::SHOP_MODE_B2C_ONLY;
++        }
++    }
++
++    public function isB2BShopModeEnable(): bool
++    {
++        return match ($this->getCurrentShopMode()) {
++            ShopModeEnum::SHOP_MODE_B2B_ONLY, ShopModeEnum::SHOP_MODE_B2B_AND_B2C => true,
++            default => false,
++        };
++    }
++
++    public function isB2CShopModeEnable(): bool
++    {
++        return match ($this->getCurrentShopMode()) {
++            ShopModeEnum::SHOP_MODE_B2C_ONLY, ShopModeEnum::SHOP_MODE_B2B_AND_B2C => true,
++            default => false,
++        };
++    }
++
++    public function update(ShopModeEnum $shopModeEnum): void
++    {
++        $this->configuration->set(self::CONFIGURATION_NAME, $shopModeEnum->value);
++    }
++}
+diff --git a/src/Core/FeatureFlag/FeatureFlagSettings.php b/src/Core/FeatureFlag/FeatureFlagSettings.php
+index e9c7da9ea1678..80aa7c42c729d 100644
+--- a/src/Core/FeatureFlag/FeatureFlagSettings.php
++++ b/src/Core/FeatureFlag/FeatureFlagSettings.php
+@@ -35,5 +35,6 @@ class FeatureFlagSettings
+     public const FEATURE_FLAG_FRONT_CONTAINER_V2 = 'front_container_v2';
+     public const FEATURE_FLAG_IMPROVED_SHIPMENT = 'improved_shipment';
+     public const FEATURE_FLAG_DISCOUNT = 'discount';
++    public const FEATURE_FLAG_IMPROVED_B2B = 'improved_b2b';
+     public const FEATURE_FLAG_ONE_PAGE_CHECKOUT = 'one_page_checkout';
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+index 1999d37c617c6..673fb081b1355 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+@@ -8,9 +8,13 @@
+ 
+ use PrestaShop\PrestaShop\Adapter\Entity\Order;
+ use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Feature\Enum\ShopModeEnum;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShopBundle\Form\Admin\Type\SwitchType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\EnumType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\HttpFoundation\RequestStack;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -22,6 +26,8 @@
+  */
+ class PreferencesType extends TranslatorAwareType
+ {
++    public const SHOP_MODE = 'shop_mode';
++
+     /**
+      * @var bool
+      */
+@@ -53,6 +59,7 @@ class PreferencesType extends TranslatorAwareType
+      * @param bool $isShopFeatureEnabled
+      * @param bool $isSingleShopContext
+      * @param bool $isAllShopContext
++     * @param ?FeatureFlagStateCheckerInterface $featureFlagStateChecker
+      */
+     public function __construct(
+         RequestStack $requestStack,
+@@ -61,7 +68,8 @@ public function __construct(
+         ConfigurationInterface $configuration,
+         bool $isShopFeatureEnabled,
+         bool $isSingleShopContext,
+-        bool $isAllShopContext
++        bool $isAllShopContext,
++        private readonly ?FeatureFlagStateCheckerInterface $featureFlagStateChecker,
+     ) {
+         parent::__construct($translator, $locales);
+ 
+@@ -79,6 +87,8 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         $configuration = $this->configuration;
+ 
++        $showB2bShopMode = $this->featureFlagStateChecker?->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_B2B) ?? false;
++
+         if ($this->requestStack->getCurrentRequest()->isSecure()) {
+             $builder->add('enable_ssl', SwitchType::class, [
+                 'label' => $this->trans('Enable SSL', 'Admin.Shopparameters.Feature'),
+@@ -100,7 +110,23 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Enable or disable token in the Front Office to improve PrestaShop\'s security.',
+                     'Admin.Shopparameters.Help'
+                 ),
+-            ])
++            ]);
++
++        if ($showB2bShopMode) {
++            $builder
++                ->add(self::SHOP_MODE, EnumType::class, [
++                    'class' => ShopModeEnum::class,
++                    'label' => $this->trans(
++                        'Shop mode',
++                        'Admin.Shopparameters.Feature'),
++                    'help' => $this->trans(
++                        'Choose which features are enabled in your shop: B2C only, B2B only, or both.',
++                        'Admin.Shopparameters.Help'
++                    ),
++                ]);
++        }
++
++        $builder
+             ->add('allow_html_iframes', SwitchType::class, [
+                 'label' => $this->trans(
+                     'Allow iframes on HTML fields',
+diff --git a/tests/Unit/Adapter/Preferences/PreferencesConfigurationTest.php b/tests/Unit/Adapter/Preferences/PreferencesConfigurationTest.php
+index 6b2a6dd7bde08..97739a08c7228 100644
+--- a/tests/Unit/Adapter/Preferences/PreferencesConfigurationTest.php
++++ b/tests/Unit/Adapter/Preferences/PreferencesConfigurationTest.php
+@@ -12,7 +12,10 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Adapter\Configuration;
+ use PrestaShop\PrestaShop\Adapter\Preferences\PreferencesConfiguration;
++use PrestaShop\PrestaShop\Core\Feature\Enum\ShopModeEnum;
++use PrestaShop\PrestaShop\Core\Feature\ShopModeFeature;
+ use PrestaShop\PrestaShop\Core\Http\CookieOptions;
++use PrestaShopBundle\Form\Admin\Configure\ShopParameters\General\PreferencesType;
+ 
+ class PreferencesConfigurationTest extends TestCase
+ {
+@@ -29,7 +32,7 @@ class PreferencesConfigurationTest extends TestCase
+     protected function setUp(): void
+     {
+         $this->mockConfiguration = $this->getMockBuilder(Configuration::class)
+-            ->onlyMethods(['get', 'getBoolean', 'set'])
++            ->onlyMethods(['get', 'getBoolean', 'set', 'getEnum'])
+             ->disableOriginalConstructor()
+             ->getMock();
+         $this->object = new PreferencesConfiguration($this->mockConfiguration);
+@@ -61,11 +64,20 @@ public function testGetConfiguration()
+                 ]
+             );
+ 
++        $this->mockConfiguration
++            ->method('getEnum')
++            ->willReturnMap(
++                [
++                    [ShopModeFeature::CONFIGURATION_NAME, ShopModeEnum::class, ShopModeFeature::DEFAULT_SHOP_MODE, ShopModeEnum::SHOP_MODE_B2C_ONLY],
++                ]
++            );
++
+         $result = $this->object->getConfiguration();
+         $this->assertSame(
+             [
+                 'enable_ssl' => true,
+                 'enable_token' => true,
++                PreferencesType::SHOP_MODE => ShopModeEnum::SHOP_MODE_B2C_ONLY,
+                 'allow_html_iframes' => true,
+                 'use_htmlpurifier' => true,
+                 'price_round_mode' => 'test',
+@@ -116,6 +128,7 @@ public function testUpdateConfigurationWithInvalidSSLConfiguration()
+                 [
+                     'enable_ssl' => false,
+                     'enable_token' => true,
++                    PreferencesType::SHOP_MODE => ShopModeEnum::SHOP_MODE_B2C_ONLY,
+                     'allow_html_iframes' => true,
+                     'use_htmlpurifier' => true,
+                     'price_round_mode' => 'test',
+@@ -138,12 +151,14 @@ public function testUpdateConfiguration()
+                     ['PS_COOKIE_SAMESITE', null, null, CookieOptions::SAMESITE_NONE],
+                 ]
+             );
++
+         $this->mockConfiguration
+             ->method('set')
+             ->willReturnMap(
+                 [
+                     ['PS_SSL_ENABLED', true],
+                     ['PS_TOKEN_ENABLE', true],
++                    [ShopModeFeature::CONFIGURATION_NAME, ShopModeEnum::SHOP_MODE_B2C_ONLY],
+                     ['PS_ALLOW_HTML_IFRAME', true],
+                     ['PS_USE_HTMLPURIFIER', true],
+                     ['PS_DISPLAY_SUPPLIERS', false],
+@@ -156,18 +171,12 @@ public function testUpdateConfiguration()
+             );
+ 
+         $this->assertSame(
+-            [
+-                [
+-                    'key' => 'Cannot disable SSL configuration due to the Cookie SameSite=None.',
+-                    'domain' => 'Admin.Advparameters.Notification',
+-                    'parameters' => [],
+-                ],
+-            ],
+-
++            [],
+             $this->object->updateConfiguration(
+                 [
+-                    'enable_ssl' => false,
++                    'enable_ssl' => true,
+                     'enable_token' => true,
++                    PreferencesType::SHOP_MODE => ShopModeEnum::SHOP_MODE_B2C_ONLY,
+                     'allow_html_iframes' => true,
+                     'use_htmlpurifier' => true,
+                     'price_round_mode' => 'test',

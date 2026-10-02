@@ -1,0 +1,831 @@
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+index 505127924fd36..a66c3528fae91 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+@@ -149,7 +149,8 @@ public function __construct(
+         unset($passedArguments['CQRSCommandMapping']);
+ 
+         // By default, the CQRS command is used as the input base class as it contains the exact available parameters for this operation
+-        if (empty($passedArguments['input']) && !empty($passedArguments['extraProperties']['CQRSCommand'])) {
++        // Exception in case the class doesn't exist we don't force the input because InputOutputResourceMetadataCollectionFactory will raise an exception when the resources are parsed
++        if (empty($passedArguments['input']) && !empty($passedArguments['extraProperties']['CQRSCommand']) && class_exists($passedArguments['extraProperties']['CQRSCommand'])) {
+             $passedArguments['input'] = $passedArguments['extraProperties']['CQRSCommand'];
+         }
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php
+new file mode 100644
+index 0000000000000..e776d2f3cf78a
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php
+@@ -0,0 +1,83 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory;
++
++use ApiPlatform\Metadata\ApiResource;
++use ApiPlatform\Metadata\Operation;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
++
++/**
++ * This factory decorates the ApiPlatform default resource factory. It looks into each operation and checks
++ * if the extra property contains some CQRS commands and/or queries. If they are not found the operation/endpoint
++ * is removed.
++ *
++ * The purpose for this clean is that we can have a single ps_apiresources module that contains definitions for
++ * endpoints based on 9.1 commands for example, the endpoints would not work on 9.0 so they are filtered out.
++ *
++ * Scope extraction is also impacted by this filtering, meaning if a scope is only associated to experimental operations
++ * it won't be available in prod mode at all, unless you enable the related feature flag.
++ */
++class CQRSNotFoundMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
++{
++    public function __construct(
++        private readonly ResourceMetadataCollectionFactoryInterface $decorated,
++        private readonly bool $isDebug,
++    ) {
++    }
++
++    public function create(string $resourceClass): ResourceMetadataCollection
++    {
++        // We call the original method since we only want to alter the result of this method.
++        $resourceMetadataCollection = $this->decorated->create($resourceClass);
++
++        // In debug mode we filter nothing, in prod mode we do unless the forcing configuration is enabled
++        if ($this->isDebug) {
++            return $resourceMetadataCollection;
++        }
++
++        /** @var ApiResource $resourceMetadata */
++        foreach ($resourceMetadataCollection as $resourceMetadata) {
++            $operations = $resourceMetadata->getOperations();
++            /** @var Operation $operation */
++            foreach ($operations as $key => $operation) {
++                $extraProperties = $operation->getExtraProperties();
++
++                if (isset($extraProperties['CQRSQuery']) && !class_exists($extraProperties['CQRSQuery'])) {
++                    $operations->remove($key);
++                }
++                if (isset($extraProperties['CQRSCommand']) && !class_exists($extraProperties['CQRSCommand'])) {
++                    $operations->remove($key);
++                }
++            }
++        }
++
++        return $resourceMetadataCollection;
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+index 1a1bf2134d776..e5c00fb6c1438 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+@@ -50,7 +50,7 @@
+ class ExperimentalOperationsMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
+ {
+     public function __construct(
+-        private readonly ResourceMetadataCollectionFactoryInterface $innerFactory,
++        private readonly ResourceMetadataCollectionFactoryInterface $decorated,
+         private readonly bool $isDebug,
+         private readonly FeatureFlagManager $featureFlagManager,
+     ) {
+@@ -59,7 +59,7 @@ public function __construct(
+     public function create(string $resourceClass): ResourceMetadataCollection
+     {
+         // We call the original method since we only want to alter the result of this method.
+-        $resourceMetadataCollection = $this->innerFactory->create($resourceClass);
++        $resourceMetadataCollection = $this->decorated->create($resourceClass);
+ 
+         // In debug mode we filter nothing, in prod mode we do unless the forcing configuration is enabled
+         if ($this->isDebug || $this->areExperimentalEndpointsEnabled()) {
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+index 949e9ddee5584..847a1955a610d 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+@@ -91,7 +91,17 @@ services:
+     decorates: api_platform.metadata.resource.metadata_collection_factory
+     autowire: true
+     arguments:
+-      $innerFactory: '@.inner'
++      $decorated: '@.inner'
++      $isDebug: '%kernel.debug%'
++
++  # This decorator allows filtering the available ApiPlatform resources when they are base on non existing CQRS classes
++  PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory\CQRSNotFoundMetadataCollectionFactoryDecorator:
++    # It is important to decorate early in the decoration chain, because InputOutputResourceMetadataCollectionFactory checks the existence
++    # of input classes and throws an exception before this one has the chance to clean the CQRS not found
++    decorates: api_platform.metadata.resource.metadata_collection_factory.attributes
++    autowire: true
++    arguments:
++      $decorated: '@.inner'
+       $isDebug: '%kernel.debug%'
+ 
+   # This service depends on ResourceMetadataCollectionFactoryInterface (auto wired) and can extract the scopes defined on operations
+diff --git a/tests/Integration/ApiPlatform/DisabledEndpointsTest.php b/tests/Integration/ApiPlatform/DisabledEndpointsTest.php
+index e51cf848d039a..c0a3cb44f0be9 100644
+--- a/tests/Integration/ApiPlatform/DisabledEndpointsTest.php
++++ b/tests/Integration/ApiPlatform/DisabledEndpointsTest.php
+@@ -152,4 +152,81 @@ public function getConfigurations(): iterable
+             true,
+         ];
+     }
++
++    /**
++     * @dataProvider getNotFoundEndpoints
++     */
++    public function testEndpointWithCQRSNotFound(bool $isDebug, string $endpointMethod, string $endpointUrl, string $endpointScope): void
++    {
++        // Boot kernel with appropriate configuration, exceptionally we force the environment, so we have
++        // distinct cache and adapted data/behaviour for each use case
++        $kernelOptions = ['debug' => $isDebug];
++
++        // The purpose in this test is not to check the HTTPS protection so we mimic it (especially for prod environment)
++        $defaultClientOptions = [
++            'headers' => [
++                'X_FORWARDED_PROTO' => 'HTTPS',
++            ],
++        ];
++        static::bootKernel($kernelOptions);
++
++        // In prod the scope should be filtered out so trying to use it would result in a 401
++        // In dev the scope is visible so developers realize if they made a mistake, it is usable when you create a token though
++        $bearerToken = $this->getBearerToken($isDebug ? [$endpointScope] : [], $kernelOptions, $defaultClientOptions);
++
++        static::createClient($kernelOptions, $defaultClientOptions)->request($endpointMethod, $endpointUrl, [
++            'headers' => [
++                'Authorization' => 'Bearer ' . $bearerToken,
++            ],
++        ]);
++
++        // In prod the endpoint should be filtered out so trying to access it result in a 404
++        // In dev the endpoint is visible so developers realize if they made a mistake, an invalid 400 http code is returned
++        self::assertResponseStatusCodeSame($isDebug ? 400 : 404);
++
++        /** @var ApiResourceScopesExtractor $scopesExtractor */
++        $scopesExtractor = static::createClient($kernelOptions)->getContainer()->get(ApiResourceScopesExtractor::class);
++        $resourceScopes = $scopesExtractor->getAllApiResourceScopes();
++        $foundScope = false;
++        foreach ($resourceScopes as $resourceScope) {
++            if (in_array($endpointScope, $resourceScope->getScopes())) {
++                $foundScope = true;
++                break;
++            }
++        }
++
++        // If debug is enabled the scope is found, if not it was filtered
++        $this->assertEquals($isDebug, $foundScope);
++    }
++
++    public static function getNotFoundEndpoints(): iterable
++    {
++        yield 'endpoint with CQRS query not found, filtered on prod' => [
++            false,
++            'GET',
++            '/test/cqrs/query/not_found',
++            'filtered_query_scope',
++        ];
++
++        yield 'endpoint with CQRS query not found, still present on dev' => [
++            true,
++            'GET',
++            '/test/cqrs/query/not_found',
++            'filtered_query_scope',
++        ];
++
++        yield 'endpoint with CQRS command not found, filtered on prod' => [
++            false,
++            'POST',
++            '/test/cqrs/command/not_found',
++            'filtered_command_scope',
++        ];
++
++        yield 'endpoint with CQRS command not found, still present on dev' => [
++            true,
++            'POST',
++            '/test/cqrs/command/not_found',
++            'filtered_command_scope',
++        ];
++    }
+ }
+diff --git a/tests/Resources/ApiPlatform/Resources/ApiTest.php b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+index 3de5ce2210af9..94fc2bdeea1bf 100644
+--- a/tests/Resources/ApiPlatform/Resources/ApiTest.php
++++ b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+@@ -31,6 +31,7 @@
+ use ApiPlatform\Metadata\ApiProperty;
+ use ApiPlatform\Metadata\ApiResource;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Query\GetProductForEditing;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSCreate;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSGet;
+ 
+ #[ApiResource(
+@@ -54,6 +55,16 @@
+             CQRSQueryMapping: ApiTest::QUERY_MAPPING,
+             experimentalOperation: true,
+         ),
++        new CQRSGet(
++            uriTemplate: '/test/cqrs/query/not_found',
++            CQRSQuery: 'PrestaShop\PrestaShop\Core\Domain\Product\Query\NotFoundQuery',
++            scopes: ['filtered_query_scope'],
++        ),
++        new CQRSCreate(
++            uriTemplate: '/test/cqrs/command/not_found',
++            CQRSCommand: 'PrestaShop\PrestaShop\Core\Domain\Product\Query\NotFoundCommand',
++            scopes: ['filtered_command_scope'],
++        ),
+     ],
+ )]
+ class ApiTest
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+index 5ad4acf2d1a44..0c11154a1662f 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+@@ -30,11 +30,17 @@
+ 
+ use ApiPlatform\Exception\InvalidArgumentException;
+ use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\AddProductCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSCommand;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+ 
+ class CQRSCommandTest extends TestCase
+ {
++    public const VALID_COMMAND_CLASS = AddProductCommand::class;
++    public const OTHER_VALID_COMMAND_CLASS = UpdateProductCommand::class;
++    public const INVALID_COMMAND_CLASS = 'My\\Namespace\\MyCommand';
++
+     public function testDefaultConstructor(): void
+     {
+         // Without any parameters
+@@ -101,66 +107,66 @@ public function testScopes(): void
+ 
+     public function testCQRSCommand(): void
+     {
+-        // CQRS query parameters in constructor
++        // CQRS command parameters in constructor
+         $operation = new CQRSCommand(
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties parameters in constructor
+         $operation = new CQRSCommand(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties AND CQRS query parameters in constructor, both values are equals no problem
+         $operation = new CQRSCommand(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Use with method, returned object is a clone All values are replaced
+-        $operation2 = $operation->withCQRSCommand('My\\Namespace\\MyOtherCommand');
++        $operation2 = $operation->withCQRSCommand(self::OTHER_VALID_COMMAND_CLASS);
+         $this->assertNotEquals($operation2, $operation);
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyOtherCommand'], $operation2->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getInput());
++        $this->assertEquals(['CQRSCommand' => self::OTHER_VALID_COMMAND_CLASS], $operation2->getExtraProperties());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getInput());
+ 
+         // Initial operation not modified of course
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // When input is manually specified it is kept over the CQRSCommand
+         $operationInput = new CQRSCommand(
+-            input: 'My\\Namespace\\MyOtherCommand',
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            input: self::OTHER_VALID_COMMAND_CLASS,
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operationInput->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operationInput->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operationInput->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operationInput->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput->getInput());
+         // Clone value keeps the initial different input value
+         $operationInput2 = $operationInput->withCQRSCommand('My\\Namespace\\MyThirdCommand');
+         $this->assertNotEquals($operationInput2, $operationInput);
+         $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyThirdCommand'], $operationInput2->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyThirdCommand', $operationInput2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput2->getInput());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput2->getInput());
+ 
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+             new CQRSCommand(
+-                extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-                CQRSCommand: 'My\\Namespace\\MyOtherCommand',
++                extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++                CQRSCommand: self::OTHER_VALID_COMMAND_CLASS,
+             );
+         } catch (InvalidArgumentException $e) {
+             $caughtException = $e;
+@@ -169,6 +175,16 @@ public function testCQRSCommand(): void
+         $this->assertNotNull($caughtException);
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property CQRSCommand and a CQRSCommand argument that are different is invalid', $caughtException->getMessage());
++
++        // CQRS command parameters in constructor that does not exist is not forced as the input
++        $operation = new CQRSCommand(
++            CQRSCommand: self::INVALID_COMMAND_CLASS,
++        );
++        $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
++        $this->assertNull($operation->getProvider());
++        $this->assertEquals(['CQRSCommand' => self::INVALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::INVALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertNull($operation->getInput());
+     }
+ 
+     public function testCQRSCommandMapping(): void
+@@ -410,7 +426,7 @@ public function testMultipleArguments(): void
+                 'scopes' => ['master_scope'],
+                 'CQRSCommandMapping' => $commandMapping,
+             ],
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+             scopes: ['scope1', 'scope2'],
+             CQRSQueryMapping: $queryMapping,
+             ApiResourceMapping: $resourceMapping,
+@@ -419,14 +435,14 @@ public function testMultipleArguments(): void
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation->getCQRSCommandMapping());
+         $this->assertEquals($queryMapping, $operation->getCQRSQueryMapping());
+         $this->assertEquals($resourceMapping, $operation->getApiResourceMapping());
+         $this->assertEquals(['master_scope', 'scope1', 'scope2'], $operation->getScopes());
+         $this->assertEquals([
+             'CQRSQuery' => 'My\\Namespace\\MyQuery',
+-            'CQRSCommand' => 'My\\Namespace\\MyCommand',
++            'CQRSCommand' => self::VALID_COMMAND_CLASS,
+             'scopes' => ['master_scope', 'scope1', 'scope2'],
+             'CQRSQueryMapping' => $queryMapping,
+             'ApiResourceMapping' => $resourceMapping,
+@@ -479,14 +495,14 @@ public function testMultipleArguments(): void
+         // The original object has not been modified
+         $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation->getCQRSCommandMapping());
+         $this->assertEquals($queryMapping, $operation->getCQRSQueryMapping());
+         $this->assertEquals($resourceMapping, $operation->getApiResourceMapping());
+         $this->assertEquals(['master_scope', 'scope1', 'scope2'], $operation->getScopes());
+         $this->assertEquals([
+             'CQRSQuery' => 'My\\Namespace\\MyQuery',
+-            'CQRSCommand' => 'My\\Namespace\\MyCommand',
++            'CQRSCommand' => self::VALID_COMMAND_CLASS,
+             'scopes' => ['master_scope', 'scope1', 'scope2'],
+             'CQRSQueryMapping' => $queryMapping,
+             'ApiResourceMapping' => $resourceMapping,
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+index 274d408468a63..478a5e8c6215f 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+@@ -30,11 +30,18 @@
+ 
+ use ApiPlatform\Exception\InvalidArgumentException;
+ use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\AddProductCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSCommand;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSCreate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+ 
+ class CQRSCreateTest extends TestCase
+ {
++    public const VALID_COMMAND_CLASS = AddProductCommand::class;
++    public const OTHER_VALID_COMMAND_CLASS = UpdateProductCommand::class;
++    public const INVALID_COMMAND_CLASS = 'My\\Namespace\\MyCommand';
++
+     public function testDefaultConstructor(): void
+     {
+         // Without any parameters
+@@ -101,32 +108,32 @@ public function testScopes(): void
+ 
+     public function testCQRSCommand(): void
+     {
+-        // CQRS query parameters in constructor
++        // CQRS command parameters in constructor
+         $operation = new CQRSCreate(
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties parameters in constructor
+         $operation = new CQRSCreate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties AND CQRS query parameters in constructor, both values are equals no problem
+         $operation = new CQRSCreate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Use with method, returned object is a clone All values are replaced
+         $operation2 = $operation->withCQRSCommand('My\\Namespace\\MyOtherCommand');
+@@ -135,17 +142,17 @@ public function testCQRSCommand(): void
+         $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getCQRSCommand());
+         $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getInput());
+         // Initial operation not modified of course
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // When input is manually specified it is kept over the CQRSCommand
+         $operationInput = new CQRSCreate(
+             input: 'My\\Namespace\\MyOtherCommand',
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operationInput->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operationInput->getCQRSCommand());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operationInput->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operationInput->getCQRSCommand());
+         $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput->getInput());
+         // Clone value keeps the initial different input value
+         $operationInput2 = $operationInput->withCQRSCommand('My\\Namespace\\MyThirdCommand');
+@@ -158,7 +165,7 @@ public function testCQRSCommand(): void
+         $caughtException = null;
+         try {
+             new CQRSCreate(
+-                extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
++                extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
+                 CQRSCommand: 'My\\Namespace\\MyOtherCommand',
+             );
+         } catch (InvalidArgumentException $e) {
+@@ -168,6 +175,16 @@ public function testCQRSCommand(): void
+         $this->assertNotNull($caughtException);
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property CQRSCommand and a CQRSCommand argument that are different is invalid', $caughtException->getMessage());
++
++        // CQRS command parameters in constructor that does not exist is not forced as the input
++        $operation = new CQRSCommand(
++            CQRSCommand: self::INVALID_COMMAND_CLASS,
++        );
++        $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
++        $this->assertNull($operation->getProvider());
++        $this->assertEquals(['CQRSCommand' => self::INVALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::INVALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertNull($operation->getInput());
+     }
+ 
+     public function testCQRSQuery(): void
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+index d67058f4baf91..94b2cad9a54e2 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+@@ -30,11 +30,18 @@
+ 
+ use ApiPlatform\Exception\InvalidArgumentException;
+ use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\AddProductCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSCommand;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSPartialUpdate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+ 
+ class CQRSPartialUpdateTest extends TestCase
+ {
++    public const VALID_COMMAND_CLASS = AddProductCommand::class;
++    public const OTHER_VALID_COMMAND_CLASS = UpdateProductCommand::class;
++    public const INVALID_COMMAND_CLASS = 'My\\Namespace\\MyCommand';
++
+     public function testDefaultConstructor(): void
+     {
+         // Without any parameters
+@@ -108,65 +115,65 @@ public function testScopes(): void
+ 
+     public function testCQRSCommand(): void
+     {
+-        // CQRS query parameters in constructor
++        // CQRS command parameters in constructor
+         $operation = new CQRSPartialUpdate(
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties parameters in constructor
+         $operation = new CQRSPartialUpdate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties AND CQRS query parameters in constructor, both values are equals no problem
+         $operation = new CQRSPartialUpdate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Use with method, returned object is a clone All values are replaced
+-        $operation2 = $operation->withCQRSCommand('My\\Namespace\\MyOtherCommand');
++        $operation2 = $operation->withCQRSCommand(self::OTHER_VALID_COMMAND_CLASS);
+         $this->assertNotEquals($operation2, $operation);
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyOtherCommand'], $operation2->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getInput());
++        $this->assertEquals(['CQRSCommand' => self::OTHER_VALID_COMMAND_CLASS], $operation2->getExtraProperties());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getInput());
+         // Initial operation not modified of course
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // When input is manually specified it is kept over the CQRSCommand
+         $operationInput = new CQRSPartialUpdate(
+-            input: 'My\\Namespace\\MyOtherCommand',
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            input: self::OTHER_VALID_COMMAND_CLASS,
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operationInput->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operationInput->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operationInput->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operationInput->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput->getInput());
+         // Clone value keeps the initial different input value
+         $operationInput2 = $operationInput->withCQRSCommand('My\\Namespace\\MyThirdCommand');
+         $this->assertNotEquals($operationInput2, $operationInput);
+         $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyThirdCommand'], $operationInput2->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyThirdCommand', $operationInput2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput2->getInput());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput2->getInput());
+ 
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+             new CQRSPartialUpdate(
+-                extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-                CQRSCommand: 'My\\Namespace\\MyOtherCommand',
++                extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++                CQRSCommand: self::OTHER_VALID_COMMAND_CLASS,
+             );
+         } catch (InvalidArgumentException $e) {
+             $caughtException = $e;
+@@ -175,6 +182,16 @@ public function testCQRSCommand(): void
+         $this->assertNotNull($caughtException);
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property CQRSCommand and a CQRSCommand argument that are different is invalid', $caughtException->getMessage());
++
++        // CQRS command parameters in constructor that does not exist is not forced as the input
++        $operation = new CQRSCommand(
++            CQRSCommand: self::INVALID_COMMAND_CLASS,
++        );
++        $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
++        $this->assertNull($operation->getProvider());
++        $this->assertEquals(['CQRSCommand' => self::INVALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::INVALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertNull($operation->getInput());
+     }
+ 
+     public function testCQRSQuery(): void
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+index a3c299adb35be..11f14a7bcc739 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+@@ -30,11 +30,18 @@
+ 
+ use ApiPlatform\Exception\InvalidArgumentException;
+ use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\AddProductCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSCommand;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSUpdate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+ 
+ class CQRSUpdateTest extends TestCase
+ {
++    public const VALID_COMMAND_CLASS = AddProductCommand::class;
++    public const OTHER_VALID_COMMAND_CLASS = UpdateProductCommand::class;
++    public const INVALID_COMMAND_CLASS = 'My\\Namespace\\MyCommand';
++
+     public function testDefaultConstructor(): void
+     {
+         // Without any parameters
+@@ -104,65 +111,65 @@ public function testScopes(): void
+ 
+     public function testCQRSCommand(): void
+     {
+-        // CQRS query parameters in constructor
++        // CQRS command parameters in constructor
+         $operation = new CQRSUpdate(
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties parameters in constructor
+         $operation = new CQRSUpdate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Extra properties AND CQRS query parameters in constructor, both values are equals no problem
+         $operation = new CQRSUpdate(
+-            extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // Use with method, returned object is a clone All values are replaced
+-        $operation2 = $operation->withCQRSCommand('My\\Namespace\\MyOtherCommand');
++        $operation2 = $operation->withCQRSCommand(self::OTHER_VALID_COMMAND_CLASS);
+         $this->assertNotEquals($operation2, $operation);
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyOtherCommand'], $operation2->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operation2->getInput());
++        $this->assertEquals(['CQRSCommand' => self::OTHER_VALID_COMMAND_CLASS], $operation2->getExtraProperties());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operation2->getInput());
+         // Initial operation not modified of course
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operation->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operation->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operation->getInput());
+ 
+         // When input is manually specified it is kept over the CQRSCommand
+         $operationInput = new CQRSUpdate(
+-            input: 'My\\Namespace\\MyOtherCommand',
+-            CQRSCommand: 'My\\Namespace\\MyCommand',
++            input: self::OTHER_VALID_COMMAND_CLASS,
++            CQRSCommand: self::VALID_COMMAND_CLASS,
+         );
+-        $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyCommand'], $operationInput->getExtraProperties());
+-        $this->assertEquals('My\\Namespace\\MyCommand', $operationInput->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput->getInput());
++        $this->assertEquals(['CQRSCommand' => self::VALID_COMMAND_CLASS], $operationInput->getExtraProperties());
++        $this->assertEquals(self::VALID_COMMAND_CLASS, $operationInput->getCQRSCommand());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput->getInput());
+         // Clone value keeps the initial different input value
+         $operationInput2 = $operationInput->withCQRSCommand('My\\Namespace\\MyThirdCommand');
+         $this->assertNotEquals($operationInput2, $operationInput);
+         $this->assertEquals(['CQRSCommand' => 'My\\Namespace\\MyThirdCommand'], $operationInput2->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyThirdCommand', $operationInput2->getCQRSCommand());
+-        $this->assertEquals('My\\Namespace\\MyOtherCommand', $operationInput2->getInput());
++        $this->assertEquals(self::OTHER_VALID_COMMAND_CLASS, $operationInput2->getInput());
+ 
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+             new CQRSUpdate(
+-                extraProperties: ['CQRSCommand' => 'My\\Namespace\\MyCommand'],
+-                CQRSCommand: 'My\\Namespace\\MyOtherCommand',
++                extraProperties: ['CQRSCommand' => self::VALID_COMMAND_CLASS],
++                CQRSCommand: self::OTHER_VALID_COMMAND_CLASS,
+             );
+         } catch (InvalidArgumentException $e) {
+             $caughtException = $e;
+@@ -171,6 +178,16 @@ public function testCQRSCommand(): void
+         $this->assertNotNull($caughtException);
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property CQRSCommand and a CQRSCommand argument that are different is invalid', $caughtException->getMessage());
++
++        // CQRS command parameters in constructor that does not exist is not forced as the input
++        $operation = new CQRSCommand(
++            CQRSCommand: self::INVALID_COMMAND_CLASS,
++        );
++        $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
++        $this->assertNull($operation->getProvider());
++        $this->assertEquals(['CQRSCommand' => self::INVALID_COMMAND_CLASS], $operation->getExtraProperties());
++        $this->assertEquals(self::INVALID_COMMAND_CLASS, $operation->getCQRSCommand());
++        $this->assertNull($operation->getInput());
+     }
+ 
+     public function testCQRSQuery(): void

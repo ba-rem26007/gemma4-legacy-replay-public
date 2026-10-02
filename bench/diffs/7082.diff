@@ -1,0 +1,230 @@
+diff --git a/app/SymfonyRequirements.php b/app/SymfonyRequirements.php
+index 28b0dcdbfcd82..b07c36895b074 100644
+--- a/app/SymfonyRequirements.php
++++ b/app/SymfonyRequirements.php
+@@ -168,6 +168,9 @@ public function __construct($cfgName, $evaluation, $approveCfgAbsence = false, $
+  */
+ class RequirementCollection implements IteratorAggregate
+ {
++    /**
++     * @var Requirement[]
++     */
+     private $requirements = array();
+ 
+     /**
+@@ -265,7 +268,7 @@ public function addCollection(RequirementCollection $collection)
+     /**
+      * Returns both requirements and recommendations.
+      *
+-     * @return array Array of Requirement instances
++     * @return Requirement[]
+      */
+     public function all()
+     {
+@@ -275,7 +278,7 @@ public function all()
+     /**
+      * Returns all mandatory requirements.
+      *
+-     * @return array Array of Requirement instances
++     * @return Requirement[]
+      */
+     public function getRequirements()
+     {
+@@ -292,7 +295,7 @@ public function getRequirements()
+     /**
+      * Returns the mandatory requirements that were not met.
+      *
+-     * @return array Array of Requirement instances
++     * @return Requirement[]
+      */
+     public function getFailedRequirements()
+     {
+@@ -309,7 +312,7 @@ public function getFailedRequirements()
+     /**
+      * Returns all optional recommendations.
+      *
+-     * @return array Array of Requirement instances
++     * @return Requirement[]
+      */
+     public function getRecommendations()
+     {
+@@ -326,7 +329,7 @@ public function getRecommendations()
+     /**
+      * Returns the recommendations that were not met.
+      *
+-     * @return array Array of Requirement instances
++     * @return Requirement[]
+      */
+     public function getFailedRecommendations()
+     {
+@@ -376,7 +379,8 @@ public function getPhpIniConfigPath()
+  */
+ class SymfonyRequirements extends RequirementCollection
+ {
+-    const REQUIRED_PHP_VERSION = '5.3.3';
++    const LEGACY_REQUIRED_PHP_VERSION = '5.3.3';
++    const REQUIRED_PHP_VERSION = '5.5.9';
+ 
+     /**
+      * Constructor that initializes the requirements.
+@@ -386,16 +390,26 @@ public function __construct()
+         /* mandatory requirements follow */
+ 
+         $installedPhpVersion = phpversion();
++        $requiredPhpVersion = $this->getPhpRequiredVersion();
+ 
+-        $this->addRequirement(
+-            version_compare($installedPhpVersion, self::REQUIRED_PHP_VERSION, '>='),
+-            sprintf('PHP version must be at least %s (%s installed)', self::REQUIRED_PHP_VERSION, $installedPhpVersion),
+-            sprintf('You are running PHP version "<strong>%s</strong>", but Symfony needs at least PHP "<strong>%s</strong>" to run.
+-                Before using Symfony, upgrade your PHP installation, preferably to the latest version.',
+-                $installedPhpVersion, self::REQUIRED_PHP_VERSION),
+-            sprintf('Install PHP %s or newer (installed version is %s)', self::REQUIRED_PHP_VERSION, $installedPhpVersion)
++        $this->addRecommendation(
++            $requiredPhpVersion,
++            'Vendors should be installed in order to check all requirements.',
++            'Run the <code>composer install</code> command.',
++            'Run the "composer install" command.'
+         );
+ 
++        if (false !== $requiredPhpVersion) {
++            $this->addRequirement(
++                version_compare($installedPhpVersion, $requiredPhpVersion, '>='),
++                sprintf('PHP version must be at least %s (%s installed)', $requiredPhpVersion, $installedPhpVersion),
++                sprintf('You are running PHP version "<strong>%s</strong>", but Symfony needs at least PHP "<strong>%s</strong>" to run.
++                Before using Symfony, upgrade your PHP installation, preferably to the latest version.',
++                    $installedPhpVersion, $requiredPhpVersion),
++                sprintf('Install PHP %s or newer (installed version is %s)', $requiredPhpVersion, $installedPhpVersion)
++            );
++        }
++
+         $this->addRequirement(
+             version_compare($installedPhpVersion, '5.3.16', '!='),
+             'PHP version must not be 5.3.16 as Symfony won\'t work properly with it',
+@@ -431,7 +445,7 @@ public function __construct()
+             'Set the "<strong>date.timezone</strong>" setting in php.ini<a href="#phpini">*</a> (like Europe/Paris).'
+         );
+ 
+-        if (version_compare($installedPhpVersion, self::REQUIRED_PHP_VERSION, '>=')) {
++        if (false !== $requiredPhpVersion && version_compare($installedPhpVersion, $requiredPhpVersion, '>=')) {
+             $timezones = array();
+             foreach (DateTimeZone::listAbbreviations() as $abbreviations) {
+                 foreach ($abbreviations as $abbreviation) {
+@@ -708,9 +722,9 @@ function_exists('posix_isatty'),
+ 
+         if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+             $this->addRecommendation(
+-                $this->getRealpathCacheSize() > 1000,
+-                'realpath_cache_size should be above 1024 in php.ini',
+-                'Set "<strong>realpath_cache_size</strong>" to e.g. "<strong>1024</strong>" in php.ini<a href="#phpini">*</a> to improve performance on windows.'
++                $this->getRealpathCacheSize() >= 5 * 1024 * 1024,
++                'realpath_cache_size should be at least 5M in php.ini',
++                'Setting "<strong>realpath_cache_size</strong>" to e.g. "<strong>5242880</strong>" or "<strong>5M</strong>" in php.ini<a href="#phpini">*</a> may improve performance on Windows significantly in some cases.'
+             );
+         }
+ 
+@@ -761,4 +775,28 @@ protected function getRealpathCacheSize()
+                 return (int) $size;
+         }
+     }
++
++    /**
++     * Defines PHP required version from Symfony version.
++     *
++     * @return string|false The PHP required version or false if it could not be guessed
++     */
++    protected function getPhpRequiredVersion()
++    {
++        if (!file_exists($path = __DIR__.'/../composer.lock')) {
++            return false;
++        }
++
++        $composerLock = json_decode(file_get_contents($path), true);
++        foreach ($composerLock['packages'] as $package) {
++            $name = $package['name'];
++            if ('symfony/symfony' !== $name && 'symfony/http-kernel' !== $name) {
++                continue;
++            }
++
++            return (int) $package['version'][1] > 2 ? self::REQUIRED_PHP_VERSION : self::LEGACY_REQUIRED_PHP_VERSION;
++        }
++
++        return false;
++    }
+ }
+diff --git a/app/check.php b/app/check.php
+index bd56279f3cf94..c6e5a877eaebb 100644
+--- a/app/check.php
++++ b/app/check.php
+@@ -12,7 +12,7 @@
+ if ($iniPath) {
+     echo_style('green', '  '.$iniPath);
+ } else {
+-    echo_style('warning', '  WARNING: No configuration file (php.ini) used by PHP!');
++    echo_style('yellow', '  WARNING: No configuration file (php.ini) used by PHP!');
+ }
+ 
+ echo PHP_EOL.PHP_EOL;
+@@ -21,7 +21,6 @@
+ 
+ $messages = array();
+ foreach ($symfonyRequirements->getRequirements() as $req) {
+-    /** @var $req Requirement */
+     if ($helpText = get_error_message($req, $lineSize)) {
+         echo_style('red', 'E');
+         $messages['error'][] = $helpText;
+diff --git a/classes/Cookie.php b/classes/Cookie.php
+index 7d16629f9e58c..8ca9183a99851 100644
+--- a/classes/Cookie.php
++++ b/classes/Cookie.php
+@@ -23,6 +23,9 @@
+  * @license   http://opensource.org/licenses/osl-3.0.php Open Software License (OSL 3.0)
+  * International Registered Trademark & Property of PrestaShop SA
+  */
++
++use \Defuse\Crypto\Key;
++
+ class CookieCore
+ {
+     /** @var array Contain cookie content in a key => value format */
+@@ -76,7 +79,12 @@ public function __construct($name, $path = '', $expire = null, $shared_urls = nu
+         $this->_allow_writing = true;
+         $this->_salt = $this->_standalone ? str_pad('', 8, md5('ps'.__FILE__)) : _COOKIE_IV_;
+ 
+-        $this->cipherTool = new PhpEncryption(_NEW_COOKIE_KEY_);
++        if ($this->_standalone) {
++            $asciiSafeString = \Defuse\Crypto\Encoding::saveBytesToChecksummedAsciiSafeString(Key::KEY_CURRENT_VERSION, str_pad($name, Key::KEY_BYTE_SIZE, __FILE__));
++            $this->cipherTool = new PhpEncryption($asciiSafeString);
++        } else {
++            $this->cipherTool = new PhpEncryption(_NEW_COOKIE_KEY_);
++        }
+ 
+         $this->_secure = (bool) $secure;
+ 
+diff --git a/composer.json b/composer.json
+index 30ea44280920c..7a5ad24ef60c6 100644
+--- a/composer.json
++++ b/composer.json
+@@ -23,7 +23,7 @@
+     "pear/archive_tar": "~1.4.2",
+     "swiftmailer/swiftmailer": "~5.4.3",
+     "symfony/monolog-bundle": "2.8.2",
+-    "sensio/distribution-bundle": "4.0.6",
++    "sensio/distribution-bundle": "~4.0.6",
+     "sensio/framework-extra-bundle": "3.0.10",
+     "prestashop/translationtools-bundle" : "dev-master",
+     "tecnickcom/tcpdf": "6.2.12",
+diff --git a/install-dev/controllers/http/database.php b/install-dev/controllers/http/database.php
+index 4652dbc0a8779..205e621489933 100644
+--- a/install-dev/controllers/http/database.php
++++ b/install-dev/controllers/http/database.php
+@@ -145,6 +145,9 @@ public function display()
+             }
+ 
+             $this->database_server = $parameters['parameters']['database_host'];
++            if (!empty($parameters['parameters']['database_port'])) {
++                $this->database_server .= ':'.$parameters['parameters']['database_port'];
++            }
+             $this->database_name = $parameters['parameters']['database_name'];
+             $this->database_login = $parameters['parameters']['database_user'];
+             $this->database_password = $parameters['parameters']['database_password'];

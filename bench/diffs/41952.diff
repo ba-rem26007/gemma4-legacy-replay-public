@@ -1,0 +1,325 @@
+diff --git a/src/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandler.php b/src/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandler.php
+new file mode 100644
+index 0000000000000..2969209b2efc6
+--- /dev/null
++++ b/src/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandler.php
+@@ -0,0 +1,63 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Cart\QueryHandler;
++
++use Cart;
++use Context;
++use Currency;
++use Customer;
++use Group;
++use Order;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Exception\CartNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartTotalForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Cart\QueryHandler\GetCartTotalForViewingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Cart\QueryResult\CartTotalForViewing;
++use Validate;
++
++/**
++ * Computes only a cart's displayed total. This mirrors how GetCartForViewingHandler produces the
++ * "total" of its summary, but skips loading the products and the rest of the cart view, so the
++ * carts grids can fill the total column of every row without the full view being built per row.
++ */
++#[AsQueryHandler]
++final class GetCartTotalForViewingHandler implements GetCartTotalForViewingHandlerInterface
++{
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(GetCartTotalForViewing $query)
++    {
++        $cartId = $query->getCartId()->getValue();
++        $cart = new Cart($cartId);
++
++        if ($cart->id !== $cartId) {
++            throw new CartNotFoundException(sprintf('Cart with id "%s" were not found', $cartId));
++        }
++
++        // getOrderTotal() relies on the context cart/currency/customer, so set them exactly as
++        // GetCartForViewingHandler does before reading the total.
++        $context = Context::getContext();
++        $context->cart = $cart;
++        $context->currency = new Currency($cart->id_currency);
++        $context->customer = new Customer($cart->id_customer);
++
++        $order = new Order((int) Order::getIdByCartId($cart->id));
++        if (Validate::isLoadedObject($order)) {
++            $taxCalculationMethod = $order->getTaxCalculationMethod();
++        } else {
++            $taxCalculationMethod = Group::getPriceDisplayMethod(Group::getCurrent()->id);
++        }
++
++        $withTax = PS_TAX_EXC != $taxCalculationMethod;
++
++        return new CartTotalForViewing(
++            (float) $cart->getOrderTotal($withTax),
++            (float) $cart->getOrderTotal($withTax, Cart::ONLY_PRODUCTS)
++        );
++    }
++}
+diff --git a/src/Core/Domain/Cart/Query/GetCartTotalForViewing.php b/src/Core/Domain/Cart/Query/GetCartTotalForViewing.php
+new file mode 100644
+index 0000000000000..2664f9cb2017d
+--- /dev/null
++++ b/src/Core/Domain/Cart/Query/GetCartTotalForViewing.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Cart\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Cart\ValueObject\CartId;
++
++/**
++ * Gets only the displayed total of a cart, without building the full cart view. Used by the carts
++ * grids, which need the total for every row but none of the rest of the cart view.
++ */
++class GetCartTotalForViewing
++{
++    /**
++     * @var CartId
++     */
++    private $cartId;
++
++    /**
++     * @param int $cartId
++     */
++    public function __construct($cartId)
++    {
++        $this->cartId = new CartId($cartId);
++    }
++
++    /**
++     * @return CartId
++     */
++    public function getCartId()
++    {
++        return $this->cartId;
++    }
++}
+diff --git a/src/Core/Domain/Cart/QueryHandler/GetCartTotalForViewingHandlerInterface.php b/src/Core/Domain/Cart/QueryHandler/GetCartTotalForViewingHandlerInterface.php
+new file mode 100644
+index 0000000000000..c46082a80bcc4
+--- /dev/null
++++ b/src/Core/Domain/Cart/QueryHandler/GetCartTotalForViewingHandlerInterface.php
+@@ -0,0 +1,23 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Cart\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartTotalForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Cart\QueryResult\CartTotalForViewing;
++
++/**
++ * Interface for service that gets only a cart's displayed total.
++ */
++interface GetCartTotalForViewingHandlerInterface
++{
++    /**
++     * @param GetCartTotalForViewing $query
++     *
++     * @return CartTotalForViewing
++     */
++    public function handle(GetCartTotalForViewing $query);
++}
+diff --git a/src/Core/Domain/Cart/QueryResult/CartTotalForViewing.php b/src/Core/Domain/Cart/QueryResult/CartTotalForViewing.php
+new file mode 100644
+index 0000000000000..835333fd0025b
+--- /dev/null
++++ b/src/Core/Domain/Cart/QueryResult/CartTotalForViewing.php
+@@ -0,0 +1,49 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Cart\QueryResult;
++
++/**
++ * Holds the totals of a cart shown in the carts grids (the full total and the products-only total).
++ */
++class CartTotalForViewing
++{
++    /**
++     * @var float
++     */
++    private $total;
++
++    /**
++     * @var float
++     */
++    private $totalProducts;
++
++    /**
++     * @param float $total
++     * @param float $totalProducts
++     */
++    public function __construct($total, $totalProducts)
++    {
++        $this->total = $total;
++        $this->totalProducts = $totalProducts;
++    }
++
++    /**
++     * @return float
++     */
++    public function getTotal()
++    {
++        return $this->total;
++    }
++
++    /**
++     * @return float
++     */
++    public function getTotalProducts()
++    {
++        return $this->totalProducts;
++    }
++}
+diff --git a/src/Core/Grid/Data/Factory/CartGridDataFactory.php b/src/Core/Grid/Data/Factory/CartGridDataFactory.php
+index 80c02c481c014..0d9512e747c69 100644
+--- a/src/Core/Grid/Data/Factory/CartGridDataFactory.php
++++ b/src/Core/Grid/Data/Factory/CartGridDataFactory.php
+@@ -11,7 +11,7 @@
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\CurrencyContext;
+ use PrestaShop\PrestaShop\Core\Domain\Cart\CartStatus;
+-use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartTotalForViewing;
+ use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
+ use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollectionInterface;
+@@ -74,9 +74,9 @@ private function applyModifications(RecordCollectionInterface $records): RecordC
+      */
+     private function setRecordData(array $record): array
+     {
+-        $cartForViewing = $this->queryBus->handle(new GetCartForViewing((int) $record['id_cart']));
++        $cartTotal = $this->queryBus->handle(new GetCartTotalForViewing((int) $record['id_cart']));
+         $record['cart_total'] = $this->locale->formatPrice(
+-            $cartForViewing->getCartSummary()['total_products'],
++            $cartTotal->getTotalProducts(),
+             $this->currencyContext->getIsoCode()
+         );
+ 
+diff --git a/src/Core/Grid/Data/Factory/CustomerCartGridDataFactoryDecorator.php b/src/Core/Grid/Data/Factory/CustomerCartGridDataFactoryDecorator.php
+index 2046092f0285e..b8126211acc5d 100644
+--- a/src/Core/Grid/Data/Factory/CustomerCartGridDataFactoryDecorator.php
++++ b/src/Core/Grid/Data/Factory/CustomerCartGridDataFactoryDecorator.php
+@@ -9,7 +9,7 @@
+ namespace PrestaShop\PrestaShop\Core\Grid\Data\Factory;
+ 
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+-use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartTotalForViewing;
+ use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
+ use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollectionInterface;
+@@ -85,9 +85,9 @@ private function applyModifications(RecordCollectionInterface $records)
+         $modifiedRecord = [];
+ 
+         foreach ($records as $r) {
+-            $cartForViewing = $this->queryBus->handle(new GetCartForViewing((int) $r['id_cart']));
++            $cartTotal = $this->queryBus->handle(new GetCartTotalForViewing((int) $r['id_cart']));
+             $r['total'] = $this->locale->formatPrice(
+-                $cartForViewing->getCartSummary()['total'],
++                $cartTotal->getTotal(),
+                 $this->contextCurrencyIsoCode
+             );
+             $modifiedRecord[] = $r;
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/cart.yml b/src/PrestaShopBundle/Resources/config/services/adapter/cart.yml
+index 1251fc87c2638..dce758a98e2c8 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/cart.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/cart.yml
+@@ -73,6 +73,10 @@ services:
+       - '@PrestaShop\PrestaShop\Adapter\ImageManager'
+       - "@prestashop.core.localization.locale.context_locale"
+ 
++  prestashop.adapter.cart.query_handler.get_cart_total_for_viewing_handler:
++    class: 'PrestaShop\PrestaShop\Adapter\Cart\QueryHandler\GetCartTotalForViewingHandler'
++    autoconfigure: true
++
+   prestashop.adapter.cart.query_handler.get_last_empty_customer_cart_handler:
+     class: 'PrestaShop\PrestaShop\Adapter\Cart\QueryHandler\GetLastEmptyCustomerCartHandler'
+     autoconfigure: true
+diff --git a/tests/Integration/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandlerTest.php b/tests/Integration/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandlerTest.php
+new file mode 100644
+index 0000000000000..00fdc1dfc4c2b
+--- /dev/null
++++ b/tests/Integration/Adapter/Cart/QueryHandler/GetCartTotalForViewingHandlerTest.php
+@@ -0,0 +1,58 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Adapter\Cart\QueryHandler;
++
++use Context;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartTotalForViewing;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++
++/**
++ * The carts grids fill the total column of every row with GetCartTotalForViewing instead of the
++ * full GetCartForViewing. This guards that the lightweight query keeps returning the exact same
++ * total as the full cart view.
++ */
++class GetCartTotalForViewingHandlerTest extends KernelTestCase
++{
++    public function testItReturnsTheSameTotalAsTheFullCartView(): void
++    {
++        self::bootKernel();
++        $container = self::getContainer();
++        // getOrderTotal() reaches for the container through the legacy context.
++        Context::getContext()->container = $container;
++        $queryBus = $container->get('prestashop.core.query_bus');
++        $connection = $container->get('doctrine.dbal.default_connection');
++
++        $cartIds = $connection
++            ->executeQuery('SELECT id_cart FROM ' . _DB_PREFIX_ . 'cart WHERE id_customer > 0 ORDER BY id_cart')
++            ->fetchFirstColumn();
++
++        $compared = 0;
++        foreach ($cartIds as $cartId) {
++            $cartId = (int) $cartId;
++
++            $fullView = $queryBus->handle(new GetCartForViewing($cartId))->getCartSummary();
++            $light = $queryBus->handle(new GetCartTotalForViewing($cartId));
++
++            $this->assertSame(
++                (float) $fullView['total'],
++                (float) $light->getTotal(),
++                sprintf('Total mismatch for cart %d', $cartId)
++            );
++            $this->assertSame(
++                (float) $fullView['total_products'],
++                (float) $light->getTotalProducts(),
++                sprintf('Products total mismatch for cart %d', $cartId)
++            );
++            ++$compared;
++        }
++
++        $this->assertGreaterThan(0, $compared, 'Expected at least one cart to compare.');
++    }
++}

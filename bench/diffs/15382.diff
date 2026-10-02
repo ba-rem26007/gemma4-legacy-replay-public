@@ -1,0 +1,153 @@
+diff --git a/src/Adapter/Routing/AdminLinkBuilder.php b/src/Adapter/Routing/AdminLinkBuilder.php
+index 95ee81388ad32..d009c102069b5 100644
+--- a/src/Adapter/Routing/AdminLinkBuilder.php
++++ b/src/Adapter/Routing/AdminLinkBuilder.php
+@@ -90,12 +90,13 @@ public function getEditLink($entity, array $parameters)
+      */
+     private function buildActionParameters($action, $entity, array $parameters)
+     {
++        unset($parameters['current_index']);
++        unset($parameters['token']);
+         $editAction = $action . $entity;
+-        $entityId = 'id_' . $entity;
+ 
+         return array_merge(
+             $parameters,
+-            [$entityId => $parameters[$entityId], $editAction => 1]
++            [$editAction => 1]
+         );
+     }
+ 
+diff --git a/src/Adapter/Routing/LegacyHelperLinkBuilder.php b/src/Adapter/Routing/LegacyHelperLinkBuilder.php
+index 3f791dea5b209..97ab10d57f1cf 100644
+--- a/src/Adapter/Routing/LegacyHelperLinkBuilder.php
++++ b/src/Adapter/Routing/LegacyHelperLinkBuilder.php
+@@ -26,6 +26,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Routing;
+ 
++use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ use PrestaShop\PrestaShop\Core\Routing\EntityLinkBuilderInterface;
+ 
+ /**
+@@ -36,10 +37,19 @@
+ class LegacyHelperLinkBuilder implements EntityLinkBuilderInterface
+ {
+     /**
+-     * {@inheritdoc}
++     * @param string $entity
++     * @param array $parameters
++     *
++     * @return string
++     *
++     * @throws InvalidArgumentException
+      */
+     public function getViewLink($entity, array $parameters)
+     {
++        if (!isset($parameters['current_index'])) {
++            throw new InvalidArgumentException('Missing parameter current_index to build legacy link');
++        }
++
+         $currentIndex = $parameters['current_index'];
+         $parameters = $this->buildActionParameters('view', $entity, $parameters);
+ 
+@@ -47,10 +57,19 @@ public function getViewLink($entity, array $parameters)
+     }
+ 
+     /**
+-     * {@inheritdoc}
++     * @param string $entity
++     * @param array $parameters
++     *
++     * @return string
++     *
++     * @throws InvalidArgumentException
+      */
+     public function getEditLink($entity, array $parameters)
+     {
++        if (!isset($parameters['current_index'])) {
++            throw new InvalidArgumentException('Missing parameter current_index to build legacy link');
++        }
++
+         $currentIndex = $parameters['current_index'];
+         $parameters = $this->buildActionParameters('update', $entity, $parameters);
+ 
+@@ -68,10 +87,9 @@ private function buildActionParameters($action, $entity, array $parameters)
+     {
+         unset($parameters['current_index']);
+         $viewAction = $action . $entity;
+-        $entityId = 'id_' . $entity;
+         $parameters = array_merge(
+             $parameters,
+-            [$entityId => $parameters[$entityId], $viewAction => 1]
++            [$viewAction => 1]
+         );
+ 
+         return $parameters;
+diff --git a/tests/Unit/Adapter/Routing/AdminLinkBuilderTest.php b/tests/Unit/Adapter/Routing/AdminLinkBuilderTest.php
+index f3d20a68c6034..4244af114b19f 100644
+--- a/tests/Unit/Adapter/Routing/AdminLinkBuilderTest.php
++++ b/tests/Unit/Adapter/Routing/AdminLinkBuilderTest.php
+@@ -89,8 +89,15 @@ public function testBuildEditLink()
+ 
+     public function testCleanTokenInLink()
+     {
+-        $builder = new AdminLinkBuilder($this->getLinkMock(), ['product' => 'AdminProducts', 'token' => 'toto']);
+-        $editLink = $builder->getEditLink('product', ['id_product' => 42]);
++        $builder = new AdminLinkBuilder($this->getLinkMock(), ['product' => 'AdminProducts']);
++        $editLink = $builder->getEditLink('product', ['id_product' => 42, 'token' => 'toto']);
++        $this->assertEquals('?controller=AdminProducts&id_product=42&updateproduct=1', $editLink);
++    }
++
++    public function testCleanCurrentIndex()
++    {
++        $builder = new AdminLinkBuilder($this->getLinkMock(), ['product' => 'AdminProducts']);
++        $editLink = $builder->getEditLink('product', ['id_product' => 42, 'current_index' => '/admin-dev/index.php/sell/customers/?_token=mYY9DFadRSfPTsJR-XXHHMQl_MXOCTZQ8n2bVlbeUMA']);
+         $this->assertEquals('?controller=AdminProducts&id_product=42&updateproduct=1', $editLink);
+     }
+ 
+diff --git a/tests/Unit/Adapter/Routing/LegacyHelperLinkBuilderTest.php b/tests/Unit/Adapter/Routing/LegacyHelperLinkBuilderTest.php
+index c6748b30add1a..f76e0c4a5013c 100644
+--- a/tests/Unit/Adapter/Routing/LegacyHelperLinkBuilderTest.php
++++ b/tests/Unit/Adapter/Routing/LegacyHelperLinkBuilderTest.php
+@@ -36,12 +36,38 @@ public function testBuildViewLink()
+         $builder = new LegacyHelperLinkBuilder();
+         $viewLink = $builder->getViewLink('product', ['id_product' => 42, 'current_index' => 'index.php?controller=AdminProducts']);
+         $this->assertEquals('index.php?controller=AdminProducts&id_product=42&viewproduct=1', $viewLink);
++
++        $viewLink = $builder->getViewLink('product', ['id_product' => 42, 'current_index' => 'index.php?controller=AdminProducts', 'token' => 'toto']);
++        $this->assertEquals('index.php?controller=AdminProducts&id_product=42&token=toto&viewproduct=1', $viewLink);
+     }
+ 
+     public function testBuildEditLink()
+     {
+         $builder = new LegacyHelperLinkBuilder();
+-        $viewLink = $builder->getEditLink('product', ['id_product' => 42, 'current_index' => 'index.php?controller=AdminProducts']);
+-        $this->assertEquals('index.php?controller=AdminProducts&id_product=42&updateproduct=1', $viewLink);
++        $editLink = $builder->getEditLink('product', ['id_product' => 42, 'current_index' => 'index.php?controller=AdminProducts']);
++        $this->assertEquals('index.php?controller=AdminProducts&id_product=42&updateproduct=1', $editLink);
++
++        $editLink = $builder->getEditLink('product', ['id_product' => 42, 'current_index' => 'index.php?controller=AdminProducts', 'token' => 'toto']);
++        $this->assertEquals('index.php?controller=AdminProducts&id_product=42&token=toto&updateproduct=1', $editLink);
++    }
++
++    /**
++     * @expectedException \PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException
++     * @expectedExceptionMessage Missing parameter current_index to build legacy link
++     */
++    public function testViewLinkWithoutCurrentLinkFails()
++    {
++        $builder = new LegacyHelperLinkBuilder();
++        $builder->getViewLink('product', ['id_product' => 42]);
++    }
++
++    /**
++     * @expectedException \PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException
++     * @expectedExceptionMessage Missing parameter current_index to build legacy link
++     */
++    public function testEditLinkWithoutCurrentLinkFails()
++    {
++        $builder = new LegacyHelperLinkBuilder();
++        $builder->getEditLink('product', ['id_product' => 42]);
+     }
+ }

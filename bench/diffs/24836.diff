@@ -1,0 +1,197 @@
+diff --git a/src/Adapter/Order/OrderAmountUpdater.php b/src/Adapter/Order/OrderAmountUpdater.php
+index 969d4dac28c03..1decf50f97b5d 100644
+--- a/src/Adapter/Order/OrderAmountUpdater.php
++++ b/src/Adapter/Order/OrderAmountUpdater.php
+@@ -309,16 +309,23 @@ private function updateOrderTotals(Order $order, Cart $cart, int $computingPreci
+         $order->total_shipping_tax_incl = $cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $orderProducts, $carrierId, false, $this->keepOrderPrices);
+ 
+         if (!$this->getOrderConfiguration('PS_ORDER_RECALCULATE_SHIPPING', $order)) {
+-            $shippingDiffTaxIncluded = $order->total_shipping_tax_incl - $totalShippingTaxIncluded;
+-            $shippingDiffTaxExcluded = $order->total_shipping_tax_excl - $totalShippingTaxExcluded;
++            $freeShipping = $this->isFreeShipping($order);
++
++            if ($freeShipping) {
++                $order->total_discounts = $order->total_discounts - $order->total_shipping_tax_incl + $totalShippingTaxIncluded;
++                $order->total_discounts_tax_excl = $order->total_discounts_tax_excl - $order->total_shipping_tax_excl + $totalShippingTaxExcluded;
++                $order->total_discounts_tax_incl = $order->total_discounts_tax_incl - $order->total_shipping_tax_incl + $totalShippingTaxIncluded;
++            }
+ 
+             $order->total_shipping = $totalShippingTaxIncluded;
+             $order->total_shipping_tax_incl = $totalShippingTaxIncluded;
+             $order->total_shipping_tax_excl = $totalShippingTaxExcluded;
+ 
+-            $order->total_paid -= $shippingDiffTaxIncluded;
+-            $order->total_paid_tax_incl -= $shippingDiffTaxIncluded;
+-            $order->total_paid_tax_excl -= $shippingDiffTaxExcluded;
++            if (!$freeShipping) {
++                $order->total_paid -= ($order->total_shipping_tax_incl - $totalShippingTaxIncluded);
++                $order->total_paid_tax_incl -= ($order->total_shipping_tax_incl - $totalShippingTaxIncluded);
++                $order->total_paid_tax_excl -= ($order->total_shipping_tax_excl - $totalShippingTaxExcluded);
++            }
+         }
+     }
+ 
+@@ -448,6 +455,12 @@ private function updateOrderCartRules(
+                     $orderCartRule->free_shipping = $cartRule->free_shipping;
+                     $orderCartRule->value = Tools::ps_round($cartRuleData->getDiscountApplied()->getTaxIncluded(), $computingPrecision);
+                     $orderCartRule->value_tax_excl = Tools::ps_round($cartRuleData->getDiscountApplied()->getTaxExcluded(), $computingPrecision);
++
++                    if ($orderCartRule->free_shipping && !$this->getOrderConfiguration('PS_ORDER_RECALCULATE_SHIPPING', $order)) {
++                        $orderCartRule->value = $orderCartRule->value - $calculator->getFees()->getInitialShippingFees()->getTaxIncluded() + $order->total_shipping;
++                        $orderCartRule->value_tax_excl = $orderCartRule->value_tax_excl - $calculator->getFees()->getInitialShippingFees()->getTaxExcluded() + $order->total_shipping_tax_excl;
++                    }
++
+                     $orderCartRule->save();
+                     continue 2;
+                 }
+@@ -549,16 +562,20 @@ private function updateOrderInvoices(Order $order, Cart $cart, int $computingPre
+             $invoice->total_shipping_tax_incl = $cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $currentInvoiceProducts, $carrierId, false, $this->keepOrderPrices);
+ 
+             if (!$this->getOrderConfiguration('PS_ORDER_RECALCULATE_SHIPPING', $order)) {
+-                $shippingDiffTaxIncluded = $invoice->total_shipping_tax_incl - $totalShippingTaxIncluded;
+-                $shippingDiffTaxExcluded = $invoice->total_shipping_tax_excl - $totalShippingTaxExcluded;
++                $freeShipping = $this->isFreeShipping($order);
++
++                if ($freeShipping) {
++                    $invoice->total_discount_tax_excl = $invoice->total_discount_tax_excl - $invoice->total_shipping_tax_excl + $totalShippingTaxExcluded;
++                    $invoice->total_discount_tax_incl = $invoice->total_discount_tax_incl - $invoice->total_shipping_tax_incl + $totalShippingTaxIncluded;
++                }
+ 
+-                $invoice->total_shipping = $totalShippingTaxIncluded;
+                 $invoice->total_shipping_tax_incl = $totalShippingTaxIncluded;
+                 $invoice->total_shipping_tax_excl = $totalShippingTaxExcluded;
+ 
+-                $invoice->total_paid -= $shippingDiffTaxIncluded;
+-                $invoice->total_paid_tax_incl -= $shippingDiffTaxIncluded;
+-                $invoice->total_paid_tax_excl -= $shippingDiffTaxExcluded;
++                if (!$freeShipping) {
++                    $invoice->total_paid_tax_incl -= ($invoice->total_shipping_tax_incl - $totalShippingTaxIncluded);
++                    $invoice->total_paid_tax_excl -= ($invoice->total_shipping_tax_excl - $totalShippingTaxExcluded);
++                }
+             }
+ 
+             if (!$invoice->update()) {
+@@ -567,6 +584,22 @@ private function updateOrderInvoices(Order $order, Cart $cart, int $computingPre
+         }
+     }
+ 
++    /**
++     * @param Order $order
++     *
++     * @return bool
++     */
++    protected function isFreeShipping(Order $order): bool
++    {
++        foreach ($order->getCartRules() as $cartRule) {
++            if ($cartRule['free_shipping']) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
+     /**
+      * @param Cart $cart
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_shipping.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_shipping.feature
+index 1c6e2e33c3540..4280805bb14a9 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_shipping.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_shipping.feature
+@@ -309,19 +309,22 @@ Feature: Order from Back Office (BO)
+       | message             | test                       |
+       | payment module name | dummy_payment              |
+       | status              | Awaiting bank wire payment |
++    And I add discount to order "bo_order1" with following details:
++      | name        | FreeShippingAndAmount |
++      | type        | free_shipping         |
+     And order "bo_order1" should have 2 products in total
+     And order "bo_order1" should have 0 invoices
+-    And order "bo_order1" should have 0 cart rule
++    And order "bo_order1" should have 1 cart rule
+     # Carrier less expensive is chosen by default
+     And order "bo_order1" should have "weight_carrier" as a carrier
+     And order "bo_order1" should have following details:
+       | total_products           | 23.800 |
+       | total_products_wt        | 25.230 |
+-      | total_discounts_tax_excl | 0.0    |
+-      | total_discounts_tax_incl | 0.0    |
+-      | total_paid_tax_excl      | 25.800 |
+-      | total_paid_tax_incl      | 27.350 |
+-      | total_paid               | 27.350 |
++      | total_discounts_tax_excl | 2.0    |
++      | total_discounts_tax_incl | 2.12   |
++      | total_paid_tax_excl      | 23.800 |
++      | total_paid_tax_incl      | 25.230 |
++      | total_paid               | 25.230 |
+       | total_paid_real          | 0.0    |
+       | total_shipping_tax_excl  | 2.0    |
+       | total_shipping_tax_incl  | 2.12   |
+@@ -340,11 +343,11 @@ Feature: Order from Back Office (BO)
+     And order "bo_order1" should have following details:
+       | total_products           | 53.800 |
+       | total_products_wt        | 57.030 |
+-      | total_discounts_tax_excl | 0.0000 |
+-      | total_discounts_tax_incl | 0.0000 |
+-      | total_paid_tax_excl      | 55.8   |
+-      | total_paid_tax_incl      | 59.150 |
+-      | total_paid               | 59.150 |
++      | total_discounts_tax_excl | 2.0000 |
++      | total_discounts_tax_incl | 2.1200 |
++      | total_paid_tax_excl      | 53.8   |
++      | total_paid_tax_incl      | 57.030 |
++      | total_paid               | 57.030 |
+       | total_paid_real          | 0.0    |
+       | total_shipping_tax_excl  | 2.0    |
+       | total_shipping_tax_incl  | 2.12   |
+@@ -360,11 +363,11 @@ Feature: Order from Back Office (BO)
+     And order "bo_order1" should have following details:
+       | total_products           | 53.80  |
+       | total_products_wt        | 57.03  |
+-      | total_discounts_tax_excl | 0.0000 |
+-      | total_discounts_tax_incl | 0.0000 |
+-      | total_paid_tax_excl      | 55.80  |
+-      | total_paid_tax_incl      | 59.15  |
+-      | total_paid               | 59.15  |
++      | total_discounts_tax_excl | 2.0000 |
++      | total_discounts_tax_incl | 2.1200 |
++      | total_paid_tax_excl      | 53.80  |
++      | total_paid_tax_incl      | 57.03  |
++      | total_paid               | 57.03  |
+       | total_paid_real          | 0.0    |
+       | total_shipping_tax_excl  | 2.0    |
+       | total_shipping_tax_incl  | 2.12   |
+@@ -378,11 +381,11 @@ Feature: Order from Back Office (BO)
+     And order "bo_order1" should have following details:
+       | total_products           | 53.80  |
+       | total_products_wt        | 57.03  |
+-      | total_discounts_tax_excl | 0.0000 |
+-      | total_discounts_tax_incl | 0.0000 |
+-      | total_paid_tax_excl      | 55.80  |
+-      | total_paid_tax_incl      | 59.15  |
+-      | total_paid               | 59.15  |
++      | total_discounts_tax_excl | 2.0000 |
++      | total_discounts_tax_incl | 2.1200 |
++      | total_paid_tax_excl      | 53.80  |
++      | total_paid_tax_incl      | 57.03  |
++      | total_paid               | 57.03  |
+       | total_paid_real          | 0.0    |
+       | total_shipping_tax_excl  | 2.0    |
+       | total_shipping_tax_incl  | 2.12   |
+@@ -396,11 +399,11 @@ Feature: Order from Back Office (BO)
+     And order "bo_order1" should have following details:
+       | total_products           | 53.80  |
+       | total_products_wt        | 57.03  |
+-      | total_discounts_tax_excl | 0.0000 |
+-      | total_discounts_tax_incl | 0.0000 |
+-      | total_paid_tax_excl      | 55.80  |
+-      | total_paid_tax_incl      | 59.15  |
+-      | total_paid               | 59.15  |
++      | total_discounts_tax_excl | 2.0000 |
++      | total_discounts_tax_incl | 2.1200 |
++      | total_paid_tax_excl      | 53.80  |
++      | total_paid_tax_incl      | 57.03  |
++      | total_paid               | 57.03  |
+       | total_paid_real          | 0.0    |
+       | total_shipping_tax_excl  | 2.0    |
+       | total_shipping_tax_incl  | 2.12   |

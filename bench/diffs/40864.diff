@@ -1,0 +1,466 @@
+diff --git a/classes/checkout/CheckoutProcess.php b/classes/checkout/CheckoutProcess.php
+index 8aa7f29d129d8..a8d16e6030b20 100644
+--- a/classes/checkout/CheckoutProcess.php
++++ b/classes/checkout/CheckoutProcess.php
+@@ -3,6 +3,7 @@
+  * For the full copyright and license information, please view the
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Foundation\Templating\RenderableInterface;
+ use PrestaShop\PrestaShop\Core\Foundation\Templating\RenderableProxy;
+ 
+@@ -23,6 +24,8 @@ class CheckoutProcessCore implements RenderableInterface
+     private $template = 'checkout/checkout-process.tpl';
+     /** @var Context */
+     protected $context;
++    /** @var OnePageCheckoutAvailabilityCheckerInterface|null */
++    private $onePageCheckoutAvailabilityChecker;
+ 
+     /**
+      * @param Context $context
+@@ -37,6 +40,16 @@ public function __construct(
+         $this->checkoutSession = $checkoutSession;
+     }
+ 
++    /**
++     * @return $this
++     */
++    public function setOnePageCheckoutAvailabilityChecker(OnePageCheckoutAvailabilityCheckerInterface $onePageCheckoutAvailabilityChecker)
++    {
++        $this->onePageCheckoutAvailabilityChecker = $onePageCheckoutAvailabilityChecker;
++
++        return $this;
++    }
++
+     /**
+      * @return string
+      */
+@@ -162,6 +175,18 @@ public function hasErrors()
+         return $this->has_errors;
+     }
+ 
++    /**
++     * @return bool
++     */
++    public function isOnePageCheckoutEnabled(): bool
++    {
++        if (null === $this->onePageCheckoutAvailabilityChecker || !isset($this->context->shop->id)) {
++            return false;
++        }
++
++        return $this->onePageCheckoutAvailabilityChecker->isEnabledForShop((int) $this->context->shop->id);
++    }
++
+     public function getDataToPersist()
+     {
+         $data = [];
+diff --git a/config/services/common.yml b/config/services/common.yml
+index 31f588bdb38af..2e087a09618b4 100644
+--- a/config/services/common.yml
++++ b/config/services/common.yml
+@@ -3,6 +3,7 @@ parameters:
+ 
+ imports:
+     - { resource: ../../src/PrestaShopBundle/Resources/config/services/core/cldr.yml }
++    - { resource: ../../src/PrestaShopBundle/Resources/config/services/core/checkout.yml }
+     - { resource: ../../src/PrestaShopBundle/Resources/config/services/adapter/data_provider_common.yml }
+     - { resource: ../../src/PrestaShopBundle/Resources/config/services/adapter/common.yml }
+     - { resource: ../../src/PrestaShopBundle/Resources/config/services/core/common.yml }
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index 70e0b344687a2..c26eeac0ae2c0 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -6,6 +6,7 @@
+ 
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
+ use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsProvider;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Checkout\TermsAndConditions;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+@@ -301,6 +302,7 @@ public function initContent(): void
+             'checkout_process' => new RenderableProxy($this->checkoutProcess),
+             'display_transaction_updated_info' => Tools::getIsset('updatedTransaction'),
+             'tos_cms' => $this->getDefaultTermsAndConditions(),
++            'is_one_page_checkout_enabled' => $this->checkoutProcess->isOnePageCheckoutEnabled(),
+         ]);
+ 
+         parent::initContent();
+@@ -381,6 +383,9 @@ protected function buildCheckoutProcess(CheckoutSession $session, $translator)
+             $this->context,
+             $session
+         );
++        /** @var OnePageCheckoutAvailabilityCheckerInterface $onePageCheckoutAvailabilityChecker */
++        $onePageCheckoutAvailabilityChecker = $this->get(OnePageCheckoutAvailabilityCheckerInterface::class);
++        $checkoutProcess->setOnePageCheckoutAvailabilityChecker($onePageCheckoutAvailabilityChecker);
+ 
+         $checkoutProcess
+             ->addStep(new CheckoutPersonalInformationStep(
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 3e81804cee51c..10313f8b5da8b 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -323,6 +323,9 @@
+   <configuration id="PS_GUEST_CHECKOUT_ENABLED" name="PS_GUEST_CHECKOUT_ENABLED">
+     <value>1</value>
+   </configuration>
++  <configuration id="PS_ONE_PAGE_CHECKOUT_ENABLED" name="PS_ONE_PAGE_CHECKOUT_ENABLED">
++    <value>0</value>
++  </configuration>
+   <configuration id="PS_DISPLAY_SUPPLIERS" name="PS_DISPLAY_SUPPLIERS">
+     <value>0</value>
+   </configuration>
+diff --git a/src/Adapter/Order/Checkout/OnePageCheckoutAvailabilityChecker.php b/src/Adapter/Order/Checkout/OnePageCheckoutAvailabilityChecker.php
+new file mode 100644
+index 0000000000000..52fd3c7a990a8
+--- /dev/null
++++ b/src/Adapter/Order/Checkout/OnePageCheckoutAvailabilityChecker.php
+@@ -0,0 +1,51 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Order\Checkout;
++
++use Exception;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutSettings;
++use PrestaShop\PrestaShop\Core\Domain\Configuration\ShopConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++
++/**
++ * Determines if One Page Checkout can be used for the specified shop based on configuration and feature flag state.
++ */
++final class OnePageCheckoutAvailabilityChecker implements OnePageCheckoutAvailabilityCheckerInterface
++{
++    public function __construct(
++        private readonly ShopConfigurationInterface $configuration,
++        private readonly FeatureFlagStateCheckerInterface $featureFlagStateChecker,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function isEnabledForShop(int $shopId): bool
++    {
++        try {
++            $isConfigurationEnabled = (bool) $this->configuration->get(
++                OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED,
++                false,
++                ShopConstraint::shop($shopId)
++            );
++
++            if (!$isConfigurationEnabled) {
++                return false;
++            }
++
++            return $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT);
++        } catch (Exception) {
++            return false;
++        }
++    }
++}
+diff --git a/src/Core/Checkout/OnePageCheckoutAvailabilityCheckerInterface.php b/src/Core/Checkout/OnePageCheckoutAvailabilityCheckerInterface.php
+new file mode 100644
+index 0000000000000..3e7fa5dbb8c52
+--- /dev/null
++++ b/src/Core/Checkout/OnePageCheckoutAvailabilityCheckerInterface.php
+@@ -0,0 +1,22 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Checkout;
++
++/**
++ * Defines how to check One Page Checkout availability for a specific shop.
++ */
++interface OnePageCheckoutAvailabilityCheckerInterface
++{
++    /**
++     * Returns whether One Page Checkout is enabled for the given shop.
++     *
++     * @param int $shopId
++     *
++     * @return bool
++     */
++    public function isEnabledForShop(int $shopId): bool;
++}
+diff --git a/src/Core/Checkout/OnePageCheckoutSettings.php b/src/Core/Checkout/OnePageCheckoutSettings.php
+new file mode 100644
+index 0000000000000..35fe56b783506
+--- /dev/null
++++ b/src/Core/Checkout/OnePageCheckoutSettings.php
+@@ -0,0 +1,12 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Checkout;
++
++final class OnePageCheckoutSettings
++{
++    public const ONE_PAGE_CHECKOUT_ENABLED = 'PS_ONE_PAGE_CHECKOUT_ENABLED';
++}
+diff --git a/src/Core/FeatureFlag/FeatureFlagSettings.php b/src/Core/FeatureFlag/FeatureFlagSettings.php
+index 441a93fc7de29..e9c7da9ea1678 100644
+--- a/src/Core/FeatureFlag/FeatureFlagSettings.php
++++ b/src/Core/FeatureFlag/FeatureFlagSettings.php
+@@ -35,4 +35,5 @@ class FeatureFlagSettings
+     public const FEATURE_FLAG_FRONT_CONTAINER_V2 = 'front_container_v2';
+     public const FEATURE_FLAG_IMPROVED_SHIPMENT = 'improved_shipment';
+     public const FEATURE_FLAG_DISCOUNT = 'discount';
++    public const FEATURE_FLAG_ONE_PAGE_CHECKOUT = 'one_page_checkout';
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/checkout.yml b/src/PrestaShopBundle/Resources/config/services/core/checkout.yml
+new file mode 100644
+index 0000000000000..bef06a18d0e2e
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/core/checkout.yml
+@@ -0,0 +1,12 @@
++services:
++  _defaults:
++    public: false
++
++  PrestaShop\PrestaShop\Adapter\Order\Checkout\OnePageCheckoutAvailabilityChecker:
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\Configuration'
++      - '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
++
++  PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface:
++    alias: PrestaShop\PrestaShop\Adapter\Order\Checkout\OnePageCheckoutAvailabilityChecker
++    public: true
+diff --git a/tests/Integration/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php b/tests/Integration/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php
+new file mode 100644
+index 0000000000000..3bdbc809dc7db
+--- /dev/null
++++ b/tests/Integration/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php
+@@ -0,0 +1,93 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Adapter\Order\Checkout;
++
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Adapter\Shop\Context as ShopContext;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutSettings;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagManager;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Tests\Resources\DatabaseDump;
++
++class OnePageCheckoutAvailabilityCheckerTest extends KernelTestCase
++{
++    private OnePageCheckoutAvailabilityCheckerInterface $onePageCheckoutAvailabilityChecker;
++    private FeatureFlagManager $featureFlagManager;
++    private Configuration $configuration;
++    private ShopContext $shopContext;
++
++    private int $shopId;
++
++    public static function setUpBeforeClass(): void
++    {
++        parent::setUpBeforeClass();
++        self::resetTables();
++    }
++
++    public static function tearDownAfterClass(): void
++    {
++        parent::tearDownAfterClass();
++        self::resetTables();
++    }
++
++    protected function setUp(): void
++    {
++        self::bootKernel();
++
++        $container = self::getContainer();
++
++        $this->onePageCheckoutAvailabilityChecker = $container->get(OnePageCheckoutAvailabilityCheckerInterface::class);
++        $this->featureFlagManager = $container->get(FeatureFlagManager::class);
++        $this->configuration = $container->get(Configuration::class);
++        $this->shopContext = $container->get(ShopContext::class);
++
++        $this->shopId = $this->shopContext->getContextShopID();
++    }
++
++    protected static function resetTables(): void
++    {
++        DatabaseDump::restoreTables(['configuration', 'feature_flag']);
++    }
++
++    public function testItReturnsTrueWhenFeatureFlagAndShopConfigurationAreEnabled(): void
++    {
++        $this->configuration->set(OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED, true, ShopConstraint::shop($this->shopId));
++        $this->featureFlagManager->enable(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT);
++
++        $this->assertTrue($this->onePageCheckoutAvailabilityChecker->isEnabledForShop($this->shopId));
++    }
++
++    public function testItReturnsFalseWhenFeatureFlagIsDisabled(): void
++    {
++        $this->configuration->set(OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED, true, ShopConstraint::shop($this->shopId));
++        $this->featureFlagManager->disable(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT);
++
++        $this->assertFalse($this->onePageCheckoutAvailabilityChecker->isEnabledForShop($this->shopId));
++    }
++
++    public function testItReturnsFalseWhenConfigurationIsDisabled(): void
++    {
++        $this->configuration->set(OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED, false, ShopConstraint::shop($this->shopId));
++        $this->featureFlagManager->enable(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT);
++
++        $this->assertFalse($this->onePageCheckoutAvailabilityChecker->isEnabledForShop($this->shopId));
++    }
++
++    public function testItUsesGlobalFallbackWhenShopValueIsNotDefined(): void
++    {
++        $this->configuration->deleteFromContext(OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED, ShopConstraint::shop($this->shopId));
++        $this->configuration->set(OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED, true, ShopConstraint::allShops());
++        $this->featureFlagManager->enable(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT);
++
++        $this->assertTrue($this->onePageCheckoutAvailabilityChecker->isEnabledForShop($this->shopId));
++    }
++}
+diff --git a/tests/Unit/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php b/tests/Unit/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php
+new file mode 100644
+index 0000000000000..48ab835733262
+--- /dev/null
++++ b/tests/Unit/Adapter/Order/Checkout/OnePageCheckoutAvailabilityCheckerTest.php
+@@ -0,0 +1,117 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace Tests\Unit\Adapter\Order\Checkout;
++
++use PHPUnit\Framework\MockObject\MockObject;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\OnePageCheckoutAvailabilityChecker;
++use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutSettings;
++use PrestaShop\PrestaShop\Core\Domain\Configuration\ShopConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use RuntimeException;
++
++class OnePageCheckoutAvailabilityCheckerTest extends TestCase
++{
++    private const SHOP_ID = 42;
++
++    private ShopConfigurationInterface|MockObject $configuration;
++    private FeatureFlagStateCheckerInterface|MockObject $featureFlagStateChecker;
++
++    private OnePageCheckoutAvailabilityChecker $onePageCheckoutAvailabilityChecker;
++
++    protected function setUp(): void
++    {
++        $this->configuration = $this->createMock(ShopConfigurationInterface::class);
++        $this->featureFlagStateChecker = $this->createMock(FeatureFlagStateCheckerInterface::class);
++
++        $this->onePageCheckoutAvailabilityChecker = new OnePageCheckoutAvailabilityChecker(
++            $this->configuration,
++            $this->featureFlagStateChecker
++        );
++    }
++
++    /**
++     * @dataProvider provideAvailabilityCases
++     */
++    public function testItReturnsExpectedAvailability(
++        bool $isConfigurationEnabled,
++        bool $isFeatureFlagEnabled,
++        bool $expectedResult
++    ): void {
++        $this->configuration
++            ->expects($this->once())
++            ->method('get')
++            ->with(
++                OnePageCheckoutSettings::ONE_PAGE_CHECKOUT_ENABLED,
++                false,
++                $this->callback(fn (ShopConstraint $shopConstraint): bool => $shopConstraint->isEqual(ShopConstraint::shop(self::SHOP_ID)))
++            )
++            ->willReturn($isConfigurationEnabled)
++        ;
++
++        if ($isConfigurationEnabled) {
++            $this->featureFlagStateChecker
++                ->expects($this->once())
++                ->method('isEnabled')
++                ->with(FeatureFlagSettings::FEATURE_FLAG_ONE_PAGE_CHECKOUT)
++                ->willReturn($isFeatureFlagEnabled)
++            ;
++        } else {
++            $this->featureFlagStateChecker
++                ->expects($this->never())
++                ->method('isEnabled')
++            ;
++        }
++
++        $this->assertSame($expectedResult, $this->onePageCheckoutAvailabilityChecker->isEnabledForShop(self::SHOP_ID));
++    }
++
++    /**
++     * @return iterable<array{bool, bool, bool}>
++     */
++    public function provideAvailabilityCases(): iterable
++    {
++        yield 'configuration disabled' => [false, false, false];
++        yield 'configuration enabled and feature flag disabled' => [true, false, false];
++        yield 'configuration enabled and feature flag enabled' => [true, true, true];
++    }
++
++    public function testItReturnsFalseWhenConfigurationThrowsException(): void
++    {
++        $this->configuration
++            ->expects($this->once())
++            ->method('get')
++            ->willThrowException(new RuntimeException('Configuration read failed'))
++        ;
++
++        $this->featureFlagStateChecker
++            ->expects($this->never())
++            ->method('isEnabled')
++        ;
++
++        $this->assertFalse($this->onePageCheckoutAvailabilityChecker->isEnabledForShop(self::SHOP_ID));
++    }
++
++    public function testItReturnsFalseWhenFeatureFlagCheckerThrowsException(): void
++    {
++        $this->configuration
++            ->expects($this->once())
++            ->method('get')
++            ->willReturn(true)
++        ;
++
++        $this->featureFlagStateChecker
++            ->expects($this->once())
++            ->method('isEnabled')
++            ->willThrowException(new RuntimeException('Feature flag check failed'))
++        ;
++
++        $this->assertFalse($this->onePageCheckoutAvailabilityChecker->isEnabledForShop(self::SHOP_ID));
++    }
++}

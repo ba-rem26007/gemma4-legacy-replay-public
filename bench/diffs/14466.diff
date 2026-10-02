@@ -1,0 +1,130 @@
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/TranslateType.php b/src/PrestaShopBundle/Form/Admin/Type/TranslateType.php
+index cabe1bb4927c1..c9359082533a6 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/TranslateType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/TranslateType.php
+@@ -30,6 +30,7 @@
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\Form\FormView;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
+ 
+ /**
+  * This form class is responsible to create a translatable form.
+@@ -37,6 +38,44 @@
+  */
+ class TranslateType extends CommonAbstractType
+ {
++    /**
++     * @var UrlGeneratorInterface
++     */
++    private $urlGenerator;
++
++    /**
++     * @var bool
++     */
++    private $saveFormLocaleChoice;
++
++    /**
++     * @var int
++     */
++    private $defaultFormLanguageId;
++
++    /**
++     * @var int
++     */
++    private $defaultShopLanguageId;
++
++    /**
++     * @param UrlGeneratorInterface $urlGenerator
++     * @param bool $saveFormLocaleChoice
++     * @param int $defaultFormLanguageId
++     * @param int $defaultShopLanguageId
++     */
++    public function __construct(
++        UrlGeneratorInterface $urlGenerator,
++        $saveFormLocaleChoice,
++        $defaultFormLanguageId,
++        $defaultShopLanguageId
++    ) {
++        $this->urlGenerator = $urlGenerator;
++        $this->saveFormLocaleChoice = $saveFormLocaleChoice;
++        $this->defaultFormLanguageId = $defaultFormLanguageId;
++        $this->defaultShopLanguageId = $defaultShopLanguageId;
++    }
++
+     /**
+      * {@inheritdoc}
+      *
+@@ -67,8 +106,14 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+     public function buildView(FormView $view, FormInterface $form, array $options)
+     {
+         $view->vars['locales'] = $options['locales'];
+-        $view->vars['defaultLocale'] = $options['locales'][0];
++        $view->vars['defaultLocale'] = $this->getDefaultLocale($options['locales']);
+         $view->vars['hideTabs'] = $options['hideTabs'];
++
++        if ($this->saveFormLocaleChoice) {
++            $view->vars['change_form_language_url'] = $this->urlGenerator->generate(
++                'admin_employees_change_form_language'
++            );
++        }
+     }
+ 
+     /**
+@@ -93,4 +138,26 @@ public function getBlockPrefix()
+     {
+         return 'translatefields';
+     }
++
++    /**
++     * Get default locale.
++     *
++     * @param array $locales
++     *
++     * @return array
++     */
++    private function getDefaultLocale(array $locales)
++    {
++        // If default form language is not available we will use default shop language
++        $languageId = $this->defaultFormLanguageId ?: $this->defaultShopLanguageId;
++
++        // Searching for a locale that matches the selected language
++        foreach ($locales as $locale) {
++            if ($locale['id_lang'] == $languageId) {
++                return $locale;
++            }
++        }
++
++        return reset($locales);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 612e4b9312d3d..539927c507253 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -28,6 +28,11 @@ services:
+     form.type.product.translate:
+         class: 'PrestaShopBundle\Form\Admin\Type\TranslateType'
+         parent: 'form.type.common_type'
++        arguments:
++            - '@router.default'
++            - "@=service('prestashop.adapter.legacy.configuration').getBoolean('PS_BO_ALLOW_EMPLOYEE_FORM_LANG')"
++            - "@=service('prestashop.adapter.legacy.context').getContext().cookie.employee_form_lang"
++            - "@=service('prestashop.adapter.legacy.configuration').getInt('PS_LANG_DEFAULT')"
+         public: true
+         tags:
+             - { name: form.type }
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_layout.html.twig b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_layout.html.twig
+index f77e7bf685f80..f5ddfb3baf793 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_layout.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_layout.html.twig
+@@ -659,6 +659,9 @@
+         <button class="btn btn-outline-secondary dropdown-toggle js-locale-btn"
+                 type="button"
+                 data-toggle="dropdown"
++                {% if change_form_language_url is defined %}
++                  data-change-language-url="{{ form.vars.change_form_language_url }}"
++                {% endif %}
+                 aria-haspopup="true"
+                 aria-expanded="false"
+                 id="{{ form.vars.id }}"

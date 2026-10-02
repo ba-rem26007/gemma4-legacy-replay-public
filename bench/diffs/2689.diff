@@ -1,0 +1,142 @@
+diff --git a/admin-dev/themes/default/template/helpers/list/list_content.tpl b/admin-dev/themes/default/template/helpers/list/list_content.tpl
+index a19c5d05c04ff..e890db57e40ae 100644
+--- a/admin-dev/themes/default/template/helpers/list/list_content.tpl
++++ b/admin-dev/themes/default/template/helpers/list/list_content.tpl
+@@ -76,7 +76,7 @@
+ 						{if $order_by == 'position' && $order_way != 'DESC'}
+ 							<div class="dragGroup">
+ 								<div class="positions">
+-									{$tr.$key.position}
++									{$tr.$key.position + 1}
+ 								</div>
+ 							</div>
+ 						{else}
+diff --git a/classes/Category.php b/classes/Category.php
+index ba932197b3813..c5535d2e34d4d 100644
+--- a/classes/Category.php
++++ b/classes/Category.php
+@@ -156,15 +156,13 @@ public function add($autodate = true, $null_values = false)
+ 		if (Tools::isSubmit('checkBoxShopAsso_category'))
+ 			foreach (Tools::getValue('checkBoxShopAsso_category') as $id_shop => $value)
+ 			{
+-				$position = Category::getLastPosition((int)$this->id_parent, $id_shop);
++				$position = (int)Category::getLastPosition((int)$this->id_parent, $id_shop);
+ 				$this->addPosition($position, $id_shop);
+ 			}
+ 		else
+ 			foreach (Shop::getShops(true) as $shop)
+ 			{
+-				$position = Category::getLastPosition((int)$this->id_parent, $shop['id_shop']);
+-				if (!$position)
+-					$position = 1;
++				$position = (int)Category::getLastPosition((int)$this->id_parent, $shop['id_shop']);
+ 				$this->addPosition($position, $shop['id_shop']);
+ 			}
+ 		if (!isset($this->doNotRegenerateNTree) || !$this->doNotRegenerateNTree)
+@@ -200,10 +198,10 @@ public function update($null_values = false)
+ 			if (Tools::isSubmit('checkBoxShopAsso_category'))
+ 				foreach (Tools::getValue('checkBoxShopAsso_category') as $id_asso_object => $row)
+ 					foreach ($row as $id_shop => $value)
+-						$this->addPosition(Category::getLastPosition((int)$this->id_parent, (int)$id_shop), (int)$id_shop);
++						$this->addPosition((int)Category::getLastPosition((int)$this->id_parent, (int)$id_shop), (int)$id_shop);
+ 			else
+ 				foreach (Shop::getShops(true) as $shop)
+-					$this->addPosition(max(1, Category::getLastPosition((int)$this->id_parent, $shop['id_shop'])), $shop['id_shop']);
++					$this->addPosition((int)Category::getLastPosition((int)$this->id_parent, $shop['id_shop']), $shop['id_shop']);
+ 		}
+ 
+ 		$ret = parent::update($null_values);
+@@ -1247,7 +1245,7 @@ public static function cleanPositions($id_category_parent = null)
+ 		{
+ 			$return &= Db::getInstance()->execute('
+ 			UPDATE `'._DB_PREFIX_.'category` c '.Shop::addSqlAssociation('category', 'c').'
+-			SET category_shop.`position` = '.(int)($i + 1).'
++			SET category_shop.`position` = '.(int)($i).'
+ 			WHERE c.`id_parent` = '.(int)$id_category_parent.' AND c.`id_category` = '.(int)$result[$i]['id_category']);
+ 		}
+ 		return $return;
+@@ -1262,11 +1260,18 @@ public static function cleanPositions($id_category_parent = null)
+ 	 */
+ 	public static function getLastPosition($id_category_parent, $id_shop)
+ 	{
+-		return (1 + (int)Db::getInstance()->getValue('
+-		SELECT MAX(cs.`position`)
+-		FROM `'._DB_PREFIX_.'category` c
+-		LEFT JOIN `'._DB_PREFIX_.'category_shop` cs ON (c.`id_category` = cs.`id_category` AND cs.`id_shop` = '.(int)$id_shop.')
+-		WHERE c.`id_parent` = '.(int)$id_category_parent));
++		if ((int)Db::getInstance()->getValue('
++				SELECT COUNT(c.`id_category`)
++				FROM `'._DB_PREFIX_.'category` c
++				LEFT JOIN `'._DB_PREFIX_.'category_shop` cs ON (c.`id_category` = cs.`id_category` AND cs.`id_shop` = '.(int)$id_shop.')
++				WHERE c.`id_parent` = '.(int)$id_category_parent) === 1)
++			return 0;
++		else
++			return (1 + (int)Db::getInstance()->getValue('
++				SELECT MAX(cs.`position`)
++				FROM `'._DB_PREFIX_.'category` c
++				LEFT JOIN `'._DB_PREFIX_.'category_shop` cs ON (c.`id_category` = cs.`id_category` AND cs.`id_shop` = '.(int)$id_shop.')
++				WHERE c.`id_parent` = '.(int)$id_category_parent));
+ 	}
+ 
+ 	public static function getUrlRewriteInformations($id_category)
+diff --git a/controllers/admin/AdminCategoriesController.php b/controllers/admin/AdminCategoriesController.php
+index 8157d20a3ecdf..74816634f27a4 100644
+--- a/controllers/admin/AdminCategoriesController.php
++++ b/controllers/admin/AdminCategoriesController.php
+@@ -791,10 +791,11 @@ public static function getDescriptionClean($description)
+ 
+ 	public function ajaxProcessUpdatePositions()
+ 	{
+-		$id_category_to_move = (int)(Tools::getValue('id_category_to_move'));
+-		$id_category_parent = (int)(Tools::getValue('id_category_parent'));
+-		$way = (int)(Tools::getValue('way'));
++		$id_category_to_move = (int)Tools::getValue('id_category_to_move');
++		$id_category_parent = (int)Tools::getValue('id_category_parent');
++		$way = (int)Tools::getValue('way');
+ 		$positions = Tools::getValue('category');
++		$found_first = (bool)Tools::getValue('found_first');
+ 		if (is_array($positions))
+ 			foreach ($positions as $key => $value)
+ 			{
+@@ -812,6 +813,11 @@ public function ajaxProcessUpdatePositions()
+ 			if (isset($position) && $category->updatePosition($way, $position))
+ 			{
+ 				Hook::exec('actionCategoryUpdate');
++
++				/* Position '0' was not found in given positions so try to reorder parent category*/
++				if (!$found_first)
++					$category->cleanPositions((int)$category->id_parent);
++
+ 				die(true);
+ 			}
+ 			else
+diff --git a/js/admin/dnd.js b/js/admin/dnd.js
+index e7e08457e2bf3..3398e957adf8c 100644
+--- a/js/admin/dnd.js
++++ b/js/admin/dnd.js
+@@ -129,12 +129,15 @@ function initTableDnD(table)
+ 
+ 				params['ajax'] = 1;
+ 
++				var data = $.tableDnD.serialize();
++				if ((table.id == 'category') && (data.indexOf('_0&') != -1))
++					data += '&found_first=1';
+ 				$.ajax({
+ 					type: 'POST',
+ 					headers: { "cache-control": "no-cache" },
+ 					async: false,
+ 					url: currentIndex + '&token=' + token + '&' + 'rand=' + new Date().getTime(),
+-					data: $.tableDnD.serialize() + '&' + objToString(params) ,
++					data:  data + '&' + objToString(params) ,
+ 					success: function(data) {
+ 						var nodrag_lines = $(tableDrag).find('tr:not(".nodrag")');
+ 						if (come_from == 'AdminModulesPositions')
+@@ -157,7 +160,7 @@ function initTableDnD(table)
+ 							var up_reg  = new RegExp('position=[-]?[0-9]+&');
+ 							nodrag_lines.each(function(i) {
+ 								$(this).attr('id', $(this).attr('id').replace(reg, '_' + i));
+-								$(this).find('.positions').text(i);
++								$(this).find('.positions').text(i + 1);
+ 							});
+ 						}
+ 

@@ -1,0 +1,162 @@
+diff --git a/src/Adapter/Module/ModuleDataProvider.php b/src/Adapter/Module/ModuleDataProvider.php
+index 61af9167b2eea..4bb1cbbf3a5f2 100644
+--- a/src/Adapter/Module/ModuleDataProvider.php
++++ b/src/Adapter/Module/ModuleDataProvider.php
+@@ -42,7 +42,7 @@ class ModuleDataProvider
+ 
+     /**
+      * Translator
+-     * @var Symfony\Component\Translation\TranslatorInterface
++     * @var \Symfony\Component\Translation\TranslatorInterface
+      */
+     private $translator;
+ 
+@@ -78,7 +78,7 @@ public function findByName($name)
+                 $legacyContext = new LegacyContext();
+                 $legacyContext = $legacyContext->getContext();
+                 $employeeID = (int)$legacyContext->employee->id;
+-                
++
+                 $qb = $this->entityManager->createQueryBuilder();
+                 $qb->select('mh')
+                     ->from('PrestaShopBundle:ModuleHistory', 'mh', 'mh.idModule')
+@@ -163,6 +163,10 @@ public function isInstalled($name)
+      */
+     public function isModuleMainClassValid($name)
+     {
++        if (!\Validate::isModuleName($name)) {
++            return false;
++        }
++
+         $file_path = _PS_MODULE_DIR_.$name.'/'.$name.'.php';
+         // Check if file exists (slightly faster than file_exists)
+         if (!(int)@filemtime($file_path)) {
+@@ -197,10 +201,10 @@ public function isModuleMainClassValid($name)
+ 
+         $logger = $this->logger;
+         // -> Even if we do not detect any parse error in the file, we may have issues
+-        // when trying to load the file. (i.e with additionnal require_once).
+-        // -> We use an anonymous function here because if a test is made two times
+-        // on the same module, the test on require_once would return immediately
+-        // true (Because the file has already been evaluated by PHP).
++        // when trying to load the file. (i.e with additional require_once).
++        // -> We use an anonymous function here because if a test is made twice
++        // on the same module, the test on require_once would immediately return true
++        // (as the file would have already been evaluated).
+         $require_correct = function ($name) use ($file_path, $logger) {
+             try {
+                 require_once $file_path;
+@@ -216,6 +220,7 @@ public function isModuleMainClassValid($name)
+             }
+             return true;
+         };
++
+         return $require_correct($name);
+     }
+ 
+diff --git a/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php b/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
+index 49fc921952e2b..76cdd872244ce 100644
+--- a/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
++++ b/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
+@@ -114,8 +114,14 @@ public function exportCatalogues($themeName, $locale)
+ 
+         $archiveParentDirectory = $this->makeArchiveParentDirectory($themeName, $locale);
+ 
+-        // Clean up previously exported archives
+-        $this->filesystem->remove($archiveParentDirectory);
++        if (
++            $this->filesystem->exists($archiveParentDirectory) &&
++            $this->ensureFileBelongsToExportDirectory($archiveParentDirectory)
++        ) {
++            // Clean up previously exported archives
++            $this->filesystem->remove($archiveParentDirectory);
++        }
++
+         $this->filesystem->mkdir($archiveParentDirectory);
+ 
+         $this->dumper->dump($mergedTranslations, array(
+@@ -128,6 +134,22 @@ public function exportCatalogues($themeName, $locale)
+         return $archiveParentDirectory;
+     }
+ 
++    /**
++     * @param $filePath
++     * @return bool
++     * @throws \Exception
++     */
++    protected function ensureFileBelongsToExportDirectory($filePath)
++    {
++        $validFileLocation = substr(realpath($filePath), 0, strlen($this->exportDir)) === $this->exportDir;
++
++        if (!$validFileLocation) {
++            throw new \Exception('Invalid file location. This file should belong to the export directory');
++        }
++
++        return $validFileLocation;
++    }
++
+     /**
+      * @param $themeName
+      * @param $locale
+@@ -218,6 +240,10 @@ protected function getExportDir($themeName)
+      */
+     protected function makeZipFilename($themeName, $locale)
+     {
++        if (!file_exists($this->exportDir)) {
++            mkdir($this->exportDir);
++        }
++
+         $zipFilenameParts = array(
+             $this->exportDir,
+             $themeName,
+@@ -232,12 +258,14 @@ protected function makeZipFilename($themeName, $locale)
+      * @param $themeName
+      * @param $locale
+      * @return string
++     * @throws \Exception
+      */
+     protected function makeArchiveParentDirectory($themeName, $locale)
+     {
+         $zipFilename = $this->makeZipFilename($themeName, $locale);
++        $archiveParentDirectory = dirname($zipFilename);
+ 
+-        return dirname($zipFilename);
++        return $archiveParentDirectory;
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Twig/TranslationsExtension.php b/src/PrestaShopBundle/Twig/TranslationsExtension.php
+index 8b90779f2daeb..b01c682e792f9 100644
+--- a/src/PrestaShopBundle/Twig/TranslationsExtension.php
++++ b/src/PrestaShopBundle/Twig/TranslationsExtension.php
+@@ -508,30 +508,6 @@ protected function getNavigation($id)
+         );
+     }
+ 
+-    /**
+-     * @param $view
+-     * @param array $parameters
+-     *
+-     * @return mixed|string
+-     */
+-    protected function render($view, $parameters = array())
+-    {
+-        $viewsDirectory = __DIR__.'/../Resources/views/Admin/Translations/include';
+-        $viewPath = $viewsDirectory.'/'.$view;
+-        if (!file_exists($viewPath)) {
+-            $message = sprintf('A view ("%s") does not exist.', $viewPath);
+-            $this->logger->error($message);
+-        }
+-
+-        $view = file_get_contents($viewPath);
+-
+-        foreach ($parameters as $key => $value) {
+-            $view = str_replace('{{ '.$key.' }}', $value, $view);
+-        }
+-
+-        return $view;
+-    }
+-
+     /**
+      * @param $subject
+      * @param $level

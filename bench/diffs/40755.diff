@@ -1,0 +1,177 @@
+diff --git a/.github/workflows/build-release.yml b/.github/workflows/build-release.yml
+new file mode 100644
+index 0000000000000..fbaa59ab5c8c4
+--- /dev/null
++++ b/.github/workflows/build-release.yml
+@@ -0,0 +1,51 @@
++name: Build Release
++
++on:
++  workflow_dispatch:
++    inputs:
++      ref:
++        description: 'Tag, branch or commit value to build'
++        required: true
++
++permissions:
++  contents: read   #   to fetch code (actions/checkout)
++
++jobs:
++  build-release:
++    name: Build Release
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ github.event.inputs.ref }}
++          path: prestashop-src
++          fetch-depth: 0
++
++      - name: Setup PHP
++        uses: shivammathur/setup-php@v2
++        with:
++          php-version: '8.1'
++          extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv
++        env:
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Setup Node
++        uses: actions/setup-node@v4
++        with:
++          # Commit builds can't determine PS version from ref; we assume that builds from commits will be v9+ only, so fallback is Node 20
++          node-version: ${{ startsWith(github.event.inputs.ref, '8.') && '16' || '20' }}
++
++      - name: Create build
++        working-directory: ${{ github.workspace }}/prestashop-src
++        run: |
++          php tools/build/CreateRelease.php \
++            --destination-dir="${{ github.workspace }}/build-release-output" \
++            --distribution=open_source
++
++      - name: Upload release artifacts
++        uses: actions/upload-artifact@v4
++        with:
++          name: open-source-archive
++          path: |
++            ${{ github.workspace }}/build-release-output/prestashop_*.zip
++            ${{ github.workspace }}/build-release-output/prestashop_*.xml
+diff --git a/tools/build/CreateRelease.php b/tools/build/CreateRelease.php
+index 45a15a3cf7fe3..64cfc0db89d71 100644
+--- a/tools/build/CreateRelease.php
++++ b/tools/build/CreateRelease.php
+@@ -62,6 +62,10 @@
+         'description' => 'Keep tests folder in the release. Default: false.',
+         'longopt' => 'keep-tests',
+     ],
++    'distribution' => [
++        'description' => 'Distribution type for app/metadata.json (e.g. open_source). When set, metadata file is generated.',
++        'longopt' => 'distribution::',
++    ],
+     'help' => [
+         'description' => 'Show help',
+         'opt' => 'h',
+@@ -95,6 +99,7 @@
+ $destinationDir = '';
+ $useZip = $useInstaller = true;
+ $keepTests = false;
++$distribution = '';
+ 
+ if (isset($userOptions['version'])) {
+     $version = $userOptions['version'];
+@@ -118,8 +123,12 @@
+     $keepTests = true;
+ }
+ 
++if (isset($userOptions['distribution'])) {
++    $distribution = $userOptions['distribution'];
++}
++
+ try {
+-    $releaseCreator = new ReleaseCreator($version, $useInstaller, $useZip, $destinationDir, $keepTests);
++    $releaseCreator = new ReleaseCreator($version, $useInstaller, $useZip, $destinationDir, $keepTests, $distribution);
+     $releaseCreator->createRelease();
+ } catch (Exception $e) {
+     $consoleWrite->displayText(
+diff --git a/tools/build/Library/ReleaseCreator.php b/tools/build/Library/ReleaseCreator.php
+index e2beb9dbd9cfa..0c80e89439f82 100644
+--- a/tools/build/Library/ReleaseCreator.php
++++ b/tools/build/Library/ReleaseCreator.php
+@@ -201,6 +201,13 @@ class ReleaseCreator
+      */
+     protected $destinationDir;
+ 
++    /**
++     * Distribution type for app/metadata.json (e.g. open_source). When set, metadata file is generated.
++     *
++     * @var string
++     */
++    protected $distribution = '';
++
+     /**
+      * Set the release wanted version, and some options.
+      *
+@@ -209,8 +216,9 @@ class ReleaseCreator
+      * @param bool $useZip
+      * @param string $destinationDir
+      * @param bool $keepTests
++     * @param string $distribution Distribution type for app/metadata.json (e.g. open_source). When set, metadata file is generated.
+      */
+-    public function __construct(?string $version = null, bool $useInstaller = true, bool $useZip = true, string $destinationDir = '', bool $keepTests = false)
++    public function __construct(?string $version = null, bool $useInstaller = true, bool $useZip = true, string $destinationDir = '', bool $keepTests = false, string $distribution = '')
+     {
+         $this->consoleWriter = new ConsoleWriter();
+         $tmpDir = sys_get_temp_dir();
+@@ -242,6 +250,7 @@ public function __construct(?string $version = null, bool $useInstaller = true,
+             $destinationDir = "{$this->projectPath}/$releasesDir/$reference";
+         }
+         $this->destinationDir = $destinationDir;
++        $this->distribution = $distribution;
+         $this->consoleWriter->displayText(
+             "--- Destination dir used will be '{$this->destinationDir}'{$this->lineSeparator}",
+             ConsoleWriter::COLOR_GREEN
+@@ -290,6 +299,7 @@ public function createRelease()
+             ->generateCachedirFiles()
+             ->runComposerInstall()
+             ->runBuildAssets()
++            ->generateMetadataFile()
+             ->createPackage();
+         $endTime = date('H:i:s');
+         $this->consoleWriter->displayText(
+@@ -531,6 +541,37 @@ protected function generateCachedirFiles()
+         return $this;
+     }
+ 
++    /**
++     * Generate app/metadata.json when --distribution is set (e.g. for official OS builds from CI).
++     *
++     * @return $this
++     * @throws BuildException
++     */
++    protected function generateMetadataFile()
++    {
++        if ($this->distribution === '') {
++            return $this;
++        }
++
++        $this->consoleWriter->displayText('Generating app/metadata.json...', ConsoleWriter::COLOR_YELLOW);
++
++        $metadataPath = $this->tempProjectPath . '/app/metadata.json';
++        $metadata = [
++            'distribution' => $this->distribution,
++            'distributionVersion' => $this->version,
++            'buildDate' => date('Y-m-d H:i:s'),
++        ];
++
++        $jsonContent = json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
++        if (file_put_contents($metadataPath, $jsonContent) === false) {
++            throw new BuildException("Unable to write metadata file '{$metadataPath}'");
++        }
++
++        $this->consoleWriter->displayText(" DONE{$this->lineSeparator}", ConsoleWriter::COLOR_GREEN);
++
++        return $this;
++    }
++
+     /**
+      * Install all dependencies.
+      *

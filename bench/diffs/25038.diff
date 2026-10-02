@@ -1,0 +1,412 @@
+diff --git a/admin-dev/themes/new-theme/js/components/tinymce-editor.js b/admin-dev/themes/new-theme/js/components/tinymce-editor.js
+index 7ceab55d5e06c..9a15463f812cf 100644
+--- a/admin-dev/themes/new-theme/js/components/tinymce-editor.js
++++ b/admin-dev/themes/new-theme/js/components/tinymce-editor.js
+@@ -251,7 +251,9 @@ class TinyMCEEditor {
+   }
+ 
+   /**
+-   * Updates the characters counter
++   * Updates the characters counter. This counter is used for front but if you don't want to encounter Validation
++   * problems you should be in sync with the TinyMceMaxLengthValidator PHP class. Both codes must behave the same
++   * way.
+    *
+    * @param id
+    */
+@@ -260,7 +262,7 @@ class TinyMCEEditor {
+     const counter = textarea.attr('counter');
+     const counterType = textarea.attr('counter_type');
+     const editor = window.tinyMCE.get(id);
+-    const max = editor.getContent().length;
++    const max = editor.getBody() ? editor.getBody().textContent.length : 0;
+ 
+     textarea
+       .parent()
+diff --git a/classes/Product.php b/classes/Product.php
+index 8e0f95ddcd41e..c53ac6fb02ce5 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -1183,14 +1183,26 @@ public static function resetStaticCache()
+     public function validateField($field, $value, $id_lang = null, $skip = [], $human_errors = false)
+     {
+         if ($field == 'description_short') {
++            // The legacy validation is basic, so the idea here is to adapt the allowed limit so that it takes into
++            // account the difference between the raw text and the html text (since actually the limit is only about
++            // the raw text) This is a bit ugly the real validation should only be performed by TinyMceMaxLengthValidator
++            // but we have to deal with this for now.
+             $limit = (int) Configuration::get('PS_PRODUCT_SHORT_DESC_LIMIT');
+             if ($limit <= 0) {
+                 $limit = 800;
+             }
+ 
+-            $size_without_html = Tools::strlen(strip_tags($value));
++            $replaceArray = [
++                "\n",
++                "\r",
++                "\n\r",
++                "\r\n",
++            ];
++            $str = str_replace($replaceArray, [''], strip_tags($value));
++            $size_without_html = iconv_strlen($str);
+             $size_with_html = Tools::strlen($value);
+-            $this->def['fields']['description_short']['size'] = $limit + $size_with_html - $size_without_html;
++            $adaptedLimit = $limit + $size_with_html - $size_without_html;
++            $this->def['fields']['description_short']['size'] = $adaptedLimit;
+         }
+ 
+         return parent::validateField($field, $value, $id_lang, $skip, $human_errors);
+diff --git a/controllers/admin/AdminProductsController.php b/controllers/admin/AdminProductsController.php
+index 72445646971e5..8b94be915e369 100755
+--- a/controllers/admin/AdminProductsController.php
++++ b/controllers/admin/AdminProductsController.php
+@@ -2071,7 +2071,18 @@ public function checkProduct()
+         }
+         foreach ($languages as $language) {
+             if ($this->isProductFieldUpdated('description_short', $language['id_lang']) && ($value = Tools::getValue('description_short_' . $language['id_lang']))) {
+-                if (Tools::strlen(strip_tags($value)) > $limit) {
++                // This validation computation actually comes from TinyMceMaxLengthValidator if you modify it here you
++                // should keep the validator in sync (along with other parts of the code, more info in the
++                // TinyMceMaxLengthValidator comments).
++                $replaceArray = [
++                    "\n",
++                    "\r",
++                    "\n\r",
++                    "\r\n",
++                ];
++                $str = str_replace($replaceArray, [''], strip_tags($value));
++                $shortDescriptionLength = iconv_strlen($str);
++                if ($shortDescriptionLength > $limit) {
+                     $this->errors[] = $this->trans(
+                         'This %1$s field (%2$s) is too long: %3$d chars max (current count %4$d).',
+                         [
+diff --git a/js/admin/tinymce_loader.js b/js/admin/tinymce_loader.js
+index abe560c28bfbe..831621a37db5b 100644
+--- a/js/admin/tinymce_loader.js
++++ b/js/admin/tinymce_loader.js
+@@ -43,7 +43,8 @@ $(document).ready(function() {
+     let textarea = $('#' + id);
+     let counter = textarea.attr('counter');
+     let counter_type = textarea.attr('counter_type');
+-    let max = tinyMCE.activeEditor.getContent().length;
++    const editor = window.tinyMCE.get(id);
++    const max = editor.getBody() ? editor.getBody().textContent.length : 0;
+ 
+     textarea
+       .parent()
+diff --git a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+index a1799e79a69c1..85601b0e716ab 100644
+--- a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
++++ b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Adapter\LegacyContext;
+ use PrestaShop\PrestaShop\Adapter\Manufacturer\ManufacturerDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Product\ProductDataProvider;
++use PrestaShop\PrestaShop\Core\Domain\Product\ProductSettings;
+ use PrestaShopBundle\Form\Admin\Category\SimpleCategory;
+ use PrestaShopBundle\Form\Admin\Feature\ProductFeature;
+ use PrestaShopBundle\Form\Admin\Type\ChoiceCategoriesTreeType;
+@@ -184,6 +185,11 @@ public function __construct(
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         $is_stock_management = $this->configuration->get('PS_STOCK_MANAGEMENT');
++        $shortDescriptionLimit = (int) $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT');
++        if ($shortDescriptionLimit <= 0) {
++            $shortDescriptionLimit = ProductSettings::MAX_DESCRIPTION_SHORT_LENGTH;
++        }
++
+         $builder->add('type_product', FormType\ChoiceType::class, [
+             'choices' => [
+                 $this->translator->trans('Standard product', [], 'Admin.Catalog.Feature') => 0,
+@@ -254,11 +260,11 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'attr' => [
+                         'class' => 'autoload_rte',
+                         'placeholder' => $this->translator->trans('The summary is a short sentence describing your product.<br />It will appears at the top of your shop\'s product page, in product lists, and in search engines\' results page (so it\'s important for SEO). To give more details about your product, use the "Description" tab.', [], 'Admin.Catalog.Help'),
+-                        'counter' => (int) $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT') <= 0 ? 800 : (int) $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT'),
++                        'counter' => $shortDescriptionLimit,
+                     ],
+                     'constraints' => [
+                         new TinyMceMaxLength([
+-                            'max' => (int) $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT') <= 0 ? 800 : (int) $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT'),
++                            'max' => $shortDescriptionLimit,
+                         ]),
+                     ],
+                     'required' => false,
+diff --git a/src/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidator.php b/src/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidator.php
+index bd42f9ef3f748..02cffd8741bc8 100644
+--- a/src/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidator.php
++++ b/src/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidator.php
+@@ -26,24 +26,50 @@
+ 
+ namespace PrestaShopBundle\Form\Validator\Constraints;
+ 
+-use PrestaShop\PrestaShop\Adapter\LegacyContext;
++use PrestaShopBundle\Translation\TranslatorInterface;
+ use Symfony\Component\Validator\Constraint;
+ use Symfony\Component\Validator\ConstraintValidator;
+ 
++/**
++ * The computation here means to only count the raw text, not the rich text with html strip tags, also all the
++ * line breaks are simply ignored (not event replaced with spaces). This computation is made to match the one
++ * from the TinyMce text count. You can see it in TinyMCEEditor.js component, if the js component is modified
++ * so should this validator.
++ *
++ * Note: if you rely on Product class validation you might also need to update Product::validateField
++ * Note: if you are still using the legacy AdminProductsController you should also update the checkProduct() function
++ */
+ class TinyMceMaxLengthValidator extends ConstraintValidator
+ {
++    /** @var TranslatorInterface */
++    private $translator;
++
++    /**
++     * @param TranslatorInterface $translator
++     */
++    public function __construct(TranslatorInterface $translator)
++    {
++        $this->translator = $translator;
++    }
++
++    /**
++     * @param mixed $value
++     * @param TinyMceMaxLength $constraint
++     */
+     public function validate($value, Constraint $constraint)
+     {
+         $replaceArray = [
+             "\n",
+             "\r",
+             "\n\r",
++            "\r\n",
+         ];
+         $str = str_replace($replaceArray, [''], strip_tags($value));
++        $length = iconv_strlen($str);
+ 
+-        if ($constraint instanceof TinyMceMaxLength && iconv_strlen($str) > $constraint->max) {
++        if ($length > $constraint->max) {
+             $this->context->addViolation(
+-                (new LegacyContext())->getContext()->getTranslator()->trans('This value is too long. It should have %limit% characters or less.', [], 'Admin.Catalog.Notification'),
++                $this->translator->trans('This value is too long. It should have %limit% characters or less.', [], 'Admin.Catalog.Notification'),
+                 ['%limit%' => $constraint->max]
+             );
+         }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_validator.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_validator.yml
+new file mode 100644
+index 0000000000000..2a0ff67a216ba
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_validator.yml
+@@ -0,0 +1,10 @@
++services:
++    _defaults:
++        public: true
++
++    prestashop.bundle.form.validator.constraints.tiny_mce_max_length_validator:
++        class: 'PrestaShopBundle\Form\Validator\Constraints\TinyMceMaxLengthValidator'
++        arguments:
++            - '@translator'
++        tags:
++            - { name: validator.constraint_validator }
+diff --git a/tests/Unit/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidatorTest.php b/tests/Unit/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidatorTest.php
+new file mode 100644
+index 0000000000000..d8b84e1da4174
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Form/Validator/Constraints/TinyMceMaxLengthValidatorTest.php
+@@ -0,0 +1,199 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Form\Validator\Constraints;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShopBundle\Form\Validator\Constraints\TinyMceMaxLength;
++use PrestaShopBundle\Form\Validator\Constraints\TinyMceMaxLengthValidator;
++use PrestaShopBundle\Translation\TranslatorInterface;
++use Symfony\Component\Validator\Context\ExecutionContextInterface;
++
++class TinyMceMaxLengthValidatorTest extends TestCase
++{
++    private const MAX_LENGTH = 42;
++
++    /**
++     * @dataProvider getValidationData
++     *
++     * @param string $content
++     * @param bool $isValid
++     * @param int|null $maxLength
++     */
++    public function testValidate(string $content, bool $isValid, ?int $maxLength = null): void
++    {
++        $validator = new TinyMceMaxLengthValidator($this->getTranslator());
++        $context = $this->getContext($isValid);
++        $validator->initialize($context);
++
++        $constraint = new TinyMceMaxLength([
++            'max' => $maxLength ?? static::MAX_LENGTH,
++        ]);
++        $validator->validate($content, $constraint);
++    }
++
++    public function getValidationData(): iterable
++    {
++        yield [
++            'Valid text',
++            true,
++        ];
++
++        yield [
++            'Valid text too long only because of HTML',
++            true,
++        ];
++
++        yield [
++            '<p>Valid text too long only because of HTML</p>',
++            true,
++        ];
++
++        yield [
++            'Invalid text that is a too long even without HTML',
++            false,
++        ];
++
++        yield [
++            '<p>Invalid text that is a too long even without HTML</p>',
++            false,
++        ];
++
++        yield [
++            '<p>White Ceramic Mug. 325ml</p>
++<p>White Ceramic Mug. 325ml</p>',
++            false,
++        ];
++
++        yield [
++            '<p>White Hot Ceramic Mug</p>
++<p>White Hot Ceramic Mug</p>',
++            true,
++        ];
++
++        yield [
++            '<p>White Hot Ceramic Mug</p>
++<p></p>
++<p>White Hot Ceramic Mug</p>
++<p></p>',
++            true,
++        ];
++
++        yield [
++            'White Hot Ceramic Mug
++
++White Hot Ceramic Mug',
++            true,
++        ];
++
++        yield [
++            '<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>
++<p>testtesttesttesttesttesttesttesttest</p>
++<p></p>',
++            true,
++            800,
++        ];
++    }
++
++    private function getContext(bool $isValid): ExecutionContextInterface
++    {
++        $context = $this->getMockBuilder(ExecutionContextInterface::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++
++        if ($isValid) {
++            $context
++                ->expects($this->never())
++                ->method('addViolation')
++            ;
++        } else {
++            $context
++                ->expects($this->once())
++                ->method('addViolation')
++            ;
++        }
++
++        return $context;
++    }
++
++    private function getTranslator(): TranslatorInterface
++    {
++        $translator = $this->getMockBuilder(TranslatorInterface::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++
++        $translator
++            ->expects($this->any())
++            ->method('trans')
++            ->willReturn('translated wording')
++        ;
++
++        return $translator;
++    }
++}

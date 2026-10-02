@@ -1,0 +1,234 @@
+diff --git a/admin-dev/themes/default/template/header.tpl b/admin-dev/themes/default/template/header.tpl
+index c464e4ad2f171..15c78f14d36fc 100644
+--- a/admin-dev/themes/default/template/header.tpl
++++ b/admin-dev/themes/default/template/header.tpl
+@@ -126,7 +126,7 @@
+ 							<ul class="dropdown-menu">
+ 								{foreach $quick_access as $quick}
+ 									<li {if $link->matchQuickLink({$quick.link})}{assign "matchQuickLink" $quick.id_quick_access}class="active"{/if}>
+-										<a href="{$quick.link|escape:'html':'UTF-8'}"{if $quick.new_window} class="_blank"{/if}>
++										<a href="{$quick.link|escape:'html':'UTF-8'}" {if $quick.new_window}target="_blank"{/if}>
+ 											{if isset($quick.icon)}
+ 												<i class="icon-{$quick.icon} icon-fw"></i>
+ 											{else}
+@@ -151,12 +151,12 @@
+ 										{l s='Add current page to QuickAccess'}
+ 									</a>
+ 								</li>
+-                                <li>
+-                                    <a href="{$link->getAdminLink("AdminQuickAccesses")|addslashes}">
+-                                        <i class="icon-cog"></i>
+-                                        {l s='Manage quick accesses'}
+-                                    </a>
+-                                </li>
++                  <li>
++                    <a href="{$link->getAdminLink("AdminQuickAccesses")|addslashes}">
++                      <i class="icon-cog"></i>
++                      {l s='Manage quick accesses'}
++                    </a>
++                  </li>
+ 							</ul>
+ 						</li>
+ 					</ul>
+diff --git a/admin-dev/themes/new-theme/template/components/layout/quick_access.tpl b/admin-dev/themes/new-theme/template/components/layout/quick_access.tpl
+index e51f266b890f5..948be855ac070 100644
+--- a/admin-dev/themes/new-theme/template/components/layout/quick_access.tpl
++++ b/admin-dev/themes/new-theme/template/components/layout/quick_access.tpl
+@@ -5,7 +5,11 @@
+   </span>
+   <div class="ps-dropdown-menu dropdown-menu" aria-labelledby="quick-access">
+     {foreach $quick_access as $quick}
+-      <a href="{$quick.link|escape:'html':'UTF-8'}" class="dropdown-item" data-item="{$quick.name}">{$quick.name}</a></li>
++      <a class="dropdown-item{if $link->matchQuickLink({$quick.link})}{assign "matchQuickLink" $quick.id_quick_access} active{/if}"
++         href="{$quick.link|escape:'html':'UTF-8'}"
++        {if $quick.new_window} target="_blank"{/if}
++         data-item="{$quick.name}"
++      >{$quick.name}</a>
+     {/foreach}
+     <hr>
+     {if isset($matchQuickLink)}
+@@ -28,7 +32,7 @@
+       data-rand="{1|rand:200}"
+       data-icon="{$quick_access_current_link_icon}"
+       data-method="add"
+-      data-url="{$smarty.server['REQUEST_URI']}"
++      data-url="{$link->getQuickLink($smarty.server['REQUEST_URI'])}"
+       data-post-link="{$link->getAdminLink('AdminQuickAccesses')}"
+       data-prompt-text="{l s='Please name this shortcut:' js=1}"
+       data-link="{$quick_access_current_link_name|truncate:32}"
+diff --git a/classes/Link.php b/classes/Link.php
+index bdb54233d5b2b..3ba7ee85f1aa5 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -1035,40 +1035,42 @@ public function getBaseLink($idShop = null, $ssl = null, $relativeProtocol = fal
+     }
+ 
+     /**
+-     * @param string $url
++     * Clean url http://website.com/admin_dir/foo => foo
++     * Remove index.php?
++     * Remove last char if it's ? or &
++     * Remove token if exists
+      *
+-     * @return mixed|string
++     * @param string $url
++     * @return string
+      */
+     public static function getQuickLink($url)
+     {
+-        // We need to know if we are in Legacy or SF environment
+-        if (Tools::getIsset('token')) {
+-            $parsedUrl = parse_url($url);
+-            $output = array();
+-            if (is_array($parsedUrl) && isset($parsedUrl['query'])) {
+-                parse_str($parsedUrl['query'], $output);
+-                unset($output['token'], $output['conf'], $output['id_quick_access']);
+-            }
++        $legacyEnvironment = stripos($url, 'controller');
++
++        $patterns = array(
++            '#'.Context::getContext()->link->getBaseLink().'#',
++            '#'.__PS_BASE_URI__.'#',
++            '#'.basename(_PS_ADMIN_DIR_).'#',
++            '/index.php/',
++            '/_?token=[a-zA-Z0-9\_]+/'
++        );
+ 
+-            return 'index.php?'.http_build_query($output);
+-        }
++        $url = preg_replace($patterns, '', $url);
++        $url = trim($url, "?&/");
+ 
+-        return str_replace('/'.basename(_PS_ADMIN_DIR_).'/', '', $url);
++        return 'index.php'.(!empty($legacyEnvironment) ? '?' : '/').$url;
+     }
+ 
+     /**
+-     * @param string $url
+-     *
++     * Check if url match with current url
++     * @param $url
+      * @return bool
+      */
+     public function matchQuickLink($url)
+     {
+-        $quicklink = $this->getQuickLink($url);
+-        if (isset($quicklink) && $quicklink === ($this->getQuickLink($_SERVER['REQUEST_URI']))) {
+-            return true;
+-        } else {
+-            return false;
+-        }
++        $quickLink = $this->getQuickLink($url);
++
++        return (isset($quickLink) && $quickLink === ($this->getQuickLink($_SERVER['REQUEST_URI'])));
+     }
+ 
+     /**
+diff --git a/classes/QuickAccess.php b/classes/QuickAccess.php
+index 04862ed0d2fc4..cd2386dbd6857 100644
+--- a/classes/QuickAccess.php
++++ b/classes/QuickAccess.php
+@@ -68,6 +68,53 @@ public static function getQuickAccesses($idLang)
+ 		ORDER BY `name` ASC');
+     }
+ 
++    /**
++     * Get all available quick_accesses with token
++     *
++     * @return array QuickAccesses
++     */
++    public static function getQuickAccessesWithToken($idLang, $idEmployee)
++    {
++        $quickAccess = self::getQuickAccesses($idLang);
++
++        if (empty($quickAccess)) {
++            return false;
++        }
++
++        foreach ($quickAccess as $index => $quick) {
++            // first, clean url to have a real quickLink
++            $quick['link'] = Context::getContext()->link->getQuickLink($quick['link']);
++            $tokenString = $idEmployee;
++
++            if ('../' === $quick['link'] && Shop::getContext() == Shop::CONTEXT_SHOP) {
++                $url = Context::getContext()->shop->getBaseURL();
++                if (!$url) {
++                    unset($quickAccess[$index]);
++                    continue;
++                }
++                $quickAccess[$index]['link'] = $url;
++            } else {
++                preg_match('/controller=(.+)(&.+)?$/', $quick['link'], $admin_tab);
++                if (isset($admin_tab[1])) {
++                    if (strpos($admin_tab[1], '&')) {
++                        $admin_tab[1] = substr($admin_tab[1], 0, strpos($admin_tab[1], '&'));
++                    }
++                    $quick_access[$index]['target'] = $admin_tab[1];
++
++                    $tokenString = $admin_tab[1].(int)Tab::getIdFromClassName($admin_tab[1]).$idEmployee;
++                }
++                $quickAccess[$index]['link'] = Context::getContext()->link->getBaseLink().basename(_PS_ADMIN_DIR_).'/'.$quick['link'];
++            }
++
++            if (false === strpos($quickAccess[$index]['link'], 'token')) {
++                $separator = strpos($quickAccess[$index]['link'], '?') ? '&' : '?';
++                $quickAccess[$index]['link'] .= $separator.'token='.Tools::getAdminToken($tokenString);
++            }
++        }
++
++        return $quickAccess;
++    }
++
+     /**
+      * Toggle new window
+      *
+diff --git a/classes/controller/AdminController.php b/classes/controller/AdminController.php
+index 52b51ceefd4eb..05551b7579f95 100644
+--- a/classes/controller/AdminController.php
++++ b/classes/controller/AdminController.php
+@@ -1821,34 +1821,8 @@ public function initHeader()
+         $is_multishop = Shop::isFeatureActive();
+ 
+         // Quick access
+-        if ((int)$this->context->employee->id) {
+-            $quick_access = QuickAccess::getQuickAccesses($this->context->language->id);
+-            foreach ($quick_access as $index => $quick) {
+-                if ($quick['link'] == '../' && Shop::getContext() == Shop::CONTEXT_SHOP) {
+-                    $url = $this->context->shop->getBaseURL();
+-                    if (!$url) {
+-                        unset($quick_access[$index]);
+-                        continue;
+-                    }
+-                    $quick_access[$index]['link'] = $url;
+-                } else {
+-                    preg_match('/controller=(.+)(&.+)?$/', $quick['link'], $admin_tab);
+-                    if (isset($admin_tab[1])) {
+-                        if (strpos($admin_tab[1], '&')) {
+-                            $admin_tab[1] = substr($admin_tab[1], 0, strpos($admin_tab[1], '&'));
+-                        }
+-
+-                        $token = Tools::getAdminToken($admin_tab[1] . (int)Tab::getIdFromClassName($admin_tab[1]) . (int)$this->context->employee->id);
+-                        $quick_access[$index]['target'] = $admin_tab[1];
+-                        $quick_access[$index]['link'] .= '&token=' . $token;
+-                    }
+-                }
+-
+-                if (false === strpos($quick_access[$index]['link'], 'token')) {
+-                    $separator = strpos($quick_access[$index]['link'], '?') ? '&' : '?';
+-                    $quick_access[$index]['link'] .= $separator.'token=' . Tools::getAdminToken($this->context->employee->id);
+-                }
+-            }
++        if ((int) $this->context->employee->id) {
++            $quick_access = QuickAccess::getQuickAccessesWithToken($this->context->language->id, (int) $this->context->employee->id);
+         }
+ 
+         $tabs = $this->getTabs();
+@@ -1875,7 +1849,7 @@ public function initHeader()
+                 'employee' => $this->context->employee,
+                 'search_type' => Tools::getValue('bo_search_type'),
+                 'bo_query' => Tools::safeOutput(Tools::stripslashes(Tools::getValue('bo_query'))),
+-                'quick_access' => $quick_access,
++                'quick_access' => empty($quick_access) ? false : $quick_access,
+                 'multi_shop' => Shop::isFeatureActive(),
+                 'shop_list' => $helperShop->getRenderedShopList(),
+                 'current_shop_name' => $helperShop->getCurrentShopName(),

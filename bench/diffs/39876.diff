@@ -1,0 +1,130 @@
+diff --git a/src/Core/Grid/Definition/Factory/DiscountGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/DiscountGridDefinitionFactory.php
+index 1d83304d58178..2fec7c09c5dd9 100644
+--- a/src/Core/Grid/Definition/Factory/DiscountGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/DiscountGridDefinitionFactory.php
+@@ -39,6 +39,7 @@
+ use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollectionInterface;
++use PrestaShopBundle\Form\Admin\Type\DateRangeType;
+ use PrestaShopBundle\Form\Admin\Type\SearchAndResetType;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+@@ -118,6 +119,22 @@ protected function getColumns(): ColumnCollectionInterface
+                         'field' => 'code',
+                     ])
+             )
++            ->add(
++                (new DataColumn('date_from'))
++                    ->setName($this->trans('Start date', [], 'Admin.Catalog.Feature'))
++                    ->setOptions([
++                        'field' => 'date_from',
++                        'sortable' => true,
++                    ])
++            )
++            ->add(
++                (new DataColumn('date_to'))
++                    ->setName($this->trans('Expiration date', [], 'Admin.Catalog.Feature'))
++                    ->setOptions([
++                        'field' => 'date_to',
++                        'sortable' => true,
++                    ])
++            )
+             ->add(
+                 (new ToggleColumn('active'))
+                     ->setName($this->trans('Status', [], 'Admin.Global'))
+@@ -195,6 +212,21 @@ protected function getFilters(): FilterCollectionInterface
+                         'choice_translation_domain' => false,
+                     ])
+             )
++            ->add((new Filter('date_from_filter', DateRangeType::class))
++                ->setTypeOptions([
++                    'required' => false,
++                    'date_format' => 'YYYY-MM-DD HH:mm:ss',
++                ])
++                ->setAssociatedColumn('date_from')
++            )
++            ->add(
++                (new Filter('date_to_filter', DateRangeType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'date_format' => 'YYYY-MM-DD HH:mm:ss',
++                    ])
++                    ->setAssociatedColumn('date_to')
++            )
+             ->add(
+                 (new Filter('actions', SearchAndResetType::class))
+                     ->setAssociatedColumn('actions')
+diff --git a/src/Core/Grid/Query/DiscountQueryBuilder.php b/src/Core/Grid/Query/DiscountQueryBuilder.php
+index 1e9572758b597..14d1e8c1c63c1 100644
+--- a/src/Core/Grid/Query/DiscountQueryBuilder.php
++++ b/src/Core/Grid/Query/DiscountQueryBuilder.php
+@@ -55,10 +55,12 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+         $qb = $this->getQueryBuilder($searchCriteria->getFilters())
+             ->select(
+                 'cr.id_cart_rule AS id_discount,
+-            crl.name,
+-            crt.type,
+-            cr.code,
+-            cr.active'
++                crl.name,
++                crt.type,
++                cr.code,
++                cr.date_from,
++                cr.date_to,
++                cr.active'
+             );
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+@@ -81,7 +83,7 @@ public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria): Q
+     }
+ 
+     /**
+-     * Gets query builder with the common sql for catalog price rule listing.
++     * Gets query builder with the common sql for discounts listing.
+      *
+      * @param array $filters
+      *
+@@ -132,14 +134,39 @@ private function applyFilters(QueryBuilder $qb, array $filters): void
+         $exactMatchFilters = ['id_discount', 'type', 'active'];
+ 
+         foreach ($filters as $filterName => $value) {
+-            if (!array_key_exists($filterName, $allowedFiltersAliasMap)) {
+-                return;
++            if (!array_key_exists($filterName, $allowedFiltersAliasMap)
++                && $filterName !== 'date_from_filter'
++                && $filterName !== 'date_to_filter') {
++                continue;
++            }
++
++            if ($filterName === 'date_from_filter' && is_array($value)) {
++                if (!empty($value['from'])) {
++                    $qb->andWhere('cr.date_from >= :dateFromStart')
++                        ->setParameter('dateFromStart', $value['from']);
++                }
++                if (!empty($value['to'])) {
++                    $qb->andWhere('cr.date_from <= :dateFromEnd')
++                        ->setParameter('dateFromEnd', $value['to']);
++                }
++                continue;
++            }
++
++            if ($filterName === 'date_to_filter' && is_array($value)) {
++                if (!empty($value['from'])) {
++                    $qb->andWhere('cr.date_to >= :dateToStart')
++                        ->setParameter('dateToStart', $value['from']);
++                }
++                if (!empty($value['to'])) {
++                    $qb->andWhere('cr.date_to <= :dateToEnd')
++                        ->setParameter('dateToEnd', $value['to']);
++                }
++                continue;
+             }
+ 
+             if (in_array($filterName, $exactMatchFilters, true)) {
+                 $qb->andWhere($allowedFiltersAliasMap[$filterName] . ' = :' . $filterName);
+                 $qb->setParameter($filterName, $value);
+-
+                 continue;
+             }
+ 

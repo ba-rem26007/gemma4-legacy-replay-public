@@ -1,0 +1,861 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 100fff7be98bc..1295afebc5a05 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -25,6 +25,7 @@
+  */
+ use PrestaShop\PrestaShop\Adapter\AddressFactory;
+ use PrestaShop\PrestaShop\Adapter\Cache\CacheAdapter;
++use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+ use PrestaShop\PrestaShop\Adapter\Customer\CustomerDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Database;
+ use PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider;
+@@ -33,6 +34,7 @@
+ use PrestaShop\PrestaShop\Core\Cart\Calculator;
+ use PrestaShop\PrestaShop\Core\Cart\CartRow;
+ use PrestaShop\PrestaShop\Core\Cart\CartRuleData;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Localization\Exception\LocalizationException;
+ use PrestaShopBundle\Form\Admin\Type\FormattedTextareaType;
+ 
+@@ -2116,9 +2118,11 @@ public function newCalculator($products, $cartRules, $id_carrier, $computePrecis
+             $orderId = Order::getIdByCartId($this->id);
+             $orderId = (int) $orderId ?: null;
+         }
++        $container = (new ContainerFinder(Context::getContext()))->getContainer();
+         $calculator = new Calculator(
+             $this,
+             $id_carrier,
++            $container->get(FeatureFlagStateCheckerInterface::class),
+             $computePrecision,
+             $orderId
+         );
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index 4c7dc6937f81e..74521f6834b37 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -26,6 +26,7 @@
+ 
+ use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+ use PrestaShop\PrestaShop\Core\Domain\CartRule\CartRuleSettings;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ 
+@@ -1343,6 +1344,22 @@ public function getContextualValue($use_tax, ?Context $context = null, $filter =
+ 
+         if (in_array($filter, [CartRule::FILTER_ACTION_ALL, CartRule::FILTER_ACTION_ALL_NOCAP, CartRule::FILTER_ACTION_REDUCTION])) {
+             $order_package_products_total = 0;
++
++            $containerFinder = new ContainerFinder(Context::getContext());
++            $container = $containerFinder->getContainer();
++            $featureFlagManager = $container->get(FeatureFlagStateCheckerInterface::class);
++
++            if ($featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT)) {
++                if ($this->type === DiscountType::ORDER_DISCOUNT && $this->reduction_percent > 0.00 && $this->reduction_product == 0) {
++                    $order_products_total = $context->cart->getOrderTotal($use_tax, Cart::ONLY_PRODUCTS, $package_products);
++                    $order_shipping_total = $context->cart->getOrderTotal($use_tax, Cart::ONLY_SHIPPING, $package_products);
++                    $order_total = $order_products_total + $order_shipping_total;
++                    $reduction_value += $order_total * $this->reduction_percent / 100;
++
++                    return $reduction_value;
++                }
++            }
++
+             if ((float) $this->reduction_amount > 0
+                 || (float) $this->reduction_percent && $this->reduction_product == 0) {
+                 $order_package_products_total = $context->cart->getOrderTotal($use_tax, Cart::ONLY_PRODUCTS, $package_products);
+@@ -1518,7 +1535,17 @@ public function getContextualValue($use_tax, ?Context $context = null, $filter =
+ 
+                         // The reduction cannot exceed the products total, except when we do not want it to be limited (for the partial use calculation)
+                         if ($filter != CartRule::FILTER_ACTION_ALL_NOCAP) {
+-                            $reduction_amount = min($reduction_amount, $this->reduction_tax ? $cart_amount_ti : $cart_amount_te);
++                            if ($featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT) && $this->type === DiscountType::ORDER_DISCOUNT) {
++                                $max_reduction_amount = $this->reduction_tax
++                                    ? $cart_amount_ti + $context->cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $package_products)
++                                    : $cart_amount_te + $context->cart->getOrderTotal(false, Cart::ONLY_SHIPPING, $package_products);
++                                $reduction_amount = min(
++                                    $reduction_amount,
++                                    $max_reduction_amount,
++                                );
++                            } else {
++                                $reduction_amount = min($reduction_amount, $this->reduction_tax ? $cart_amount_ti : $cart_amount_te);
++                            }
+                         }
+ 
+                         if ($this->reduction_tax && !$use_tax) {
+@@ -1564,6 +1591,12 @@ public function getContextualValue($use_tax, ?Context $context = null, $filter =
+                         $current_cart_amount = max($current_cart_amount - (float) $previous_reduction_amount, 0);
+                     }
+ 
++                    if ($featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT) && $this->type === DiscountType::ORDER_DISCOUNT) {
++                        $current_cart_amount += $this->reduction_tax
++                            ? $context->cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $package_products)
++                            : $context->cart->getOrderTotal(false, Cart::ONLY_SHIPPING, $package_products);
++                    }
++
+                     $reduction_value = min($reduction_value, $current_cart_amount);
+                 }
+             }
+diff --git a/src/Adapter/CartRule/CartRuleBuilder.php b/src/Adapter/CartRule/CartRuleBuilder.php
+index 9d167d78ab239..35f5b0b098398 100644
+--- a/src/Adapter/CartRule/CartRuleBuilder.php
++++ b/src/Adapter/CartRule/CartRuleBuilder.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddOrderLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
+ 
+@@ -58,7 +59,7 @@ public function build(AddDiscountCommand $command): CartRule
+         $cartRule->type = $command->getDiscountType()->getValue();
+         $cartRule->free_shipping = $command instanceof AddFreeShippingDiscountCommand;
+ 
+-        if ($command instanceof AddCartLevelDiscountCommand) {
++        if ($command instanceof AddCartLevelDiscountCommand || $command instanceof AddOrderLevelDiscountCommand) {
+             if ($command->getPercentDiscount()) {
+                 $cartRule->reduction_percent = (float) (string) $command->getPercentDiscount();
+                 $cartRule->reduction_amount = 0;
+diff --git a/src/Adapter/Discount/CommandHandler/AddOrderLevelDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddOrderLevelDiscountHandler.php
+new file mode 100644
+index 0000000000000..922b1bf5aa845
+--- /dev/null
++++ b/src/Adapter/Discount/CommandHandler/AddOrderLevelDiscountHandler.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddOrderLevelDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\AddOrderLevelDiscountHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++#[AsCommandHandler]
++class AddOrderLevelDiscountHandler implements AddOrderLevelDiscountHandlerInterface
++{
++    public function __construct(
++        private readonly DiscountRepository $discountRepository,
++        private readonly CartRuleBuilder $cartRuleBuilder
++    ) {
++    }
++
++    public function handle(AddOrderLevelDiscountCommand $command): DiscountId
++    {
++        $BuiltCartRule = $this->cartRuleBuilder->build($command);
++        $discount = $this->discountRepository->add($BuiltCartRule);
++
++        return new DiscountId((int) $discount->id);
++    }
++}
+diff --git a/src/Core/Cart/Calculator.php b/src/Core/Cart/Calculator.php
+index 0fdeb2d53e778..d8fcff7a4ecd8 100644
+--- a/src/Core/Cart/Calculator.php
++++ b/src/Core/Cart/Calculator.php
+@@ -29,6 +29,7 @@
+ use CartCore;
+ use Currency;
+ use Exception;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Localization\CLDR\ComputingPrecision;
+ use Tools;
+ 
+@@ -90,7 +91,7 @@ class Calculator
+      * @param int|null $computePrecision
+      * @param int|null $orderId
+      */
+-    public function __construct(CartCore $cart, $carrierId, ?int $computePrecision = null, ?int $orderId = null)
++    public function __construct(CartCore $cart, $carrierId, ?FeatureFlagStateCheckerInterface $featureFlagManager = null, ?int $computePrecision = null, ?int $orderId = null)
+     {
+         $this->setCart($cart);
+         $this->setCarrierId($carrierId);
+@@ -98,7 +99,7 @@ public function __construct(CartCore $cart, $carrierId, ?int $computePrecision =
+         $this->cartRows = new CartRowCollection();
+         $this->fees = new Fees($this->orderId);
+         $this->cartRules = new CartRuleCollection();
+-        $this->cartRuleCalculator = new CartRuleCalculator();
++        $this->cartRuleCalculator = new CartRuleCalculator($featureFlagManager);
+ 
+         if (null === $computePrecision) {
+             $currency = new Currency((int) $cart->id_currency);
+diff --git a/src/Core/Cart/CartRuleCalculator.php b/src/Core/Cart/CartRuleCalculator.php
+index e73da399570a6..265ca42dacdff 100644
+--- a/src/Core/Cart/CartRuleCalculator.php
++++ b/src/Core/Cart/CartRuleCalculator.php
+@@ -29,6 +29,9 @@
+ use Cart;
+ use CartRule;
+ use Currency;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShopDatabaseException;
+ 
+ class CartRuleCalculator
+@@ -53,6 +56,10 @@ class CartRuleCalculator
+      */
+     protected $fees;
+ 
++    public function __construct(private readonly ?FeatureFlagStateCheckerInterface $featureFlagManager = null)
++    {
++    }
++
+     /**
+      * process cartrules calculation
+      */
+@@ -99,6 +106,20 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+         if (!CartRule::isFeatureActive()) {
+             return;
+         }
++        if ($cartRule->type === DiscountType::ORDER_DISCOUNT && (float) $cartRule->reduction_percent > 0 && $cartRule->reduction_product == 0) {
++            if ($this->featureFlagManager !== null && $this->featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT)) {
++                $initialShippingFees = $this->calculator->getFees()->getInitialShippingFees();
++                $productsTotal = $this->calculator->getRowTotal();
++                $orderTotal = $productsTotal->add($initialShippingFees);
++                $orderDiscountAmount = new AmountImmutable(
++                    $orderTotal->getTaxExcluded() * $cartRule->reduction_percent / 100,
++                    $orderTotal->getTaxIncluded() * $cartRule->reduction_percent / 100
++                );
++                $cartRuleData->addDiscountApplied($orderDiscountAmount);
++
++                return;
++            }
++        }
+ 
+         // Free shipping on selected carriers
+         if ($cartRule->free_shipping && $withFreeShipping) {
+@@ -229,7 +250,7 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+              */
+ 
+             // currency conversion
+-            $discountConverted = $this->convertAmountBetweenCurrencies(
++            $totalDiscountConverted = $discountConverted = $this->convertAmountBetweenCurrencies(
+                 $cartRule->reduction_amount,
+                 new Currency($cartRule->reduction_currency),
+                 new Currency($cart->id_currency)
+@@ -247,6 +268,7 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+ 
+             // apply weighted discount:
+             // on each line we apply a part of the discount corresponding to discount*rowWeight/total
++            $taxRate = 0;
+             foreach ($concernedRows as $concernedRow) {
+                 // Get current line tax rate
+                 $taxRate = $this->getTaxRateFromRow($concernedRow);
+@@ -276,6 +298,32 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+                 // Apply the discount amount
+                 $cartRuleData->addDiscountApplied($amount);
+             }
++
++            if ($this->featureFlagManager !== null && $this->featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_DISCOUNT) && $cartRule->type === DiscountType::ORDER_DISCOUNT) {
++                $totalProducts = $cartRule->reduction_tax ? $totalTaxIncl : $totalTaxExcl;
++                // The total discount is superior to the products amount, so we apply the remaining part of the discount globally
++                if ($totalDiscountConverted > $totalProducts) {
++                    $remainingDiscount = $totalDiscountConverted - $totalProducts;
++
++                    $initialShippingFees = $this->calculator->getFees()->getInitialShippingFees();
++                    $shippingAmount = $cartRule->reduction_tax ? $initialShippingFees->getTaxIncluded() : $initialShippingFees->getTaxExcluded();
++                    $shippingDiscount = min($remainingDiscount, $shippingAmount);
++
++                    if ($shippingDiscount > 0) {
++                        if ($cartRule->reduction_tax) {
++                            $shippingDiscountTaxIncluded = $shippingDiscount;
++                            $shippingDiscountTaxExcluded = $shippingDiscount / (1 + $taxRate);
++                        } else {
++                            $shippingDiscountTaxIncluded = $shippingDiscount * (1 + $taxRate);
++                            $shippingDiscountTaxExcluded = $shippingDiscount;
++                        }
++                        $shippingDiscountAmount = new AmountImmutable($shippingDiscountTaxIncluded, $shippingDiscountTaxExcluded);
++
++                        $this->calculator->getFees()->subDiscountValueShipping($shippingDiscountAmount);
++                        $cartRuleData->addDiscountApplied($shippingDiscountAmount);
++                    }
++                }
++            }
+         }
+     }
+ 
+diff --git a/src/Core/Domain/Discount/Command/AddOrderLevelDiscountCommand.php b/src/Core/Domain/Discount/Command/AddOrderLevelDiscountCommand.php
+new file mode 100644
+index 0000000000000..c889610a83a73
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/AddOrderLevelDiscountCommand.php
+@@ -0,0 +1,88 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\ValueObject\Money;
++
++class AddOrderLevelDiscountCommand extends AddDiscountCommand
++{
++    private ?DecimalNumber $percentDiscount = null;
++    private ?Money $amountDiscount = null;
++
++    public function __construct(
++    ) {
++        parent::__construct(DiscountType::ORDER_DISCOUNT);
++    }
++
++    public function getPercentDiscount(): ?DecimalNumber
++    {
++        return $this->percentDiscount;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setPercentDiscount(DecimalNumber $percentDiscount): self
++    {
++        if ($this->getAmountDiscount() !== null) {
++            throw new DiscountConstraintException('Amount discount is already set.', DiscountConstraintException::INVALID_AMOUNT_DISCOUNT_ALREADY_SET);
++        }
++        if ($percentDiscount->isLowerThanZero() || $percentDiscount->isGreaterThan(new DecimalNumber('100.0'))) {
++            throw new DiscountConstraintException(sprintf('Invalid percent reduction "%s".', $percentDiscount), DiscountConstraintException::INVALID_REDUCTION_PERCENT);
++        }
++        $this->percentDiscount = $percentDiscount;
++
++        return $this;
++    }
++
++    public function getAmountDiscount(): ?Money
++    {
++        return $this->amountDiscount;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     * @throws DomainConstraintException
++     */
++    public function setAmountDiscount(DecimalNumber $amountDiscount, CurrencyId $currencyId, bool $taxIncluded): self
++    {
++        if ($this->getPercentDiscount() !== null) {
++            throw new DiscountConstraintException('Percent discount is already set.', DiscountConstraintException::INVALID_PERCENT_DISCOUNT_ALREADY_SET);
++        }
++        if ($amountDiscount->isLowerThanZero()) {
++            throw new DiscountConstraintException(sprintf('Invalid amount reduction "%s".', $amountDiscount), DiscountConstraintException::INVALID_REDUCTION_AMOUNT);
++        }
++        $this->amountDiscount = new Money($amountDiscount, $currencyId, $taxIncluded);
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/Discount/CommandHandler/AddOrderLevelDiscountHandlerInterface.php b/src/Core/Domain/Discount/CommandHandler/AddOrderLevelDiscountHandlerInterface.php
+new file mode 100644
+index 0000000000000..af7deb8a77602
+--- /dev/null
++++ b/src/Core/Domain/Discount/CommandHandler/AddOrderLevelDiscountHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddOrderLevelDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++interface AddOrderLevelDiscountHandlerInterface
++{
++    public function handle(AddOrderLevelDiscountCommand $command): DiscountId;
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index e45e7f4356939..8af0a0f480f3c 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddOrderLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+@@ -76,6 +77,11 @@ public function create(array $data)
+                 $command->setCombinationId(self::COMBINATION_ID);
+                 $name = $this->translator->trans('On free gift', [], 'Admin.Catalog.Feature');
+                 break;
++            case DiscountType::ORDER_DISCOUNT:
++                $command = new AddOrderLevelDiscountCommand();
++                $name = $this->translator->trans('On order amount', [], 'Admin.Catalog.Feature');
++                $command->setPercentDiscount(new DecimalNumber('50'));
++                break;
+             default:
+                 throw new RuntimeException('Unknown discount type ' . $discountType);
+         }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index 5edd9f7a9bf84..ec5deb002ab00 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -12,6 +12,11 @@ services:
+     public: false
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\AddOrderLevelDiscountHandler:
++    autowire: true
++    public: false
++    autoconfigure: true
++
+   PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\AddProductLevelDiscountHandler:
+     autowire: true
+     public: false
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index 5c67894b9c60d..90664df04d3f0 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -37,6 +37,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddOrderLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountException;
+@@ -107,6 +108,46 @@ public function createSimpleCartLevelDiscountIfNotExists(string $discountReferen
+         }
+     }
+ 
++    /**
++     * @When I create a order level discount :discountReference with following properties:
++     *
++     * @param string $discountReference
++     * @param TableNode $node
++     *
++     * @return void
++     *
++     * @throws Exception
++     */
++    public function createOrderLevelDiscountIfNotExists(string $discountReference, TableNode $node): void
++    {
++        $data = $this->localizeByRows($node);
++        try {
++            $command = new AddOrderLevelDiscountCommand();
++            $this->createDiscount($discountReference, $data, $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I create a order level discount :discountReference
++     *
++     * @param string $discountReference
++     *
++     * @return void
++     *
++     * @throws Exception
++     */
++    public function createSimpleOrderLevelDiscountIfNotExists(string $discountReference): void
++    {
++        try {
++            $command = new AddOrderLevelDiscountCommand();
++            $this->createDiscount($discountReference, [], $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
+     /**
+      * @When I create a product level discount :discountReference with following properties:
+      *
+@@ -281,7 +322,10 @@ protected function createDiscount(string $cartRuleReference, array $data, AddDis
+             $command->setCode($data['code']);
+         }
+ 
+-        if ($command instanceof AddCartLevelDiscountCommand || $command instanceof AddProductLevelDiscountCommand) {
++        if ($command instanceof AddCartLevelDiscountCommand
++            || $command instanceof AddProductLevelDiscountCommand
++            || $command instanceof AddOrderLevelDiscountCommand
++        ) {
+             if (!empty($data['reduction_percent'])) {
+                 $command->setPercentDiscount(new DecimalNumber($data['reduction_percent']));
+             }
+diff --git a/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php b/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
+index a7e87a419bc03..5b924de520525 100644
+--- a/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
+@@ -114,22 +114,6 @@ protected function getDoctrineEntityManager(): EntityManager
+         return $doctrineEntityManager;
+     }
+ 
+-    /**
+-     * @AfterScenario
+-     */
+-    public function cleanFixtures()
+-    {
+-        $doctrineEntityManager = $this->getDoctrineEntityManager();
+-
+-        /** @var array<int, FeatureFlag> $allFlags */
+-        $allFlags = $doctrineEntityManager->getRepository(FeatureFlag::class)->findAll();
+-        foreach ($allFlags as $flag) {
+-            $doctrineEntityManager->remove($flag);
+-        }
+-
+-        $doctrineEntityManager->flush();
+-    }
+-
+     /**
+      * @AfterStep
+      */
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_order_level_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_order_level_discount.feature
+new file mode 100644
+index 0000000000000..3717bc0765808
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_order_level_discount.feature
+@@ -0,0 +1,120 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-order-level-discount
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-order-level-discount
++Feature: Add discount
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given there is a currency named "chf" with iso code "CHF" and exchange rate of 1.25
++    Given currency "usd" is the default one
++    And language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++
++  Scenario: Create a simple order level discount
++    When I create a order level discount "basic_order_level_discount"
++    And discount "basic_order_level_discount" should have the following properties:
++      | active | false         |
++      | type   | order_discount |
++
++  Scenario: Create a complete order level discount
++    When I create a order level discount "complete_percent_order_level_discount" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_order_2019     |
++      | reduction_percent | 10.0                |
++    And discount "complete_percent_order_level_discount" should have the following properties:
++      | name[en-US]       | Promotion           |
++      | type              | order_discount       |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_order_2019     |
++      | reduction_percent | 10.0                |
++    When I create a order level discount "complete_amount_order_level_discount" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_order_2019_2   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    And discount "complete_amount_order_level_discount" should have the following properties:
++      | name[en-US]        | Promotion           |
++      | type               | order_discount       |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_order_2019_2   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    When I create a order level discount "complete_amount_order_level_discount_tax_excluded" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_order_2019_3   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++    And discount "complete_amount_order_level_discount_tax_excluded" should have the following properties:
++      | name[en-US]        | Promotion           |
++      | type               | order_discount       |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_order_2019_3   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++
++  Scenario: Create an active order level discount but without names should be forbidden
++    When I create a order level discount "invalid_order_level_discount" with following properties:
++      | active | true          |
++      | type   | order_discount |
++    Then I should get error that discount field name is invalid
++    # Discount online with name only in default language is valid though
++    When I create a order level discount "default_language_order_level_discount" with following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
++    Then discount "default_language_order_level_discount" should have the following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
++
++  Scenario: Create an active order level discount with wrong values
++    When I create a order level discount "invalid_percent_order_level_discount_1" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_order_2019_4   |
++      | reduction_percent | -10.0               |
++    Then I should get error that discount field reduction_percent is invalid
++    When I create a order level discount "invalid_percent_order_level_discount_2" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_order_2019_5   |
++      | reduction_percent | 102.0               |
++    Then I should get error that discount field reduction_percent is invalid
++    When I create a order level discount "invalid_amount_order_level_discount" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_order_2019_5   |
++      | reduction_amount   | -102.0              |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++    Then I should get error that discount field reduction_amount is invalid
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_order_level.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_order_level.feature
+new file mode 100644
+index 0000000000000..62331eb52910f
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_order_level.feature
+@@ -0,0 +1,152 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags full-ux-discount-test-order-level
++@restore-all-tables-before-feature
++@full-ux-discount-test-order-level
++@clear-cache-before-feature
++@clear-cache-after-feature
++
++Feature: Full UX discount test
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts using the new discounts
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given there is a customer named "testCustomer2" whose email is "pub2@prestashop.com"
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_order_RULE_FEATURE_ACTIVE" is set to 1
++
++  Scenario: Create a complete order level flat discount using new CQRS
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    And there is a product in the catalog named "product2" with a price of 20.0 and 1000 items in stock
++    When I create a order level discount "complete_amount_order_level_discount" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2025-01-01 11:05:00 |
++      | valid_to           | 2025-12-01 00:00:00 |
++      | code               | PROMO_order_2025    |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    And discount "complete_amount_order_level_discount" should have the following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2025-01-01 11:05:00 |
++      | valid_to           | 2025-12-01 00:00:00 |
++      | code               | PROMO_order_2025    |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    And I add 1 product "product1" to the cart "dummy_cart"
++    And I add 1 product "product2" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$46.81'
++    And I use a voucher "complete_amount_order_level_discount" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$36.81'
++    Then my cart "dummy_cart" should have the following details:
++      | total_products | $39.81  |
++      | shipping       | $7.00   |
++      | total_discount | -$10.00 |
++      | total          | $36.81  |
++    Then I disable feature flag "discount"
++
++  Scenario: Create a complete order level flat discount greater that product total using new CQRS
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    And there is a product in the catalog named "product2" with a price of 20.0 and 1000 items in stock
++    When I create a order level discount "complete_amount_order_level_discount_greater" with following properties:
++      | name[en-US]        | Promotion                |
++      | active             | true                     |
++      | valid_from         | 2025-01-01 11:05:00      |
++      | valid_to           | 2025-12-01 00:00:00      |
++      | code               | PROMO_order_greater_2025 |
++      | reduction_amount   | 45.0                     |
++      | reduction_currency | usd                      |
++      | taxIncluded        | true                     |
++    And discount "complete_amount_order_level_discount_greater" should have the following properties:
++      | name[en-US]        | Promotion                |
++      | active             | true                     |
++      | valid_from         | 2025-01-01 11:05:00      |
++      | valid_to           | 2025-12-01 00:00:00      |
++      | code               | PROMO_order_greater_2025 |
++      | reduction_amount   | 45.0                     |
++      | reduction_currency | usd                      |
++      | taxIncluded        | true                     |
++    And I add 1 product "product1" to the cart "dummy_cart"
++    And I add 1 product "product2" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$46.81'
++    And I use a voucher "complete_amount_order_level_discount_greater" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$1.81'
++    Then my cart "dummy_cart" should have the following details:
++      | total_products | $39.81  |
++      | shipping       | $7.00   |
++      | total_discount | -$45.00 |
++      | total          | $1.81   |
++    Then I disable feature flag "discount"
++
++  Scenario: Create a complete order level flat discount greater that product total using new CQRS
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    And there is a product in the catalog named "product2" with a price of 20.0 and 1000 items in stock
++    When I create a order level discount "complete_amount_order_level_discount_too_generous" with following properties:
++      | name[en-US]        | Promotion                 |
++      | active             | true                      |
++      | valid_from         | 2025-01-01 11:05:00       |
++      | valid_to           | 2025-12-01 00:00:00       |
++      | code               | PROMO_order_generous_2025 |
++      | reduction_amount   | 55.0                      |
++      | reduction_currency | usd                       |
++      | taxIncluded        | true                      |
++    And discount "complete_amount_order_level_discount_too_generous" should have the following properties:
++      | name[en-US]        | Promotion                 |
++      | active             | true                      |
++      | valid_from         | 2025-01-01 11:05:00       |
++      | valid_to           | 2025-12-01 00:00:00       |
++      | code               | PROMO_order_generous_2025 |
++      | reduction_amount   | 55.0                      |
++      | reduction_currency | usd                       |
++      | taxIncluded        | true                      |
++    And I add 1 product "product1" to the cart "dummy_cart"
++    And I add 1 product "product2" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$46.81'
++    And I use a voucher "complete_amount_order_level_discount_too_generous" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$0.00'
++    Then my cart "dummy_cart" should have the following details:
++      | total_products | $39.81  |
++      | shipping       | $7.00   |
++      | total_discount | -$46.81 |
++      | total          | $0.00   |
++    Then I disable feature flag "discount"
++
++  Scenario: Create a complete order level percent discount using new CQRS
++    Given I create an empty cart "dummy_cart_2" for customer "testCustomer2"
++    And I enable feature flag "discount"
++    And there is a product in the catalog named "product3" with a price of 19.9 and 1000 items in stock
++    When I create a order level discount "complete_percent_order_level_discount" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2025-01-01 11:05:00 |
++      | valid_to          | 2025-12-01 00:00:00 |
++      | code              | PROMO_order_2025_2  |
++      | reduction_percent | 50.0                |
++    And discount "complete_percent_order_level_discount" should have the following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2025-01-01 11:05:00 |
++      | valid_to          | 2025-12-01 00:00:00 |
++      | code              | PROMO_order_2025_2  |
++      | reduction_percent | 50.0                |
++    And I add 1 product "product3" to the cart "dummy_cart_2"
++    And cart "dummy_cart_2" total with tax included should be '$26.90'
++    And I use a voucher "complete_percent_order_level_discount" on the cart "dummy_cart_2"
++    And cart "dummy_cart_2" total with tax included should be '$13.45'
++    Then my cart "dummy_cart_2" should have the following details:
++      | total_products | $19.90  |
++      | shipping       | $7.00   |
++      | total_discount | -$13.45 |
++      | total          | $13.45  |
++    Then I disable feature flag "discount"

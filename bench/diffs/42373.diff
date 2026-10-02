@@ -1,0 +1,1213 @@
+diff --git a/classes/ImageManager.php b/classes/ImageManager.php
+index f0359ede7e8ce..1a46ee4686fa4 100644
+--- a/classes/ImageManager.php
++++ b/classes/ImageManager.php
+@@ -805,6 +805,14 @@ public static function copyImg($id_entity, $id_image = null, $url = '', $entity
+         $url = urldecode(trim($url));
+         $parced_url = parse_url($url);
+ 
++        // A malformed URL would blow up in http_build_url() below.
++        // The scheme/host allow-list itself lives in Tools::copyFromUntrustedSource().
++        if ($parced_url === false) {
++            @unlink($tmpfile);
++
++            return false;
++        }
++
+         if (isset($parced_url['path'])) {
+             $uri = ltrim($parced_url['path'], '/');
+             $parts = explode('/', $uri);
+@@ -825,7 +833,8 @@ public static function copyImg($id_entity, $id_image = null, $url = '', $entity
+ 
+         $orig_tmpfile = $tmpfile;
+ 
+-        if (Tools::copy($url, $tmpfile)) {
++        // Untrusted URL (import): use the SSRF-hardened download path.
++        if (Tools::copyFromUntrustedSource($url, $tmpfile)) {
+             // Evaluate the memory required to resize the image: if it's too much, you can't resize it.
+             if (!ImageManager::checkImageMemoryLimit($tmpfile)) {
+                 @unlink($tmpfile);
+diff --git a/classes/Tools.php b/classes/Tools.php
+index 4a68fae529263..5d71c21d4266f 100644
+--- a/classes/Tools.php
++++ b/classes/Tools.php
+@@ -56,6 +56,66 @@ class ToolsCore
+ 
+     public const LANGUAGE_EXTRACTOR_REGEXP = '#(?<=-)\w\w|\w\w(?!-)#';
+ 
++    /**
++     * Schemes an untrusted (user-supplied) URL is allowed to use, mapped to their default port.
++     * Any other wrapper (phar://, file://, gopher://, data://, ...) is rejected.
++     *
++     * Must stay in sync with the CURLPROTO_* mask applied in file_get_contents_curl():
++     * a scheme accepted here has to be one curl is also allowed to speak, otherwise a URL
++     * passes our own validation only for curl to refuse it -- or, when CURLPROTO_HTTP is
++     * not defined and no mask can be applied, to be fetched with a protocol we never
++     * meant to allow. That is why sftp is absent.
++     *
++     * @see Tools::copyFromUntrustedSource()
++     */
++    public const UNTRUSTED_URL_ALLOWED_SCHEMES = [
++        'http' => 80,
++        'https' => 443,
++        'ftp' => 21,
++        'ftps' => 990,
++    ];
++
++    /**
++     * IPv4 ranges that FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE does
++     * NOT reject but that are never a legitimate remote source.
++     * Each entry is [network, prefix length].
++     */
++    protected const SSRF_BLOCKED_IPV4_RANGES = [
++        ['100.64.0.0', 10],   // RFC 6598 shared address space (CGNAT), used as internal range by some hosts
++        ['192.0.0.0', 24],    // RFC 6890 IETF protocol assignments
++        ['192.0.2.0', 24],    // RFC 5737 TEST-NET-1
++        ['198.18.0.0', 15],   // RFC 2544 benchmarking
++        ['198.51.100.0', 24], // RFC 5737 TEST-NET-2
++        ['203.0.113.0', 24],  // RFC 5737 TEST-NET-3
++        ['224.0.0.0', 4],     // multicast
++    ];
++
++    /**
++     * IPv6 ranges that FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE does
++     * NOT reject but that are never a legitimate remote source.
++     * Each entry is [network, prefix length].
++     */
++    protected const SSRF_BLOCKED_IPV6_RANGES = [
++        ['ff00::', 8],   // multicast (fe80::1 is caught by filter_var, ff02::1 is not)
++        ['100::', 64],   // RFC 6666 discard-only
++        ['fec0::', 10],  // deprecated site-local (filter_var only catches fe80::/10)
++        ['2001::', 32],  // Teredo: embeds an obfuscated IPv4 address, reject wholesale
++    ];
++
++    /**
++     * IPv6 ranges that carry an IPv4 address inside them. Such an address must be
++     * range-checked as the IPv4 address it really reaches, because the IPv4 flags of
++     * filter_var() do not apply to IPv6 notation: without this, ::ffff:169.254.169.254
++     * is reported as a public address and the cloud metadata endpoint stays reachable.
++     * Each entry is [network, prefix length, byte offset of the embedded IPv4].
++     */
++    protected const SSRF_IPV4_IN_IPV6_RANGES = [
++        ['::ffff:0:0', 96, 12], // IPv4-mapped
++        ['64:ff9b::', 96, 12],  // RFC 6052 NAT64
++        ['::', 96, 12],         // deprecated IPv4-compatible
++        ['2002::', 16, 2],      // RFC 3056 6to4
++    ];
++
+     protected static $file_exists_cache = [];
+     protected static $_forceCompile;
+     protected static $_caching;
+@@ -67,6 +127,14 @@ class ToolsCore
+     protected static $colorBrightnessCalculator;
+     protected static $fallbackParameters = [];
+ 
++    /**
++     * Memoizes resolvePublicIps() for the duration of the request: importing a few
++     * thousand images from the same host would otherwise issue as many DNS lookups.
++     *
++     * @var array<string, string[]>
++     */
++    protected static $untrusted_url_resolve_cache = [];
++
+     public static $round_mode = null;
+ 
+     /**
+@@ -85,6 +153,7 @@ public function __construct(Request $request = null)
+     public static function resetStaticCache()
+     {
+         static::$cldr_cache = [];
++        static::$untrusted_url_resolve_cache = [];
+     }
+ 
+     /**
+@@ -352,7 +421,11 @@ public static function getServerName()
+     }
+ 
+     /**
+-     * Get the server variable REMOTE_ADDR, or the first ip of HTTP_X_FORWARDED_FOR (when using proxy).
++     * Get the server variable REMOTE_ADDR, or the client IP from HTTP_X_FORWARDED_FOR (when using proxy).
++     *
++     * Parses the XFF chain from right-to-left to prevent IP spoofing (CWE-290 / CWE-348):
++     * the rightmost entries are appended by trusted proxy infrastructure and cannot be forged
++     * by the client. The leftmost entry is entirely client-controlled and must never be trusted.
+      *
+      * @return string $remote_addr ip of client
+      */
+@@ -371,16 +444,22 @@ public static function getRemoteAddr()
+         if (isset($_SERVER['HTTP_X_FORWARDED_FOR']) && $_SERVER['HTTP_X_FORWARDED_FOR'] && (!isset($_SERVER['REMOTE_ADDR'])
+             || preg_match('/^127\..*/i', trim($_SERVER['REMOTE_ADDR'])) || preg_match('/^172\.(1[6-9]|2\d|30|31)\..*/i', trim($_SERVER['REMOTE_ADDR']))
+             || preg_match('/^192\.168\.*/i', trim($_SERVER['REMOTE_ADDR'])) || preg_match('/^10\..*/i', trim($_SERVER['REMOTE_ADDR'])))) {
+-            if (strpos($_SERVER['HTTP_X_FORWARDED_FOR'], ',')) {
+-                $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+-
+-                return $ips[0];
+-            } else {
+-                return $_SERVER['HTTP_X_FORWARDED_FOR'];
++            // CWE-348: Traverse right-to-left — the rightmost entries are appended by trusted
++            // proxy infrastructure and cannot be forged by the client. Return the first
++            // non-private, non-reserved IP to prevent XFF header spoofing (CWE-290).
++            $ips = array_map('trim', explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']));
++            foreach (array_reverse($ips) as $ip) {
++                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false) {
++                    return $ip;
++                }
+             }
+-        } else {
+-            return $_SERVER['REMOTE_ADDR'];
++
++            // All entries are private/reserved (internal proxy chain) — return the rightmost
++            // which is at minimum the last hop and not client-controlled.
++            return end($ips);
+         }
++
++        return $_SERVER['REMOTE_ADDR'];
+     }
+ 
+     /**
+@@ -1967,9 +2046,15 @@ public static function refreshCACertFile()
+     }
+ 
+     /**
++     * Supported $options keys:
++     *  - restrict_ssrf (bool): harden the download against SSRF, for untrusted
++     *    (user-supplied) URLs. See Tools::copy().
++     *  - max_redirects (int): redirect cap, defaults to 5.
++     *
+      * @param string $url
+      * @param int $curl_timeout
+-     * @param array $opts
++     * @param array|null $opts
++     * @param array $options behaviour flags, see above
+      *
+      * @return bool|string
+      *
+@@ -1978,22 +2063,57 @@ public static function refreshCACertFile()
+     private static function file_get_contents_curl(
+         $url,
+         $curl_timeout,
+-        $opts
++        $opts,
++        array $options = []
+     ) {
+-        $content = false;
++        if (!function_exists('curl_init')) {
++            return false;
++        }
++
++        $restrictSsrf = !empty($options['restrict_ssrf']);
++        $maxRedirects = isset($options['max_redirects']) ? (int) $options['max_redirects'] : 5;
++
++        Tools::refreshCACertFile();
++
++        $currentUrl = $url;
++        for ($hop = 0; $hop <= $maxRedirects; ++$hop) {
++            // Hardened mode: validate the URL of *every* hop (allowed scheme, host resolving
++            // only to public addresses) and pin the validated IP for the connection.
++            $pinnedResolve = null;
++            if ($restrictSsrf) {
++                $pinnedResolve = static::getPinnedResolveEntry($currentUrl);
++                if (null === $pinnedResolve) {
++                    return false;
++                }
++            }
+ 
+-        if (function_exists('curl_init')) {
+-            Tools::refreshCACertFile();
+             $curl = curl_init();
+ 
+             curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+-            curl_setopt($curl, CURLOPT_URL, $url);
++            curl_setopt($curl, CURLOPT_URL, $currentUrl);
+             curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 5);
+             curl_setopt($curl, CURLOPT_TIMEOUT, $curl_timeout);
+             curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, true);
+             curl_setopt($curl, CURLOPT_CAINFO, _PS_CACHE_CA_CERT_FILE_);
+-            curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
+-            curl_setopt($curl, CURLOPT_MAXREDIRS, 5);
++            // Hardened mode follows redirects manually, one validated hop at a time.
++            curl_setopt($curl, CURLOPT_FOLLOWLOCATION, !$restrictSsrf);
++            curl_setopt($curl, CURLOPT_MAXREDIRS, $maxRedirects);
++
++            if ($restrictSsrf) {
++                curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
++                // curl connects to this exact address, so the hostname cannot be
++                // re-pointed at an internal host after our check (DNS rebinding).
++                // An empty entry means the host was validated but is not pinnable
++                // (outbound proxy), in which case there is nothing to set.
++                if ('' !== $pinnedResolve) {
++                    curl_setopt($curl, CURLOPT_RESOLVE, [$pinnedResolve]);
++                }
++                if (defined('CURLPROTO_HTTP')) {
++                    $allowedProtocols = CURLPROTO_HTTP | CURLPROTO_HTTPS | CURLPROTO_FTP | CURLPROTO_FTPS;
++                    curl_setopt($curl, CURLOPT_PROTOCOLS, $allowedProtocols);
++                    curl_setopt($curl, CURLOPT_REDIR_PROTOCOLS, $allowedProtocols);
++                }
++            }
+ 
+             if ($opts != null) {
+                 if (isset($opts['http']['method']) && Tools::strtolower($opts['http']['method']) == 'post') {
+@@ -2006,22 +2126,145 @@ private static function file_get_contents_curl(
+             }
+ 
+             $content = curl_exec($curl);
++            $errno = curl_errno($curl);
++            $error = curl_error($curl);
++            $httpStatus = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
++            $redirectUrl = curl_getinfo($curl, CURLINFO_REDIRECT_URL);
++            curl_close($curl);
+ 
+-            if (false === $content && _PS_MODE_DEV_) {
++            // Hardened mode is used while importing untrusted data: a single unreachable
++            // URL must not interrupt the import, so keep the failure silent there.
++            if (false === $content && !$restrictSsrf && _PS_MODE_DEV_) {
+                 $errorMessage = sprintf(
+                     'file_get_contents_curl failed to download %s : (error code %d) %s',
+-                    $url,
+-                    curl_errno($curl),
+-                    curl_error($curl)
++                    $currentUrl,
++                    $errno,
++                    $error
+                 );
+ 
+                 throw new \Exception($errorMessage);
+             }
+ 
+-            curl_close($curl);
++            if (!$restrictSsrf) {
++                return $content;
++            }
++
++            if (false === $content || 0 !== $errno) {
++                return false;
++            }
++
++            if ($httpStatus >= 300 && $httpStatus < 400 && !empty($redirectUrl)) {
++                $currentUrl = $redirectUrl;
++
++                continue;
++            }
++
++            return $content;
+         }
+ 
+-        return $content;
++        // Too many redirects.
++        return false;
++    }
++
++    /**
++     * Validates an untrusted URL and builds the CURLOPT_RESOLVE entry pinning its host to a
++     * validated public IP, so that curl connects to the address we checked and nothing else.
++     *
++     * @param string $url
++     *
++     * @return string|null a "host:port:ip" entry, an empty string when the URL is valid but
++     *                     cannot be pinned (see below), or null when it must not be fetched
++     */
++    protected static function getPinnedResolveEntry($url)
++    {
++        $parts = parse_url($url);
++        if ($parts === false || empty($parts['scheme']) || empty($parts['host'])) {
++            return null;
++        }
++
++        $scheme = Tools::strtolower($parts['scheme']);
++        if (!static::isUntrustedUrlSchemeAllowed($scheme)) {
++            return null;
++        }
++
++        // Strips the brackets of an IPv6 literal.
++        $host = static::hostToAscii(trim($parts['host'], '[]'));
++        if (null === $host) {
++            return null;
++        }
++
++        $publicIps = static::resolvePublicIps($host);
++        if (empty($publicIps)) {
++            return null;
++        }
++
++        // An outbound proxy does the resolving itself, so CURLOPT_RESOLVE would be ignored.
++        // The host has still been validated above; returning an empty entry keeps the
++        // download working on a proxy-only server instead of failing it outright, at the
++        // cost of the anti-rebinding guarantee, which is unobtainable through a proxy.
++        if (static::hasOutboundProxy()) {
++            return '';
++        }
++
++        $port = isset($parts['port']) ? (int) $parts['port'] : static::UNTRUSTED_URL_ALLOWED_SCHEMES[$scheme];
++        $ip = $publicIps[0];
++
++        return $host . ':' . $port . ':' . (strpos($ip, ':') === false ? $ip : '[' . $ip . ']');
++    }
++
++    /**
++     * Converts an internationalised host name to its ASCII (punycode) form.
++     *
++     * Required for two reasons: PHP's resolver functions do not perform the conversion
++     * themselves the way libcurl does, so an IDN host resolves partially at best and is
++     * then refused; and the CURLOPT_RESOLVE cache key has to be the ASCII form, which is
++     * what libcurl actually looks up.
++     *
++     * @param string $host
++     *
++     * @return string|null null when the host cannot be represented in ASCII
++     */
++    protected static function hostToAscii($host)
++    {
++        // Nothing to do for a plain ASCII host, which is the overwhelming majority.
++        if (!preg_match('/[^\x20-\x7f]/', $host)) {
++            return $host;
++        }
++
++        if (!function_exists('idn_to_ascii')) {
++            return null;
++        }
++
++        $ascii = idn_to_ascii($host, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46);
++
++        return $ascii === false ? null : $ascii;
++    }
++
++    /**
++     * Whether an outbound proxy is configured through the environment. libcurl picks these
++     * up on its own, and when it does it resolves host names itself.
++     *
++     * @return bool
++     */
++    protected static function hasOutboundProxy()
++    {
++        foreach (['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY'] as $var) {
++            if (!empty(getenv($var))) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
++    /**
++     * @param string $scheme
++     *
++     * @return bool whether an untrusted URL may use this scheme
++     */
++    public static function isUntrustedUrlSchemeAllowed($scheme)
++    {
++        return isset(static::UNTRUSTED_URL_ALLOWED_SCHEMES[Tools::strtolower($scheme)]);
+     }
+ 
+     private static function file_get_contents_fopen(
+@@ -2148,6 +2391,20 @@ public static function simplexml_load_file($url, $class_name = null)
+         return Cache::retrieve($cache_id);
+     }
+ 
++    /**
++     * Copies a local or remote source to a local destination.
++     *
++     * WARNING: this follows the source wherever it points, which means an
++     * attacker-controlled $source can reach the local network (CWE-918) or a PHP stream
++     * wrapper such as phar://. Any caller whose $source can be influenced by user input
++     * MUST use copyFromUntrustedSource() instead.
++     *
++     * @param string $source
++     * @param string $destination
++     * @param resource|null $stream_context
++     *
++     * @return bool|int
++     */
+     public static function copy($source, $destination, $stream_context = null)
+     {
+         if (null === $stream_context && !preg_match('/^https?:\/\//', $source)) {
+@@ -2157,6 +2414,203 @@ public static function copy($source, $destination, $stream_context = null)
+         return @file_put_contents($destination, Tools::file_get_contents($source, false, $stream_context));
+     }
+ 
++    /**
++     * SSRF-hardened variant of copy(), for sources that can be influenced by user input,
++     * e.g. CSV imports.
++     *
++     * Defense in depth against CWE-918: remote sources are restricted to the
++     * UNTRUSTED_URL_ALLOWED_SCHEMES allow-list, so any other wrapper (phar://, file://,
++     * gopher://, data://, ...) is rejected; hosts must resolve to public addresses only; the
++     * resolved IP is pinned (anti DNS-rebinding) and every redirect hop is re-validated.
++     * Local (scheme-less) sources keep the historical copy() behaviour.
++     *
++     * This is a separate method rather than an extra argument on copy() on purpose:
++     * adding a parameter to a public method turns every shop that overrides it into a
++     * fatal "declaration must be compatible" error.
++     *
++     * @param string $source
++     * @param string $destination
++     *
++     * @return bool
++     */
++    public static function copyFromUntrustedSource($source, $destination)
++    {
++        $parsed = parse_url($source);
++        if ($parsed === false) {
++            return false;
++        }
++
++        // No scheme => local path: preserve the historical copy behaviour.
++        if (!isset($parsed['scheme'])) {
++            return @copy($source, $destination);
++        }
++
++        // Straight to the hardened curl path: never the stream wrappers, never a fopen
++        // fallback, so that a rejected URL cannot be retried through a weaker route.
++        $content = Tools::file_get_contents_curl($source, 30, null, ['restrict_ssrf' => true]);
++        if (false === $content) {
++            return false;
++        }
++
++        return (bool) @file_put_contents($destination, $content);
++    }
++
++    /**
++     * Resolves a host to its IP addresses and returns them only if ALL of them
++     * are public. Returns an empty array when resolution fails or any address is
++     * private/reserved (fail-closed).
++     *
++     * @param string $host hostname or IP literal
++     *
++     * @return string[] validated public IPs (empty if unsafe/unresolvable)
++     */
++    public static function resolvePublicIps($host)
++    {
++        // IP literal: validate directly, no lookup and nothing worth caching.
++        if (filter_var($host, FILTER_VALIDATE_IP)) {
++            return static::isPublicIp($host) ? [$host] : [];
++        }
++
++        // Refusals are cached too: a CSV full of bad rows must not re-resolve every time.
++        if (isset(static::$untrusted_url_resolve_cache[$host])) {
++            return static::$untrusted_url_resolve_cache[$host];
++        }
++
++        $ips = [];
++        $ipv4 = @gethostbynamel($host);
++        if (is_array($ipv4)) {
++            $ips = array_merge($ips, $ipv4);
++        }
++        if (function_exists('dns_get_record')) {
++            $records = @dns_get_record($host, DNS_AAAA);
++            if (is_array($records)) {
++                foreach ($records as $record) {
++                    if (!empty($record['ipv6'])) {
++                        $ips[] = $record['ipv6'];
++                    }
++                }
++            }
++        }
++
++        // Every resolved address must be public, otherwise refuse.
++        $result = [];
++        if (!empty($ips)) {
++            $result = array_values(array_unique($ips));
++            foreach ($result as $ip) {
++                if (!static::isPublicIp($ip)) {
++                    $result = [];
++
++                    break;
++                }
++            }
++        }
++
++        return static::$untrusted_url_resolve_cache[$host] = $result;
++    }
++
++    /**
++     * @param string $ip
++     *
++     * @return bool true when $ip is a valid, non-private, non-reserved address
++     */
++    public static function isPublicIp($ip)
++    {
++        // An IPv6 address that embeds an IPv4 one must be judged on the IPv4 address it
++        // actually reaches; the IPv4 range flags below are not applied to IPv6 notation.
++        $ip = static::normalizeIpForRangeCheck($ip);
++        if ($ip === null) {
++            return false;
++        }
++
++        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
++            return false;
++        }
++
++        // filter_var() leaves a number of non-routable ranges through, complete the job.
++        $packed = @inet_pton($ip);
++        if ($packed === false) {
++            return false;
++        }
++        $ranges = strlen($packed) === 4 ? static::SSRF_BLOCKED_IPV4_RANGES : static::SSRF_BLOCKED_IPV6_RANGES;
++        foreach ($ranges as $range) {
++            if (static::packedIpInRange($packed, $range[0], $range[1])) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /**
++     * Canonicalises an IP address for range checking: IPv6 forms that embed an IPv4
++     * address (IPv4-mapped, IPv4-compatible, NAT64, 6to4) are reduced to that IPv4
++     * address, everything else is returned unchanged.
++     *
++     * @param string $ip
++     *
++     * @return string|null null when $ip is not a valid IP address
++     */
++    protected static function normalizeIpForRangeCheck($ip)
++    {
++        if (!is_string($ip) || !filter_var($ip, FILTER_VALIDATE_IP)) {
++            return null;
++        }
++
++        $packed = @inet_pton($ip);
++        if ($packed === false) {
++            return null;
++        }
++
++        // Only IPv6 addresses can wrap an IPv4 one.
++        if (strlen($packed) !== 16) {
++            return $ip;
++        }
++
++        foreach (static::SSRF_IPV4_IN_IPV6_RANGES as $range) {
++            if (!static::packedIpInRange($packed, $range[0], $range[1])) {
++                continue;
++            }
++
++            $embedded = @inet_ntop(substr($packed, $range[2], 4));
++
++            return $embedded === false ? null : $embedded;
++        }
++
++        return $ip;
++    }
++
++    /**
++     * Tests a packed IP address (as returned by inet_pton) against a CIDR range.
++     * Works for both address families; a family mismatch is never a match.
++     *
++     * @param string $packedIp
++     * @param string $network
++     * @param int $prefixLength
++     *
++     * @return bool
++     */
++    protected static function packedIpInRange($packedIp, $network, $prefixLength)
++    {
++        $packedNetwork = @inet_pton($network);
++        if ($packedNetwork === false || strlen($packedNetwork) !== strlen($packedIp)) {
++            return false;
++        }
++
++        $wholeBytes = intdiv($prefixLength, 8);
++        if ($wholeBytes > 0 && strncmp($packedIp, $packedNetwork, $wholeBytes) !== 0) {
++            return false;
++        }
++
++        $remainingBits = $prefixLength % 8;
++        if ($remainingBits === 0) {
++            return true;
++        }
++
++        $mask = (0xFF << (8 - $remainingBits)) & 0xFF;
++
++        return (ord($packedIp[$wholeBytes]) & $mask) === (ord($packedNetwork[$wholeBytes]) & $mask);
++    }
++
+     /**
+      * Translates a string with underscores into camel case (e.g. first_name -> firstName).
+      *
+diff --git a/classes/controller/AdminController.php b/classes/controller/AdminController.php
+index 92167acc07dbb..8dca4460a7863 100644
+--- a/classes/controller/AdminController.php
++++ b/classes/controller/AdminController.php
+@@ -921,7 +921,7 @@ public function processFilter()
+                     if (($type == 'date' || $type == 'datetime') && is_string($value)) {
+                         $value = json_decode($value, true);
+                     }
+-                    $key = isset($tmp_tab[1]) ? $tmp_tab[0] . '.`' . $tmp_tab[1] . '`' : '`' . $tmp_tab[0] . '`';
++                    $key = isset($tmp_tab[1]) ? '`' . bqSQL($tmp_tab[0]) . '`.`' . bqSQL($tmp_tab[1]) . '`' : '`' . bqSQL($tmp_tab[0]) . '`';
+ 
+                     // Assignment by reference
+                     if (array_key_exists('tmpTableFilter', $field)) {
+@@ -938,7 +938,7 @@ public function processFilter()
+                             if (!Validate::isDate($value[0])) {
+                                 $this->errors[] = $this->trans('The \'From\' date format is invalid (YYYY-MM-DD)', [], 'Admin.Notifications.Error');
+                             } else {
+-                                $sql_filter .= ' AND ' . pSQL($key) . ' >= \'' . pSQL(Tools::dateFrom($value[0])) . '\'';
++                                $sql_filter .= ' AND ' . $key . ' >= \'' . pSQL(Tools::dateFrom($value[0])) . '\'';
+                             }
+                         }
+ 
+@@ -946,7 +946,7 @@ public function processFilter()
+                             if (!Validate::isDate($value[1])) {
+                                 $this->errors[] = $this->trans('The \'To\' date format is invalid (YYYY-MM-DD)', [], 'Admin.Notifications.Error');
+                             } else {
+-                                $sql_filter .= ' AND ' . pSQL($key) . ' <= \'' . pSQL(Tools::dateTo($value[1])) . '\'';
++                                $sql_filter .= ' AND ' . $key . ' <= \'' . pSQL(Tools::dateTo($value[1])) . '\'';
+                             }
+                         }
+                     } else {
+@@ -955,16 +955,16 @@ public function processFilter()
+                         $alias = ($definition && !empty($definition['fields'][$filter]['shop'])) ? 'sa' : 'a';
+ 
+                         if ($type == 'int' || $type == 'bool') {
+-                            $sql_filter .= (($check_key || $key == '`active`') ? $alias . '.' : '') . pSQL($key) . ' = ' . (int) $value . ' ';
++                            $sql_filter .= (($check_key || $key == '`active`') ? $alias . '.' : '') . $key . ' = ' . (int) $value . ' ';
+                         } elseif ($type == 'decimal') {
+-                            $sql_filter .= ($check_key ? $alias . '.' : '') . pSQL($key) . ' = ' . (float) $value . ' ';
++                            $sql_filter .= ($check_key ? $alias . '.' : '') . $key . ' = ' . (float) $value . ' ';
+                         } elseif ($type == 'select') {
+-                            $sql_filter .= ($check_key ? $alias . '.' : '') . pSQL($key) . ' = \'' . pSQL($value) . '\' ';
++                            $sql_filter .= ($check_key ? $alias . '.' : '') . $key . ' = \'' . pSQL($value) . '\' ';
+                         } elseif ($type == 'price') {
+                             $value = str_replace(',', '.', $value);
+-                            $sql_filter .= ($check_key ? $alias . '.' : '') . pSQL($key) . ' = ' . pSQL(trim($value)) . ' ';
++                            $sql_filter .= ($check_key ? $alias . '.' : '') . $key . ' = ' . (float) trim($value) . ' ';
+                         } else {
+-                            $sql_filter .= ($check_key ? $alias . '.' : '') . pSQL($key) . ' LIKE \'%' . pSQL(trim($value)) . '%\' ';
++                            $sql_filter .= ($check_key ? $alias . '.' : '') . $key . ' LIKE \'%' . pSQL(trim($value)) . '%\' ';
+                         }
+                     }
+                 }
+diff --git a/composer.json b/composer.json
+index 64572b7fbdd63..530f252ad15b5 100644
+--- a/composer.json
++++ b/composer.json
+@@ -74,7 +74,7 @@
+         "prestashop/gsitemap": "^4",
+         "prestashop/laminas-code-lts": "dev-4.5-lts",
+         "prestashop/pagesnotfound": "^2",
+-        "prestashop/productcomments": "^7.0",
++        "prestashop/productcomments": "^8.0",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+diff --git a/composer.lock b/composer.lock
+index ff2c2f2b1524f..e70e35d995fae 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "93fa6fdcc7e64557a53fcbce50e6ce77",
++    "content-hash": "d477c15f07de83536f10b3e9f4121bed",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5873,16 +5873,16 @@
+         },
+         {
+             "name": "prestashop/productcomments",
+-            "version": "v7.0.0",
++            "version": "8.0.1",
+             "source": {
+                 "type": "git",
+                 "url": "https://github.com/PrestaShop/productcomments.git",
+-                "reference": "7287476cb44969af58721cb9ad7b5cb89393b2c8"
++                "reference": "6314ef9fa92867a6008f92194caac64bc305cf52"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/productcomments/zipball/7287476cb44969af58721cb9ad7b5cb89393b2c8",
+-                "reference": "7287476cb44969af58721cb9ad7b5cb89393b2c8",
++                "url": "https://api.github.com/repos/PrestaShop/productcomments/zipball/6314ef9fa92867a6008f92194caac64bc305cf52",
++                "reference": "6314ef9fa92867a6008f92194caac64bc305cf52",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5914,9 +5914,10 @@
+             "description": "PrestaShop module productcomments",
+             "homepage": "https://github.com/PrestaShop/productcomments",
+             "support": {
+-                "source": "https://github.com/PrestaShop/productcomments/tree/v7.0.0"
++                "issues": "https://github.com/PrestaShop/productcomments/issues",
++                "source": "https://github.com/PrestaShop/productcomments/tree/8.0.1"
+             },
+-            "time": "2024-04-24T14:10:24+00:00"
++            "time": "2026-08-07T09:18:57+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+diff --git a/controllers/admin/AdminImportController.php b/controllers/admin/AdminImportController.php
+index 696e83e321123..9b4ce5ca5e86a 100644
+--- a/controllers/admin/AdminImportController.php
++++ b/controllers/admin/AdminImportController.php
+@@ -1949,7 +1949,7 @@ protected function productImportOne($info, $default_language_id, $id_lang, $forc
+                 if ($product->getType() == Product::PTYPE_VIRTUAL) {
+                     $product_download = new ProductDownload();
+                     $product_download->filename = ProductDownload::getNewFilename();
+-                    Tools::copy($info['file_url'], _PS_DOWNLOAD_DIR_ . $product_download->filename);
++                    Tools::copyFromUntrustedSource($info['file_url'], _PS_DOWNLOAD_DIR_ . $product_download->filename);
+                     $product_download->id_product = (int) $product->id;
+                     $product_download->nb_downloadable = (int) $info['nb_downloadable'];
+                     $product_download->date_expiration = $info['date_expiration'];
+diff --git a/docs/CHANGELOG.txt b/docs/CHANGELOG.txt
+index 28e336cfedb9b..e31d7103a32dd 100644
+--- a/docs/CHANGELOG.txt
++++ b/docs/CHANGELOG.txt
+@@ -23,6 +23,18 @@ needs please refer to https://devdocs.prestashop.com/ for more information.
+ 
+ Changelog for PrestaShop 8
+ 
++####################################
++#   v8.2.8 - (2026-08-12)
++####################################
++
++- Core:
++  - Improvement:
++    - GHSA-xrwj-pq6w-f8m4 Validate image URLs on CSV import to prevent Server-Side Request Forgery (by @clotairer & @matthieu-rolland, vulnerability reported by lrui1)
++    - GHSA-w6j9-q9rq-wrqg Escape leading formula characters in CSV exports (by @clotairer & @matthieu-rolland, vulnerability reported by Suphawith Phusanbai)
++    - GHSA-2cr4-vw9p-pjvf Parse the X-Forwarded-For header from right to left to prevent IP spoofing (by @clotairer & @matthieu-rolland, vulnerability reported by Pedro Gabaldón Juliá from ITRESIT)
++    - GHSA-whxq-pxj5-qq7v Escape identifiers in legacy admin list filters to prevent SQL injection (by @clotairer & @matthieu-rolland, found by Savio from Doyensec in collaboration with Anthropic Research)
++    - GHSA-jf3w-9rmr-5rcr Restrict the notifications endpoints to authorised employees (by @clotairer & @matthieu-rolland, vulnerability reported by Robert Scherer)
++
+ ####################################
+ #   v8.2.7 - (2026-06-03)
+ ####################################
+diff --git a/install-dev/install_version.php b/install-dev/install_version.php
+index 9ebb90f0dbd6e..bd010234da72e 100644
+--- a/install-dev/install_version.php
++++ b/install-dev/install_version.php
+@@ -24,7 +24,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
+-define('_PS_INSTALL_VERSION_', '8.2.7');
++define('_PS_INSTALL_VERSION_', '8.2.8');
+ define('_PS_INSTALL_MINIMUM_PHP_VERSION_ID_', 70205);
+ define('_PS_INSTALL_MAXIMUM_PHP_VERSION_ID_', 81099);
+ 
+diff --git a/src/Adapter/Import/Handler/ProductImportHandler.php b/src/Adapter/Import/Handler/ProductImportHandler.php
+index 0432fdd9b9fcb..0c4ecbd3e4dea 100644
+--- a/src/Adapter/Import/Handler/ProductImportHandler.php
++++ b/src/Adapter/Import/Handler/ProductImportHandler.php
+@@ -885,7 +885,8 @@ private function loadProductData(
+                     $entityFields,
+                     'file_url'
+                 );
+-                $this->tools->copy($virtualProductFileUrl, $downloadDir . $productDownload->filename);
++                // Untrusted URL (import): use the SSRF-hardened download path.
++                $this->tools->copyFromUntrustedSource($virtualProductFileUrl, $downloadDir . $productDownload->filename);
+                 $productDownload->id_product = (int) $product->id;
+                 $productDownload->nb_downloadable = (int) $this->fetchDataValueByKey(
+                     $dataRow,
+diff --git a/src/Adapter/Import/ImageCopier.php b/src/Adapter/Import/ImageCopier.php
+index c1a57924f96da..82980d728ca5a 100644
+--- a/src/Adapter/Import/ImageCopier.php
++++ b/src/Adapter/Import/ImageCopier.php
+@@ -116,6 +116,13 @@ public function copyImg($entityId, $imageId = null, $url = '', $entity = 'produc
+         $url = urldecode(trim($url));
+         $parsedUrl = parse_url($url);
+ 
++        // A malformed URL would blow up in http_build_url() below.
++        if ($parsedUrl === false) {
++            @unlink($tmpFile);
++
++            return false;
++        }
++
+         if (isset($parsedUrl['path'])) {
+             $uri = ltrim($parsedUrl['path'], '/');
+             $parts = explode('/', $uri);
+@@ -136,7 +143,8 @@ public function copyImg($entityId, $imageId = null, $url = '', $entity = 'produc
+ 
+         $origTmpfile = $tmpFile;
+ 
+-        if ($this->tools->copy($url, $tmpFile)) {
++        // Untrusted URL (import): use the SSRF-hardened download path.
++        if ($this->tools->copyFromUntrustedSource($url, $tmpFile)) {
+             // Evaluate the memory required to resize the image: if it's too much, you can't resize it.
+             if (!ImageManager::checkImageMemoryLimit($tmpFile)) {
+                 @unlink($tmpFile);
+diff --git a/src/Adapter/Tools.php b/src/Adapter/Tools.php
+index 29d6f1487d5bf..fbeeacbd16120 100644
+--- a/src/Adapter/Tools.php
++++ b/src/Adapter/Tools.php
+@@ -163,6 +163,20 @@ public function copy($source, $destination, $streamContext = null)
+         return LegacyTools::copy($source, $destination, $streamContext);
+     }
+ 
++    /**
++     * Copy content from a source that can be influenced by user input, blocking requests
++     * to private/reserved hosts and non-HTTP(S)/FTP(S) stream wrappers.
++     *
++     * @param string $source
++     * @param string $destination
++     *
++     * @return bool
++     */
++    public function copyFromUntrustedSource($source, $destination)
++    {
++        return LegacyTools::copyFromUntrustedSource($source, $destination);
++    }
++
+     /**
+      * Sanitize a string.
+      *
+diff --git a/src/Core/Version.php b/src/Core/Version.php
+index 841c25791e46f..000ac5a56aea2 100644
+--- a/src/Core/Version.php
++++ b/src/Core/Version.php
+@@ -32,11 +32,11 @@
+  */
+ final class Version
+ {
+-    public const VERSION = '8.2.7';
++    public const VERSION = '8.2.8';
+     public const MAJOR_VERSION_STRING = '8';
+     public const MAJOR_VERSION = 8;
+     public const MINOR_VERSION = 2;
+-    public const RELEASE_VERSION = 7;
++    public const RELEASE_VERSION = 8;
+ 
+     // This class should not be instanciated
+     private function __construct()
+diff --git a/src/PrestaShopBundle/Command/SecurityAnnotationLinterCommand.php b/src/PrestaShopBundle/Command/SecurityAnnotationLinterCommand.php
+index 9514bacb2d90c..c523409ee4657 100644
+--- a/src/PrestaShopBundle/Command/SecurityAnnotationLinterCommand.php
++++ b/src/PrestaShopBundle/Command/SecurityAnnotationLinterCommand.php
+@@ -60,8 +60,6 @@ final class SecurityAnnotationLinterCommand extends Command
+      */
+     private const EXCEPTION_ROUTES = [
+         'admin_category_simple_add_form',
+-        'admin_common_notifications',
+-        'admin_common_notifications_ack',
+         'admin_common_pagination',
+         'admin_common_reset_search',
+         'admin_common_reset_search_by_filter_id',
+diff --git a/src/PrestaShopBundle/Component/CsvResponse.php b/src/PrestaShopBundle/Component/CsvResponse.php
+index 8cbf4ed0e7351..f038150586e9b 100644
+--- a/src/PrestaShopBundle/Component/CsvResponse.php
++++ b/src/PrestaShopBundle/Component/CsvResponse.php
+@@ -217,6 +217,29 @@ public function processData()
+         throw new \LogicException('The data must be an array or a valid PHP callable function.');
+     }
+ 
++    /**
++     * Sanitizes a row of data to prevent CSV formula injection (OWASP).
++     * Values starting with =, +, -, @, tab or carriage return are prefixed with a single quote.
++     *
++     * @param array $row
++     *
++     * @return array
++     */
++    private function sanitizeRow(array $row): array
++    {
++        return array_map(function ($value) {
++            if ($value === null) {
++                return '';
++            }
++            $value = (string) $value;
++            if (strlen($value) > 0 && in_array($value[0], ['=', '+', '-', '@', "\t", "\r"], true)) {
++                $value = "'" . $value;
++            }
++
++            return $value;
++        }, $row);
++    }
++
+     /**
+      * Process to data export if $this->data is an array.
+      */
+@@ -225,11 +248,11 @@ private function processDataArray()
+         $handle = tmpfile();
+ 
+         if ($this->includeHeaderRow) {
+-            fputcsv($handle, $this->headersData, ';');
++            fputcsv($handle, $this->sanitizeRow($this->headersData), ';');
+         }
+ 
+         foreach ($this->data as $line) {
+-            fputcsv($handle, $line, ';');
++            fputcsv($handle, $this->sanitizeRow($line), ';');
+         }
+ 
+         $this->dumpFile($handle);
+@@ -243,7 +266,7 @@ private function processDataCallback()
+         $handle = tmpfile();
+ 
+         if ($this->includeHeaderRow) {
+-            fputcsv($handle, $this->headersData, ';');
++            fputcsv($handle, $this->sanitizeRow($this->headersData), ';');
+         }
+ 
+         do {
+@@ -263,7 +286,7 @@ private function processDataCallback()
+                     }
+                 }
+ 
+-                fputcsv($handle, $lineData, ';');
++                fputcsv($handle, $this->sanitizeRow($lineData), ';');
+             }
+ 
+             $this->incrementData();
+diff --git a/src/PrestaShopBundle/Controller/Admin/CommonController.php b/src/PrestaShopBundle/Controller/Admin/CommonController.php
+index 406fcd70ae238..da3d708062c48 100644
+--- a/src/PrestaShopBundle/Controller/Admin/CommonController.php
++++ b/src/PrestaShopBundle/Controller/Admin/CommonController.php
+@@ -57,6 +57,11 @@ class CommonController extends FrameworkBundleAdminController
+      * - Registered customers
+      * - New messages.
+      *
++     * @AdminSecurity(
++     *     "is_granted('read', 'AdminOrders') || is_granted('read', 'AdminCustomers') || is_granted('read', 'AdminCustomerThreads')",
++     *     message="You do not have permission to view this."
++     * )
++     *
+      * @return JsonResponse
+      */
+     public function notificationsAction()
+@@ -71,6 +76,11 @@ public function notificationsAction()
+     /**
+      * Update the last time a notification type has been seen.
+      *
++     * @AdminSecurity(
++     *     "is_granted('read', 'AdminOrders') || is_granted('read', 'AdminCustomers') || is_granted('read', 'AdminCustomerThreads')",
++     *     message="You do not have permission to view this."
++     * )
++     *
+      * @param Request $request
+      *
+      * @return JsonResponse
+diff --git a/tests/Integration/PrestaShopBundle/Controller/Api/Improve/Design/PositionsControllerTest.php b/tests/Integration/PrestaShopBundle/Controller/Api/Improve/Design/PositionsControllerTest.php
+index d025e7792df8f..a76332bc9e5d3 100644
+--- a/tests/Integration/PrestaShopBundle/Controller/Api/Improve/Design/PositionsControllerTest.php
++++ b/tests/Integration/PrestaShopBundle/Controller/Api/Improve/Design/PositionsControllerTest.php
+@@ -120,6 +120,18 @@ protected function setUp(): void
+ 
+         $this->client = self::createClient();
+         $this->router = self::$container->get('router');
++
++        // Compile the URL matcher now, with warnings muted: on PHP >= 7.3 (PCRE2 < 10.43) the
++        // routing dumper probes route sub-patterns with a variable-length lookbehind that PCRE2
++        // rejects, and Symfony 4.4 only silences the PCRE1 wording of that warning. This test runs
++        // in an isolated process, so any warning printed on stderr during the request would make
++        // PHPUnit report the test as errored.
++        $errorReportingLevel = error_reporting(E_ALL & ~E_WARNING);
++        try {
++            $this->router->getMatcher();
++        } finally {
++            error_reporting($errorReportingLevel);
++        }
+     }
+ 
+     protected function tearDown(): void
+diff --git a/tests/Unit/Classes/ToolsTest.php b/tests/Unit/Classes/ToolsTest.php
+index 1f0411ed400ed..d222f19d9fad8 100644
+--- a/tests/Unit/Classes/ToolsTest.php
++++ b/tests/Unit/Classes/ToolsTest.php
+@@ -27,6 +27,8 @@
+ namespace Tests\Unit\Classes;
+ 
+ use PHPUnit\Framework\TestCase;
++use ReflectionMethod;
++use ReflectionParameter;
+ use Tests\Resources\TestCase\ExtendedTestCaseMethodsTrait;
+ use Tools;
+ 
+@@ -1096,4 +1098,196 @@ public function provideHtaccessRules()
+             ],
+         ];
+     }
++
++    public function providerIsPublicIp(): array
++    {
++        return [
++            // Routable addresses, the only ones that must be accepted.
++            'ipv4 public' => [true, '8.8.8.8'],
++            'ipv4 public 2' => [true, '1.1.1.1'],
++            'ipv6 public' => [true, '2606:4700::1111'],
++            'ipv4-mapped public' => [true, '::ffff:8.8.8.8'],
++            '6to4 wrapping public ipv4' => [true, '2002:0808:0808::'],
++
++            // Plain IPv4 private/reserved ranges.
++            'loopback' => [false, '127.0.0.1'],
++            'rfc1918 10/8' => [false, '10.0.0.1'],
++            'rfc1918 172.16/12' => [false, '172.16.0.1'],
++            'rfc1918 192.168/16' => [false, '192.168.1.1'],
++            'cloud metadata' => [false, '169.254.169.254'],
++            'unspecified' => [false, '0.0.0.0'],
++            'broadcast' => [false, '255.255.255.255'],
++
++            // Plain IPv6 private/reserved ranges.
++            'ipv6 loopback' => [false, '::1'],
++            'ipv6 unique local' => [false, 'fc00::1'],
++            'ipv6 link local' => [false, 'fe80::1'],
++
++            // IPv6 notations that tunnel an IPv4 address: the IPv4 range flags of
++            // filter_var() do not apply to them, so they must be unwrapped first.
++            'ipv4-mapped cloud metadata' => [false, '::ffff:169.254.169.254'],
++            'ipv4-mapped loopback' => [false, '::ffff:127.0.0.1'],
++            'ipv4-mapped rfc1918' => [false, '::ffff:10.0.0.1'],
++            'ipv4-mapped rfc1918 2' => [false, '::ffff:192.168.1.1'],
++            'ipv4-mapped loopback hex' => [false, '0:0:0:0:0:ffff:7f00:1'],
++            'ipv4-compatible loopback' => [false, '::127.0.0.1'],
++            'ipv4-compatible rfc1918' => [false, '::10.0.0.1'],
++            'nat64 loopback' => [false, '64:ff9b::7f00:1'],
++            'nat64 rfc1918' => [false, '64:ff9b::a00:1'],
++            '6to4 loopback' => [false, '2002:7f00:0001::'],
++
++            // Non-routable ranges that filter_var() alone lets through.
++            'shared address space' => [false, '100.64.0.1'],
++            'ietf protocol assignments' => [false, '192.0.0.1'],
++            'test-net-1' => [false, '192.0.2.1'],
++            'benchmarking' => [false, '198.18.0.1'],
++            'test-net-2' => [false, '198.51.100.1'],
++            'test-net-3' => [false, '203.0.113.1'],
++            'ipv4 multicast' => [false, '224.0.0.1'],
++            'ipv4 multicast top' => [false, '239.255.255.255'],
++            'ipv6 multicast' => [false, 'ff02::1'],
++            'ipv6 discard only' => [false, '100::1'],
++            'ipv6 site local' => [false, 'fec0::1'],
++            'teredo' => [false, '2001::1'],
++
++            // Not addresses at all.
++            'hostname' => [false, 'not-an-ip'],
++            'empty' => [false, ''],
++            'out of range octets' => [false, '999.999.999.999'],
++        ];
++    }
++
++    /**
++     * @dataProvider providerIsPublicIp
++     */
++    public function testIsPublicIp(bool $expected, string $ip): void
++    {
++        $this->assertSame($expected, Tools::isPublicIp($ip));
++    }
++
++    /**
++     * Same vectors as providerIsPublicIp, minus the values that are not IP literals:
++     * those would send resolvePublicIps() down the DNS path, which has no place in a
++     * unit test.
++     */
++    public function providerResolvePublicIpsOnLiteral(): array
++    {
++        return array_filter(
++            $this->providerIsPublicIp(),
++            function (array $case) {
++                return (bool) filter_var($case[1], FILTER_VALIDATE_IP);
++            }
++        );
++    }
++
++    /**
++     * An IP literal is validated directly, without any DNS lookup, and is refused
++     * whenever it is not publicly routable.
++     *
++     * @dataProvider providerResolvePublicIpsOnLiteral
++     */
++    public function testResolvePublicIpsOnLiteral(bool $expectedPublic, string $ip): void
++    {
++        $this->assertSame(
++            $expectedPublic ? [$ip] : [],
++            Tools::resolvePublicIps($ip)
++        );
++    }
++
++    /**
++     * Every accepted scheme must map to a usable default port, otherwise building the
++     * CURLOPT_RESOLVE pin for a URL without an explicit port breaks.
++     */
++    public function testEveryAllowedSchemeHasADefaultPort(): void
++    {
++        foreach (Tools::UNTRUSTED_URL_ALLOWED_SCHEMES as $scheme => $port) {
++            $this->assertIsInt($port, "scheme $scheme must map to an int port");
++            $this->assertGreaterThan(0, $port, "scheme $scheme must map to a valid port");
++        }
++    }
++
++    /**
++     * The allow-list must not accept anything the CURLPROTO_* mask does not, otherwise a URL
++     * passes our validation only for curl to refuse it -- or worse, gets fetched with an
++     * unintended protocol on a build where CURLPROTO_HTTP is undefined and no mask applies.
++     * sftp in particular must stay out.
++     */
++    public function testAllowedSchemesAreAllPermittedCurlProtocols(): void
++    {
++        $this->assertSame(
++            [],
++            array_diff(array_keys(Tools::UNTRUSTED_URL_ALLOWED_SCHEMES), ['http', 'https', 'ftp', 'ftps'])
++        );
++    }
++
++    /**
++     * @dataProvider providerUntrustedUrlScheme
++     */
++    public function testIsUntrustedUrlSchemeAllowed(bool $expected, string $scheme): void
++    {
++        $this->assertSame($expected, Tools::isUntrustedUrlSchemeAllowed($scheme));
++    }
++
++    public function providerUntrustedUrlScheme(): array
++    {
++        return [
++            'http' => [true, 'http'],
++            'https' => [true, 'https'],
++            'uppercase is normalised' => [true, 'HTTPS'],
++            'ftp' => [true, 'ftp'],
++            'ftps' => [true, 'ftps'],
++            // curl is not allowed to speak these, so they must not pass validation either.
++            'sftp' => [false, 'sftp'],
++            'scp' => [false, 'scp'],
++            // PHP stream wrappers, the whole point of the allow-list.
++            'file' => [false, 'file'],
++            'phar' => [false, 'phar'],
++            'data' => [false, 'data'],
++            'gopher' => [false, 'gopher'],
++            'zip' => [false, 'zip'],
++            'empty' => [false, ''],
++        ];
++    }
++
++    /**
++     * Tools::copy() is overridden in the wild (override/classes/Tools.php). Adding a
++     * parameter to it makes every such override a fatal "declaration must be compatible"
++     * error, so the SSRF-hardened variant lives in its own method instead. Same reasoning
++     * for file_get_contents(), which is overridden just as often. These tests exist to stop
++     * the parameter from creeping back in.
++     */
++    public function testCopySignatureIsUnchangedForBackwardCompatibility(): void
++    {
++        $copy = new ReflectionMethod(Tools::class, 'copy');
++
++        $this->assertSame(3, $copy->getNumberOfParameters());
++        $this->assertSame(2, $copy->getNumberOfRequiredParameters());
++        $this->assertSame(
++            ['source', 'destination', 'stream_context'],
++            array_map(function (ReflectionParameter $p) {
++                return $p->getName();
++            }, $copy->getParameters())
++        );
++    }
++
++    public function testFileGetContentsSignatureIsUnchangedForBackwardCompatibility(): void
++    {
++        $method = new ReflectionMethod(Tools::class, 'file_get_contents');
++
++        $this->assertSame(5, $method->getNumberOfParameters());
++        $this->assertSame(1, $method->getNumberOfRequiredParameters());
++    }
++
++    /**
++     * The hardened variant must be publicly reachable, since the Symfony adapter
++     * (PrestaShop\PrestaShop\Adapter\Tools) delegates to it.
++     */
++    public function testCopyFromUntrustedSourceIsPublicStatic(): void
++    {
++        $method = new ReflectionMethod(Tools::class, 'copyFromUntrustedSource');
++
++        $this->assertTrue($method->isPublic());
++        $this->assertTrue($method->isStatic());
++        $this->assertSame(2, $method->getNumberOfParameters());
++    }
+ }

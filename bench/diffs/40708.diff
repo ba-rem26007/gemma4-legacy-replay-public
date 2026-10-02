@@ -1,0 +1,1068 @@
+diff --git a/admin-dev/themes/new-theme/js/components/entity-search-input.ts b/admin-dev/themes/new-theme/js/components/entity-search-input.ts
+index d9c8ecece2d71..40f06d6a6afec 100644
+--- a/admin-dev/themes/new-theme/js/components/entity-search-input.ts
++++ b/admin-dev/themes/new-theme/js/components/entity-search-input.ts
+@@ -124,7 +124,7 @@ export default class EntitySearchInput {
+       return;
+     }
+ 
+-    values.forEach((index: number, value: any) => {
++    values.forEach((value: any) => {
+       this.appendSelectedItem(value);
+     });
+   }
+diff --git a/classes/Product.php b/classes/Product.php
+index 41087ba4d5748..fc21687312637 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -5462,8 +5462,14 @@ public static function getProductProperties($id_lang, $row, ?Context $context =
+             return array_merge($row, self::$productPropertiesCache[$cache_key]);
+         }
+ 
++        /*
++         * Now, to get proper prices, we need to calculate them for a specific quantity, because
++         * there can be quantity discount. The variable to use is different for different contexts.
++         * If a specific quantity_wanted is set, we use it. Usually a product page.
++         * If cart_quantity is defined, we use it. Usually cart context.
++         * Otherwise, we use minimal_quantity, if nothing was passed - on listings.
++         */
+         if (isset($row['quantity_wanted'])) {
+-            // 'quantity_wanted' may very well be zero even if set
+             $quantityToUseForPriceCalculations = max((int) $row['minimal_quantity'], (int) $row['quantity_wanted']);
+         } elseif (isset($row['cart_quantity'])) {
+             $quantityToUseForPriceCalculations = max((int) $row['minimal_quantity'], (int) $row['cart_quantity']);
+diff --git a/controllers/front/CartController.php b/controllers/front/CartController.php
+index dffa454c504e9..db505deaad206 100644
+--- a/controllers/front/CartController.php
++++ b/controllers/front/CartController.php
+@@ -449,14 +449,24 @@ protected function processChangeProductInCart(): void
+              * No subtracting of quantity in the cart here.
+              */
+             $availableProductQuantity = Product::getQuantity($this->id_product, $this->id_product_attribute);
+-            $this->errors[] = $this->trans(
+-                'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
+-                [
+-                    '%product%' => $product->name,
+-                    '%quantity%' => $availableProductQuantity,
+-                ],
+-                'Shop.Notifications.Error'
+-            );
++            $productName = Product::getProductName($this->id_product, $this->id_product_attribute);
++
++            if ($availableProductQuantity > 0) {
++                $this->errors[] = $this->trans(
++                    'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
++                    [
++                        '%product%' => $productName,
++                        '%quantity%' => $availableProductQuantity,
++                    ],
++                    'Shop.Notifications.Error'
++                );
++            } else {
++                $this->errors[] = $this->trans(
++                    'This product (%product%) is no longer available.',
++                    ['%product%' => $productName],
++                    'Shop.Notifications.Error'
++                );
++            }
+ 
+             return;
+         }
+@@ -538,14 +548,24 @@ protected function processChangeProductInCart(): void
+                  * No subtracting of quantity in the cart here.
+                  */
+                 $availableProductQuantity = Product::getQuantity($this->id_product, $this->id_product_attribute);
+-                $this->{$ErrorKey}[] = $this->trans(
+-                    'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
+-                    [
+-                        '%product%' => $product->name,
+-                        '%quantity%' => $availableProductQuantity,
+-                    ],
+-                    'Shop.Notifications.Error'
+-                );
++                $productName = Product::getProductName($this->id_product, $this->id_product_attribute);
++
++                if ($availableProductQuantity > 0) {
++                    $this->{$ErrorKey}[] = $this->trans(
++                        'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
++                        [
++                            '%product%' => $productName,
++                            '%quantity%' => $availableProductQuantity,
++                        ],
++                        'Shop.Notifications.Error'
++                    );
++                } else {
++                    $this->{$ErrorKey}[] = $this->trans(
++                        'This product (%product%) is no longer available.',
++                        ['%product%' => $productName],
++                        'Shop.Notifications.Error'
++                    );
++                }
+             }
+         }
+ 
+@@ -669,11 +689,13 @@ protected function areProductsAvailable(): bool|string
+             return true;
+         }
+ 
+-        if ($product['active']) {
++        $productName = !empty($product['attributes']) ? $product['name'] . ' ' . $product['attributes'] : $product['name'];
++
++        if ($product['active'] && $product['quantity_available'] > 0) {
+             return $this->trans(
+                 'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
+                 [
+-                    '%product%' => $product['name'],
++                    '%product%' => $productName,
+                     '%quantity%' => $product['quantity_available'],
+                 ],
+                 'Shop.Notifications.Error'
+@@ -682,7 +704,7 @@ protected function areProductsAvailable(): bool|string
+ 
+         return $this->trans(
+             'This product (%product%) is no longer available.',
+-            ['%product%' => $product['name']],
++            ['%product%' => $productName],
+             'Shop.Notifications.Error'
+         );
+     }
+diff --git a/src/Adapter/Presenter/Cart/CartLazyArray.php b/src/Adapter/Presenter/Cart/CartLazyArray.php
+index d71d6301e1bdf..f29a0154e1e42 100644
+--- a/src/Adapter/Presenter/Cart/CartLazyArray.php
++++ b/src/Adapter/Presenter/Cart/CartLazyArray.php
+@@ -579,6 +579,7 @@ private function presentProduct(array $rawProduct)
+                 $rawProduct['total']
+         );
+ 
++        // Pass the cart quantity as quantity wanted for proper price calculation
+         $rawProduct['quantity_wanted'] = $rawProduct['cart_quantity'];
+ 
+         $presenter = new ProductListingPresenter(
+diff --git a/src/Adapter/Presenter/Product/ProductLazyArray.php b/src/Adapter/Presenter/Product/ProductLazyArray.php
+index 286922a8090f1..bc647c6560074 100644
+--- a/src/Adapter/Presenter/Product/ProductLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductLazyArray.php
+@@ -439,14 +439,11 @@ public function getQuantityDiscounts()
+     public function getReferenceToDisplay()
+     {
+         $combinationData = $this->getCombinationSpecificData();
+-        if (
+-            isset($combinationData['reference'])
+-            && !empty($combinationData['reference'])
+-        ) {
++        if (!empty($combinationData['reference'])) {
+             return $combinationData['reference'];
+         }
+ 
+-        if ('' !== $this->product['reference']) {
++        if (!empty($this->product['reference'])) {
+             return $this->product['reference'];
+         }
+ 
+@@ -1332,10 +1329,6 @@ public function addQuantityInformation(
+         $show_availability = $show_price && $settings->stock_management_enabled;
+         $this->product['show_availability'] = $show_availability;
+ 
+-        if (!isset($product['quantity_wanted'])) {
+-            $product['quantity_wanted'] = $this->getQuantityWanted();
+-        }
+-
+         // Validate and format availability date
+         $product['available_date'] = $this->prepareAvailabilityDate($product);
+ 
+@@ -1362,12 +1355,14 @@ public function addQuantityInformation(
+             return;
+         }
+ 
+-        // Quantity available we will display is reduced by amount we want to add to cart
+-        $availableQuantity = $product['quantity'] - $product['quantity_wanted'];
+-        if (isset($product['stock_quantity'])) {
+-            $availableQuantity =
+-                $product['stock_quantity'] - $product['quantity_wanted'];
+-        }
++        /*
++         * To define availabiity, we will subtract the stock quantity by the quantity the customer
++         * wants to add to cart. Since this class can be instantiated from multiple places, we need
++         * to make sure we use proper quantity key. Normally, it's 'quantity', but on cart page,
++         * it's 'stock_quantity'.
++         */
++        $stockQuantity = isset($product['stock_quantity']) ? $product['stock_quantity'] : $product['quantity'];
++        $availableQuantity = $stockQuantity - $this->getQuantityWanted();
+ 
+         // Combination labels
+         $combinationData = $this->getCombinationSpecificData();
+diff --git a/src/Adapter/Presenter/Product/ProductListingLazyArray.php b/src/Adapter/Presenter/Product/ProductListingLazyArray.php
+index 7977b968c7361..28a01664fdd39 100644
+--- a/src/Adapter/Presenter/Product/ProductListingLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductListingLazyArray.php
+@@ -65,4 +65,21 @@ protected function shouldEnableAddToCartButton(array $product, ProductPresentati
+ 
+         return parent::shouldEnableAddToCartButton($product, $settings);
+     }
++
++    /**
++     * Returns the quantity wanted value for products in listings. We have this specific implementation
++     * because in listings, the quantity wanted is not to be taken from the request directly.
++     * If a specific value was already provided, we use it. For example, in cart context.
++     *
++     * @return int Quantity wanted, usually 1, altered if needed, always a positive integer
++     */
++    #[LazyArrayAttribute(arrayAccess: true)]
++    public function getQuantityWanted()
++    {
++        if (empty($this->product['quantity_wanted'])) {
++            $this->product['quantity_wanted'] = $this->getQuantityRequired();
++        }
++
++        return $this->product['quantity_wanted'];
++    }
+ }
+diff --git a/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php b/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
+index 3c81c656d8229..4bbd49037fe26 100644
+--- a/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
++++ b/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
+@@ -31,12 +31,14 @@
+ use Currency;
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Adapter\Product\Image\ProductImagePathFactory;
++use PrestaShop\PrestaShop\Adapter\Product\Pack\Repository\ProductPackRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
+ use PrestaShop\PrestaShop\Adapter\Shop\Repository\ShopRepository;
+ use PrestaShop\PrestaShop\Adapter\Tax\TaxComputer;
+ use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Image\ValueObject\ImageId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
+ use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+@@ -135,7 +137,8 @@ public function __construct(
+         bool $isEcotaxEnabled,
+         int $ecoTaxGroupId,
+         ShopRepository $shopRepository,
+-        ProductRepository $productRepository
++        ProductRepository $productRepository,
++        private ProductPackRepository $productPackRepository,
+     ) {
+         $this->productGridDataFactory = $productGridDataFactory;
+ 
+@@ -239,6 +242,23 @@ private function applyModification(array $products, ShopSearchCriteriaInterface
+                 (string) $priceTaxIncluded,
+                 $currency->iso_code
+             );
++
++            $productType = $products[$i]['product_type'] ?? null;
++            // For pack products we dynamically update the quantity in the column so that it reflects its quantity based on
++            // its configuration and the quantity of its products. Since it's done in the decorator the dynamic quantity is not
++            // consistent with sorting and filtering Including this complexity in the query builder would cost too much in performance
++            // and would be too complex so it's a compromise
++            if ($productType === ProductType::TYPE_PACK) {
++                if ($searchCriteria->getShopConstraint()->getShopId() !== null) {
++                    $shopId = $searchCriteria->getShopConstraint()->getShopId();
++                } else {
++                    $shopId = new ShopId((int) $products[$i]['id_shop_default']);
++                }
++                $packQuantity = $this->productPackRepository->getDynamicPackQuantity(new ProductId($products[$i]['id_product']), $shopId);
++                if (null !== $packQuantity) {
++                    $products[$i]['quantity'] = $packQuantity;
++                }
++            }
+         }
+ 
+         return $this->applyShopModifications($products, $searchCriteria);
+diff --git a/src/Adapter/Product/Pack/Repository/ProductPackRepository.php b/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
+index b500209e33f91..ea0aba7b05904 100644
+--- a/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
++++ b/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
+@@ -30,15 +30,23 @@
+ 
+ use Doctrine\DBAL\Connection;
+ use Pack;
++use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Stock\Repository\StockAvailableRepository;
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\NoCombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Pack\Exception\ProductPackException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Pack\ValueObject\PackId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Pack\ValueObject\PackStockType;
+ use PrestaShop\PrestaShop\Core\Domain\Product\QuantifiedProduct;
++use PrestaShop\PrestaShop\Core\Domain\Product\Stock\Exception\StockAvailableNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
+ use PrestaShopException;
+@@ -58,7 +66,10 @@ class ProductPackRepository extends AbstractObjectModelRepository
+ 
+     public function __construct(
+         Connection $connection,
+-        string $dbPrefix
++        string $dbPrefix,
++        private ProductRepository $productRepository,
++        private ConfigurationInterface $configuration,
++        private StockAvailableRepository $stockAvailableRepository,
+     ) {
+         $this->connection = $connection;
+         $this->dbPrefix = $dbPrefix;
+@@ -206,6 +217,78 @@ public function getPacksContaining(ProductId $productId): array
+         }, $packs);
+     }
+ 
++    public function getDynamicPackQuantity(ProductId $productId, ShopId $shopId): ?int
++    {
++        $product = $this->productRepository->get($productId, $shopId);
++        if ($product->getProductType() !== ProductType::TYPE_PACK) {
++            return null;
++        }
++
++        $packQuantity = null;
++
++        // First, get pack stock type
++        $packStockType = (int) $product->pack_stock_type;
++        if ($packStockType === PackStockType::STOCK_TYPE_DEFAULT) {
++            $packStockType = (int) $this->configuration->get('PS_PACK_STOCK_TYPE');
++        }
++
++        // Now get quantity based on the pack stock type
++        if ($packStockType === PackStockType::STOCK_TYPE_PACK_ONLY) {
++            try {
++                $stockAvailable = $this->stockAvailableRepository->getForProduct($productId, $shopId);
++                $packQuantity = $stockAvailable->quantity;
++            } catch (StockAvailableNotFoundException) {
++                $packQuantity = 0;
++            }
++        } elseif ($packStockType === PackStockType::STOCK_TYPE_PRODUCTS_ONLY || $packStockType === PackStockType::STOCK_TYPE_BOTH) {
++            $packedItems = $this->getPackedProducts(
++                new PackId((int) $product->id),
++                new LanguageId((int) $this->configuration->get('PS_LANG_DEFAULT')),
++                ShopConstraint::shop($shopId->getValue())
++            );
++
++            // Compute minimum quantity based on products
++            $productsMinQuantity = null;
++            foreach ($packedItems as $packedItem) {
++                $packedItemProductId = (int) $packedItem['id_product_item'];
++                $packedItemCombinationId = (int) $packedItem['id_product_attribute_item'];
++                $packedItemQuantity = (int) $packedItem['quantity'];
++                try {
++                    if (empty($packedItemCombinationId)) {
++                        $packedItemStockAvailable = $this->stockAvailableRepository->getForProduct(new ProductId($packedItemProductId), $shopId);
++                    } else {
++                        $packedItemStockAvailable = $this->stockAvailableRepository->getForCombination(new CombinationId($packedItemCombinationId), $shopId);
++                    }
++
++                    $packedItemStock = $packedItemStockAvailable->quantity;
++                } catch (StockAvailableNotFoundException) {
++                    $packedItemStock = 0;
++                }
++
++                // Depending on the quantity required in the packs the amount of possible pack is impacted
++                $availablePackUnits = (int) floor($packedItemStock / $packedItemQuantity);
++                if ($productsMinQuantity === null) {
++                    $productsMinQuantity = $availablePackUnits;
++                } else {
++                    $productsMinQuantity = min($productsMinQuantity, $availablePackUnits);
++                }
++            }
++
++            if ($packStockType === PackStockType::STOCK_TYPE_PRODUCTS_ONLY) {
++                $packQuantity = $productsMinQuantity;
++            } else {
++                try {
++                    $stockAvailable = $this->stockAvailableRepository->getForProduct($productId, $shopId);
++                    $packQuantity = min($productsMinQuantity, (int) $stockAvailable->quantity);
++                } catch (StockAvailableNotFoundException) {
++                    $packQuantity = 0;
++                }
++            }
++        }
++
++        return $packQuantity;
++    }
++
+     /**
+      * Builds string with ids, that will help to identify objects that was being updated in case of error
+      *
+diff --git a/src/Adapter/Product/QueryHandler/GetProductForEditingHandler.php b/src/Adapter/Product/QueryHandler/GetProductForEditingHandler.php
+index 37f0c3462aebe..739bd0c33881e 100644
+--- a/src/Adapter/Product/QueryHandler/GetProductForEditingHandler.php
++++ b/src/Adapter/Product/QueryHandler/GetProductForEditingHandler.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Adapter\Configuration;
+ use PrestaShop\PrestaShop\Adapter\Product\Image\ProductImagePathFactory;
+ use PrestaShop\PrestaShop\Adapter\Product\Image\Repository\ProductImageRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Pack\Repository\ProductPackRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\SpecificPrice\Repository\SpecificPriceRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Repository\StockAvailableRepository;
+@@ -182,7 +183,8 @@ public function __construct(
+         ProductImagePathFactory $productImageUrlFactory,
+         SpecificPriceRepository $specificPriceRepository,
+         Configuration $configuration,
+-        CategoryDisplayNameBuilder $categoryDisplayNameBuilder
++        CategoryDisplayNameBuilder $categoryDisplayNameBuilder,
++        private ProductPackRepository $packRepository,
+     ) {
+         $this->numberExtractor = $numberExtractor;
+         $this->productRepository = $productRepository;
+@@ -209,10 +211,11 @@ public function handle(GetProductForEditing $query): ProductForEditing
+             $query->getProductId(),
+             $query->getShopConstraint()
+         );
++        $productType = $product->getProductType();
+ 
+         return new ProductForEditing(
+             (int) $product->id,
+-            $product->getProductType(),
++            $productType,
+             (bool) $product->active,
+             $this->getCustomizationOptions($product),
+             $this->getBasicInformation($product),
+@@ -223,7 +226,7 @@ public function handle(GetProductForEditing $query): ProductForEditing
+             $this->getShippingInformation($product),
+             $this->getSeoOptions($product),
+             $this->getAttachments($query->getProductId()),
+-            $this->getProductStockInformation($product),
++            $this->getProductStockInformation($product, $query->getShopConstraint()),
+             $this->getVirtualProductFile($product),
+             $this->getCover($query->getProductId(), $product->getShopId()),
+             array_map(fn (ShopId $shopId) => $shopId->getValue(), $this->productRepository->getAssociatedShopIds($query->getProductId()))
+@@ -508,10 +511,11 @@ private function getSeoOptions(Product $product): ProductSeoOptions
+      * Returns the product stock infos, it's important that the Product is fetched with stock data
+      *
+      * @param Product $product
++     * @param ShopConstraint $shopConstraint
+      *
+      * @return ProductStockInformation
+      */
+-    private function getProductStockInformation(Product $product): ProductStockInformation
++    private function getProductStockInformation(Product $product, ShopConstraint $shopConstraint): ProductStockInformation
+     {
+         try {
+             $stockAvailable = $this->stockAvailableRepository->getForProduct(new ProductId($product->id), new ShopId($product->getShopId()));
+@@ -519,6 +523,10 @@ private function getProductStockInformation(Product $product): ProductStockInfor
+             $stockAvailable = $this->stockAvailableRepository->createStockAvailable(new ProductId($product->id), new ShopId($product->getShopId()));
+         }
+ 
++        // Compute pack quantity based on its configuration
++        $shopId = $shopConstraint->getShopId() !== null ? $shopConstraint->getShopId() : new ShopId($product->getShopId());
++        $packQuantity = $this->packRepository->getDynamicPackQuantity(new ProductId((int) $product->id), $shopId);
++
+         return new ProductStockInformation(
+             (int) $product->pack_stock_type,
+             (int) $stockAvailable->out_of_stock,
+@@ -529,7 +537,8 @@ private function getProductStockInformation(Product $product): ProductStockInfor
+             $product->available_now,
+             $product->available_later,
+             $stockAvailable->location,
+-            DateTimeUtil::buildDateTimeOrNull($product->available_date)
++            DateTimeUtil::buildDateTimeOrNull($product->available_date),
++            $packQuantity,
+         );
+     }
+ 
+diff --git a/src/Core/Domain/Product/QueryResult/ProductStockInformation.php b/src/Core/Domain/Product/QueryResult/ProductStockInformation.php
+index e09d0805e66dd..f58bd32f14b9d 100644
+--- a/src/Core/Domain/Product/QueryResult/ProductStockInformation.php
++++ b/src/Core/Domain/Product/QueryResult/ProductStockInformation.php
+@@ -85,6 +85,8 @@ class ProductStockInformation
+      */
+     private $availableDate;
+ 
++    private ?int $packQuantity;
++
+     /**
+      * @param int $packStockType
+      * @param int $outOfStockType
+@@ -96,6 +98,7 @@ class ProductStockInformation
+      * @param array $localizedAvailableLaterLabels
+      * @param string $location
+      * @param DateTimeInterface|null $availableDate
++     * @param int|null $packQuantity
+      */
+     public function __construct(
+         int $packStockType,
+@@ -107,7 +110,8 @@ public function __construct(
+         array $localizedAvailableNowLabels,
+         array $localizedAvailableLaterLabels,
+         string $location,
+-        ?DateTimeInterface $availableDate
++        ?DateTimeInterface $availableDate,
++        ?int $packQuantity = null,
+     ) {
+         $this->packStockType = $packStockType;
+         $this->outOfStockType = $outOfStockType;
+@@ -119,6 +123,7 @@ public function __construct(
+         $this->localizedAvailableNowLabels = $localizedAvailableNowLabels;
+         $this->localizedAvailableLaterLabels = $localizedAvailableLaterLabels;
+         $this->availableDate = $availableDate;
++        $this->packQuantity = $packQuantity;
+     }
+ 
+     /**
+@@ -200,4 +205,14 @@ public function getAvailableDate(): ?DateTimeInterface
+     {
+         return $this->availableDate;
+     }
++
++    /**
++     * Dynamic quantity of the pack based on its config and the quantity of its products
++     *
++     * @return int|null
++     */
++    public function getPackQuantity(): ?int
++    {
++        return $this->packQuantity;
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
+index b0ad70041ab3d..784b34eba1c00 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProvider.php
+@@ -409,6 +409,7 @@ private function extractStockData(ProductForEditing $productForEditing, ShopCons
+                     $productForEditing->getProductId(),
+                     $shopConstraint
+                 ),
++                'pack_quantity' => $productForEditing->getStockInformation()->getPackQuantity(),
+                 'minimal_quantity' => $stockInformation->getMinimalQuantity(),
+             ],
+             'options' => [
+diff --git a/src/Core/Grid/Query/AddressQueryBuilder.php b/src/Core/Grid/Query/AddressQueryBuilder.php
+index 3cce619558617..ea494d24784c2 100644
+--- a/src/Core/Grid/Query/AddressQueryBuilder.php
++++ b/src/Core/Grid/Query/AddressQueryBuilder.php
+@@ -85,6 +85,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+             ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'a', 'id_address')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/AttachmentQueryBuilder.php b/src/Core/Grid/Query/AttachmentQueryBuilder.php
+index 1cccc929fa8bf..958cb15c6339e 100644
+--- a/src/Core/Grid/Query/AttachmentQueryBuilder.php
++++ b/src/Core/Grid/Query/AttachmentQueryBuilder.php
+@@ -73,6 +73,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+             ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'a', 'id_attachment')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/AttributeGroupQueryBuilder.php b/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
+index b49f262c7743f..f1cbd240ac1f8 100644
+--- a/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
++++ b/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
+@@ -93,7 +93,9 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+ 
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+-            ->applySorting($searchCriteria, $qb);
++            ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'ag', 'id_attribute_group')
++        ;
+ 
+         return $qb;
+     }
+diff --git a/src/Core/Grid/Query/AttributeQueryBuilder.php b/src/Core/Grid/Query/AttributeQueryBuilder.php
+index 39213020ff10d..f9b02464ebf54 100644
+--- a/src/Core/Grid/Query/AttributeQueryBuilder.php
++++ b/src/Core/Grid/Query/AttributeQueryBuilder.php
+@@ -101,7 +101,9 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+ 
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+-            ->applySorting($searchCriteria, $qb);
++            ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'a', 'id_attribute')
++        ;
+ 
+         return $qb;
+     }
+diff --git a/src/Core/Grid/Query/CartQueryBuilder.php b/src/Core/Grid/Query/CartQueryBuilder.php
+index 301efd687e502..de20fc988bebf 100644
+--- a/src/Core/Grid/Query/CartQueryBuilder.php
++++ b/src/Core/Grid/Query/CartQueryBuilder.php
+@@ -83,6 +83,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+             ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'c', 'id_cart')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/CartRuleQueryBuilder.php b/src/Core/Grid/Query/CartRuleQueryBuilder.php
+index 56e35c44ec40f..9f534cac6ed76 100644
+--- a/src/Core/Grid/Query/CartRuleQueryBuilder.php
++++ b/src/Core/Grid/Query/CartRuleQueryBuilder.php
+@@ -82,6 +82,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+             ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'cr', 'id_cart_rule')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/CategoryQueryBuilder.php b/src/Core/Grid/Query/CategoryQueryBuilder.php
+index 448d3657a25b3..66a7ac76e06b2 100644
+--- a/src/Core/Grid/Query/CategoryQueryBuilder.php
++++ b/src/Core/Grid/Query/CategoryQueryBuilder.php
+@@ -116,7 +116,9 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+ 
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+-            ->applySorting($searchCriteria, $qb);
++            ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'c', 'id_category')
++        ;
+ 
+         return $qb;
+     }
+diff --git a/src/Core/Grid/Query/CustomerQueryBuilder.php b/src/Core/Grid/Query/CustomerQueryBuilder.php
+index 082b19e96dfee..e1e43956517f2 100644
+--- a/src/Core/Grid/Query/CustomerQueryBuilder.php
++++ b/src/Core/Grid/Query/CustomerQueryBuilder.php
+@@ -84,10 +84,10 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+         $this->appendLastVisitQuery($searchQueryBuilder);
+         $this->applySorting($searchQueryBuilder, $searchCriteria);
+ 
+-        $this->criteriaApplicator->applyPagination(
+-            $searchCriteria,
+-            $searchQueryBuilder
+-        );
++        $this->criteriaApplicator
++            ->applyPagination($searchCriteria, $searchQueryBuilder)
++            ->applyDeterministicSorting($searchCriteria, $searchQueryBuilder, 'c', 'id_customer')
++        ;
+ 
+         return $searchQueryBuilder;
+     }
+diff --git a/src/Core/Grid/Query/DoctrineSearchCriteriaApplicator.php b/src/Core/Grid/Query/DoctrineSearchCriteriaApplicator.php
+index 21cfad7088d3a..2643dba0749f1 100644
+--- a/src/Core/Grid/Query/DoctrineSearchCriteriaApplicator.php
++++ b/src/Core/Grid/Query/DoctrineSearchCriteriaApplicator.php
+@@ -64,4 +64,23 @@ public function applySorting(SearchCriteriaInterface $searchCriteria, QueryBuild
+ 
+         return $this;
+     }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function applyDeterministicSorting(
++        SearchCriteriaInterface $searchCriteria,
++        QueryBuilder $queryBuilder,
++        string $alias,
++        string $primaryKey
++    ) {
++        if ($searchCriteria->getOrderBy() !== $primaryKey) {
++            $queryBuilder->addOrderBy(
++                sprintf('%s.`%s`', $alias, $primaryKey),
++                $searchCriteria->getOrderWay()
++            );
++        }
++
++        return $this;
++    }
+ }
+diff --git a/src/Core/Grid/Query/DoctrineSearchCriteriaApplicatorInterface.php b/src/Core/Grid/Query/DoctrineSearchCriteriaApplicatorInterface.php
+index f987d39ab444a..c9d11020b2ac7 100644
+--- a/src/Core/Grid/Query/DoctrineSearchCriteriaApplicatorInterface.php
++++ b/src/Core/Grid/Query/DoctrineSearchCriteriaApplicatorInterface.php
+@@ -53,4 +53,18 @@ public function applyPagination(SearchCriteriaInterface $searchCriteria, QueryBu
+      * @return self
+      */
+     public function applySorting(SearchCriteriaInterface $searchCriteria, QueryBuilder $queryBuilder);
++
++    /**
++     * Apply deterministic sorting (stable order) on query builder.
++     * Useful when the requested sorting may lead to non-deterministic results
++     * (e.g. same values across many rows), so it appends a tie-breaker.
++     *
++     * @param SearchCriteriaInterface $searchCriteria
++     * @param QueryBuilder $queryBuilder
++     * @param string $alias The root alias used in the query (e.g. "a")
++     * @param string $primaryKey The primary key field name (e.g. "id")
++     *
++     * @return self
++     */
++    public function applyDeterministicSorting(SearchCriteriaInterface $searchCriteria, QueryBuilder $queryBuilder, string $alias, string $primaryKey);
+ }
+diff --git a/src/Core/Grid/Query/ManufacturerQueryBuilder.php b/src/Core/Grid/Query/ManufacturerQueryBuilder.php
+index 9b7129a69ef5b..0a1a3ed4a179e 100644
+--- a/src/Core/Grid/Query/ManufacturerQueryBuilder.php
++++ b/src/Core/Grid/Query/ManufacturerQueryBuilder.php
+@@ -87,6 +87,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+             ->applySorting($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'm', 'id_manufacturer')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/OrderQueryBuilder.php b/src/Core/Grid/Query/OrderQueryBuilder.php
+index 9b8c37e55dfb2..f90e7ee5e6ff8 100644
+--- a/src/Core/Grid/Query/OrderQueryBuilder.php
++++ b/src/Core/Grid/Query/OrderQueryBuilder.php
+@@ -105,6 +105,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+ 
+         $this->criteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
++            ->applyDeterministicSorting($searchCriteria, $qb, 'o', 'id_order')
+         ;
+ 
+         return $qb;
+diff --git a/src/Core/Grid/Query/ProductQueryBuilder.php b/src/Core/Grid/Query/ProductQueryBuilder.php
+index a706b459d69c5..50c70b8110d56 100644
+--- a/src/Core/Grid/Query/ProductQueryBuilder.php
++++ b/src/Core/Grid/Query/ProductQueryBuilder.php
+@@ -94,7 +94,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+     {
+         $qb = $this->getQueryBuilder($searchCriteria);
+         $qb
+-            ->addSelect('p.`id_product`, p.`reference`, p.`id_shop_default`')
++            ->addSelect('p.`id_product`, p.`reference`, p.`id_shop_default`, p.`product_type`')
+             ->addSelect('ps.`price` AS `price_tax_excluded`, ps.`ecotax` AS `ecotax_tax_excluded`, ps.`id_tax_rules_group`, ps.`active`')
+             ->addSelect('pl.`name`, pl.`link_rewrite`')
+             ->addSelect('cl.`name` AS `category`')
+@@ -126,6 +126,8 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+             $this->searchCriteriaApplicator->applySorting($searchCriteria, $qb);
+         }
+ 
++        $this->searchCriteriaApplicator->applyDeterministicSorting($searchCriteria, $qb, 'p', 'id_product');
++
+         return $qb;
+     }
+ 
+diff --git a/src/Core/Grid/Query/SupplierQueryBuilder.php b/src/Core/Grid/Query/SupplierQueryBuilder.php
+index a910d88d88fda..36b307e9f6520 100644
+--- a/src/Core/Grid/Query/SupplierQueryBuilder.php
++++ b/src/Core/Grid/Query/SupplierQueryBuilder.php
+@@ -96,6 +96,12 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+             ->applyPagination($searchCriteria, $qb)
+         ;
+ 
++        if ($isCountFilter) {
++            $this->searchCriteriaApplicator->applyDeterministicSorting($searchCriteria, $qb, 'subQuery', 'id_supplier');
++        } else {
++            $this->searchCriteriaApplicator->applyDeterministicSorting($searchCriteria, $qb, 's', 'id_supplier');
++        }
++
+         return $qb;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+index de1ee7f901693..54c8d03885898 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+@@ -2110,7 +2110,7 @@ public function setInternalNoteAction($orderId, Request $request)
+      *
+      * @return JsonResponse
+      */
+-    #[AdminSecurity("is_granted('create', request.get('_legacy_controller')) && is_granted('update', request.get('_legacy_controller'))", message: 'You do not have permission to perform this search.')]
++    #[AdminSecurity("is_granted('create', request.get('_legacy_controller')) || is_granted('update', request.get('_legacy_controller'))", message: 'You do not have permission to perform this search.')]
+     public function searchProductsAction(Request $request): JsonResponse
+     {
+         try {
+diff --git a/src/PrestaShopBundle/Entity/ImageType.php b/src/PrestaShopBundle/Entity/ImageType.php
+index e88874e6f1a53..db99a676c8c70 100644
+--- a/src/PrestaShopBundle/Entity/ImageType.php
++++ b/src/PrestaShopBundle/Entity/ImageType.php
+@@ -34,9 +34,9 @@
+ /**
+  * @ORM\Entity(repositoryClass="PrestaShopBundle\Entity\Repository\ImageTypeRepository")
+  *
+- * @ORM\Table(uniqueConstraints={@ORM\UniqueConstraint(columns={"name","theme_name"})})
++ * @ORM\Table(uniqueConstraints={@ORM\UniqueConstraint(columns={"name"})})
+  *
+- * @UniqueEntity({"name", "theme_name"})
++ * @UniqueEntity({"name"})
+  */
+ class ImageType
+ {
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
+index 2eb5c1176bd04..657de875a876a 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
+@@ -31,6 +31,7 @@
+ use PrestaShopBundle\Form\Admin\Type\DeltaQuantityType;
+ use PrestaShopBundle\Form\Admin\Type\EntitySearchInputType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+ use Symfony\Component\Form\Extension\Core\Type\NumberType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -105,6 +106,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                         'class' => 'stock-movement-list',
+                     ],
+                 ])
++                ->add('pack_quantity', HiddenType::class)
+             ;
+         }
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/product.yml b/src/PrestaShopBundle/Resources/config/services/adapter/product.yml
+index 57b76bfa61ed2..bec69dd35f410 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/product.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/product.yml
+@@ -27,6 +27,7 @@ services:
+     autoconfigure: true
+ 
+   PrestaShop\PrestaShop\Adapter\Product\Grid\Data\Factory\ProductGridDataFactoryDecorator:
++    autowire: true
+     arguments:
+       - '@prestashop.core.grid.data.factory.product'
+       - '@PrestaShop\PrestaShop\Core\Localization\Locale\Repository'
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/product/_pack.yml b/src/PrestaShopBundle/Resources/config/services/adapter/product/_pack.yml
+index 75a637081d597..8f76100b622f7 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/product/_pack.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/product/_pack.yml
+@@ -3,6 +3,7 @@ services:
+     public: true
+ 
+   PrestaShop\PrestaShop\Adapter\Product\Pack\Repository\ProductPackRepository:
++    autowire: true
+     arguments:
+       - '@doctrine.dbal.default_connection'
+       - '%database_prefix%'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Blocks/header-details.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Blocks/header-details.html.twig
+index fd5c518b77728..1700033ee1ac3 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Blocks/header-details.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Blocks/header-details.html.twig
+@@ -68,7 +68,12 @@
+ 
+     {# Only display stock when Stock management is enabled #}
+     {% if stockEnabled %}
+-      {% set quantityData = productData.stock.quantities.delta_quantity.quantity %}
++      {% if productData.header.type == 'pack' and productData.stock.quantities.pack_quantity is not null %}
++        {% set quantityData = productData.stock.quantities.pack_quantity %}
++      {% else %}
++        {% set quantityData = productData.stock.quantities.delta_quantity.quantity %}
++      {% endif %}
++
+       {% if productData.header.type != 'combinations' %}
+         {% set lowStock = productData.stock.options.low_stock_threshold %}
+       {% else %}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
+index 0514035c1fdd9..19be842cec999 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
+@@ -422,6 +422,15 @@ private function assertStockInformation(string $productReference, TableNode $tab
+         $this->assertBoolProperty($productForEditing, $data, 'low_stock_alert', $shopErrorMessage);
+         $this->assertDateTimeProperty($productForEditing, $data, 'available_date', $shopErrorMessage);
+ 
++        if (isset($data['pack_quantity'])) {
++            if ($data['pack_quantity'] === '') {
++                Assert::assertNull($productForEditing->getStockInformation()->getPackQuantity(), 'invalid pack quantity, null expected');
++            } else {
++                Assert::assertEquals((int) $data['pack_quantity'], $productForEditing->getStockInformation()->getPackQuantity(), 'invalid pack quantity');
++            }
++            unset($data['pack_quantity']);
++        }
++
+         // Assertions checking isset() can hide some errors if it doesn't find array key,
+         // to make sure all provided fields were checked we need to unset every asserted field
+         // and finally, if provided data is not empty, it means there are some unnasserted values left
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/update_stock.feature b/tests/Integration/Behaviour/Features/Scenario/Product/update_stock.feature
+index 12247cfbf2573..2b36077196d3c 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/update_stock.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/update_stock.feature
+@@ -41,36 +41,86 @@ Feature: Update product stock from Back Office (BO)
+       | low_stock_alert     | false     |
+       | available_date      |           |
+ 
+-  Scenario: I update product pack stock type
++  Scenario: I update product pack stock type and check its quantity
+     Given I add product "productPack1" with following information:
+       | name[en-US] | weird sunglasses box |
+       | type        | pack                 |
+     And product "productPack1" type should be pack
+-    And I add product "product2" with following information:
++    And I update product "productPack1" stock with following information:
++      | delta_quantity | 100 |
++      | location       | dtc |
++    And I add product "shady_sunglasses" with following information:
+       | name[en-US] | shady sunglasses |
+       | type        | standard         |
+-    And product "product2" type should be standard
++    And I update product "shady_sunglasses" stock with following information:
++      | delta_quantity | 50  |
++      | location       | dtc |
++    And product "shady_sunglasses" type should be standard
++    And I add product "stylish_hat" with following information:
++      | name[en-US] | stylish hat |
++      | type        | standard    |
++    And product "stylish_hat" type should be standard
++    And I update product "stylish_hat" stock with following information:
++      | delta_quantity | 20  |
++      | location       | dtc |
+     When I update pack "productPack1" with following product quantities:
+-      | product  | quantity |
+-      | product2 | 5        |
++      | product          | quantity |
++      | shady_sunglasses | 5        |
++      | stylish_hat      | 1        |
+     Then product "productPack1" type should be pack
+     And pack "productPack1" should contain products with following details:
+-      | product  | combination | quantity | name             | image url                                              |
+-      | product2 |             | 5        | shady sunglasses | http://myshop.com/img/p/{no_picture}-small_default.jpg |
++      | product          | combination | quantity | name             | image url                                              |
++      | shady_sunglasses |             | 5        | shady sunglasses | http://myshop.com/img/p/{no_picture}-small_default.jpg |
++      | stylish_hat      |             | 1        | stylish hat      | http://myshop.com/img/p/{no_picture}-small_default.jpg |
++    # With default configuration, use pack only
+     And product "productPack1" should have following stock information:
+       | pack_stock_type | default |
++      | quantity        | 100     |
++      | pack_quantity   | 100     |
+     When I update product "productPack1" with following values:
+       | pack_stock_type | pack_only |
++    # With pack only same behaviour
+     Then product "productPack1" should have following stock information:
+       | pack_stock_type | pack_only |
++      | quantity        | 100       |
++      | pack_quantity   | 100       |
+     When I update product "productPack1" with following values:
+       | pack_stock_type | products_only |
++    # Use products only, stylish hat minimum is 20, sunglasses minimum is 10 (stock available / quantity in pack = 50 / 5), so 10 is the minimum
++    Then product "productPack1" should have following stock information:
++      | pack_stock_type | products_only |
++      | quantity        | 100           |
++      | pack_quantity   | 10            |
++    And I update product "productPack1" stock with following information:
++      | delta_quantity | -95 |
++      | location       | dtc |
+     Then product "productPack1" should have following stock information:
+       | pack_stock_type | products_only |
++      | quantity        | 5             |
++      | pack_quantity   | 10            |
++    # Now both are used but pack quantity is only 5 now, so this minimum is used
+     When I update product "productPack1" with following values:
+       | pack_stock_type | both |
+     Then product "productPack1" should have following stock information:
+       | pack_stock_type | both |
++      | quantity        | 5    |
++      | pack_quantity   | 5    |
++    And I update product "productPack1" stock with following information:
++      | delta_quantity | 10  |
++      | location       | dtc |
++    Then product "productPack1" should have following stock information:
++      | pack_stock_type | both |
++      | quantity        | 15   |
++      | pack_quantity   | 10   |
++    # Update the required quantity, stylish hat is now the one with minimum quantity (20 / 10)
++    When I update pack "productPack1" with following product quantities:
++      | product          | quantity |
++      | shady_sunglasses | 5        |
++      | stylish_hat      | 10       |
++    Then product "productPack1" should have following stock information:
++      | pack_stock_type | both |
++      | quantity        | 15   |
++      | pack_quantity   | 2    |
+     When I update product "productPack1" with following values:
+       | pack_stock_type | invalid |
+     Then I should get error that pack stock type is invalid
+@@ -120,7 +170,7 @@ Feature: Update product stock from Back Office (BO)
+       | quantity | 51  |
+       | location | dtc |
+     And product "product1" last stock movements should be:
+-      | employee   | delta_quantity |
++      | employee     | delta_quantity |
+       | Puffin Mummy | 51             |
+     And product "product1" last stock movement increased by 51
+     When I update product "product1" stock with following information:
+@@ -130,7 +180,7 @@ Feature: Update product stock from Back Office (BO)
+       | quantity | 42 |
+       | location |    |
+     And product "product1" last stock movements should be:
+-      | employee   | delta_quantity |
++      | employee     | delta_quantity |
+       | Puffin Mummy | -9             |
+       | Puffin Mummy | 51             |
+     And product "product1" last stock movement decreased by 9
+@@ -140,7 +190,7 @@ Feature: Update product stock from Back Office (BO)
+     Then product "product1" should have following stock information:
+       | quantity | 42 |
+     And product "product1" last stock movements should be:
+-      | employee   | delta_quantity |
++      | employee     | delta_quantity |
+       | Puffin Mummy | -9             |
+       | Puffin Mummy | 51             |
+     And product "product1" last stock movement decreased by 9
+@@ -281,7 +331,7 @@ Feature: Update product stock from Back Office (BO)
+       | delta_quantity | -1 |
+     Then I should get error that stock available quantity is invalid
+     And product "product2" last stock movements should be:
+-      | employee   | delta_quantity |
++      | employee     | delta_quantity |
+       | Puffin Mummy | -4294967295    |
+       | Puffin Mummy | 4294967295     |
+       | Puffin Mummy | -2147483648    |
+diff --git a/tests/UI/campaigns/functional/BO/13_shopParameters/03_productSettings/03_productsStock/02_defaultPackStockManagement.ts b/tests/UI/campaigns/functional/BO/13_shopParameters/03_productSettings/03_productsStock/02_defaultPackStockManagement.ts
+index 5be27a34ea512..7b3bf0d861b15 100644
+--- a/tests/UI/campaigns/functional/BO/13_shopParameters/03_productSettings/03_productsStock/02_defaultPackStockManagement.ts
++++ b/tests/UI/campaigns/functional/BO/13_shopParameters/03_productSettings/03_productsStock/02_defaultPackStockManagement.ts
+@@ -126,7 +126,10 @@ describe('BO - Shop Parameters - Product Settings : Default pack stock managemen
+       {
+         args: {
+           option: 'Use quantity of products in the pack',
+-          packQuantity: productPackData.quantity - 1,
++          // The lower quantity is defined by the first product based on the quantity required in the pack
++          packQuantity: Math.floor(
++            (firstProductData.quantity - productPackData.pack[0].quantity) / productPackData.pack[0].quantity,
++          ),
+           firstProductQuantity: firstProductData.quantity - productPackData.pack[0].quantity,
+           secondProductQuantity: secondProductData.quantity - productPackData.pack[1].quantity,
+         },
+@@ -134,7 +137,10 @@ describe('BO - Shop Parameters - Product Settings : Default pack stock managemen
+       {
+         args: {
+           option: 'Use both, whatever is lower',
+-          packQuantity: productPackData.quantity - 2,
++          // The lower quantity is defined by the first product based on the quantity required in the pack
++          packQuantity: Math.floor(
++            (firstProductData.quantity - 2 * productPackData.pack[0].quantity) / productPackData.pack[0].quantity,
++          ),
+           firstProductQuantity: firstProductData.quantity - 2 * productPackData.pack[0].quantity,
+           secondProductQuantity: secondProductData.quantity - 2 * productPackData.pack[1].quantity,
+         },
+diff --git a/tests/UI/package-lock.json b/tests/UI/package-lock.json
+index fc24cf528b192..96eed30e01255 100644
+--- a/tests/UI/package-lock.json
++++ b/tests/UI/package-lock.json
+@@ -534,7 +534,7 @@
+     },
+     "node_modules/@prestashop-core/ui-testing": {
+       "version": "0.0.12",
+-      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#140bd39f0de1299df62092ab1af308214bd9af50",
++      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#6d9e330a971cc0932817c03422296701598ee644",
+       "license": "MIT",
+       "dependencies": {
+         "@faker-js/faker": "^10.1.0",
+@@ -8704,7 +8704,7 @@
+       }
+     },
+     "@prestashop-core/ui-testing": {
+-      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#140bd39f0de1299df62092ab1af308214bd9af50",
++      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#6d9e330a971cc0932817c03422296701598ee644",
+       "from": "@prestashop-core/ui-testing@https://github.com/PrestaShop/ui-testing-library#main",
+       "requires": {
+         "@faker-js/faker": "^10.1.0",
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
+index 9e6a888526b79..cc5874785bde3 100644
+--- a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
++++ b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/ProductFormDataProviderTest.php
+@@ -1627,6 +1627,7 @@ private function getDefaultOutputData(): array
+                         'delta' => 0,
+                     ],
+                     'stock_movements' => [],
++                    'pack_quantity' => null,
+                     'minimal_quantity' => 0,
+                 ],
+                 'options' => [

@@ -1,0 +1,718 @@
+diff --git a/admin-dev/themes/new-theme/scss/components/layout/_main_header.scss b/admin-dev/themes/new-theme/scss/components/layout/_main_header.scss
+index 0e16325340bef..9577cf16ee7ef 100644
+--- a/admin-dev/themes/new-theme/scss/components/layout/_main_header.scss
++++ b/admin-dev/themes/new-theme/scss/components/layout/_main_header.scss
+@@ -787,8 +787,10 @@ $header-text-color: #4e6167 !default;
+       border: 1px solid #899ea5;
+       @include border-radius(1px);
+ 
++      &:active,
+       &:hover {
+         color: $primary;
++        background-color: inherit;
+         border-color: $primary;
+ 
+         .material-icons {
+diff --git a/config/smartyfront.config.inc.php b/config/smartyfront.config.inc.php
+index 2645ba7de1151..7144353b57228 100644
+--- a/config/smartyfront.config.inc.php
++++ b/config/smartyfront.config.inc.php
+@@ -25,6 +25,8 @@
+  */
+ global $smarty;
+ 
++use PrestaShop\TranslationToolsBundle\Translation\Helper\DomainHelper;
++
+ $template_dirs = array(_PS_THEME_DIR_.'templates');
+ $plugin_dirs = array(_PS_THEME_DIR_.'plugins');
+ if (_PS_PARENT_THEME_DIR_ !== '') {
+@@ -171,8 +173,16 @@ function smartyTranslate($params, $smarty)
+     if (!isset($params['sprintf'])) {
+         $params['sprintf'] = array();
+     }
++
++    // fix inheritance template filename in case of includes from different cross sources between theme, modules, ...
++    $filename = $smarty->template_resource;
++    if (!isset($smarty->inheritance->sourceStack[0]) || $filename === $smarty->inheritance->sourceStack[0]->resource) {
++        $filename = $smarty->source->name;
++    }
++    $basename = basename($filename, '.tpl');
++
+     if (!isset($params['d'])) {
+-        $params['d'] = null;
++        $params['d'] = $params['mod'] ? DomainHelper::buildModuleDomainFromLegacySource($params['mod'], $basename) : null;
+     }
+ 
+     if (!empty($params['d'])) {
+@@ -214,14 +224,6 @@ function smartyTranslate($params, $smarty)
+     }
+ 
+     $string = str_replace('\'', '\\\'', $params['s']);
+-
+-    // fix inheritance template filename in case of includes from different cross sources between theme, modules, ...
+-    $filename = $smarty->template_resource;
+-    if (!isset($smarty->inheritance->sourceStack[0]) || $filename === $smarty->inheritance->sourceStack[0]->resource) {
+-        $filename = $smarty->source->name;
+-    }
+-
+-    $basename = basename($filename, '.tpl');
+     $key = $basename.'_'.md5($string);
+ 
+     if (isset($smarty->source) && (strpos($smarty->source->filepath, DIRECTORY_SEPARATOR.'override'.DIRECTORY_SEPARATOR) !== false)) {
+diff --git a/src/Core/Translation/Builder/TranslationCatalogueBuilder.php b/src/Core/Translation/Builder/TranslationCatalogueBuilder.php
+index a1aa3f6ef9eec..c0fda01e66639 100644
+--- a/src/Core/Translation/Builder/TranslationCatalogueBuilder.php
++++ b/src/Core/Translation/Builder/TranslationCatalogueBuilder.php
+@@ -38,6 +38,7 @@
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ProviderDefinitionInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ThemeProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Util\Inflector;
++use PrestaShopBundle\Translation\Provider\AbstractProvider;
+ 
+ /**
+  * This class provides the catalogue represented as an array.
+@@ -190,6 +191,9 @@ public function getRawCatalogue(
+             foreach ($messages as $translationKey => $translationValue) {
+                 $translationKey = (string) $translationKey;
+                 $message = new Message($translationKey);
++                if ($locale === AbstractProvider::DEFAULT_LOCALE) {
++                    $message->setFileTranslation($translationKey);
++                }
+                 if ($fileTranslatedCatalogue->defines($translationKey, $domainName)) {
+                     $message->setFileTranslation($fileTranslatedCatalogue->get($translationKey, $domainName));
+                 }
+diff --git a/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php b/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
+index bbfe03755dc69..a3168dc38a914 100644
+--- a/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
++++ b/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\AbstractCoreProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\FrontofficeProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ModuleProviderDefinition;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ModulesProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ProviderDefinitionInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ThemeProviderDefinition;
+ use Symfony\Component\Filesystem\Filesystem;
+@@ -96,6 +97,11 @@ class CatalogueProviderFactory
+      */
+     private $themesDirectory;
+ 
++    /**
++     * @var ModuleCatalogueProviderFactory
++     */
++    private $moduleCatalogueProviderFactory;
++
+     /**
+      * @param DatabaseTranslationLoader $databaseTranslationLoader
+      * @param LegacyModuleExtractorInterface $legacyModuleExtractor
+@@ -127,6 +133,13 @@ public function __construct(
+         $this->themeRepository = $themeRepository;
+         $this->filesystem = $filesystem;
+         $this->themesDirectory = $themesDirectory;
++        $this->moduleCatalogueProviderFactory = new ModuleCatalogueProviderFactory(
++            $this->databaseTranslationLoader,
++            $this->legacyModuleExtractor,
++            $this->legacyFileLoader,
++            $this->modulesDirectory,
++            $this->translationsDirectory
++        );
+     }
+ 
+     /**
+@@ -144,7 +157,7 @@ public function getProvider(ProviderDefinitionInterface $providerDefinition): Ca
+         }
+ 
+         if ($providerDefinition instanceof ModuleProviderDefinition) {
+-            return $this->getModuleCatalogueProvider($providerDefinition);
++            return $this->moduleCatalogueProviderFactory->getModuleCatalogueProvider($providerDefinition);
+         } elseif ($providerDefinition instanceof AbstractCoreProviderDefinition) {
+             return $this->getCoreCatalogueProvider($providerDefinition);
+         } elseif ($providerDefinition instanceof ThemeProviderDefinition) {
+@@ -174,29 +187,6 @@ private function getCoreCatalogueProvider(ProviderDefinitionInterface $providerD
+         return $this->providers[$providerDefinition->getType()];
+     }
+ 
+-    /**
+-     * @param ModuleProviderDefinition $providerDefinition
+-     *
+-     * @return CatalogueLayersProviderInterface
+-     */
+-    private function getModuleCatalogueProvider(ModuleProviderDefinition $providerDefinition): CatalogueLayersProviderInterface
+-    {
+-        if (!isset($this->providers[$providerDefinition->getType()])) {
+-            $this->providers[$providerDefinition->getType()] = new ModuleCatalogueLayersProvider(
+-                $this->databaseTranslationLoader,
+-                $this->legacyModuleExtractor,
+-                $this->legacyFileLoader,
+-                $this->modulesDirectory,
+-                $this->translationsDirectory,
+-                $providerDefinition->getModuleName(),
+-                $providerDefinition->getFilenameFilters(),
+-                $providerDefinition->getTranslationDomains()
+-            );
+-        }
+-
+-        return $this->providers[$providerDefinition->getType()];
+-    }
+-
+     /**
+      * @param ThemeProviderDefinition $providerDefinition
+      *
+@@ -206,14 +196,22 @@ private function getThemeCatalogueProvider(ThemeProviderDefinition $providerDefi
+     {
+         if (!isset($this->providers[$providerDefinition->getType()])) {
+             $coreFrontProviderDefinition = new FrontofficeProviderDefinition();
++            $modulesProviderDefinition = new ModulesProviderDefinition();
+             $coreFrontProvider = new CoreCatalogueLayersProvider(
+                 $this->databaseTranslationLoader,
+                 $this->translationsDirectory,
+-                $coreFrontProviderDefinition->getFilenameFilters(),
+-                $coreFrontProviderDefinition->getTranslationDomains()
++                array_merge(
++                    $coreFrontProviderDefinition->getFilenameFilters(),
++                    $modulesProviderDefinition->getFilenameFilters()
++                ),
++                array_merge(
++                    $coreFrontProviderDefinition->getTranslationDomains(),
++                    $modulesProviderDefinition->getTranslationDomains()
++                )
+             );
+ 
+             $this->providers[$providerDefinition->getType()] = new ThemeCatalogueLayersProvider(
++                $this->moduleCatalogueProviderFactory,
+                 $coreFrontProvider,
+                 $this->databaseTranslationLoader,
+                 $this->themeExtractor,
+diff --git a/src/Core/Translation/Storage/Provider/Definition/ModulesProviderDefinition.php b/src/Core/Translation/Storage/Provider/Definition/ModulesProviderDefinition.php
+new file mode 100644
+index 0000000000000..ef053011f008e
+--- /dev/null
++++ b/src/Core/Translation/Storage/Provider/Definition/ModulesProviderDefinition.php
+@@ -0,0 +1,62 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition;
++
++/**
++ * Properties container for Modules translation provider.
++ */
++class ModulesProviderDefinition extends AbstractCoreProviderDefinition
++{
++    private const FILENAME_FILTERS_REGEX = ['#^Modules*#'];
++
++    private const TRANSLATION_DOMAINS_REGEX = ['^Modules*'];
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getType(): string
++    {
++        return ProviderDefinitionInterface::TYPE_MODULES;
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getFilenameFilters(): array
++    {
++        return self::FILENAME_FILTERS_REGEX;
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getTranslationDomains(): array
++    {
++        return self::TRANSLATION_DOMAINS_REGEX;
++    }
++}
+diff --git a/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php b/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php
+new file mode 100644
+index 0000000000000..b68312b65bd9b
+--- /dev/null
++++ b/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php
+@@ -0,0 +1,89 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Translation\Storage\Provider;
++
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ModuleProviderDefinition;
++use Symfony\Component\Translation\Loader\LoaderInterface;
++
++class ModuleCatalogueProviderFactory
++{
++    /**
++     * @var DatabaseTranslationLoader
++     */
++    private $databaseTranslationLoader;
++
++    /**
++     * @var LegacyModuleExtractorInterface
++     */
++    private $legacyModuleExtractor;
++
++    /**
++     * @var LoaderInterface
++     */
++    private $legacyFileLoader;
++
++    /**
++     * @var string
++     */
++    private $modulesDirectory;
++
++    /**
++     * @var string
++     */
++    private $translationsDirectory;
++
++    public function __construct(
++        DatabaseTranslationLoader $databaseTranslationLoader,
++        LegacyModuleExtractorInterface $legacyModuleExtractor,
++        LoaderInterface $legacyFileLoader,
++        string $modulesDirectory,
++        string $translationsDirectory
++    ) {
++        $this->databaseTranslationLoader = $databaseTranslationLoader;
++        $this->legacyModuleExtractor = $legacyModuleExtractor;
++        $this->legacyFileLoader = $legacyFileLoader;
++        $this->modulesDirectory = $modulesDirectory;
++        $this->translationsDirectory = $translationsDirectory;
++    }
++
++    public function getModuleCatalogueProvider(ModuleProviderDefinition $providerDefinition): CatalogueLayersProviderInterface
++    {
++        return new ModuleCatalogueLayersProvider(
++            $this->databaseTranslationLoader,
++            $this->legacyModuleExtractor,
++            $this->legacyFileLoader,
++            $this->modulesDirectory,
++            $this->translationsDirectory,
++            $providerDefinition->getModuleName(),
++            $providerDefinition->getFilenameFilters(),
++            $providerDefinition->getTranslationDomains()
++        );
++    }
++}
+diff --git a/src/Core/Translation/Storage/Provider/ThemeCatalogueLayersProvider.php b/src/Core/Translation/Storage/Provider/ThemeCatalogueLayersProvider.php
+index 0042050c6d53f..e5dcf53b9301f 100644
+--- a/src/Core/Translation/Storage/Provider/ThemeCatalogueLayersProvider.php
++++ b/src/Core/Translation/Storage/Provider/ThemeCatalogueLayersProvider.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Core\Translation\Exception\TranslationFilesNotFoundException;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ThemeExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ModuleProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\FileTranslatedCatalogueFinder;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\UserTranslatedCatalogueFinder;
+ use RuntimeException;
+@@ -93,6 +94,17 @@ class ThemeCatalogueLayersProvider implements CatalogueLayersProviderInterface
+     private $theme;
+ 
+     /**
++     * @var MessageCatalogue|null
++     */
++    private $defaultCatalogue;
++
++    /**
++     * @var ModuleCatalogueProviderFactory
++     */
++    private $moduleCatalogueProviderFactory;
++
++    /**
++     * @param ModuleCatalogueProviderFactory $moduleCatalogueProviderFactory
+      * @param CatalogueLayersProviderInterface $coreFrontProvider
+      * @param DatabaseTranslationLoader $databaseTranslationLoader
+      * @param ThemeExtractor $themeExtractor
+@@ -102,6 +114,7 @@ class ThemeCatalogueLayersProvider implements CatalogueLayersProviderInterface
+      * @param string $themeName
+      */
+     public function __construct(
++        ModuleCatalogueProviderFactory $moduleCatalogueProviderFactory,
+         CatalogueLayersProviderInterface $coreFrontProvider,
+         DatabaseTranslationLoader $databaseTranslationLoader,
+         ThemeExtractor $themeExtractor,
+@@ -111,6 +124,7 @@ public function __construct(
+         string $themeName
+     ) {
+         $this->databaseTranslationLoader = $databaseTranslationLoader;
++        $this->moduleCatalogueProviderFactory = $moduleCatalogueProviderFactory;
+         $this->coreFrontProvider = $coreFrontProvider;
+         $this->themeExtractor = $themeExtractor;
+         $this->themeRepository = $themeRepository;
+@@ -129,7 +143,11 @@ public function getDefaultCatalogue(
+         bool $refreshCache = false
+     ): MessageCatalogue {
+         // Extracts wordings from the theme's templates
+-        return $this->themeExtractor->extract($this->theme, $locale);
++        if ($this->defaultCatalogue === null) {
++            $this->defaultCatalogue = $this->themeExtractor->extract($this->theme, $locale);
++        }
++
++        return $this->defaultCatalogue;
+     }
+ 
+     /**
+@@ -137,12 +155,15 @@ public function getDefaultCatalogue(
+      *
+      * @return MessageCatalogue
+      *
+-     * @throws TranslationFilesNotFoundException
++     * The **file** translated catalogue for a theme other than classic corresponds
++     * to the core files, overwritten by the user-translated core wordings (if any), overwritten
++     * by the theme files (if any)
+      */
+     public function getFileTranslatedCatalogue(string $locale): MessageCatalogue
+     {
+         // load front office catalogue
+-        $catalogue = $this->coreFrontProvider->getFileTranslatedCatalogue($locale);
++        $coreCatalogue = $this->getCoreCatalogue($locale);
++        $coreCatalogue->addCatalogue($this->getModulesTranslations($locale));
+ 
+         try {
+             $fileTranslatedCatalogue = (new FileTranslatedCatalogueFinder(
+@@ -152,13 +173,12 @@ public function getFileTranslatedCatalogue(string $locale): MessageCatalogue
+                 ->getCatalogue($locale);
+ 
+             // overwrite with the theme's own catalogue
+-            $catalogue->addCatalogue($fileTranslatedCatalogue);
++            $coreCatalogue->addCatalogue($fileTranslatedCatalogue);
+         } catch (TranslationFilesNotFoundException $e) {
+-            // there are no translation files, ignore them
+-            return new MessageCatalogue($locale);
++            // No translation file was found in the theme, we keep using those from the core
+         }
+ 
+-        return $catalogue;
++        return $coreCatalogue;
+     }
+ 
+     /**
+@@ -206,4 +226,56 @@ private function getResourceDirectory(): string
+ 
+         return $resourceDirectory;
+     }
++
++    private function getCoreCatalogue(string $locale): MessageCatalogue
++    {
++        $coreCatalogue = $this->coreFrontProvider->getFileTranslatedCatalogue($locale);
++
++        // load core user-translated catalogue
++        $coreUserTranslatedCatalogue = (new UserTranslatedCatalogueFinder(
++            $this->databaseTranslationLoader,
++            ['*']
++        ))
++            ->getCatalogue($locale);
++
++        $coreCatalogue->addCatalogue($coreUserTranslatedCatalogue);
++
++        return $coreCatalogue;
++    }
++
++    private function getModulesTranslations(string $locale): MessageCatalogue
++    {
++        $moduleCatalogue = new MessageCatalogue($locale);
++        $modules = $this->getModulesFromTranslations($locale);
++
++        foreach ($modules as $module) {
++            $moduleProvider = $this->moduleCatalogueProviderFactory->getModuleCatalogueProvider(
++                new ModuleProviderDefinition($module)
++            );
++            try {
++                $moduleCatalogue->addCatalogue($moduleProvider->getFileTranslatedCatalogue($locale));
++            } catch (Exception $e) {
++                // no translations found
++            }
++        }
++
++        return $moduleCatalogue;
++    }
++
++    /**
++     * @return string[]
++     */
++    private function getModulesFromTranslations(string $locale): array
++    {
++        $modules = [];
++
++        $catalogue = $this->getDefaultCatalogue($locale);
++        foreach ($catalogue->getDomains() as $domain) {
++            if (preg_match('/^Modules([A-Z]([^A-Z]+))/', $domain, $matches)) {
++                $modules[] = strtolower($matches[1]);
++            }
++        }
++
++        return $modules;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Product/ProductPage/product.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Product/ProductPage/product.html.twig
+index 0c899c61814b5..98e103dda8e25 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Product/ProductPage/product.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Product/ProductPage/product.html.twig
+@@ -280,7 +280,6 @@
+   <script src="{{ asset('themes/default/js/bundle/product/default-category.js') }}"></script>
+   <script src="{{ asset('themes/default/js/bundle/product/product-combinations.js') }}"></script>
+   <script src="{{ asset('themes/default/js/bundle/category-tree.js') }}"></script>
+-  <script src="{{ asset('themes/default/js/bundle/module/module_card.js') }}"></script>
+   <script src="{{ asset('themes/default/js/bundle/modal-confirmation.js') }}"></script>
+   <script src="{{ asset('themes/new-theme/public/product_page.bundle.js') }}"></script>
+   <script src="{{ asset('themes/default/js/bundle/product/form.js') }}"></script>
+diff --git a/src/PrestaShopBundle/Service/TranslationService.php b/src/PrestaShopBundle/Service/TranslationService.php
+index bbe0dfba9c6e1..94c3dc1c117af 100644
+--- a/src/PrestaShopBundle/Service/TranslationService.php
++++ b/src/PrestaShopBundle/Service/TranslationService.php
+@@ -238,14 +238,18 @@ public function saveTranslationMessage($lang, $domain, $key, $translationValue,
+         $translation = null;
+ 
+         try {
+-            $translation = $entityManager->getRepository(Translation::class)
++            $queryBuilder = $entityManager->getRepository(Translation::class)
+                 ->createQueryBuilder('t')
+                 ->where('t.lang = :lang')->setParameter('lang', $lang)
+                 ->andWhere('t.domain = :domain')->setParameter('domain', $domain)
+                 ->andWhere('t.key LIKE :key')->setParameter('key', $key)
+-                ->andWhere('t.theme = :theme OR t.theme is NULL')->setParameter('theme', $theme)
+-                ->getQuery()
+-                ->getSingleResult();
++            ;
++            if ($theme !== null) {
++                $queryBuilder->andWhere('t.theme = :theme')->setParameter('theme', $theme);
++            } else {
++                $queryBuilder->andWhere('t.theme IS NULL');
++            }
++            $translation = $queryBuilder->getQuery()->getSingleResult();
+         } catch (Exception $exception) {
+             $logger->error($exception->getMessage(), $log_context);
+         }
+diff --git a/src/PrestaShopBundle/Translation/Loader/DatabaseTranslationLoader.php b/src/PrestaShopBundle/Translation/Loader/DatabaseTranslationLoader.php
+index f70045ea4d1f1..d6e7d192dafc4 100644
+--- a/src/PrestaShopBundle/Translation/Loader/DatabaseTranslationLoader.php
++++ b/src/PrestaShopBundle/Translation/Loader/DatabaseTranslationLoader.php
+@@ -77,6 +77,10 @@ public function load($resource, $locale, $domain = 'messages', $theme = null)
+             $langs[$locale] = $this->entityManager->getRepository(Lang::class)->findOneBy(['locale' => $locale]);
+         }
+ 
++        if ($langs[$locale] === null) {
++            return $catalogue;
++        }
++
+         /** @var EntityRepository $translationRepository */
+         $translationRepository = $this->entityManager->getRepository(Translation::class);
+ 
+diff --git a/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php b/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
+index 685d3ef905b09..fc7ef56ccc6e5 100644
+--- a/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
++++ b/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
+@@ -77,20 +77,14 @@ public function load($resource, $locale, $domain = 'messages')
+         $selectTranslationsQuery = '
+             SELECT `key`, `translation`, `domain`
+             FROM `' . _DB_PREFIX_ . 'translation`
+-            WHERE `id_lang` = ' . $localeResults[$locale]['id_lang'];
++            WHERE `id_lang` = ' . $localeResults[$locale]['id_lang'] . '
++            AND theme ' . ($this->theme !== null ? '= "' . $this->theme->getName() . '"' : 'IS NULL');
++
+         $translations = Db::getInstance()->executeS($selectTranslationsQuery) ?: [];
+ 
+         $catalogue = new MessageCatalogue($locale);
+         $this->addTranslationsToCatalogue($translations, $catalogue);
+ 
+-        if (null !== $this->theme) {
+-            $selectThemeTranslationsQuery =
+-                $selectTranslationsQuery . "\n" .
+-                "AND theme = '" . $this->theme->getName() . "'";
+-            $themeTranslations = Db::getInstance()->executeS($selectThemeTranslationsQuery) ?: [];
+-            $this->addTranslationsToCatalogue($themeTranslations, $catalogue);
+-        }
+-
+         return $catalogue;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+index 7910c2684a7de..305a63ed4cb14 100644
+--- a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
++++ b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+@@ -92,20 +92,43 @@ public function loadLanguage(TranslatorInterface $translator, $locale, $withDB =
+         if (!($translator instanceof BaseTranslatorComponent)) {
+             return;
+         }
++
+         $translator->addLoader('xlf', new XliffFileLoader());
++        if ($withDB) {
++            $translator->addLoader('db', new SqlTranslationLoader());
++            if (null !== $theme) {
++                $sqlThemeTranslationLoader = new SqlTranslationLoader();
++                $sqlThemeTranslationLoader->setTheme($theme);
++                $translator->addLoader('db.theme', $sqlThemeTranslationLoader);
++            }
++        }
+ 
+         // Load the theme translations catalogue
+-        $finder = Finder::create()
+-            ->files()
+-            ->name('*.' . $locale . '.xlf')
+-            ->notName($this->isAdminContext ? '^Shop*' : '^Admin*')
+-            ->in($this->getTranslationResourcesDirectories($theme));
++        $domains = [];
++        foreach ($this->getTranslationResourcesDirectories($theme) as $type => $directory) {
++            $finder = Finder::create()
++                ->files()
++                ->name('*.' . $locale . '.xlf')
++                ->notName($this->isAdminContext ? '^Shop*' : '^Admin*')
++                ->in($directory);
++
++            foreach ($finder as $file) {
++                list($domain, $locale, $format) = explode('.', $file->getBasename(), 3);
++                $translator->addResource($format, $file, $locale, $domain);
++                if ($withDB) {
++                    $domains[] = $domain;
++                    if ($type !== 'theme') {
++                        // Load core user-translated wordings
++                        $translator->addResource('db', $domain . '.' . $locale . '.db', $locale, $domain);
++                    }
++                }
++            }
++        }
+ 
+-        foreach ($finder as $file) {
+-            list($domain, $locale, $format) = explode('.', $file->getBasename(), 3);
+-            $translator->addResource($format, $file, $locale, $domain);
+-            if ($withDB) {
+-                $translator->addResource('db', $domain . '.' . $locale . '.db', $locale, $domain);
++        // Load theme user-translated wordings for core + theme wordings
++        if (!$this->isAdminContext) {
++            foreach ($domains as $domain) {
++                $translator->addResource('db.theme', $domain . '.' . $locale . '.db', $locale, $domain);
+             }
+         }
+ 
+@@ -114,14 +137,6 @@ public function loadLanguage(TranslatorInterface $translator, $locale, $withDB =
+         foreach ($activeModulesPaths as $activeModuleName => $activeModulePath) {
+             $this->loadModuleTranslations($translator, $activeModuleName, $activeModulePath, $locale, $withDB);
+         }
+-
+-        if ($withDB) {
+-            $sqlTranslationLoader = new SqlTranslationLoader();
+-            if (null !== $theme) {
+-                $sqlTranslationLoader->setTheme($theme);
+-            }
+-            $translator->addLoader('db', $sqlTranslationLoader);
+-        }
+     }
+ 
+     /**
+@@ -165,12 +180,12 @@ private function loadModuleTranslations(
+      */
+     protected function getTranslationResourcesDirectories(Theme $theme = null): array
+     {
+-        $locations = [self::TRANSLATION_DIR];
++        $locations = ['core' => self::TRANSLATION_DIR];
+ 
+         if (null !== $theme) {
+             $activeThemeLocation = $theme->getDirectory() . '/translations';
+             if (is_dir($activeThemeLocation)) {
+-                $locations[] = $activeThemeLocation;
++                $locations['theme'] = $activeThemeLocation;
+             }
+         }
+ 
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTest.php b/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTest.php
+index 3639860066260..105f00261a4ba 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTest.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTest.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\CoreCatalogueLayersProvider;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\FrontofficeProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ThemeProviderDefinition;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\ModuleCatalogueProviderFactory;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\ThemeCatalogueLayersProvider;
+ use PrestaShop\PrestaShop\Core\Translation\TranslationRepositoryInterface;
+ use Symfony\Component\Filesystem\Filesystem;
+@@ -135,6 +136,7 @@ public function testItExtractsDefaultCatalogueFromThemeFiles(): void
+         );
+ 
+         $provider = new ThemeCatalogueLayersProvider(
++            $this->createMock(ModuleCatalogueProviderFactory::class),
+             $coreFrontProvider,
+             $databaseTranslationLoader,
+             $this->themeExtractor,
+@@ -274,6 +276,7 @@ protected function getProvider(array $databaseContent = []): ThemeCatalogueLayer
+         );
+ 
+         return new ThemeCatalogueLayersProvider(
++            $this->createMock(ModuleCatalogueProviderFactory::class),
+             $coreFrontProvider,
+             $databaseTranslationLoader,
+             $this->themeExtractor,
+diff --git a/tests/Unit/Core/Translation/Builder/TranslationTreeBuilderTest.php b/tests/Unit/Core/Translation/Builder/TranslationTreeBuilderTest.php
+index dd3b44296a75e..969266d8f5d37 100644
+--- a/tests/Unit/Core/Translation/Builder/TranslationTreeBuilderTest.php
++++ b/tests/Unit/Core/Translation/Builder/TranslationTreeBuilderTest.php
+@@ -39,6 +39,7 @@
+ class TranslationTreeBuilderTest extends TestCase
+ {
+     private const LOCALE = 'en-US';
++    private const FRENCH_LOCALE = 'fr-FR';
+ 
+     private static $defaultTranslations = [
+         'AdminFirstDomain' => [
+@@ -146,7 +147,7 @@ public function testGetTreeContent(): void
+     {
+         $tree = $this->treeBuilder->getTree(
+             new BackofficeProviderDefinition(),
+-            self::LOCALE,
++            self::FRENCH_LOCALE,
+             []
+         );
+ 

@@ -1,0 +1,138 @@
+diff --git a/classes/tax/Tax.php b/classes/tax/Tax.php
+index 5996e8de0e5fa..42dd110330d96 100644
+--- a/classes/tax/Tax.php
++++ b/classes/tax/Tax.php
+@@ -86,15 +86,6 @@ public function historize()
+         return parent::update();
+     }
+ 
+-    public function toggleStatus()
+-    {
+-        if (parent::toggleStatus()) {
+-            return $this->_onStatusChange();
+-        }
+-
+-        return false;
+-    }
+-
+     public function update($null_values = false)
+     {
+         if (!$this->deleted && $this->isUsed()) {
+@@ -110,21 +101,12 @@ public function update($null_values = false)
+ 
+             return $res;
+         } elseif (parent::update($null_values)) {
+-            return $this->_onStatusChange();
++            return true;
+         }
+ 
+         return false;
+     }
+ 
+-    protected function _onStatusChange()
+-    {
+-        if (!$this->active) {
+-            return TaxRule::deleteTaxRuleByIdTax($this->id);
+-        }
+-
+-        return true;
+-    }
+-
+     /**
+      * Returns true if the tax is used in an order details.
+      *
+diff --git a/classes/tax/TaxRulesGroup.php b/classes/tax/TaxRulesGroup.php
+index 31c5d9066b287..ad2373db6594c 100644
+--- a/classes/tax/TaxRulesGroup.php
++++ b/classes/tax/TaxRulesGroup.php
+@@ -195,11 +195,12 @@ private static function getTaxRulesGroupsData($onlyActive = true, bool $includeR
+                 INNER JOIN ' . _DB_PREFIX_ . 'tax_rule tr
+                 ON g.id_tax_rules_group = tr.id_tax_rules_group
+                 INNER JOIN ' . _DB_PREFIX_ . 'tax t
+-                ON tr.id_tax = t.id_tax
++                ON (tr.id_tax = t.id_tax AND t.active = 1)
+             ';
+         }
+ 
+         $sql .= Shop::addSqlAssociation('tax_rules_group', 'g') . ' WHERE g.deleted = 0'
++            . ($onlyActive ? ' AND g.`active` = 1' : '')
+             . ($onlyActive ? ' AND g.`active` = 1' : '')
+             . ' ORDER BY name ASC';
+ 
+diff --git a/controllers/admin/AdminTaxRulesGroupController.php b/controllers/admin/AdminTaxRulesGroupController.php
+index de3fd93fec09d..33ac16e80f288 100644
+--- a/controllers/admin/AdminTaxRulesGroupController.php
++++ b/controllers/admin/AdminTaxRulesGroupController.php
+@@ -153,7 +153,7 @@ public function initRulesList($id_group)
+ 			LEFT JOIN `' . _DB_PREFIX_ . 'state` s
+ 				ON (a.`id_state` = s.`id_state`)
+ 			LEFT JOIN `' . _DB_PREFIX_ . 'tax` t
+-				ON (a.`id_tax` = t.`id_tax`)';
++				ON (a.`id_tax` = t.`id_tax` AND t.active = 1)';
+         $this->_where = 'AND `id_tax_rules_group` = ' . (int) $id_group;
+         $this->_use_found_rows = false;
+ 
+diff --git a/src/Adapter/Presenter/Product/ProductLazyArray.php b/src/Adapter/Presenter/Product/ProductLazyArray.php
+index 31f6d155964e2..ea0059062c01f 100644
+--- a/src/Adapter/Presenter/Product/ProductLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductLazyArray.php
+@@ -490,7 +490,7 @@ public function getFlags()
+         if ($this->product['new']) {
+             $flags['new'] = [
+                 'type' => 'new',
+-                'label' => $this->translator->trans('New', [], 'Shop.Theme.Catalog'),
++                'label' => $this->translator->trans('New', [], 'Shop.Theme.Global'),
+             ];
+         }
+ 
+diff --git a/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php b/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
+index 00b8b4bf183da..216a7e44709be 100644
+--- a/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
++++ b/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
+@@ -54,9 +54,9 @@ public function __construct(
+     public function getChoices()
+     {
+         return [
+-            $this->translator->trans('New', [], 'Shop.Theme.Catalog') => ProductCondition::NEW,
+-            $this->translator->trans('Used', [], 'Shop.Theme.Catalog') => ProductCondition::USED,
+-            $this->translator->trans('Refurbished', [], 'Shop.Theme.Catalog') => ProductCondition::REFURBISHED,
++            $this->translator->trans('New', [], 'Admin.Catalog.Feature') => ProductCondition::NEW,
++            $this->translator->trans('Used', [], 'Admin.Catalog.Feature') => ProductCondition::USED,
++            $this->translator->trans('Refurbished', [], 'Admin.Catalog.Feature') => ProductCondition::REFURBISHED,
+         ];
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Product/ProductOptions.php b/src/PrestaShopBundle/Form/Admin/Product/ProductOptions.php
+index fe35a0d9943be..138dedd4a20dc 100644
+--- a/src/PrestaShopBundle/Form/Admin/Product/ProductOptions.php
++++ b/src/PrestaShopBundle/Form/Admin/Product/ProductOptions.php
+@@ -199,9 +199,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('condition', FormType\ChoiceType::class, [
+                 'choices' => [
+-                    $this->translator->trans('New', [], 'Admin.Global') => 'new',
+-                    $this->translator->trans('Used', [], 'Shop.Theme.Catalog') => 'used',
+-                    $this->translator->trans('Refurbished', [], 'Shop.Theme.Catalog') => 'refurbished',
++                    $this->translator->trans('New', [], 'Admin.Catalog.Feature') => 'new',
++                    $this->translator->trans('Used', [], 'Admin.Catalog.Feature') => 'used',
++                    $this->translator->trans('Refurbished', [], 'Admin.Catalog.Feature') => 'refurbished',
+                 ],
+                 'attr' => [
+                     'class' => 'custom-select',
+diff --git a/tests/UI/campaigns/functional/BO/11_international/03_taxes/01_taxes/04_taxOptionsForm.ts b/tests/UI/campaigns/functional/BO/11_international/03_taxes/01_taxes/04_taxOptionsForm.ts
+index 0d5bcf76b9358..69e115fbce868 100644
+--- a/tests/UI/campaigns/functional/BO/11_international/03_taxes/01_taxes/04_taxOptionsForm.ts
++++ b/tests/UI/campaigns/functional/BO/11_international/03_taxes/01_taxes/04_taxOptionsForm.ts
+@@ -62,12 +62,6 @@ describe('BO - International - Taxes : Edit Tax options with all EcoTax values',
+       \tEcotax: '${taxOption.ecoTax}'`, async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `updateForm${index + 1}`, baseContext);
+ 
+-        // @todo : https://github.com/PrestaShop/PrestaShop/issues/32914
+-        if (taxOption.ecoTax === 'FR Taux standard (20%)') {
+-          this.skip();
+-          return;
+-        }
+-
+         const textResult = await taxesPage.updateTaxOption(page, taxOption);
+         await expect(textResult).to.be.equal('Update successful');
+       });

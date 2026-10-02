@@ -1,0 +1,1619 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/country/index.ts b/admin-dev/themes/new-theme/js/pages/country/index.ts
+index 85daee7531cb7..c7021f6b08b8b 100644
+--- a/admin-dev/themes/new-theme/js/pages/country/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/country/index.ts
+@@ -15,5 +15,6 @@ $(() => {
+   countryGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitRowActionExtension());
+   countryGrid.addExtension(new window.prestashop.component.GridExtensions.LinkRowActionExtension());
+   countryGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
+-  countryGrid.addExtension(new window.prestashop.component.GridExtensions.ColumnTogglingExtension());
++  countryGrid.addExtension(new window.prestashop.component.GridExtensions.AsyncToggleColumnExtension());
++  countryGrid.addExtension(new window.prestashop.component.GridExtensions.ModalFormSubmitExtension());
+ });
+diff --git a/src/Adapter/Country/CommandHandler/BulkToggleCountriesStatusHandler.php b/src/Adapter/Country/CommandHandler/BulkToggleCountriesStatusHandler.php
+new file mode 100644
+index 0000000000000..f8f4d0344772a
+--- /dev/null
++++ b/src/Adapter/Country/CommandHandler/BulkToggleCountriesStatusHandler.php
+@@ -0,0 +1,68 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\AbstractBulkCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkToggleCountriesStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler\BulkToggleCountriesStatusHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\BulkCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++
++#[AsCommandHandler]
++final class BulkToggleCountriesStatusHandler extends AbstractBulkCommandHandler implements BulkToggleCountriesStatusHandlerInterface
++{
++    public function __construct(
++        private readonly CountryRepository $countryRepository,
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function handle(BulkToggleCountriesStatusCommand $command): void
++    {
++        $this->handleBulkAction($command->getCountryIds(), CountryException::class, $command);
++    }
++
++    /**
++     * @param CountryId $id
++     * @param BulkToggleCountriesStatusCommand $command
++     */
++    protected function handleSingleAction(mixed $id, mixed $command): void
++    {
++        $country = $this->countryRepository->get($id);
++        $country->active = $command->getExpectedStatus();
++
++        $this->countryRepository->update($country);
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    protected function buildBulkException(array $caughtExceptions): BulkCommandExceptionInterface
++    {
++        return new BulkCountryException(
++            $caughtExceptions,
++            'Errors occurred during country bulk change status action',
++            BulkCountryException::FAILED_BULK_UPDATE_STATUS
++        );
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    protected function supports($id): bool
++    {
++        return $id instanceof CountryId;
++    }
++}
+diff --git a/src/Adapter/Country/CommandHandler/BulkUpdateCountryZoneHandler.php b/src/Adapter/Country/CommandHandler/BulkUpdateCountryZoneHandler.php
+new file mode 100644
+index 0000000000000..cf4acc49c101d
+--- /dev/null
++++ b/src/Adapter/Country/CommandHandler/BulkUpdateCountryZoneHandler.php
+@@ -0,0 +1,71 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Adapter\Zone\Repository\ZoneRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\AbstractBulkCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkUpdateCountryZoneCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler\BulkUpdateCountryZoneHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\BulkCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use PrestaShop\PrestaShop\Core\Domain\Zone\ValueObject\ZoneId;
++
++#[AsCommandHandler]
++final class BulkUpdateCountryZoneHandler extends AbstractBulkCommandHandler implements BulkUpdateCountryZoneHandlerInterface
++{
++    public function __construct(
++        private readonly CountryRepository $countryRepository,
++        private readonly ZoneRepository $zoneRepository,
++    ) {
++    }
++
++    public function handle(BulkUpdateCountryZoneCommand $command): void
++    {
++        $zoneId = $command->getNewZoneId();
++        $this->zoneRepository->assertZoneExists(new ZoneId($zoneId));
++
++        $this->handleBulkAction($command->getCountryIds(), CountryException::class, $command);
++    }
++
++    /**
++     * @param CountryId $id
++     * @param BulkUpdateCountryZoneCommand $command
++     */
++    protected function handleSingleAction(mixed $id, mixed $command): void
++    {
++        $country = $this->countryRepository->get($id);
++        $country->id_zone = $command->getNewZoneId();
++
++        $this->countryRepository->update($country);
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    protected function buildBulkException(array $caughtExceptions): BulkCommandExceptionInterface
++    {
++        return new BulkCountryException(
++            $caughtExceptions,
++            'Errors occurred during country bulk update zone action',
++            BulkCountryException::FAILED_BULK_UPDATE_ZONE
++        );
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    protected function supports($id): bool
++    {
++        return $id instanceof CountryId;
++    }
++}
+diff --git a/src/Adapter/Country/CommandHandler/ToggleCountryStatusHandler.php b/src/Adapter/Country/CommandHandler/ToggleCountryStatusHandler.php
+new file mode 100644
+index 0000000000000..886c95c90c509
+--- /dev/null
++++ b/src/Adapter/Country/CommandHandler/ToggleCountryStatusHandler.php
+@@ -0,0 +1,41 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\ToggleCountryStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler\ToggleCountryStatusHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotEditCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotToggleCountryStatusException;
++
++#[AsCommandHandler]
++final class ToggleCountryStatusHandler implements ToggleCountryStatusHandlerInterface
++{
++    public function __construct(
++        private readonly CountryRepository $countryRepository
++    ) {
++    }
++
++    public function handle(ToggleCountryStatusCommand $command): void
++    {
++        $country = $this->countryRepository->get($command->getCountryId());
++        $country->active = !$country->active;
++
++        try {
++            $this->countryRepository->update($country);
++        } catch (CannotEditCountryException $e) {
++            throw new CannotToggleCountryStatusException(
++                sprintf('Failed to toggle status for country with id "%d"', $command->getCountryId()->getValue()),
++                0,
++                $e
++            );
++        }
++    }
++}
+diff --git a/src/Adapter/Country/Repository/CountryRepository.php b/src/Adapter/Country/Repository/CountryRepository.php
+index 7e6b3e63d426b..f1f825c4959c9 100644
+--- a/src/Adapter/Country/Repository/CountryRepository.php
++++ b/src/Adapter/Country/Repository/CountryRepository.php
+@@ -21,16 +21,11 @@
+ /**
+  * Provides methods to access data storage of Country
+  */
+-class CountryRepository extends AbstractObjectModelRepository
++final class CountryRepository extends AbstractObjectModelRepository implements CountryRepositoryInterface
+ {
+-    /**
+-     * @var CountryValidator
+-     */
+-    private $countryValidator;
+-
+-    public function __construct(CountryValidator $countryValidator)
+-    {
+-        $this->countryValidator = $countryValidator;
++    public function __construct(
++        private readonly CountryValidator $countryValidator,
++    ) {
+     }
+ 
+     /**
+diff --git a/src/Adapter/Country/Repository/CountryRepositoryInterface.php b/src/Adapter/Country/Repository/CountryRepositoryInterface.php
+new file mode 100644
+index 0000000000000..189dca17f234f
+--- /dev/null
++++ b/src/Adapter/Country/Repository/CountryRepositoryInterface.php
+@@ -0,0 +1,25 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Country\Repository;
++
++use Country;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++
++interface CountryRepositoryInterface
++{
++    public function assertCountryExists(CountryId $countryId): void;
++
++    public function get(CountryId $countryId): Country;
++
++    public function add(Country $country): Country;
++
++    public function update(Country $country): Country;
++
++    public function delete(CountryId $countryId): void;
++}
+diff --git a/src/Adapter/Zone/Repository/ZoneRepository.php b/src/Adapter/Zone/Repository/ZoneRepository.php
+index 484b203d93add..a4d56d859cabf 100644
+--- a/src/Adapter/Zone/Repository/ZoneRepository.php
++++ b/src/Adapter/Zone/Repository/ZoneRepository.php
+@@ -17,7 +17,7 @@
+ /**
+  * Provides methods to access data storage of Zone
+  */
+-class ZoneRepository extends AbstractObjectModelRepository
++final class ZoneRepository extends AbstractObjectModelRepository
+ {
+     public function __construct(
+         private readonly Connection $connection,
+@@ -25,6 +25,14 @@ public function __construct(
+     ) {
+     }
+ 
++    /**
++     * @throws ZoneNotFoundException
++     */
++    public function assertZoneExists(ZoneId $zoneId): void
++    {
++        $this->assertObjectModelExists($zoneId->getValue(), 'zone', ZoneNotFoundException::class);
++    }
++
+     /**
+      * @throws ZoneNotFoundException
+      */
+diff --git a/src/Core/Context/CountryContextBuilder.php b/src/Core/Context/CountryContextBuilder.php
+index b8ee8cf16f6fa..c7796a57b29fe 100644
+--- a/src/Core/Context/CountryContextBuilder.php
++++ b/src/Core/Context/CountryContextBuilder.php
+@@ -10,7 +10,7 @@
+ 
+ use Country as LegacyCountry;
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+-use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
+ use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ 
+@@ -23,7 +23,7 @@ class CountryContextBuilder implements LegacyContextBuilderInterface
+     private ?LegacyCountry $legacyCountry = null;
+ 
+     public function __construct(
+-        private readonly CountryRepository $countryRepository,
++        private readonly CountryRepositoryInterface $countryRepository,
+         private readonly ContextStateManager $contextStateManager,
+         private readonly LanguageContext $languageContext,
+     ) {
+diff --git a/src/Core/Domain/Country/Command/BulkToggleCountriesStatusCommand.php b/src/Core/Domain/Country/Command/BulkToggleCountriesStatusCommand.php
+new file mode 100644
+index 0000000000000..14361fda8cc07
+--- /dev/null
++++ b/src/Core/Domain/Country/Command/BulkToggleCountriesStatusCommand.php
+@@ -0,0 +1,54 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++
++/**
++ * Toggles countries status on bulk action.
++ */
++final class BulkToggleCountriesStatusCommand
++{
++    private bool $expectedStatus;
++
++    /** @var array<int, CountryId> */
++    private array $countryIds = [];
++
++    /**
++     * @param array<int, int> $countryIds
++     */
++    public function __construct(bool $expectedStatus, array $countryIds)
++    {
++        $this->setCountryIds($countryIds);
++        $this->expectedStatus = $expectedStatus;
++    }
++
++    public function getExpectedStatus(): bool
++    {
++        return $this->expectedStatus;
++    }
++
++    /**
++     * @return array<int, CountryId>
++     */
++    public function getCountryIds(): array
++    {
++        return $this->countryIds;
++    }
++
++    /**
++     * @param array<int, int> $countryIds
++     */
++    private function setCountryIds(array $countryIds): void
++    {
++        foreach ($countryIds as $countryId) {
++            $this->countryIds[] = new CountryId((int) $countryId);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Country/Command/BulkUpdateCountryZoneCommand.php b/src/Core/Domain/Country/Command/BulkUpdateCountryZoneCommand.php
+new file mode 100644
+index 0000000000000..a9c09dbf61f06
+--- /dev/null
++++ b/src/Core/Domain/Country/Command/BulkUpdateCountryZoneCommand.php
+@@ -0,0 +1,63 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++
++/**
++ * Updates zone for given countries.
++ */
++final class BulkUpdateCountryZoneCommand
++{
++    /** @var array<int, CountryId> */
++    private array $countryIds = [];
++
++    private int $newZoneId;
++
++    /**
++     * @param int[] $countryIds
++     */
++    public function __construct(array $countryIds, int $newZoneId)
++    {
++        if ($newZoneId <= 0) {
++            throw new CountryException(sprintf('Zone Id must be integer greater than 0, but %s given.', var_export($newZoneId, true)));
++        }
++
++        $this->newZoneId = $newZoneId;
++        $this->setCountryIds($countryIds);
++    }
++
++    /**
++     * @return array<int, CountryId>
++     */
++    public function getCountryIds(): array
++    {
++        return $this->countryIds;
++    }
++
++    public function getNewZoneId(): int
++    {
++        return $this->newZoneId;
++    }
++
++    /**
++     * @param int[] $countryIds
++     */
++    private function setCountryIds(array $countryIds): void
++    {
++        if (empty($countryIds)) {
++            throw new CountryException('You must select at least one country.');
++        }
++
++        foreach ($countryIds as $countryId) {
++            $this->countryIds[] = new CountryId((int) $countryId);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Country/Command/ToggleCountryStatusCommand.php b/src/Core/Domain/Country/Command/ToggleCountryStatusCommand.php
+new file mode 100644
+index 0000000000000..ca84cd8c4a327
+--- /dev/null
++++ b/src/Core/Domain/Country/Command/ToggleCountryStatusCommand.php
+@@ -0,0 +1,29 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++
++/**
++ * Toggles country status.
++ */
++final class ToggleCountryStatusCommand
++{
++    private CountryId $countryId;
++
++    public function __construct(int $countryId)
++    {
++        $this->countryId = new CountryId($countryId);
++    }
++
++    public function getCountryId(): CountryId
++    {
++        return $this->countryId;
++    }
++}
+diff --git a/src/Core/Domain/Country/CommandHandler/BulkToggleCountriesStatusHandlerInterface.php b/src/Core/Domain/Country/CommandHandler/BulkToggleCountriesStatusHandlerInterface.php
+new file mode 100644
+index 0000000000000..e23617467a5c5
+--- /dev/null
++++ b/src/Core/Domain/Country/CommandHandler/BulkToggleCountriesStatusHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkToggleCountriesStatusCommand;
++
++interface BulkToggleCountriesStatusHandlerInterface
++{
++    public function handle(BulkToggleCountriesStatusCommand $command): void;
++}
+diff --git a/src/Core/Domain/Country/CommandHandler/BulkUpdateCountryZoneHandlerInterface.php b/src/Core/Domain/Country/CommandHandler/BulkUpdateCountryZoneHandlerInterface.php
+new file mode 100644
+index 0000000000000..806e210828691
+--- /dev/null
++++ b/src/Core/Domain/Country/CommandHandler/BulkUpdateCountryZoneHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkUpdateCountryZoneCommand;
++
++interface BulkUpdateCountryZoneHandlerInterface
++{
++    public function handle(BulkUpdateCountryZoneCommand $command): void;
++}
+diff --git a/src/Core/Domain/Country/CommandHandler/ToggleCountryStatusHandlerInterface.php b/src/Core/Domain/Country/CommandHandler/ToggleCountryStatusHandlerInterface.php
+new file mode 100644
+index 0000000000000..3e112697bbb7f
+--- /dev/null
++++ b/src/Core/Domain/Country/CommandHandler/ToggleCountryStatusHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\ToggleCountryStatusCommand;
++
++interface ToggleCountryStatusHandlerInterface
++{
++    public function handle(ToggleCountryStatusCommand $command): void;
++}
+diff --git a/src/Core/Domain/Country/Exception/BulkCountryException.php b/src/Core/Domain/Country/Exception/BulkCountryException.php
+new file mode 100644
+index 0000000000000..d3b31f3010dcd
+--- /dev/null
++++ b/src/Core/Domain/Country/Exception/BulkCountryException.php
+@@ -0,0 +1,41 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use Throwable;
++
++final class BulkCountryException extends CountryException implements BulkCommandExceptionInterface
++{
++    public const FAILED_BULK_UPDATE_STATUS = 1;
++    public const FAILED_BULK_UPDATE_ZONE = 2;
++
++    /**
++     * @param Throwable[] $exceptions
++     * @param string $message
++     * @param int $code
++     * @param Throwable|null $previous
++     */
++    public function __construct(
++        private readonly array $exceptions,
++        string $message = 'Errors occurred during country bulk action',
++        int $code = 0,
++        ?Throwable $previous = null
++    ) {
++        parent::__construct($message, $code, $previous);
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getExceptions(): array
++    {
++        return $this->exceptions;
++    }
++}
+diff --git a/src/Core/Domain/Country/Exception/CannotToggleCountryStatusException.php b/src/Core/Domain/Country/Exception/CannotToggleCountryStatusException.php
+new file mode 100644
+index 0000000000000..1b68a97d00c68
+--- /dev/null
++++ b/src/Core/Domain/Country/Exception/CannotToggleCountryStatusException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Exception;
++
++final class CannotToggleCountryStatusException extends CountryException
++{
++}
+diff --git a/src/Core/Grid/Definition/Factory/CountryGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/CountryGridDefinitionFactory.php
+index d696a6553df4d..0deabfe43be5d 100644
+--- a/src/Core/Grid/Definition/Factory/CountryGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/CountryGridDefinitionFactory.php
+@@ -10,6 +10,8 @@
+ 
+ use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\BulkActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\BulkActionCollectionInterface;
++use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\Type\ModalFormSubmitBulkAction;
++use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\Type\SubmitBulkAction;
+ use PrestaShop\PrestaShop\Core\Grid\Action\GridActionCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Action\GridActionCollectionInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Action\Row\RowActionCollection;
+@@ -20,6 +22,7 @@
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\BulkActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\DataColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ToggleColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollectionInterface;
+@@ -27,7 +30,7 @@
+ use PrestaShopBundle\Form\Admin\Type\YesAndNoChoiceType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ 
+-class CountryGridDefinitionFactory extends AbstractGridDefinitionFactory
++final class CountryGridDefinitionFactory extends AbstractGridDefinitionFactory
+ {
+     use BulkDeleteActionTrait;
+     use DeleteActionTrait;
+@@ -97,12 +100,15 @@ protected function getColumns(): ColumnCollectionInterface
+                         'field' => 'zone_name',
+                     ])
+             )
+-            // todo: change it to ToggleColumn when toggle status route is created
+             ->add(
+-                (new DataColumn('active'))
++                (new ToggleColumn('active'))
+                     ->setName($this->trans('Enabled', [], 'Admin.Global'))
+                     ->setOptions([
+                         'field' => 'active',
++                        'primary_field' => 'id_country',
++                        'route' => 'admin_countries_toggle_status',
++                        'route_param_name' => 'countryId',
++                        'sortable' => false,
+                     ])
+             )
+             ->add(
+@@ -248,7 +254,28 @@ protected function getGridActions(): GridActionCollectionInterface
+      */
+     protected function getBulkActions(): BulkActionCollectionInterface
+     {
+-        // todo: need to implement bulk actions
+-        return new BulkActionCollection();
++        return (new BulkActionCollection())
++            ->add(
++                (new SubmitBulkAction('enable_selection'))
++                    ->setName($this->trans('Enable selection', [], 'Admin.Actions'))
++                    ->setOptions([
++                        'submit_route' => 'admin_countries_bulk_enable_status',
++                    ])
++            )
++            ->add(
++                (new SubmitBulkAction('disable_selection'))
++                    ->setName($this->trans('Disable selection', [], 'Admin.Actions'))
++                    ->setOptions([
++                        'submit_route' => 'admin_countries_bulk_disable_status',
++                    ])
++            )
++            ->add(
++                (new ModalFormSubmitBulkAction('assign_zone'))
++                    ->setName($this->trans('Assign to a new zone', [], 'Admin.International.Feature'))
++                    ->setOptions([
++                        'submit_route' => 'admin_countries_bulk_update_zone',
++                        'modal_id' => 'changeCountriesZoneModal',
++                    ])
++            );
+     }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+index 6965625ef46e1..d8aa88aa4fd96 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+@@ -9,23 +9,32 @@
+ namespace PrestaShopBundle\Controller\Admin\Improve\International;
+ 
+ use Exception;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkToggleCountriesStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkUpdateCountryZoneCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\DeleteCountryCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\ToggleCountryStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\BulkCountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotEditCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotToggleCountryStatusException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\DeleteCountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Query\GetCountryForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Country\QueryResult\CountryForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Zone\Exception\ZoneException;
++use PrestaShop\PrestaShop\Core\Domain\Zone\Exception\ZoneNotFoundException;
+ use PrestaShop\PrestaShop\Core\Form\FormHandlerInterface as ConfigurationFormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
+ use PrestaShop\PrestaShop\Core\Search\Filters\CountryFilters;
+ use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
++use PrestaShopBundle\Form\Admin\Improve\International\Locations\ChangeCountriesZoneType;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
+ use PrestaShopBundle\Security\Attribute\DemoRestricted;
+ use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\HttpFoundation\JsonResponse;
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+@@ -54,11 +63,13 @@ public function indexAction(
+     ): Response {
+         $countryGrid = $countryGridFactory->getGrid($filters);
+         $countryOptionsForm = $countryOptionsFormHandler->getForm();
++        $changeCountriesZoneForm = $this->createForm(ChangeCountriesZoneType::class);
+ 
+         return $this->render('@PrestaShop/Admin/Improve/International/Country/index.html.twig', [
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+             'countryGrid' => $this->presentGrid($countryGrid),
+             'countryOptionsForm' => $countryOptionsForm->createView(),
++            'changeCountriesZoneForm' => $changeCountriesZoneForm->createView(),
+             'enableSidebar' => true,
+             'layoutHeaderToolbarBtn' => $this->getCountryToolbarButtons(),
+         ]);
+@@ -197,6 +208,92 @@ public function deleteAction(int $countryId): RedirectResponse
+         return $this->redirectToRoute('admin_countries_index');
+     }
+ 
++    #[DemoRestricted(redirectRoute: 'admin_countries_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_countries_index')]
++    public function toggleStatusAction(int $countryId): JsonResponse
++    {
++        try {
++            $this->dispatchCommand(new ToggleCountryStatusCommand($countryId));
++            $response = [
++                'status' => true,
++                'message' => $this->trans(
++                    'The status has been successfully updated.',
++                    [],
++                    'Admin.Notifications.Success'
++                ),
++            ];
++        } catch (CountryException $e) {
++            $response = [
++                'status' => false,
++                'message' => $this->getErrorMessageForException($e, $this->getErrorMessages($e)),
++            ];
++        }
++
++        return $this->json($response);
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_countries_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_countries_index')]
++    public function bulkEnableAction(Request $request): RedirectResponse
++    {
++        $countryIds = $this->getBulkCountriesFromRequest($request);
++
++        try {
++            $this->dispatchCommand(new BulkToggleCountriesStatusCommand(true, $countryIds));
++            $this->addFlash(
++                'success',
++                $this->trans('The status has been successfully updated.', [], 'Admin.Notifications.Success')
++            );
++        } catch (CountryException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
++        }
++
++        return $this->redirectToRoute('admin_countries_index');
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_countries_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_countries_index')]
++    public function bulkDisableAction(Request $request): RedirectResponse
++    {
++        $countryIds = $this->getBulkCountriesFromRequest($request);
++
++        try {
++            $this->dispatchCommand(new BulkToggleCountriesStatusCommand(false, $countryIds));
++            $this->addFlash(
++                'success',
++                $this->trans('The status has been successfully updated.', [], 'Admin.Notifications.Success')
++            );
++        } catch (CountryException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
++        }
++
++        return $this->redirectToRoute('admin_countries_index');
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_countries_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_countries_index')]
++    public function bulkUpdateZoneAction(Request $request): RedirectResponse
++    {
++        $changeCountriesZoneForm = $this->createForm(ChangeCountriesZoneType::class);
++        $changeCountriesZoneForm->handleRequest($request);
++
++        $data = $changeCountriesZoneForm->getData();
++
++        try {
++            $this->dispatchCommand(
++                new BulkUpdateCountryZoneCommand($data['country_ids'], (int) $data['new_zone_id'])
++            );
++
++            $this->addFlash('success', $this->trans('Successful update', [], 'Admin.Notifications.Success'));
++        } catch (CountryException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
++        }
++
++        return $this->redirectToRoute('admin_countries_index');
++    }
++
+     /**
+      * @return array
+      */
+@@ -221,6 +318,23 @@ protected function getCountryToolbarButtons(): array
+     protected function getErrorMessages(Exception $e): array
+     {
+         return [
++            BulkCountryException::class => [
++                BulkCountryException::FAILED_BULK_UPDATE_STATUS => $this->trans(
++                    'An error occurred when updating the status for one or several countries.',
++                    [],
++                    'Admin.International.Feature'
++                ),
++                BulkCountryException::FAILED_BULK_UPDATE_ZONE => $this->trans(
++                    'An error occurred when updating the zone for one or several countries.',
++                    [],
++                    'Admin.International.Feature'
++                ),
++            ],
++            CountryException::class => $this->trans(
++                'An unexpected error occurred.',
++                [],
++                'Admin.Notifications.Error'
++            ),
+             CountryNotFoundException::class => $this->trans(
+                 'This country does not exist.',
+                 [],
+@@ -238,6 +352,11 @@ protected function getErrorMessages(Exception $e): array
+                     'Admin.International.Feature'
+                 ),
+             ],
++            CannotToggleCountryStatusException::class => $this->trans(
++                'Failed to update country status.',
++                [],
++                'Admin.International.Feature'
++            ),
+             CountryConstraintException::class => $this->trans(
+                 'Country contains invalid field values.',
+                 [],
+@@ -248,6 +367,24 @@ protected function getErrorMessages(Exception $e): array
+                 [],
+                 'Admin.International.Feature'
+             ),
++            ZoneNotFoundException::class => $this->trans(
++                'The object cannot be loaded (or found).',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            ZoneException::class => $this->trans(
++                'The object cannot be loaded (the identifier is missing or invalid)',
++                [],
++                'Admin.Notifications.Error'
++            ),
+         ];
+     }
++
++    /**
++     * @return int[]
++     */
++    private function getBulkCountriesFromRequest(Request $request): array
++    {
++        return array_map('intval', $request->request->all('country_bulk'));
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/ChangeCountriesZoneType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/ChangeCountriesZoneType.php
+new file mode 100644
+index 0000000000000..a936a4ef9da13
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/ChangeCountriesZoneType.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Locations;
++
++use PrestaShop\PrestaShop\Core\Form\ConfigurableFormChoiceProviderInterface;
++use Symfony\Component\Form\AbstractType;
++use Symfony\Component\Form\CallbackTransformer;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\CollectionType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\FormBuilderInterface;
++
++final class ChangeCountriesZoneType extends AbstractType
++{
++    public function __construct(private readonly ConfigurableFormChoiceProviderInterface $zoneChoiceProvider)
++    {
++    }
++
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder
++            ->add('new_zone_id', ChoiceType::class, [
++                'choices' => $this->zoneChoiceProvider->getChoices([]),
++                'translation_domain' => false,
++            ])
++            ->add('country_ids', CollectionType::class, [
++                'allow_add' => true,
++                'entry_type' => HiddenType::class,
++                'label' => false,
++            ])
++        ;
++
++        $builder->get('country_ids')
++            ->addModelTransformer(new CallbackTransformer(
++                static function ($countryIds) {
++                    return $countryIds;
++                },
++                static function (array $countryIds) {
++                    return array_map(static function ($countryId) {
++                        return (int) $countryId;
++                    }, $countryIds);
++                }
++            ))
++        ;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
+index 8df19d7c498e7..8eac4bb583fc4 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
+@@ -62,3 +62,43 @@ admin_countries_save_options:
+     _legacy_controller: AdminCountries
+     _legacy_link: AdminCountries:submitOptionscountry
+     _legacy_feature_flag: country
++
++admin_countries_bulk_enable_status:
++  path: /bulk-status-enable
++  methods: [ POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Improve\International\CountryController::bulkEnableAction'
++    _legacy_controller: AdminCountries
++    _legacy_link: AdminCountries:submitBulkenableSelectioncountry
++    _legacy_feature_flag: country
++
++admin_countries_bulk_disable_status:
++  path: /bulk-status-disable
++  methods: [ POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Improve\International\CountryController::bulkDisableAction'
++    _legacy_controller: AdminCountries
++    _legacy_link: AdminCountries:submitBulkdisableSelectioncountry
++    _legacy_feature_flag: country
++
++admin_countries_bulk_update_zone:
++  path: /bulk-update-zone
++  methods: [ POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Improve\International\CountryController::bulkUpdateZoneAction'
++    _legacy_controller: AdminCountries
++    _legacy_link: AdminCountries:submitBulkAffectZonecountry
++    _legacy_feature_flag: country
++
++admin_countries_toggle_status:
++  path: /{countryId}/toggle-status
++  methods: [ POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Improve\International\CountryController::toggleStatusAction'
++    _legacy_controller: AdminCountries
++    _legacy_link: AdminCountries:statuscountry
++    _legacy_feature_flag: country
++    _legacy_parameters:
++      id_country: countryId
++  requirements:
++    countryId: \d+
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/country.yml b/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
+index bd7be5588ae8b..1f2d0f159cbf6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
+@@ -22,6 +22,9 @@ services:
+   PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository:
+     autowire: true
+ 
++  PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepositoryInterface:
++    alias: PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository
++
+   PrestaShop\PrestaShop\Adapter\Country\CommandHandler\AddCountryHandler:
+     public: true
+     autowire: true
+@@ -32,6 +35,21 @@ services:
+     autowire: true
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Country\CommandHandler\ToggleCountryStatusHandler:
++    public: false
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Country\CommandHandler\BulkToggleCountriesStatusHandler:
++    public: false
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Country\CommandHandler\BulkUpdateCountryZoneHandler:
++    public: false
++    autowire: true
++    autoconfigure: true
++
+   PrestaShop\PrestaShop\Adapter\Country\CommandHandler\EditCountryHandler:
+     public: false
+     autowire: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index db408d4ffe811..f3aaf3a0af5bb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -605,6 +605,10 @@ services:
+     arguments:
+       $zoneChoiceProvider: '@prestashop.core.form.choice_provider.zone_by_id'
+ 
++  PrestaShopBundle\Form\Admin\Improve\International\Locations\ChangeCountriesZoneType:
++    arguments:
++      $zoneChoiceProvider: '@prestashop.core.form.choice_provider.zone_by_id'
++
+   PrestaShopBundle\Form\Admin\Sell\Product\EventListener\SpecificPriceCombinationListener:
+     arguments:
+       $combinationRepository: '@PrestaShop\PrestaShop\Adapter\Product\Combination\Repository\CombinationRepository'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/change_countries_zone_modal.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/change_countries_zone_modal.html.twig
+new file mode 100644
+index 0000000000000..c63fabef9671d
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/change_countries_zone_modal.html.twig
+@@ -0,0 +1,36 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% embed '@PrestaShop/Admin/Helpers/bootstrap_popup.html.twig' with {
++  id: 'changeCountriesZoneModal',
++  title: 'Choose a zone'|trans({}, 'Admin.International.Feature'),
++  closable: true,
++  actions: [{
++    type: 'button',
++    label: 'Update zone'|trans({}, 'Admin.International.Feature'),
++    class: 'btn btn-primary btn-lg js-submit-modal-form-btn',
++  }],
++} %}
++  {% block content %}
++    <div class="modal-body">
++      {{ form_start(changeCountriesZoneForm, {
++        action: path('admin_countries_bulk_update_zone'),
++        attr: {
++          'data-bulk-inputs-id': changeCountriesZoneForm.country_ids.vars.id
++        }
++      }) }}
++
++      <div class="form-group mb-0">
++        {{ form_widget(changeCountriesZoneForm.new_zone_id) }}
++      </div>
++
++      <div class="d-none">
++        {{ form_widget(changeCountriesZoneForm.country_ids) }}
++      </div>
++
++      {{ form_end(changeCountriesZoneForm) }}
++    </div>
++  {% endblock %}
++{% endembed %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
+index c87261e3cf4dd..2a1bb0d55a987 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
+@@ -5,6 +5,8 @@
+ {% extends '@PrestaShop/Admin/layout.html.twig' %}
+ 
+ {% block content %}
++  {{ include('@PrestaShop/Admin/Improve/International/Country/Blocks/change_countries_zone_modal.html.twig') }}
++
+   {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {grid: countryGrid}) }}
+ 
+   {{ form_start(countryOptionsForm, {attr: {class: 'form', id: 'configuration_country_options_form'}, action: path('admin_countries_save_options')}) }}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
+index 612d2d8ce14c5..f3708c58e169c 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
+@@ -8,15 +8,20 @@
+ namespace Tests\Integration\Behaviour\Features\Context\Domain;
+ 
+ use Behat\Gherkin\Node\TableNode;
+-use Country;
+ use PHPUnit\Framework\Assert;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\AddCountryCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkToggleCountriesStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\BulkUpdateCountryZoneCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\DeleteCountryCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\EditCountryCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Command\ToggleCountryStatusCommand;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\BulkCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Query\GetCountryForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Country\QueryResult\CountryForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Zone\Exception\ZoneNotFoundException;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\SharedStorage;
+ use Tests\Integration\Behaviour\Features\Context\Util\NoExceptionAlthoughExpectedException;
+@@ -43,6 +48,14 @@ public function setNonExistingCountryReference(string $reference): void
+         $this->getSharedStorage()->set($reference, self::NON_EXISTING_COUNTRY_ID);
+     }
+ 
++    /**
++     * @Given country :reference has invalid id
++     */
++    public function setInvalidCountryReference(string $reference): void
++    {
++        $this->getSharedStorage()->set($reference, 0);
++    }
++
+     /**
+      * @Then I should get error that country was not found
+      */
+@@ -51,6 +64,32 @@ public function assertCountryNotFound(): void
+         $this->assertLastErrorIs(CountryNotFoundException::class);
+     }
+ 
++    /**
++     * @Then I should get error that country id is invalid
++     */
++    public function assertCountryIdIsInvalid(): void
++    {
++        $this->assertLastErrorIs(CountryConstraintException::class, CountryConstraintException::INVALID_ID);
++    }
++
++    /**
++     * @Then I should get error that zone was not found
++     */
++    public function assertZoneNotFound(): void
++    {
++        $this->assertLastErrorIs(ZoneNotFoundException::class);
++    }
++
++    /**
++     * @Then I should get a bulk country exception containing :expectedErrorsCount errors
++     */
++    public function assertBulkCountryExceptionContainingErrors(int $expectedErrorsCount): void
++    {
++        /** @var BulkCountryException $lastError */
++        $lastError = $this->assertLastErrorIs(BulkCountryException::class);
++        Assert::assertCount($expectedErrorsCount, $lastError->getExceptions());
++    }
++
+     /**
+      * @When I add new country :countryReference with following properties:
+      *
+@@ -146,10 +185,120 @@ public function editCountry(string $countryReference, TableNode $table): void
+         $this->getCommandBus()->handle($command);
+     }
+ 
++    /**
++     * @When I toggle country status :countryReference
++     */
++    public function toggleCountryStatus(string $countryReference): void
++    {
++        try {
++            $this->getCommandBus()->handle(new ToggleCountryStatusCommand($this->referenceToId($countryReference)));
++        } catch (CountryException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I bulk enable countries :countryReferences
++     */
++    public function bulkEnableCountries(string $countryReferences): void
++    {
++        $this->bulkToggleCountriesStatus($countryReferences, true);
++    }
++
++    /**
++     * @When I bulk disable countries :countryReferences
++     */
++    public function bulkDisableCountries(string $countryReferences): void
++    {
++        $this->bulkToggleCountriesStatus($countryReferences, false);
++    }
++
++    /**
++     * @When I bulk enable an empty list of countries
++     */
++    public function bulkEnableEmptyCountriesList(): void
++    {
++        try {
++            $this->getCommandBus()->handle(new BulkToggleCountriesStatusCommand(true, []));
++        } catch (CountryException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I bulk update an empty list of countries to zone :zoneId
++     */
++    public function bulkUpdateEmptyCountriesListZone(int $zoneId): void
++    {
++        try {
++            $this->getCommandBus()->handle(new BulkUpdateCountryZoneCommand([], $zoneId));
++        } catch (CountryException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then no exception should have been thrown
++     */
++    public function assertNoExceptionWasThrown(): void
++    {
++        $this->assertLastErrorIsNull();
++    }
++
++    /**
++     * @Then I should get error that country list is empty
++     */
++    public function assertCountryListIsEmpty(): void
++    {
++        $this->assertLastErrorIs(CountryException::class);
++    }
++
++    /**
++     * @When I bulk update countries :countryReferences to zone :zoneId
++     */
++    public function bulkUpdateCountriesZone(string $countryReferences, int $zoneId): void
++    {
++        try {
++            $this->getCommandBus()->handle(new BulkUpdateCountryZoneCommand(
++                $this->getCountryIdsFromReferences($countryReferences),
++                $zoneId
++            ));
++        } catch (CountryException|ZoneNotFoundException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then country :countryReference should be enabled
++     */
++    public function assertCountryIsEnabled(string $countryReference): void
++    {
++        $country = $this->getQueryBus()->handle(new GetCountryForEditing($this->referenceToId($countryReference)));
++        Assert::assertTrue($country->isEnabled());
++    }
++
++    /**
++     * @Then country :countryReference should be disabled
++     */
++    public function assertCountryIsDisabled(string $countryReference): void
++    {
++        $country = $this->getQueryBus()->handle(new GetCountryForEditing($this->referenceToId($countryReference)));
++        Assert::assertFalse($country->isEnabled());
++    }
++
++    /**
++     * @Then country :countryReference should be assigned to zone :zoneId
++     */
++    public function assertCountryZone(string $countryReference, int $zoneId): void
++    {
++        $country = $this->getQueryBus()->handle(new GetCountryForEditing($this->referenceToId($countryReference)));
++        Assert::assertSame($zoneId, $country->getZone());
++    }
++
+     /**
+      * @Then /^the country "(.+)" should have the following properties:$/
+      */
+-    public function assertQueryCustomerProperties($countryReference, TableNode $table)
++    public function assertCountryProperties(string $countryReference, TableNode $table)
+     {
+         $countryId = SharedStorage::getStorage()->get($countryReference);
+         $expectedData = $this->localizeByRows($table);
+@@ -232,4 +381,28 @@ public function assertCountryIsDeleted(string $countryReference): void
+             SharedStorage::getStorage()->clear($countryReference);
+         }
+     }
++
++    private function bulkToggleCountriesStatus(string $countryReferences, bool $expectedStatus): void
++    {
++        try {
++            $this->getCommandBus()->handle(new BulkToggleCountriesStatusCommand(
++                $expectedStatus,
++                $this->getCountryIdsFromReferences($countryReferences)
++            ));
++        } catch (CountryException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @return int[]
++     */
++    private function getCountryIdsFromReferences(string $countryReferences): array
++    {
++        $references = array_map('trim', explode(',', $countryReferences));
++
++        return array_map(function (string $reference): int {
++            return $this->referenceToId($reference);
++        }, $references);
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature
+new file mode 100644
+index 0000000000000..c5c98d5e28893
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature
+@@ -0,0 +1,74 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s country --tags bulk-toggle-countries-status
++@restore-all-tables-before-feature
++@bulk-toggle-countries-status
++Feature: Bulk toggle countries status
++  PrestaShop allows BO users to update multiple countries status at once
++  As a BO user
++  I must be able to update multiple countries status at once
++
++  Scenario: Bulk enable and disable countries
++    Given language "language1" with locale "en-US" exists
++    And I add new country "bulk_country_1" with following properties:
++      | name[en-US]                | Bulk Country 1  |
++      | iso_code                   | QA              |
++      | call_prefix                | 21              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | false           |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    And I add new country "bulk_country_2" with following properties:
++      | name[en-US]                | Bulk Country 2  |
++      | iso_code                   | QB              |
++      | call_prefix                | 22              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | false           |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    When I bulk enable countries "bulk_country_1, bulk_country_2"
++    Then country "bulk_country_1" should be enabled
++    And country "bulk_country_2" should be enabled
++    When I bulk disable countries "bulk_country_1, bulk_country_2"
++    Then country "bulk_country_1" should be disabled
++    And country "bulk_country_2" should be disabled
++
++  Scenario: Bulk toggle should report invalid country id
++    Given country "invalid_country" has invalid id
++    When I bulk enable countries "invalid_country"
++    Then I should get error that country id is invalid
++
++  Scenario: Bulk toggle should no-op when country list is empty
++    When I bulk enable an empty list of countries
++    Then no exception should have been thrown
++
++  Scenario: Bulk toggle should continue on partial failure and aggregate errors
++    Given language "language1" with locale "en-US" exists
++    And I add new country "bulk_partial_country" with following properties:
++      | name[en-US]                | Bulk Partial    |
++      | iso_code                   | QC              |
++      | call_prefix                | 31              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | false           |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    And country "bulk_partial_missing" does not exist
++    When I bulk enable countries "bulk_partial_country, bulk_partial_missing"
++    Then I should get a bulk country exception containing 1 errors
++    And country "bulk_partial_country" should be enabled
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature
+new file mode 100644
+index 0000000000000..df11ef3d6c03f
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature
+@@ -0,0 +1,90 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s country --tags bulk-update-country-zone
++@restore-all-tables-before-feature
++@bulk-update-country-zone
++Feature: Bulk update countries zone
++  PrestaShop allows BO users to update zone for multiple countries at once
++  As a BO user
++  I must be able to update zone for multiple countries at once
++
++  Scenario: Bulk update countries zone
++    Given language "language1" with locale "en-US" exists
++    And I add new country "zone_country_1" with following properties:
++      | name[en-US]                | Zone Country 1  |
++      | iso_code                   | QD              |
++      | call_prefix                | 41              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | true            |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    And I add new country "zone_country_2" with following properties:
++      | name[en-US]                | Zone Country 2  |
++      | iso_code                   | QE              |
++      | call_prefix                | 42              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | true            |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    When I bulk update countries "zone_country_1, zone_country_2" to zone 2
++    Then country "zone_country_1" should be assigned to zone 2
++    And country "zone_country_2" should be assigned to zone 2
++
++  Scenario: Bulk update countries zone should fail when country id is invalid
++    Given country "invalid_zone_country" has invalid id
++    When I bulk update countries "invalid_zone_country" to zone 2
++    Then I should get error that country id is invalid
++
++  Scenario: Bulk update countries zone should fail when country list is empty
++    When I bulk update an empty list of countries to zone 2
++    Then I should get error that country list is empty
++
++  Scenario: Bulk update countries zone should fail when zone does not exist
++    Given language "language1" with locale "en-US" exists
++    And I add new country "zone_missing_country" with following properties:
++      | name[en-US]                | Zone Missing    |
++      | iso_code                   | QF              |
++      | call_prefix                | 51              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | true            |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    When I bulk update countries "zone_missing_country" to zone 999999
++    Then I should get error that zone was not found
++
++  Scenario: Bulk update countries zone should continue on partial failure and aggregate errors
++    Given language "language1" with locale "en-US" exists
++    And I add new country "zone_partial_country" with following properties:
++      | name[en-US]                | Zone Partial    |
++      | iso_code                   | QG              |
++      | call_prefix                | 61              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | true            |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    And country "zone_partial_missing" does not exist
++    When I bulk update countries "zone_partial_country, zone_partial_missing" to zone 2
++    Then I should get a bulk country exception containing 1 errors
++    And country "zone_partial_country" should be assigned to zone 2
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature b/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature
+new file mode 100644
+index 0000000000000..aace01a0a4cd5
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature
+@@ -0,0 +1,57 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s country --tags toggle-country-status
++@restore-all-tables-before-feature
++@toggle-country-status
++Feature: Toggle country status
++  PrestaShop allows BO users to toggle country status
++  As a BO user
++  I must be able to toggle country status
++
++  Scenario: Toggle one country status
++    Given language "language1" with locale "en-US" exists
++    When I add new country "toggle_country" with following properties:
++      | name[en-US]                | Toggle Country  |
++      | iso_code                   | QW              |
++      | call_prefix                | 11              |
++      | default_currency           | 1               |
++      | zone                       | 1               |
++      | need_zip_code              | true            |
++      | zip_code_format            | NNNNN           |
++      | address_format             | not implemented |
++      | is_enabled                 | true            |
++      | contains_states            | false           |
++      | need_identification_number | false           |
++      | display_tax_label          | true            |
++      | shop_association           | 1               |
++    And I toggle country status "toggle_country"
++    Then country "toggle_country" should be disabled
++
++  Scenario: Toggle one country status should fail when country does not exist
++    Given country "missing_country" does not exist
++    When I toggle country status "missing_country"
++    Then I should get error that country was not found
++
++  Scenario: Toggle country status should fail when country id is invalid
++    Given country "invalid_country" has invalid id
++    When I toggle country status "invalid_country"
++    Then I should get error that country id is invalid
++
++  Scenario: Toggle country status twice returns to original state
++    Given language "language1" with locale "en-US" exists
++    And I add new country "roundtrip_country" with following properties:
++      | name[en-US]                | Roundtrip Country |
++      | iso_code                   | QV                |
++      | call_prefix                | 71                |
++      | default_currency           | 1                 |
++      | zone                       | 1                 |
++      | need_zip_code              | true              |
++      | zip_code_format            | NNNNN             |
++      | address_format             | not implemented   |
++      | is_enabled                 | true              |
++      | contains_states            | false             |
++      | need_identification_number | false             |
++      | display_tax_label          | true              |
++      | shop_association           | 1                 |
++    When I toggle country status "roundtrip_country"
++    Then country "roundtrip_country" should be disabled
++    When I toggle country status "roundtrip_country"
++    Then country "roundtrip_country" should be enabled
+diff --git a/tests/Unit/Core/Context/CountryContextBuilderTest.php b/tests/Unit/Core/Context/CountryContextBuilderTest.php
+index 54bc915121a1d..aad1a3a0af007 100644
+--- a/tests/Unit/Core/Context/CountryContextBuilderTest.php
++++ b/tests/Unit/Core/Context/CountryContextBuilderTest.php
+@@ -11,7 +11,7 @@
+ use Country;
+ use PHPUnit\Framework\MockObject\MockObject;
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+-use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\Context\CountryContextBuilder;
+ use Tests\Unit\Core\Configuration\MockConfigurationTrait;
+ 
+@@ -91,9 +91,9 @@ private function mockCountry(): Country|MockObject
+         return $country;
+     }
+ 
+-    private function mockCountryRepository(Country|MockObject $country): CountryRepository|MockObject
++    private function mockCountryRepository(Country|MockObject $country): CountryRepositoryInterface|MockObject
+     {
+-        $repository = $this->createMock(CountryRepository::class);
++        $repository = $this->createMock(CountryRepositoryInterface::class);
+         $repository
+             ->method('get')
+             ->willReturn($country)
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/CountryContextSubscriberTest.php b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/CountryContextSubscriberTest.php
+index 2de5b8babd03c..94034c5f016a5 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/CountryContextSubscriberTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/CountryContextSubscriberTest.php
+@@ -9,7 +9,7 @@
+ namespace Tests\Unit\PrestaShopBundle\EventListener\Admin\Context;
+ 
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+-use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\Context\CountryContextBuilder;
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShopBundle\EventListener\Admin\Context\CountryContextSubscriber;
+@@ -21,7 +21,7 @@ class CountryContextSubscriberTest extends ContextEventListenerTestCase
+     public function testKernelRequest(): void
+     {
+         $countryContextBuilder = new CountryContextBuilder(
+-            $this->createMock(CountryRepository::class),
++            $this->createMock(CountryRepositoryInterface::class),
+             $this->createMock(ContextStateManager::class),
+             $this->createMock(LanguageContext::class),
+         );

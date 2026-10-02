@@ -1,0 +1,412 @@
+diff --git a/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php b/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php
+new file mode 100644
+index 0000000000000..8bf531537d1cb
+--- /dev/null
++++ b/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php
+@@ -0,0 +1,87 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler;
++
++use Carrier;
++use OrderDetail;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\ListAvailableShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\ListAvailableShipmentsHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentsForMerge;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Product;
++use Symfony\Contracts\Translation\TranslatorInterface;
++use Throwable;
++
++#[AsQueryHandler]
++class ListAvailableShipmentsHandler implements ListAvailableShipmentsHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $repository,
++        private readonly TranslatorInterface $translator,
++    ) {
++    }
++
++    /**
++     * @param ListAvailableShipments $query
++     *
++     * @return ShipmentsForMerge[]
++     */
++    public function handle(ListAvailableShipments $query)
++    {
++        $shipments = [];
++        $orderId = $query->getOrderId()->getValue();
++        $orderDetailsIds = $query->getOrderIdDetails()->getValue();
++
++        try {
++            $getShipmentsFromOrder = $this->repository->findByOrderId($orderId);
++        } catch (Throwable $e) {
++            throw new ShipmentNotFoundException(sprintf('Could not find shipment for order id "%s"', $orderId), 0, $e);
++        }
++        if (empty($getShipmentsFromOrder)) {
++            return $shipments;
++        }
++
++        foreach ($getShipmentsFromOrder as $shipment) {
++            foreach ($orderDetailsIds as $orderDetailId) {
++                $orderDetail = new OrderDetail($orderDetailId);
++                $carrierCompatibleWithProduct = array_map(function ($carrier) {
++                    return $carrier['id_carrier'];
++                }, (new Product($orderDetail->product_id))->getCarriers());
++
++                if ($shipment->getDeliveredAt() === null) {
++                    $isCompatible = in_array($shipment->getCarrierId(), $carrierCompatibleWithProduct);
++                    $shipmentName = $this->translator->trans('Shipment ', [], 'Shop.Forms.Labels') . $shipment->getId() . ' ' . (new Carrier($shipment->getCarrierId()))->name;
++                    $shipments[] = new ShipmentsForMerge($shipment->getId(), $shipmentName, $isCompatible);
++                }
++            }
++        }
++
++        return $shipments;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Query/ListAvailableShipments.php b/src/Core/Domain/Shipment/Query/ListAvailableShipments.php
+new file mode 100644
+index 0000000000000..872bd36899eec
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Query/ListAvailableShipments.php
+@@ -0,0 +1,56 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\OrderDetailsId;
++
++class ListAvailableShipments
++{
++    /**
++     * @var OrderId
++     */
++    private $orderId;
++
++    /**
++     * @var OrderDetailsId
++     */
++    private $orderIdDetails;
++
++    public function __construct(int $orderId, array $orderIdDetails)
++    {
++        $this->orderId = new OrderId($orderId);
++        $this->orderIdDetails = new OrderDetailsId($orderIdDetails);
++    }
++
++    public function getOrderId(): OrderId
++    {
++        return $this->orderId;
++    }
++
++    public function getOrderIdDetails(): OrderDetailsId
++    {
++        return $this->orderIdDetails;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/QueryHandler/ListAvailableShipmentsHandlerInterface.php b/src/Core/Domain/Shipment/QueryHandler/ListAvailableShipmentsHandlerInterface.php
+new file mode 100644
+index 0000000000000..7b9db8d85bb5b
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryHandler/ListAvailableShipmentsHandlerInterface.php
+@@ -0,0 +1,40 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\ListAvailableShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentsForMerge;
++
++interface ListAvailableShipmentsHandlerInterface
++{
++    /**
++     * @param ListAvailableShipments $query
++     *
++     * @return ShipmentsForMerge[]
++     */
++    public function handle(ListAvailableShipments $query);
++}
+diff --git a/src/Core/Domain/Shipment/QueryResult/ShipmentsForMerge.php b/src/Core/Domain/Shipment/QueryResult/ShipmentsForMerge.php
+new file mode 100644
+index 0000000000000..90459159cbee2
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryResult/ShipmentsForMerge.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult;
++
++class ShipmentsForMerge
++{
++    public function __construct(
++        private int $id,
++        private string $shipmentName,
++        private bool $canHandleProduct,
++    ) {
++    }
++
++    /**
++     * @return int
++     */
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    /**
++     * @return string
++     */
++    public function getShipmentName(): string
++    {
++        return $this->shipmentName;
++    }
++
++    /**
++     * @return bool
++     */
++    public function getHandleProduct(): bool
++    {
++        return $this->canHandleProduct;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/ValueObject/OrderDetailsId.php b/src/Core/Domain/Shipment/ValueObject/OrderDetailsId.php
+new file mode 100644
+index 0000000000000..e1f2b633bd373
+--- /dev/null
++++ b/src/Core/Domain/Shipment/ValueObject/OrderDetailsId.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject;
++
++use Exception;
++
++class OrderDetailsId
++{
++    /**
++     * @var array
++     */
++    private $orderDetailsId;
++
++    /**
++     * @param array $orderDetailsId
++     *
++     * @throws Exception
++     */
++    public function __construct(array $orderDetailsId)
++    {
++        if (0 >= count($orderDetailsId)) {
++            throw new Exception('You need to provide at least one order detail ID');
++        }
++
++        $this->orderDetailsId = $orderDetailsId;
++    }
++
++    /**
++     * @return array
++     */
++    public function getValue(): array
++    {
++        return $this->orderDetailsId;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+index d913b753ca738..95b5e1b99ecdf 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+@@ -11,3 +11,5 @@ services:
+   PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\SwitchShipmentCarrierHandler:
+ 
+   PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\MergeProductsToShipmentHandler:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\ListAvailableShipmentsHandler:
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index 5a653f88510c9..4f52c2e805731 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -31,12 +31,14 @@
+ 
+ use Behat\Gherkin\Node\TableNode;
+ use Exception;
++use Order;
+ use OrderDetail;
+ use PHPUnit\Framework\Assert;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SwitchShipmentCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\ListAvailableShipments;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\SharedStorage;
+ 
+@@ -169,4 +171,29 @@ public function mergeProductsToShipment(string $sourceShipmentReference, string
+             new MergeProductsToShipment($sourceShipmentId, $targetShipmentId, $orderDetailQuantities)
+         );
+     }
++
++    /**
++     * @Then order :orderReference should get available shipments for product :productName:
++     */
++    public function orderShouldGetAvailableShipmentsForSpecificProduct(string $orderReference, string $productName, TableNode $table): void
++    {
++        $orderId = $this->referenceToId($orderReference);
++        $data = $table->getColumnsHash();
++        $orderDetailList = (new Order($orderId))->getOrderDetailList();
++        $orderDetailsId = [];
++        foreach ($orderDetailList as $orderDetail) {
++            if ($orderDetail['product_name'] === $productName) {
++                $orderDetailsId[] = $orderDetail['id_order_detail'];
++            }
++        }
++
++        $testAvailableShipmentForProduct = $this->getQueryBus()->handle(
++            new ListAvailableShipments($orderId, $orderDetailsId)
++        );
++
++        for ($i = 0; $i < count($testAvailableShipmentForProduct); ++$i) {
++            Assert::assertEquals($testAvailableShipmentForProduct[$i]->getShipmentName(), $data[$i]['shipment_name']);
++            Assert::assertEquals($testAvailableShipmentForProduct[$i]->getHandleProduct(), (bool) $data[$i]['can_handle_merge']);
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+index 093783a2eae36..bc4e0dfe591ee 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+@@ -116,3 +116,13 @@ Feature: Product associated with different carriers
+       | bottle of beer | 1        |
+       | saucisson      | 2        |
+     And the shipment "shipment2" should be deleted
++
++  Scenario: Retrieve available shipments for merge action
++    Then order "bo_order1" should get available shipments for product "bottle of beer":
++      | shipment_name                  | can_handle_merge |
++      | Shipment 1 Beer carrier        | 1             |
++      | Shipment 2 Saucisson carrier   | 0             |
++    Then order "bo_order1" should get available shipments for product "saucisson":
++      | shipment_name                  | can_handle_merge |
++      | Shipment 1 Beer carrier        | 0             |
++      | Shipment 2 Saucisson carrier   | 1             |

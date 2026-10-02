@@ -1,0 +1,378 @@
+diff --git a/src/Core/Domain/Discount/ProductRuleType.php b/src/Core/Domain/Discount/ProductRuleType.php
+index 0907caf4abd72..79982e3c6d894 100644
+--- a/src/Core/Domain/Discount/ProductRuleType.php
++++ b/src/Core/Domain/Discount/ProductRuleType.php
+@@ -34,4 +34,5 @@ enum ProductRuleType: string
+     case CATEGORIES = 'categories';
+     case PRODUCTS = 'products';
+     case COMBINATIONS = 'combinations';
++    case MANUFACTURERS = 'manufacturers';
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 7378a57b4dc65..c33bf75d10595 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -204,6 +204,18 @@ private function updateDiscountConditions(int $discountId, array $data): void
+                 }
+ 
+                 $conditionsCommand->setProductConditions($productRuleGroups);
++            } elseif ($data['conditions']['cart_conditions']['children_selector'] === CartConditionsType::PRODUCT_SEGMENT) {
++                $manufacturer = $data['conditions']['cart_conditions']['product_segment']['manufacturer'] ?? [];
++                if (!empty($manufacturer)) {
++                    $productRuleGroups = [];
++                    $productRuleGroups[] = new ProductRuleGroup(
++                        $data['conditions']['cart_conditions']['product_segment']['quantity'],
++                        [
++                            new ProductRule(ProductRuleType::MANUFACTURERS, [(int) $manufacturer]),
++                        ]
++                    );
++                    $conditionsCommand->setProductConditions($productRuleGroups);
++                }
+             }
+         }
+ 
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 4b48e19b92818..965fe60d0d534 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -91,6 +91,8 @@ public function getData($id)
+         $discountForEditing = $this->queryBus->handle(new GetDiscountForEditing($id));
+         $isAmountDiscount = $discountForEditing->getAmountDiscount() !== null;
+         $details = $this->getGiftDetails($discountForEditing);
++        $specificProducts = $this->getSpecificProducts($discountForEditing);
++        $productSegment = $this->getProductSegmentDetails($discountForEditing);
+ 
+         $selectedCondition = 'none';
+         $selectedCartCondition = 'none';
+@@ -100,9 +102,12 @@ public function getData($id)
+         } elseif ($discountForEditing->getMinimumAmount()) {
+             $selectedCondition = 'cart_conditions';
+             $selectedCartCondition = 'minimum_amount';
+-        } elseif ($discountForEditing->getProductConditions()) {
++        } elseif (!empty($specificProducts)) {
+             $selectedCondition = 'cart_conditions';
+             $selectedCartCondition = 'specific_products';
++        } elseif (!empty($productSegment['manufacturer'])) {
++            $selectedCondition = 'cart_conditions';
++            $selectedCartCondition = 'product_segment';
+         }
+ 
+         return [
+@@ -139,7 +144,8 @@ public function getData($id)
+                         'currency' => $discountForEditing->getMinimumAmountCurrencyId(),
+                         'include_tax' => $discountForEditing->getMinimumAmountTaxIncluded(),
+                     ],
+-                    'specific_products' => $this->getSpecificProducts($discountForEditing),
++                    'specific_products' => $specificProducts,
++                    'product_segment' => $productSegment,
+                 ],
+             ],
+             'usability' => [
+@@ -258,4 +264,26 @@ private function displayWarning(string $message): void
+             $session->getFlashBag()->add('warning', $message);
+         }
+     }
++
++    private function getProductSegmentDetails(DiscountForEditing $discountForEditing): array
++    {
++        $productSegment = [
++            'manufacturer' => 0,
++            'quantity' => 0,
++        ];
++
++        foreach ($discountForEditing->getProductConditions() as $condition) {
++            foreach ($condition->getRules() as $rule) {
++                if ($rule->getType() === ProductRuleType::MANUFACTURERS) {
++                    foreach ($rule->getItemIds() as $manufacturerId) {
++                        $productSegment['manufacturer'] = $manufacturerId;
++                    }
++                }
++            }
++
++            $productSegment['quantity'] = $condition->getQuantity();
++        }
++
++        return $productSegment;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+index 036a3f2a88187..3023a7f447a25 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+@@ -42,6 +42,7 @@ class CartConditionsType extends TranslatorAwareType
+     public const MINIMUM_AMOUNT = 'minimum_amount';
+     public const MINIMUM_PRODUCT_QUANTITY = 'minimum_product_quantity';
+     public const SPECIFIC_PRODUCTS = 'specific_products';
++    public const PRODUCT_SEGMENT = 'product_segment';
+ 
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+@@ -106,6 +107,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ),
+                 ],
+             ])
++            ->add(self::PRODUCT_SEGMENT, DiscountProductSegmentType::class, [
++                'label' => $this->trans('Product segment', 'Admin.Catalog.Feature'),
++            ])
+         ;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+new file mode 100644
+index 0000000000000..338a747551b83
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+@@ -0,0 +1,74 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Form\Admin\Sell\Discount;
++
++use PrestaShopBundle\Form\Admin\Sell\Product\Description\ManufacturerType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\IntegerType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Validator\Constraints\GreaterThanOrEqual;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Component\Validator\Constraints\Type;
++use Symfony\Component\Validator\Constraints\When;
++
++class DiscountProductSegmentType extends TranslatorAwareType
++{
++    public const MANUFACTURER = 'manufacturer';
++
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add(self::MANUFACTURER, ManufacturerType::class, [
++                'label' => $this->trans('Brand', 'Admin.Catalog.Feature'),
++                'required' => false,
++            ])
++            ->add('quantity', IntegerType::class, [
++                'label' => $this->trans('Minimum product quantity', 'Admin.Catalog.Feature'),
++                'attr' => [
++                    'class' => 'js-comma-transformer',
++                ],
++                'constraints' => [
++                    new When(
++                        expression: sprintf(
++                            'this.getParent().getParent().get("children_selector").getData() === "%s"',
++                            CartConditionsType::PRODUCT_SEGMENT,
++                        ),
++                        constraints: [
++                            new NotBlank(),
++                            new Type([
++                                'type' => 'numeric',
++                            ]),
++                            new GreaterThanOrEqual([
++                                'value' => 1,
++                            ]),
++                        ],
++                    ),
++                ],
++            ])
++        ;
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_brand_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_brand_trigger.feature
+new file mode 100644
+index 0000000000000..29109804cf2c3
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_brand_trigger.feature
+@@ -0,0 +1,36 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount-with-brand-trigger
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-discount-with-brand-trigger
++Feature: Add discount with brand trigger
++  PrestaShop allows BO users to update discounts conditions
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++
++  Scenario: Create discount with brand trigger
++    Given I add new manufacturer "rocket" with following properties:
++      | name                     | Rocket                             |
++      | short_description[en-US] | Cigarettes manufacturer            |
++      | description[en-US]       | Morbi at nulla id mi gravida blandit a non erat. Mauris nec lorem vel odio sagittis ornare.|
++      | meta_title[en-US]        | You smoke - you die!               |
++      | meta_description[en-US]  | The sun is shining and the weather is sweet|
++      | enabled                  | true                               |
++    When I create a "free_shipping" discount "discount_with_brand_trigger" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_brand_trigger" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_brand_trigger" with following conditions matching at least 42 products:
++      | condition_type | items  |
++      | manufacturers  | rocket |
++    Then discount "discount_with_brand_trigger" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_brand_trigger" should have the following product conditions matching at least 42 products:
++      | condition_type | items  |
++      | manufacturers  | rocket |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_brand_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_brand_trigger.feature
+new file mode 100644
+index 0000000000000..b28a8c3ff6596
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_brand_trigger.feature
+@@ -0,0 +1,119 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-with-brand-trigger
++@restore-all-tables-before-feature
++@discount-with-brand-trigger
++Feature: Add discount with brand trigger on FO
++  PrestaShop allows discounts with restricted products as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  Scenario: First create products and the discount that will be used in following scenarios
++    Given I add new manufacturer "rocket" with following properties:
++      | name                     | Rocket                             |
++      | short_description[en-US] | Cigarettes manufacturer            |
++      | description[en-US]       | Morbi at nulla id mi gravida blandit a non erat. Mauris nec lorem vel odio sagittis ornare.|
++      | meta_title[en-US]        | You smoke - you die!               |
++      | meta_description[en-US]  | The sun is shining and the weather is sweet|
++      | enabled                  | true                               |
++    And I add product "beer_product" with following information:
++      | name[en-US] | bottle of beer     |
++      | name[fr-FR] | bouteille de bière |
++      | type        | standard           |
++    And I update product "beer_product" with following values:
++      | manufacturer | rocket            |
++    And I update product "beer_product" stock with following information:
++      | delta_quantity | 51 |
++    And I enable product "beer_product"
++    And I update product "beer_product" with following values:
++      | price | 20.00 |
++    And I add product "potato_chips_product" with following information:
++      | name[en-US] | potato chips |
++      | name[fr-FR] | chips        |
++      | type        | standard     |
++    And I update product "potato_chips_product" with following values:
++      | manufacturer | rocket            |
++    And I update product "potato_chips_product" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "potato_chips_product"
++    And I update product "potato_chips_product" with following values:
++      | price | 5.00 |
++    When I create a "cart_level" discount "discount_with_brand_trigger" with following properties:
++      | name[en-US] | Promotion |
++      | name[fr-FR] | Promotion |
++      | code        | CART_LEVEL_BRAND_TRIGGER  |
++      | active             | true                |
++      | reduction_amount   | 5.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    Then discount "discount_with_brand_trigger" should have the following properties:
++      | name[en-US] | Promotion     |
++      | name[fr-FR] | Promotion     |
++      | type        | cart_level |
++      | code               | CART_LEVEL_BRAND_TRIGGER     |
++      | active             | true                |
++      | reduction_amount   | 5.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    When I update discount "discount_with_brand_trigger" with following conditions matching at least 10 products:
++      | condition_type | items  |
++      | manufacturers  | rocket |
++    Then discount "discount_with_brand_trigger" should have the following properties:
++      | minimum_product_quantity | 0             |
++    And discount "discount_with_brand_trigger" should have the following product conditions matching at least 10 products:
++      | condition_type | items  |
++      | manufacturers  | rocket |
++
++  Scenario: Reduction with brand trigger on FO
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 5 product "bottle of beer" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$107.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $107.00 |
++    # We try to apply the discount with only 5 products, it should not work
++    When I use a voucher "discount_with_brand_trigger" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$107.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $100.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $107.00 |
++    When I add 4 product "potato chips" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$127.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $120.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $127.00 |
++    # Now we try to apply the discount with 5 beers and 4 chips, it should not work (quantity should be 10)
++    When I use a voucher "discount_with_brand_trigger" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$127.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $120.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $127.00 |
++    # Now we add the missing quantity to apply the discount, it should be ok
++    When I add 1 product "potato chips" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$132.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $125.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $132.00 |
++    When I use a voucher "discount_with_brand_trigger" on the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$127.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $125.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$5.00 |
++      | total          | $127.00 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index dbffafa25b14e..f6bbcbee0ea7c 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -324,6 +324,7 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+ 
+     catalog_price_rule:
+       paths:

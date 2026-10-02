@@ -1,0 +1,1581 @@
+diff --git a/classes/order/Order.php b/classes/order/Order.php
+index bbd55f04cd780..98dd3128b14de 100644
+--- a/classes/order/Order.php
++++ b/classes/order/Order.php
+@@ -24,6 +24,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ use PrestaShop\PrestaShop\Adapter\ServiceLocator;
++use PrestaShopBundle\Entity\MutatorType;
+ 
+ class OrderCore extends ObjectModel
+ {
+@@ -539,12 +540,14 @@ public function getHistory($id_lang, $id_order_state = false, $no_hidden = false
+         if (!isset(self::$_historyCache[$this->id . '_' . $id_order_state . '_' . $filters]) || $no_hidden) {
+             $id_lang = $id_lang ? (int) $id_lang : 'o.`id_lang`';
+             $result = Db::getInstance()->executeS('
+-            SELECT os.*, oh.*, e.`firstname` as employee_firstname, e.`lastname` as employee_lastname, osl.`name` as ostate_name
++            SELECT os.*, oh.*, e.`firstname` as employee_firstname, e.`lastname` as employee_lastname, osl.`name` as ostate_name, a.`client_id` as api_client_id
+             FROM `' . _DB_PREFIX_ . 'orders` o
+             LEFT JOIN `' . _DB_PREFIX_ . 'order_history` oh ON o.`id_order` = oh.`id_order`
+             LEFT JOIN `' . _DB_PREFIX_ . 'order_state` os ON os.`id_order_state` = oh.`id_order_state`
+             LEFT JOIN `' . _DB_PREFIX_ . 'order_state_lang` osl ON (os.`id_order_state` = osl.`id_order_state` AND osl.`id_lang` = ' . (int) ($id_lang) . ')
+             LEFT JOIN `' . _DB_PREFIX_ . 'employee` e ON e.`id_employee` = oh.`id_employee`
++            LEFT JOIN `' . _DB_PREFIX_ . 'mutation` m ON m.`mutation_table` = "order_history" AND m.`mutation_row_id` = oh.`id_order_history` AND m.`mutator_type` = "' . MutatorType::API_CLIENT->value . '"
++            LEFT JOIN `' . _DB_PREFIX_ . 'api_client` a ON m.`mutator_identifier` = a.`id_api_client`
+             WHERE oh.id_order = ' . (int) $this->id . '
+             ' . ($no_hidden ? ' AND os.hidden = 0' : '') . '
+             ' . ($logable ? ' AND os.logable = 1' : '') . '
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 160e2f60c7ca6..bfd6e02b39e72 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -1638,7 +1638,7 @@ CREATE TABLE `PREFIX_product` (
+   `active` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `redirect_type` ENUM(
+     '', '404', '410', '301-product', '302-product',
+-    '301-category', '302-category', '200-displayed', 
++    '301-category', '302-category', '200-displayed',
+     '404-displayed', '410-displayed', 'default'
+   ) NOT NULL DEFAULT 'default',
+   `id_type_redirected` int(10) unsigned NOT NULL DEFAULT '0',
+@@ -1698,7 +1698,7 @@ CREATE TABLE IF NOT EXISTS `PREFIX_product_shop` (
+   `active` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `redirect_type` ENUM(
+     '', '404', '410', '301-product', '302-product',
+-    '301-category', '302-category', '200-displayed', 
++    '301-category', '302-category', '200-displayed',
+     '404-displayed', '410-displayed', 'default'
+   ) NOT NULL DEFAULT 'default',
+   `id_type_redirected` int(10) unsigned NOT NULL DEFAULT '0',
+diff --git a/src/Adapter/Order/CommandHandler/AddOrderFromBackOfficeHandler.php b/src/Adapter/Order/CommandHandler/AddOrderFromBackOfficeHandler.php
+index 201f21229fa47..cb1651a1c8065 100644
+--- a/src/Adapter/Order/CommandHandler/AddOrderFromBackOfficeHandler.php
++++ b/src/Adapter/Order/CommandHandler/AddOrderFromBackOfficeHandler.php
+@@ -86,14 +86,18 @@ public function handle(AddOrderFromBackOfficeCommand $command)
+         //Context country, language and currency is used in PaymentModule::validateOrder (it should rely on cart address country instead)
+         $this->setCartContext($this->contextStateManager, $cart);
+ 
+-        $translator = Context::getContext()->getTranslator();
+-        $employee = new Employee($command->getEmployeeId()->getValue());
+-        $message = sprintf(
+-            '%s %s. %s',
+-            $translator->trans('Manual order -- Employee:', [], 'Admin.Orderscustomers.Feature'),
+-            $employee->firstname[0],
+-            $employee->lastname
+-        );
++        if ($command->getEmployeeId()->getValue()) {
++            $translator = Context::getContext()->getTranslator();
++            $employee = new Employee($command->getEmployeeId()->getValue());
++            $message = sprintf(
++                '%s %s. %s',
++                $translator->trans('Manual order -- Employee:', [], 'Admin.Orderscustomers.Feature'),
++                $employee->firstname[0],
++                $employee->lastname
++            );
++        } else {
++            $message = '';
++        }
+ 
+         try {
+             $orderMessage = $command->getOrderMessage();
+diff --git a/src/Adapter/Order/CommandHandler/UpdateOrderStatusHandler.php b/src/Adapter/Order/CommandHandler/UpdateOrderStatusHandler.php
+index 259cd89e7eb8d..cdc356f53fa6b 100644
+--- a/src/Adapter/Order/CommandHandler/UpdateOrderStatusHandler.php
++++ b/src/Adapter/Order/CommandHandler/UpdateOrderStatusHandler.php
+@@ -28,15 +28,17 @@
+ 
+ use Carrier;
+ use Configuration;
+-use Context;
+ use OrderHistory;
+ use OrderState;
+ use PrestaShop\PrestaShop\Adapter\Order\AbstractOrderHandler;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Context\EmployeeContext;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Command\UpdateOrderStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Order\CommandHandler\UpdateOrderStatusHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\ChangeOrderStatusException;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
++use PrestaShop\PrestaShop\Core\Mutation\MutationTracker;
++use PrestaShopBundle\Entity\MutationAction;
+ 
+ /**
+  * @internal
+@@ -44,6 +46,12 @@
+ #[AsCommandHandler]
+ final class UpdateOrderStatusHandler extends AbstractOrderHandler implements UpdateOrderStatusHandlerInterface
+ {
++    public function __construct(
++        private EmployeeContext $employeeContext,
++        private MutationTracker $mutationTracker,
++    ) {
++    }
++
+     /**
+      * {@inheritdoc}
+      */
+@@ -61,7 +69,7 @@ public function handle(UpdateOrderStatusCommand $command)
+         // Create new OrderHistory
+         $history = new OrderHistory();
+         $history->id_order = $order->id;
+-        $history->id_employee = (int) Context::getContext()->employee->id;
++        $history->id_employee = (int) $this->employeeContext->getEmployee()?->getId();
+ 
+         $useExistingPayments = false;
+         if (!$order->hasInvoice()) {
+@@ -81,6 +89,8 @@ public function handle(UpdateOrderStatusCommand $command)
+ 
+         // Save all changes
+         if ($history->addWithemail(true, $templateVars)) {
++            $this->mutationTracker->addMutationForApiClient('order_history', (int) $history->id, MutationAction::CREATE);
++
+             return;
+         }
+ 
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+index 27e6b13ab972a..f83ee4357cf71 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+@@ -392,7 +392,8 @@ private function getOrderHistory(Order $order): OrderHistoryForViewing
+                 new DateTimeImmutable($item['date_add']),
+                 (bool) $item['send_email'],
+                 $item['employee_firstname'],
+-                $item['employee_lastname']
++                $item['employee_lastname'],
++                $item['api_client_id'],
+             );
+         }
+ 
+@@ -703,7 +704,7 @@ private function getOrderMessages(Order $order): OrderMessagesForViewing
+ 
+         foreach ($orderMessagesForOrderPage['messages'] as $orderMessage) {
+             $messageEmployeeId = (int) $orderMessage['id_employee'];
+-            $isCurrentEmployeesMessage = (int) $this->context->employee->id === $messageEmployeeId;
++            $isCurrentEmployeesMessage = $this->context->employee && ((int) $this->context->employee->id === $messageEmployeeId);
+ 
+             $messages[] = new OrderMessageForViewing(
+                 (int) $orderMessage['id_customer_message'],
+diff --git a/src/Core/Context/ApiClient.php b/src/Core/Context/ApiClient.php
+index 5f410b6839832..c5c8a489bf774 100644
+--- a/src/Core/Context/ApiClient.php
++++ b/src/Core/Context/ApiClient.php
+@@ -31,12 +31,18 @@
+ class ApiClient
+ {
+     public function __construct(
++        private int $id,
+         private string $clientId,
+         private array $scopes,
+         private int $shopId
+     ) {
+     }
+ 
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
+     public function getClientId(): string
+     {
+         return $this->clientId;
+diff --git a/src/Core/Context/ApiClientContextBuilder.php b/src/Core/Context/ApiClientContextBuilder.php
+index 478b364a848d6..0cbc9a7a8e116 100644
+--- a/src/Core/Context/ApiClientContextBuilder.php
++++ b/src/Core/Context/ApiClientContextBuilder.php
+@@ -52,6 +52,7 @@ public function build(): ApiClientContext
+             // Authorized shop should be associated to the client but for no we use the default one
+             $defaultShopId = $this->configuration->get('PS_SHOP_DEFAULT', null, ShopConstraint::allShops());
+             $apiClientDTO = new ApiClient(
++                id: $apiClient->getId(),
+                 clientId: $apiClient->getClientId(),
+                 scopes: $apiClient->getScopes(),
+                 shopId: (int) $defaultShopId
+diff --git a/src/Core/Context/EmployeeContext.php b/src/Core/Context/EmployeeContext.php
+index 812783a52b095..e3cb0ca4faf20 100644
+--- a/src/Core/Context/EmployeeContext.php
++++ b/src/Core/Context/EmployeeContext.php
+@@ -49,33 +49,33 @@ public function getEmployee(): ?Employee
+ 
+     public function hasAuthorizationOnShopGroup(int $shopGroupId): bool
+     {
+-        if (!$this->employee) {
++        if (!$this->getEmployee()) {
+             return false;
+         }
+ 
+-        return $this->isSuperAdmin() || in_array($shopGroupId, $this->employee->getAssociatedShopGroupIds());
++        return $this->isSuperAdmin() || in_array($shopGroupId, $this->getEmployee()->getAssociatedShopGroupIds());
+     }
+ 
+     public function hasAuthorizationOnShop(int $shopId): bool
+     {
+-        if (!$this->employee) {
++        if (!$this->getEmployee()) {
+             return false;
+         }
+ 
+-        return $this->isSuperAdmin() || in_array($shopId, $this->employee->getAssociatedShopIds());
++        return $this->isSuperAdmin() || in_array($shopId, $this->getEmployee()->getAssociatedShopIds());
+     }
+ 
+     public function getDefaultShopId(): int
+     {
+-        if (!$this->employee) {
++        if (!$this->getEmployee()) {
+             return 0;
+         }
+ 
+-        return $this->employee->getDefaultShopId();
++        return $this->getEmployee()->getDefaultShopId();
+     }
+ 
+     public function isSuperAdmin(): bool
+     {
+-        return $this->employee && $this->employee->getProfileId() === self::SUPER_ADMIN_PROFILE_ID;
++        return $this->getEmployee() && $this->getEmployee()->getProfileId() === self::SUPER_ADMIN_PROFILE_ID;
+     }
+ }
+diff --git a/src/Core/Domain/Employee/ValueObject/EmployeeId.php b/src/Core/Domain/Employee/ValueObject/EmployeeId.php
+index 33d68357aab89..a81598c616eb8 100644
+--- a/src/Core/Domain/Employee/ValueObject/EmployeeId.php
++++ b/src/Core/Domain/Employee/ValueObject/EmployeeId.php
+@@ -31,7 +31,7 @@
+ /**
+  * Defines Employee ID with it's constraints.
+  */
+-class EmployeeId
++class EmployeeId implements EmployeeIdInterface
+ {
+     /**
+      * @var int
+@@ -50,10 +50,7 @@ public function __construct($employeeId)
+         $this->employeeId = $employeeId;
+     }
+ 
+-    /**
+-     * @return int
+-     */
+-    public function getValue()
++    public function getValue(): int
+     {
+         return $this->employeeId;
+     }
+diff --git a/src/Core/Domain/Employee/ValueObject/EmployeeIdInterface.php b/src/Core/Domain/Employee/ValueObject/EmployeeIdInterface.php
+new file mode 100644
+index 0000000000000..9836622d05e52
+--- /dev/null
++++ b/src/Core/Domain/Employee/ValueObject/EmployeeIdInterface.php
+@@ -0,0 +1,34 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject;
++
++interface EmployeeIdInterface
++{
++    public function getValue(): int;
++}
+diff --git a/src/Core/Domain/Employee/ValueObject/NoEmployeeId.php b/src/Core/Domain/Employee/ValueObject/NoEmployeeId.php
+new file mode 100644
+index 0000000000000..848ca84c9ce30
+--- /dev/null
++++ b/src/Core/Domain/Employee/ValueObject/NoEmployeeId.php
+@@ -0,0 +1,42 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject;
++
++class NoEmployeeId implements EmployeeIdInterface
++{
++    /**
++     * @var int
++     */
++    public const NO_EMPLOYEE_ID_VALUE = 0;
++
++    public function getValue(): int
++    {
++        return self::NO_EMPLOYEE_ID_VALUE;
++    }
++}
+diff --git a/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php b/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
+index cff2ca4e02096..18aaa1332edee 100644
+--- a/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
++++ b/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
+@@ -28,6 +28,8 @@
+ 
+ use PrestaShop\PrestaShop\Core\Domain\Cart\ValueObject\CartId;
+ use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\EmployeeId;
++use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\EmployeeIdInterface;
++use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\NoEmployeeId;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\InvalidOrderStateException;
+ use PrestaShopBundle\Exception\InvalidModuleException;
+ 
+@@ -57,7 +59,7 @@ class AddOrderFromBackOfficeCommand
+     private $orderStateId;
+ 
+     /**
+-     * @var EmployeeId
++     * @var EmployeeIdInterface
+      */
+     private $employeeId;
+ 
+@@ -74,7 +76,7 @@ public function __construct($cartId, $employeeId, $orderMessage, $paymentModuleN
+         $this->assertOrderStateIsPositiveInt($orderStateId);
+ 
+         $this->cartId = new CartId($cartId);
+-        $this->employeeId = new EmployeeId($employeeId);
++        $this->employeeId = $employeeId === NoEmployeeId::NO_EMPLOYEE_ID_VALUE ? new NoEmployeeId() : new EmployeeId($employeeId);
+         $this->orderMessage = $orderMessage;
+         $this->paymentModuleName = $paymentModuleName;
+         $this->orderStateId = $orderStateId;
+@@ -113,7 +115,7 @@ public function getOrderStateId()
+     }
+ 
+     /**
+-     * @return EmployeeId
++     * @return EmployeeIdInterface
+      */
+     public function getEmployeeId()
+     {
+diff --git a/src/Core/Domain/Order/QueryResult/OrderStatusForViewing.php b/src/Core/Domain/Order/QueryResult/OrderStatusForViewing.php
+index cbfde8653d793..df65e6008134d 100644
+--- a/src/Core/Domain/Order/QueryResult/OrderStatusForViewing.php
++++ b/src/Core/Domain/Order/QueryResult/OrderStatusForViewing.php
+@@ -70,6 +70,8 @@ class OrderStatusForViewing
+      */
+     private $orderHistoryId;
+ 
++    private ?string $apiClientId;
++
+     /**
+      * @param int $orderHistoryId
+      * @param int $orderStatusId
+@@ -88,7 +90,8 @@ public function __construct(
+         DateTimeImmutable $createdAt,
+         bool $withEmail,
+         ?string $employeeFirstName,
+-        ?string $employeeLastName
++        ?string $employeeLastName,
++        ?string $apiClientId,
+     ) {
+         $this->orderStatusId = $orderStatusId;
+         $this->name = $name;
+@@ -98,6 +101,7 @@ public function __construct(
+         $this->employeeFirstName = $employeeFirstName;
+         $this->employeeLastName = $employeeLastName;
+         $this->orderHistoryId = $orderHistoryId;
++        $this->apiClientId = $apiClientId;
+     }
+ 
+     /**
+@@ -163,4 +167,9 @@ public function getEmployeeLastName(): ?string
+     {
+         return $this->employeeLastName;
+     }
++
++    public function getApiClientId(): ?string
++    {
++        return $this->apiClientId;
++    }
+ }
+diff --git a/src/Core/Mutation/MutationTracker.php b/src/Core/Mutation/MutationTracker.php
+new file mode 100644
+index 0000000000000..49b9b1865077b
+--- /dev/null
++++ b/src/Core/Mutation/MutationTracker.php
+@@ -0,0 +1,123 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Mutation;
++
++use Doctrine\ORM\EntityManagerInterface;
++use PrestaShop\PrestaShop\Core\Context\ApiClientContext;
++use PrestaShop\PrestaShop\Core\Context\EmployeeContext;
++use PrestaShopBundle\Entity\Mutation;
++use PrestaShopBundle\Entity\MutationAction;
++use PrestaShopBundle\Entity\MutatorType;
++
++/**
++ * The mutation track service helps to add mutation from any service in the code base, it automatically
++ * fills the related potential modifiers (employee and/or api client from the context). The purpose is
++ * to let it automatically set these associations based on the context services, except for module which
++ * must be done manually.
++ */
++class MutationTracker
++{
++    public function __construct(
++        private readonly EntityManagerInterface $entityManager,
++        private readonly ApiClientContext $apiClientContext,
++        private readonly EmployeeContext $employeeContext,
++    ) {
++    }
++
++    /**
++     * Add a mutation associated to the logged in Employee if present.
++     */
++    public function addMutationForEmployee(string $mutationTable, int $mutationRowId, MutationAction $action, string $mutationDetails = ''): void
++    {
++        if ($this->employeeContext->getEmployee()) {
++            $this->persistMutation(
++                $mutationTable,
++                $mutationRowId,
++                $action,
++                MutatorType::EMPLOYEE,
++                (string) $this->employeeContext->getEmployee()->getId(),
++                $mutationDetails
++            );
++        }
++    }
++
++    /**
++     * Adds mutation associated to the authenticated ApiClient if present.
++     */
++    public function addMutationForApiClient(string $mutationTable, int $mutationRowId, MutationAction $action, string $mutationDetails = ''): void
++    {
++        if ($this->apiClientContext->getApiClient()) {
++            $this->persistMutation(
++                $mutationTable,
++                $mutationRowId,
++                $action,
++                MutatorType::API_CLIENT,
++                (string) $this->apiClientContext->getApiClient()->getId(),
++                $mutationDetails
++            );
++        }
++    }
++
++    /**
++     * Add mutation for module, the identifier must be specified explicitly since it cannot be guesses based on context.
++     */
++    public function addMutationForModule(string $mutationTable, int $mutationRowId, MutationAction $action, string $moduleIdentifier, string $mutationDetails = ''): void
++    {
++        $this->persistMutation(
++            $mutationTable,
++            $mutationRowId,
++            $action,
++            MutatorType::MODULE,
++            $moduleIdentifier,
++            $mutationDetails
++        );
++    }
++
++    private function persistMutation(
++        string $mutationTable,
++        int $mutationRowId,
++        MutationAction $action,
++        MutatorType $mutatorType,
++        string $mutatorIdentifier,
++        string $mutationDetails
++    ): void {
++        $mutation = new Mutation();
++        $mutation
++            ->setMutationTable($mutationTable)
++            ->setMutationRowId($mutationRowId)
++            ->setAction($action)
++            ->setMutatorType($mutatorType)
++            ->setMutatorIdentifier($mutatorIdentifier)
++            ->setMutationDetails($mutationDetails)
++        ;
++
++        $this->entityManager->persist($mutation);
++        $this->entityManager->flush();
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/Mutation.php b/src/PrestaShopBundle/Entity/Mutation.php
+new file mode 100644
+index 0000000000000..28d51bfd889f0
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/Mutation.php
+@@ -0,0 +1,185 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity;
++
++use DateTime;
++use Doctrine\ORM\Mapping as ORM;
++
++/**
++ * Mutation entity allows to track a modification/mutation performed on a table, usually in the BO, but it could
++ * also allow tracking some modification in FO like a payment module changing an order status.
++ *
++ * As such the mutation needs to hold three mandatory elements:
++ * - mutation table: which table was modified
++ * - mutation row ID: ID identifying which row of the modified table was modified
++ * - action performed (create, update, delete) identified by an enum to remain small in DB
++ * - mutator type: Employee, ApiClient or Module
++ * - mutator identifier: Identifier of associated mutator (usually an int matching the row, but can be a technical name for a module)
++ *
++ * @ORM\Table
++ * @ORM\HasLifecycleCallbacks
++ * @ORM\Entity(repositoryClass="PrestaShopBundle\Entity\Repository\MutationRepository")
++ */
++class Mutation
++{
++    /**
++     * @ORM\Id
++     * @ORM\Column(name="id_mutation", type="integer", options={"unsigned": true})
++     * @ORM\GeneratedValue(strategy="AUTO")
++     */
++    private int $id;
++
++    /**
++     * @ORM\Column(name="mutation_table", type="string", length=255)
++     */
++    private string $mutationTable;
++
++    /**
++     * @ORM\Column(name="mutation_row_id", type="bigint")
++     */
++    private int $mutationRowId;
++
++    /**
++     * @ORM\Column(name="mutation_action", enumType="PrestaShopBundle\Entity\MutationAction", columnDefinition="ENUM('create', 'update', 'delete')"))
++     */
++    private MutationAction $action;
++
++    /**
++     * @ORM\Column(name="mutator_type", enumType="PrestaShopBundle\Entity\MutatorType", columnDefinition="ENUM('employee', 'api_client', 'module')")
++     */
++    private MutatorType $mutatorType;
++
++    /**
++     * @ORM\Column(name="mutator_identifier", type="string", length=255)
++     */
++    private string $mutatorIdentifier;
++
++    /**
++     * @ORM\Column(name="mutation_details", type="string", length=255, nullable=true)
++     */
++    private string $mutationDetails;
++
++    /**
++     * @ORM\Column(name="date_add", type="datetime", nullable=false)
++     */
++    private DateTime $dateAdd;
++
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    public function getMutationTable(): string
++    {
++        return $this->mutationTable;
++    }
++
++    public function setMutationTable(string $mutationTable): self
++    {
++        $this->mutationTable = $mutationTable;
++
++        return $this;
++    }
++
++    public function getMutationRowId(): int
++    {
++        return $this->mutationRowId;
++    }
++
++    public function setMutationRowId(int $mutationRowId): self
++    {
++        $this->mutationRowId = $mutationRowId;
++
++        return $this;
++    }
++
++    public function getAction(): MutationAction
++    {
++        return $this->action;
++    }
++
++    public function setAction(MutationAction $action): self
++    {
++        $this->action = $action;
++
++        return $this;
++    }
++
++    public function getMutatorType(): MutatorType
++    {
++        return $this->mutatorType;
++    }
++
++    public function setMutatorType(MutatorType $mutatorType): self
++    {
++        $this->mutatorType = $mutatorType;
++
++        return $this;
++    }
++
++    public function getMutatorIdentifier(): string
++    {
++        return $this->mutatorIdentifier;
++    }
++
++    public function setMutatorIdentifier(string $mutatorIdentifier): self
++    {
++        $this->mutatorIdentifier = $mutatorIdentifier;
++
++        return $this;
++    }
++
++    public function getMutationDetails(): string
++    {
++        return $this->mutationDetails;
++    }
++
++    public function setMutationDetails(string $mutationDetails): self
++    {
++        $this->mutationDetails = $mutationDetails;
++
++        return $this;
++    }
++
++    public function getDateAdd(): DateTime
++    {
++        return $this->dateAdd;
++    }
++
++    /**
++     * Now we tell doctrine that before we persist or update we call the updateTimestamps() function.
++     *
++     * @ORM\PrePersist
++     * @ORM\PreUpdate
++     */
++    public function updateTimestamps()
++    {
++        $this->dateAdd = new DateTime();
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/MutationAction.php b/src/PrestaShopBundle/Entity/MutationAction.php
+new file mode 100644
+index 0000000000000..9d895c1d37bfd
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/MutationAction.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity;
++
++enum MutationAction: string
++{
++    case CREATE = 'create';
++    case UPDATE = 'update';
++    case DELETE = 'delete';
++}
+diff --git a/src/PrestaShopBundle/Entity/MutatorType.php b/src/PrestaShopBundle/Entity/MutatorType.php
+new file mode 100644
+index 0000000000000..efb9b1964fe04
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/MutatorType.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity;
++
++enum MutatorType: string
++{
++    case EMPLOYEE = 'employee';
++    case API_CLIENT = 'api_client';
++    case MODULE = 'module';
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/MutationRepository.php b/src/PrestaShopBundle/Entity/Repository/MutationRepository.php
+new file mode 100644
+index 0000000000000..a53baaf1c8b32
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/Repository/MutationRepository.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity\Repository;
++
++use Doctrine\ORM\EntityRepository;
++
++class MutationRepository extends EntityRepository
++{
++}
+diff --git a/src/PrestaShopBundle/Entity/StockMvt.php b/src/PrestaShopBundle/Entity/StockMvt.php
+index efec851b1a673..03828f1c83f08 100644
+--- a/src/PrestaShopBundle/Entity/StockMvt.php
++++ b/src/PrestaShopBundle/Entity/StockMvt.php
+@@ -79,7 +79,7 @@ class StockMvt
+      *
+      * @ORM\Column(name="id_employee", type="integer", nullable=false)
+      */
+-    private $idEmployee;
++    private $idEmployee = 0;
+ 
+     /**
+      * @var string
+diff --git a/src/PrestaShopBundle/PrestaShopBundle.php b/src/PrestaShopBundle/PrestaShopBundle.php
+index 01d9ec9cb1ed4..eca80b659d4cb 100644
+--- a/src/PrestaShopBundle/PrestaShopBundle.php
++++ b/src/PrestaShopBundle/PrestaShopBundle.php
+@@ -75,7 +75,7 @@ public function getContainerExtension(): ?ExtensionInterface
+     /**
+      * {@inheritdoc}
+      */
+-    public function build(ContainerBuilder $container)
++    public function build(ContainerBuilder $container): void
+     {
+         $container->addCompilerPass(new DynamicRolePass());
+         $container->addCompilerPass(new PopulateTranslationProvidersPass());
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index 7c92e0bc4e558..6ecb6d218366b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -24,8 +24,8 @@ services:
+       - '@prestashop.adapter.order.product_quantity.updater'
+       - '@prestashop.adapter.order.order_detail.updater'
+ 
+-  prestashop.adapter.order.command_handler.update_order_status_handler:
+-    class: PrestaShop\PrestaShop\Adapter\Order\CommandHandler\UpdateOrderStatusHandler
++  PrestaShop\PrestaShop\Adapter\Order\CommandHandler\UpdateOrderStatusHandler:
++    autowire: true
+     autoconfigure: true
+ 
+   prestashop.adapter.order.command_handler.update_product_in_order_handler:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+index ca3d1c6cf95d5..319084e1ccc13 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+@@ -132,6 +132,12 @@ services:
+     arguments:
+       - PrestaShopBundle\Entity\ApiClient
+ 
++
++  PrestaShopBundle\Entity\Repository\MutationRepository:
++    factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
++    arguments:
++      - PrestaShopBundle\Entity\Mutation
++
+   PrestaShopBundle\Entity\Repository\ImageTypeRepository:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/mutation.yml b/src/PrestaShopBundle/Resources/config/services/core/mutation.yml
+new file mode 100644
+index 0000000000000..d4a8860e85b62
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/core/mutation.yml
+@@ -0,0 +1,8 @@
++services:
++  _defaults:
++    public: false
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Core\Mutation\:
++    resource: "%kernel.project_dir%/src/Core/Mutation/*"
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/history.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/history.html.twig
+index 8b0f59310caa3..899093e275c2c 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/history.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/history.html.twig
+@@ -38,13 +38,16 @@
+         {% if status.employeeLastName is not empty %}
+           {{ status.employeeFirstName ~ ' ' ~ status.employeeLastName }}
+         {% endif %}
++        {% if status.apiClientId is not empty %}
++          {{ 'Api Client: %api_client_id%'|trans({'%api_client_id%': status.apiClientId}, 'Admin.Global') }}
++        {% endif %}
+       </td>
+       <td class="text-right" data-role="date-column">
+         {{ status.createdAt|date_format_full }}
+       </td>
+       <td class="text-right">
+         {% if status.withEmail %}
+-          <form method="post" 
++          <form method="post"
+                 action="{{ path('admin_orders_resend_email', {'orderId': orderForViewing.id, 'orderHistoryId': status.orderHistoryId, 'orderStatusId': status.orderStatusId}) }}">
+             <button class="btn btn-link pt-0 pb-0">
+               {{ 'Resend email'|trans({}, 'Admin.Orderscustomers.Feature') }}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ApiClientManagementFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ApiClientManagementFeatureContext.php
+index 029e1b8a95c6c..52d3b113bebfa 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ApiClientManagementFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ApiClientManagementFeatureContext.php
+@@ -30,6 +30,7 @@
+ namespace Tests\Integration\Behaviour\Features\Context\Domain;
+ 
+ use Behat\Gherkin\Node\TableNode;
++use PrestaShop\PrestaShop\Core\Context\ApiClient;
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\Command\AddApiClientCommand;
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\Command\DeleteApiClientCommand;
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\Command\EditApiClientCommand;
+@@ -43,7 +44,9 @@
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\ValueObject\CreatedApiClient;
+ use PrestaShopBundle\Entity\Repository\ApiClientRepository;
+ use Symfony\Component\PasswordHasher\PasswordHasherInterface;
++use Tests\Integration\Behaviour\Features\Context\CommonFeatureContext;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
++use Tests\Resources\Context\ApiClientContextDecorator;
+ use Tests\Resources\Resetter\ApiClientResetter;
+ 
+ class ApiClientManagementFeatureContext extends AbstractDomainFeatureContext
+@@ -307,12 +310,49 @@ private function assertSecret(string $secretReference, string $apiClientReferenc
+ 
+     /**
+      * @BeforeFeature @restore-api-client-before-feature
+-     */
+-    public static function restoreProductTablesBeforeFeature(): void
++     * @AfterFeature @restore-api-client-after-feature     */
++    public static function restoreApiClientTables(): void
+     {
+         ApiClientResetter::resetApiClient();
+     }
+ 
++    /**
++     * @Given I am logged in as api client with id :apiClientId
++     */
++    public function logsInAsApiClient(string $apiClientId): void
++    {
++        $apiAccessRepository = CommonFeatureContext::getContainer()->get(ApiClientRepository::class);
++        $apiClient = $apiAccessRepository->getByClientId($apiClientId);
++        /** @var ApiClientContextDecorator $apiClientContext */
++        $apiClientContext = CommonFeatureContext::getContainer()->get(ApiClientContextDecorator::class);
++        $apiClientContext->setOverriddenApiClient(new ApiClient(
++            id: $apiClient->getId(),
++            clientId: $apiClient->getClientId(),
++            shopId: $this->getDefaultShopId(),
++            scopes: $apiClient->getScopes(),
++        ));
++    }
++
++    /**
++     * @Given I am not logged in as an api client
++     */
++    public function logsOutApiClient()
++    {
++        /** @var ApiClientContextDecorator $apiClientContext */
++        $apiClientContext = CommonFeatureContext::getContainer()->get(ApiClientContextDecorator::class);
++        $apiClientContext->setOverriddenApiClient(null);
++    }
++
++    /**
++     * @AfterFeature
++     */
++    public static function resetApiClientContext(): void
++    {
++        /** @var ApiClientContextDecorator $apiClientContext */
++        $apiClientContext = CommonFeatureContext::getContainer()->get(ApiClientContextDecorator::class);
++        $apiClientContext->resetOverriddenApiClient();
++    }
++
+     private function createApiClient(string $apiClientReference, TableNode $table, string $secretReference = null): void
+     {
+         $data = $this->fixDataType($table->getRowsHash());
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index 8a0a1e04f2b20..8db0e11b21f2c 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -762,6 +762,45 @@ public function orderHasStatus(string $orderReference, string $status)
+         }
+     }
+ 
++    /**
++     * @Then order :orderReference has the following status history:
++     *
++     * @param string $orderReference
++     * @param TableNode $tableNode
++     *
++     * @throws RuntimeException
++     */
++    public function orderHasHistoryStatus(string $orderReference, TableNode $tableNode)
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        /** @var OrderForViewing $orderForViewing */
++        $orderForViewing = $this->getQueryBus()->handle(new GetOrderForViewing($orderId));
++        $orderStatusHistory = $orderForViewing->getHistory()->getStatuses();
++
++        /** @var OrderStateByIdChoiceProvider $orderStateChoiceProvider */
++        $orderStateChoiceProvider = $this->getContainer()->get('prestashop.core.form.choice_provider.order_state_by_id');
++        $availableOrderStates = $orderStateChoiceProvider->getChoices();
++
++        $expectedOrderStatusHistory = $tableNode->getColumnsHash();
++        Assert::assertEquals(count($expectedOrderStatusHistory), count($orderStatusHistory));
++
++        foreach ($expectedOrderStatusHistory as $key => $expectedOrderStatus) {
++            if (!isset($availableOrderStates[$expectedOrderStatus['status']])) {
++                throw new RuntimeException('Unknown order status ' . $expectedOrderStatus['status']);
++            }
++            $expectedOrderStatusHistory[$key]['status_id'] = (int) $availableOrderStates[$expectedOrderStatus['status']];
++        }
++
++        foreach ($expectedOrderStatusHistory as $key => $expectedOrderStatus) {
++            $orderStatus = $orderStatusHistory[$key];
++            Assert::assertEquals($expectedOrderStatus['status_id'], $orderStatus->getOrderStatusId());
++            Assert::assertEquals($expectedOrderStatus['status'], $orderStatus->getName());
++            Assert::assertEquals($expectedOrderStatus['employee_first_name'], $orderStatus->getEmployeeFirstName());
++            Assert::assertEquals($expectedOrderStatus['employee_last_name'], $orderStatus->getEmployeeLastName());
++            Assert::assertEquals($expectedOrderStatus['api_client_id'], $orderStatus->getApiClientId());
++        }
++    }
++
+     /**
+      * @Then order :orderReference has :statusNb status(es) in history
+      *
+@@ -1635,7 +1674,7 @@ private function mapAddOrderFromBackOfficeData(array $testCaseData)
+         $data = [];
+         $cartId = SharedStorage::getStorage()->get($testCaseData['cart']);
+         $data['cartId'] = $cartId;
+-        $data['employeeId'] = Context::getContext()->employee->id;
++        $data['employeeId'] = (int) Context::getContext()->employee?->id;
+         $data['orderMessage'] = $testCaseData['message'];
+         $data['paymentModuleName'] = $testCaseData['payment module name'];
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php b/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
+index 594591dcbcff1..7785fc4c575a7 100644
+--- a/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/EmployeeFeatureContext.php
+@@ -27,7 +27,9 @@
+ namespace Tests\Integration\Behaviour\Features\Context;
+ 
+ use Context;
+-use Employee;
++use Employee as LegacyEmployee;
++use PrestaShop\PrestaShop\Core\Context\Employee;
++use Tests\Resources\Context\EmployeeContextDecorator;
+ 
+ /**
+  * Class EmployeeFeatureContext
+@@ -39,8 +41,48 @@ class EmployeeFeatureContext extends AbstractPrestaShopFeatureContext
+      */
+     public function logsInBackOffice($employeeEmail)
+     {
+-        $employee = new Employee();
++        $employee = new LegacyEmployee();
++        $legacyEmployee = $employee->getByEmail($employeeEmail);
+ 
+-        Context::getContext()->employee = $employee->getByEmail($employeeEmail);
++        Context::getContext()->employee = $legacyEmployee;
++
++        /** @var EmployeeContextDecorator $employeeContext */
++        $employeeContext = CommonFeatureContext::getContainer()->get(EmployeeContextDecorator::class);
++        $employeeContext->setOverriddenEmployee(new Employee(
++            id: (int) $legacyEmployee->id,
++            profileId: (int) $legacyEmployee->id_profile,
++            languageId: (int) $legacyEmployee->id_lang,
++            firstName: $legacyEmployee->firstname,
++            lastName: $legacyEmployee->lastname,
++            email: $legacyEmployee->email,
++            password: $legacyEmployee->passwd,
++            imageUrl: $legacyEmployee->getImage(),
++            defaultTabId: (int) $legacyEmployee->default_tab,
++            defaultShopId: (int) $legacyEmployee->getDefaultShopID(),
++            associatedShopIds: $legacyEmployee->getAssociatedShopIds(),
++            associatedShopGroupIds: $legacyEmployee->getAssociatedShopGroupIds()
++        ));
++    }
++
++    /**
++     * @Given I am not logged in as an employee
++     */
++    public function logsOutBackOffice()
++    {
++        Context::getContext()->employee = null;
++        /** @var EmployeeContextDecorator $employeeContext */
++        $employeeContext = CommonFeatureContext::getContainer()->get(EmployeeContextDecorator::class);
++        $employeeContext->setOverriddenEmployee(null);
++    }
++
++    /**
++     * @AfterFeature
++     */
++    public static function resetEmployeeContext(): void
++    {
++        Context::getContext()->employee = null;
++        /** @var EmployeeContextDecorator $employeeContext */
++        $employeeContext = CommonFeatureContext::getContainer()->get(EmployeeContextDecorator::class);
++        $employeeContext->resetOverriddenEmployee();
+     }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_update_status.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_update_status.feature
+new file mode 100644
+index 0000000000000..709e05790fa35
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_update_status.feature
+@@ -0,0 +1,82 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s order --tags order-update-status
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@order-update-status
++Feature: Order from Back Office (BO)
++  In order to manage orders for FO customers
++  As a BO user
++  I need to be able to update the order status and see its history
++
++  Background:
++    Given email sending is disabled
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And a carrier "default_carrier" with name "My carrier" exists
++
++  Scenario: I update the order status while logged as an employee
++    Given I am logged in as "test@prestashop.com" employee
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And order "bo_order1" has status "Awaiting bank wire payment"
++    And order "bo_order1" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Awaiting bank wire payment | Puff                | Daddy              |               |
++    When I update order "bo_order1" status to "Payment accepted"
++    Then order "bo_order1" has status "Payment accepted"
++    And order "bo_order1" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Payment accepted           | Puff                | Daddy              |               |
++      | Awaiting bank wire payment | Puff                | Daddy              |               |
++    Given I am not logged in as an employee
++    When I update order "bo_order1" status to "Delivered"
++    Then order "bo_order1" has status "Delivered"
++    And order "bo_order1" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Delivered                  |                     |                    |               |
++      | Payment accepted           | Puff                | Daddy              |               |
++      | Awaiting bank wire payment | Puff                | Daddy              |               |
++
++  Scenario: I update the order status while logged as an api client
++    Given I create an api client "AC-1" with following properties:
++      | clientName  | Thomas               |
++      | apiClientId | api_client           |
++      | enabled     | true                 |
++      | description | a simple description |
++      | lifetime    | 3600                 |
++    Given I am not logged in as an employee
++    Given I am logged in as api client with id "api_client"
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add order "bo_order2" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And order "bo_order2" has status "Awaiting bank wire payment"
++    And order "bo_order2" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Awaiting bank wire payment |                     |                    |               |
++    When I update order "bo_order2" status to "Payment accepted"
++    Then order "bo_order2" has status "Payment accepted"
++    And order "bo_order2" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Payment accepted           |                     |                    | api_client    |
++      | Awaiting bank wire payment |                     |                    |               |
++    Given I am not logged in as an api client
++    When I update order "bo_order2" status to "Delivered"
++    Then order "bo_order2" has status "Delivered"
++    And order "bo_order2" has the following status history:
++      | status                     | employee_first_name | employee_last_name | api_client_id |
++      | Delivered                  |                     |                    |               |
++      | Payment accepted           |                     |                    | api_client    |
++      | Awaiting bank wire payment |                     |                    |               |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index a689ac445422e..a4d3d288fc1e2 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -154,6 +154,7 @@ default:
+                 - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
+diff --git a/tests/Resources/Context/ApiClientContextDecorator.php b/tests/Resources/Context/ApiClientContextDecorator.php
+new file mode 100644
+index 0000000000000..0863c21a6422f
+--- /dev/null
++++ b/tests/Resources/Context/ApiClientContextDecorator.php
+@@ -0,0 +1,82 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Resources\Context;
++
++use PrestaShop\PrestaShop\Core\Context\ApiClient;
++use PrestaShop\PrestaShop\Core\Context\ApiClientContext;
++
++/**
++ * This decorator is used for test environment only it allows it makes the context mutable and allows
++ * to vary its value in test scenarios. Not to use in prod code as the contexts are meant to be immutable.
++ */
++class ApiClientContextDecorator extends ApiClientContext
++{
++    private ApiClientContext $decoratedApiClientContext;
++
++    private ?ApiClient $overriddenApiClient = null;
++
++    private bool $useOverriddenValue = false;
++
++    public function __construct(ApiClientContext $decoratedApiClientContext)
++    {
++        $this->decoratedApiClientContext = $decoratedApiClientContext;
++        parent::__construct($decoratedApiClientContext->getApiClient());
++    }
++
++    public function getApiClient(): ?ApiClient
++    {
++        if ($this->useOverriddenValue) {
++            return $this->overriddenApiClient;
++        }
++
++        return $this->decoratedApiClientContext->getApiClient();
++    }
++
++    /**
++     * Once the value has been overridden it will we used instead of the initial one (even if it's null),
++     * to disable this permanent override you can use resetOverriddenEmployee
++     *
++     * @param ApiClient|null $overriddenApiClient
++     */
++    public function setOverriddenApiClient(?ApiClient $overriddenApiClient): void
++    {
++        $this->useOverriddenValue = true;
++        $this->overriddenApiClient = $overriddenApiClient;
++    }
++
++    /**
++     * This method resets the override values, thus the decorator keeps acting as a simple proxy without impacting
++     * the decorated service.
++     */
++    public function resetOverriddenApiClient(): void
++    {
++        $this->useOverriddenValue = false;
++        $this->overriddenApiClient = null;
++    }
++}
+diff --git a/tests/Resources/Context/EmployeeContextDecorator.php b/tests/Resources/Context/EmployeeContextDecorator.php
+new file mode 100644
+index 0000000000000..6affd25c3f478
+--- /dev/null
++++ b/tests/Resources/Context/EmployeeContextDecorator.php
+@@ -0,0 +1,82 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Resources\Context;
++
++use PrestaShop\PrestaShop\Core\Context\Employee;
++use PrestaShop\PrestaShop\Core\Context\EmployeeContext;
++
++/**
++ * This decorator is used for test environment only it allows it makes the context mutable and allows
++ * to vary its value in test scenarios. Not to use in prod code as the contexts are meant to be immutable.
++ */
++class EmployeeContextDecorator extends EmployeeContext
++{
++    private EmployeeContext $decoratedEmployeeContext;
++
++    private ?Employee $overriddenEmployee = null;
++
++    private bool $useOverriddenValue = false;
++
++    public function __construct(EmployeeContext $decoratedEmployeeContext)
++    {
++        $this->decoratedEmployeeContext = $decoratedEmployeeContext;
++        parent::__construct($decoratedEmployeeContext->getEmployee());
++    }
++
++    public function getEmployee(): ?Employee
++    {
++        if ($this->useOverriddenValue) {
++            return $this->overriddenEmployee;
++        }
++
++        return $this->decoratedEmployeeContext->getEmployee();
++    }
++
++    /**
++     * Once the value has been overridden it will we used instead of the initial one (even if it's null),
++     * to disable this permanent override you can use resetOverriddenEmployee
++     *
++     * @param Employee|null $overriddenEmployee
++     */
++    public function setOverriddenEmployee(?Employee $overriddenEmployee): void
++    {
++        $this->useOverriddenValue = true;
++        $this->overriddenEmployee = $overriddenEmployee;
++    }
++
++    /**
++     * This method resets the override values, thus the decorator keeps acting as a simple proxy without impacting
++     * the decorated service.
++     */
++    public function resetOverriddenEmployee(): void
++    {
++        $this->useOverriddenValue = false;
++        $this->overriddenEmployee = null;
++    }
++}
+diff --git a/tests/Resources/config/services.yml b/tests/Resources/config/services.yml
+index 1995cef60b321..e0046c287ded5 100644
+--- a/tests/Resources/config/services.yml
++++ b/tests/Resources/config/services.yml
+@@ -55,3 +55,16 @@ services:
+ 
+     Symfony\Component\Serializer\SerializerInterface:
+       alias: serializer
++
++    # Decorate contexts to make them mutable for test purpose only
++    # It is very important to have these decorators lazy, or it would force the early creation of the decorated service that would be
++    # built before the listeners get the chance to setup the builders
++    Tests\Resources\Context\ApiClientContextDecorator:
++      lazy: true
++      decorates: PrestaShop\PrestaShop\Core\Context\ApiClientContext
++      arguments: ['@.inner']
++
++    Tests\Resources\Context\EmployeeContextDecorator:
++      lazy: true
++      decorates: PrestaShop\PrestaShop\Core\Context\EmployeeContext
++      arguments: ['@.inner']
+diff --git a/tests/Unit/Core/Context/ApiClientContextBuilderTest.php b/tests/Unit/Core/Context/ApiClientContextBuilderTest.php
+index 0f867e5ab5287..087c421d9554a 100644
+--- a/tests/Unit/Core/Context/ApiClientContextBuilderTest.php
++++ b/tests/Unit/Core/Context/ApiClientContextBuilderTest.php
+@@ -40,20 +40,24 @@ class ApiClientContextBuilderTest extends TestCase
+ {
+     use MockConfigurationTrait;
+ 
++    private const SHOP_ID = 42;
++    private const API_CLIENT_ID = 51;
++
+     public function testBuild(): void
+     {
+         $apiClient = $this->getApiClientEntity();
+         $builder = new ApiClientContextBuilder(
+             $this->mockRepository($apiClient),
+-            $this->mockConfiguration(['PS_SHOP_DEFAULT' => 42])
++            $this->mockConfiguration(['PS_SHOP_DEFAULT' => self::SHOP_ID])
+         );
+ 
+         $builder->setClientId('client_id');
+         $apiClientContext = $builder->build();
+         $this->assertNotNull($apiClientContext->getApiClient());
+-        $this->assertEquals($apiClient->getClientId(), $apiClientContext->getApiClient()->getClientId());
+-        $this->assertEquals($apiClient->getScopes(), $apiClientContext->getApiClient()->getScopes());
+-        $this->assertEquals(42, $apiClientContext->getApiClient()->getShopId());
++        $this->assertEquals(self::API_CLIENT_ID, $apiClientContext->getApiClient()->getId());
++        $this->assertEquals('client_id', $apiClientContext->getApiClient()->getClientId());
++        $this->assertEquals(['scope1', 'scope3'], $apiClientContext->getApiClient()->getScopes());
++        $this->assertEquals(self::SHOP_ID, $apiClientContext->getApiClient()->getShopId());
+     }
+ 
+     public function testBuildWithStringValue(): void
+@@ -61,7 +65,7 @@ public function testBuildWithStringValue(): void
+         $apiClient = $this->getApiClientEntity();
+         $builder = new ApiClientContextBuilder(
+             $this->mockRepository($apiClient),
+-            $this->mockConfiguration(['PS_SHOP_DEFAULT' => '42'])
++            $this->mockConfiguration(['PS_SHOP_DEFAULT' => (string) self::SHOP_ID])
+         );
+ 
+         $builder->setClientId('client_id');
+@@ -69,7 +73,7 @@ public function testBuildWithStringValue(): void
+         $this->assertNotNull($apiClientContext->getApiClient());
+         $this->assertEquals($apiClient->getClientId(), $apiClientContext->getApiClient()->getClientId());
+         $this->assertEquals($apiClient->getScopes(), $apiClientContext->getApiClient()->getScopes());
+-        $this->assertEquals(42, $apiClientContext->getApiClient()->getShopId());
++        $this->assertEquals(self::SHOP_ID, $apiClientContext->getApiClient()->getShopId());
+     }
+ 
+     public function testBuildNoApiClient(): void
+@@ -98,7 +102,7 @@ private function getApiClientEntity(): ApiClient
+     {
+         $apiClient = new ApiClient();
+         $apiClient
+-            ->setId(42)
++            ->setId(self::API_CLIENT_ID)
+             ->setClientId('client_id')
+             ->setClientName('client_name')
+             ->setScopes(['scope1', 'scope3'])
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/Context/API/ApiClientContextListenerTest.php b/tests/Unit/PrestaShopBundle/EventListener/Context/API/ApiClientContextListenerTest.php
+index 77c9f737ebbbb..31a28b5234a83 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/Context/API/ApiClientContextListenerTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/Context/API/ApiClientContextListenerTest.php
+@@ -45,13 +45,13 @@ class ApiClientContextListenerTest extends ContextEventListenerTestCase
+     /**
+      * @dataProvider getExpectedClients
+      */
+-    public function testBuildBasedOnSecurityToken(string $clientId, array $scopes): void
++    public function testBuildBasedOnSecurityToken(int $apiId, string $clientId, array $scopes): void
+     {
+         // Create request that mimic a call to external API
+         $event = $this->createRequestEvent(new Request([], [], ['_controller' => 'api_platform.action.placeholder']));
+ 
+         $builder = new ApiClientContextBuilder(
+-            $this->mockRepository($clientId, $scopes),
++            $this->mockRepository($apiId, $clientId, $scopes),
+             $this->mockConfiguration(['PS_SHOP_DEFAULT' => 42])
+         );
+         $listener = new ApiClientContextListener(
+@@ -63,6 +63,7 @@ public function testBuildBasedOnSecurityToken(string $clientId, array $scopes):
+ 
+         $apiClientContext = $builder->build();
+         $this->assertNotNull($apiClientContext->getApiClient());
++        $this->assertEquals($apiId, $apiClientContext->getApiClient()->getId());
+         $this->assertEquals($clientId, $apiClientContext->getApiClient()->getClientId());
+         $this->assertEquals($scopes, $apiClientContext->getApiClient()->getScopes());
+         $this->assertEquals(42, $apiClientContext->getApiClient()->getShopId());
+@@ -71,11 +72,13 @@ public function testBuildBasedOnSecurityToken(string $clientId, array $scopes):
+     public function getExpectedClients(): iterable
+     {
+         yield 'client with scopes' => [
++            42,
+             'client_id',
+             ['scope1', 'scope3'],
+         ];
+ 
+         yield 'client with empty scopes' => [
++            51,
+             'any_other_client_id',
+             [],
+         ];
+@@ -142,9 +145,10 @@ private function mockSecurity(?TokenInterface $token): Security|MockObject
+         return $security;
+     }
+ 
+-    private function mockRepository(string $expectedClientId, array $scopes): ApiClientRepository|MockObject
++    private function mockRepository(int $apiId, string $expectedClientId, array $scopes): ApiClientRepository|MockObject
+     {
+         $apiClient = new ApiClient();
++        $apiClient->setId($apiId);
+         $apiClient->setScopes($scopes);
+         $apiClient->setClientId($expectedClientId);
+ 

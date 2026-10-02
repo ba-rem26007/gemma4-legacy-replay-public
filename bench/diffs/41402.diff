@@ -1,0 +1,3664 @@
+diff --git a/src/Adapter/Address/Repository/AddressRepository.php b/src/Adapter/Address/Repository/AddressRepository.php
+index 7461db1522d51..a367ed56d0cda 100644
+--- a/src/Adapter/Address/Repository/AddressRepository.php
++++ b/src/Adapter/Address/Repository/AddressRepository.php
+@@ -9,6 +9,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Address\Repository;
+ 
+ use Address;
++use Doctrine\DBAL\Connection;
+ use PrestaShop\PrestaShop\Core\Domain\Address\Exception\AddressNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
+ use PrestaShop\PrestaShop\Core\Domain\AttributeGroup\Attribute\Exception\AttributeNotFoundException;
+@@ -20,6 +21,12 @@
+  */
+ class AddressRepository extends AbstractMultiShopObjectModelRepository
+ {
++    public function __construct(
++        private readonly Connection $connection,
++        private string $dbPrefix,
++    ) {
++    }
++
+     /**
+      * @param AddressId $addressId
+      *
+@@ -39,4 +46,27 @@ public function get(AddressId $addressId): Address
+ 
+         return $address;
+     }
++
++    public function getZoneId(AddressId $addressId): int
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('s.id_zone AS id_zone_state', 'c.id_zone')
++            ->from($this->dbPrefix . 'address', 'a')
++            ->leftJoin('a', $this->dbPrefix . 'country', 'c', 'c.id_country = a.id_country')
++            ->leftJoin('a', $this->dbPrefix . 'state', 's', 's.id_state = a.id_state')
++            ->where('a.id_address = :addressId')
++            ->setParameter('addressId', $addressId->getValue())
++        ;
++
++        $result = $qb->executeQuery()->fetchAssociative();
++
++        if ($result === false || (empty($result['id_zone_state']) && empty($result['id_zone']))) {
++            throw new AddressNotFoundException(sprintf('Address with id %s not found', $addressId->getValue()));
++        }
++
++        return !empty($result['id_zone_state'])
++            ? (int) $result['id_zone_state']
++            : (int) $result['id_zone'];
++    }
+ }
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php
+new file mode 100644
+index 0000000000000..0ae68a1c478c7
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php
+@@ -0,0 +1,60 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class BaseRangeCostCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly CarrierDataProviderInterface $carrierDataProvider,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $carrierData = $context->getCarrierData();
++        $zoneId = $context->getResolvedZoneId();
++
++        if ($carrierData === null || $zoneId === null) {
++            $context->setAvailable(false);
++
++            return;
++        }
++
++        $cost = $this->carrierDataProvider->getRangeCost(
++            $carrierData,
++            $context->getTotalWeight(),
++            $context->getOrderTotal(),
++            $zoneId,
++            $context->getCurrencyId(),
++        );
++
++        if ($cost === null) {
++            $context->setAvailable(false);
++
++            return;
++        }
++
++        if ($cost->equals(new DecimalNumber('0'))) {
++            $context->setFreeShipping(true);
++
++            return;
++        }
++
++        $context->setCost($cost);
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculator.php
+new file mode 100644
+index 0000000000000..6ae1e6ea43e66
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculator.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class CarrierDataCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly CarrierDataProviderInterface $carrierDataProvider,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        $carrierData = $this->carrierDataProvider->getCarrierShippingData($context->getCarrierId());
++
++        if ($carrierData === null) {
++            $context->setAvailable(false);
++
++            return;
++        }
++
++        $context->setCarrierData($carrierData);
++
++        if ($carrierData->isFreeShippingMethod()) {
++            $context->setFreeShipping(true);
++        }
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculator.php
+new file mode 100644
+index 0000000000000..070f5c8d42ef9
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculator.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++
++class CurrencyConversionCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly Tools $tools,
++        private readonly CurrencyRepository $currencyRepository,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $currency = $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()));
++        $converted = $this->tools->convertPrice($context->getCost()->__toString(), $currency);
++
++        $context->setCost(new DecimalNumber((string) $converted));
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+new file mode 100644
+index 0000000000000..ca1143e9bb0eb
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++
++class FreeShippingCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly FreeShippingCriteriaProviderInterface $criteriaProvider,
++        private readonly Tools $tools,
++        private readonly CurrencyRepository $currencyRepository,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $thresholds = $this->criteriaProvider->getCriteria();
++
++        if ($thresholds->hasFreePrice()) {
++            $convertedPrice = new DecimalNumber((string) $this->tools->convertPrice(
++                (float) (string) $thresholds->getFreePrice(),
++                $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()))
++            ));
++
++            if ($context->getOrderTotal()->isGreaterOrEqualThan($convertedPrice)) {
++                $context->setFreeShipping(true);
++
++                return;
++            }
++        }
++
++        if ($thresholds->hasFreeWeight() && $context->getTotalWeight()->isGreaterOrEqualThan($thresholds->getFreeWeight())) {
++            $context->setFreeShipping(true);
++        }
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculator.php
+new file mode 100644
+index 0000000000000..f3c771aad5c21
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculator.php
+@@ -0,0 +1,41 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class HandlingCostCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly AdapterConfiguration $configuration,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $carrierData = $context->getCarrierData();
++        if ($carrierData === null || !$carrierData->hasShippingHandling()) {
++            return;
++        }
++
++        $handlingCost = $this->configuration->get('PS_SHIPPING_HANDLING');
++        if (!$handlingCost) {
++            return;
++        }
++
++        $context->setCost($context->getCost()->plus(new DecimalNumber((string) $handlingCost)));
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php
+new file mode 100644
+index 0000000000000..b1026cf9f82e5
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php
+@@ -0,0 +1,66 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\ShippingTaxRateProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++use PrestaShop\PrestaShop\Core\Pricing\Rounding\RoundingServiceInterface;
++
++class TaxCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly AdapterConfiguration $configuration,
++        private readonly ShippingTaxRateProviderInterface $taxRateProvider,
++        private readonly CurrencyRepository $currencyRepository,
++        private readonly RoundingServiceInterface $roundingService,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable()) {
++            return;
++        }
++
++        $currency = $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()));
++        $precision = (int) $currency->precision;
++        $context->setPrecision($precision);
++
++        if ($context->isFreeShipping()) {
++            $zero = new DecimalNumber('0');
++            $context->setTaxExcluded($zero);
++            $context->setTaxIncluded($zero);
++
++            return;
++        }
++
++        $cost = $context->getCost();
++
++        $addressId = $context->getAddressId();
++        $carrierId = $context->getCarrierId();
++        $taxIncluded = $cost;
++
++        if (
++            $this->configuration->get('PS_TAX')
++            && $addressId !== null
++            && !$this->configuration->get('PS_ATCP_SHIPWRAP')
++        ) {
++            $taxRate = $this->taxRateProvider->getTaxRate($carrierId, $addressId);
++            $taxIncluded = $cost->times($taxRate->getMultiplier());
++        }
++
++        $context->setTaxExcluded($this->roundingService->round($cost, $precision));
++        $context->setTaxIncluded($this->roundingService->round($taxIncluded, $precision));
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculator.php
+new file mode 100644
+index 0000000000000..51485a469b2b5
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculator.php
+@@ -0,0 +1,46 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository;
++use PrestaShop\PrestaShop\Core\Domain\Address\Exception\AddressNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class ZoneResolutionCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly AddressRepository $addressRepository,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->getResolvedZoneId() !== null) {
++            return;
++        }
++
++        $addressId = $context->getAddressId();
++
++        if ($addressId !== null) {
++            try {
++                $zoneId = $this->addressRepository->getZoneId(new AddressId($addressId));
++            } catch (AddressNotFoundException) {
++                $context->setAvailable(false);
++
++                return;
++            }
++        } else {
++            $zoneId = $context->getCountryZoneId();
++        }
++
++        $context->setResolvedZoneId($zoneId);
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php b/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php
+new file mode 100644
+index 0000000000000..fc7f387b17920
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php
+@@ -0,0 +1,78 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider;
++
++use Carrier;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\Repository\CarrierRepository;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\Exception\CarrierNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++
++class CarrierDataProvider implements CarrierDataProviderInterface
++{
++    public function __construct(
++        private readonly CarrierRepository $carrierRepository,
++    ) {
++    }
++
++    public function getCarrierShippingData(int $carrierId): ?CarrierShippingData
++    {
++        try {
++            $carrier = $this->carrierRepository->get(new CarrierId($carrierId));
++        } catch (CarrierNotFoundException) {
++            return null;
++        }
++
++        $shippingMethod = $carrier->getShippingMethod();
++
++        return new CarrierShippingData(
++            $carrier->id,
++            $shippingMethod,
++            (int) $carrier->range_behavior,
++            (bool) $carrier->shipping_handling,
++            $shippingMethod === Carrier::SHIPPING_METHOD_FREE,
++        );
++    }
++
++    public function getRangeCost(
++        CarrierShippingData $carrierData,
++        DecimalNumber $totalWeight,
++        DecimalNumber $orderTotal,
++        int $zoneId,
++        int $currencyId,
++    ): ?DecimalNumber {
++        $carrier = $this->carrierRepository->get(new CarrierId($carrierData->getCarrierId()));
++
++        $weightFloat = (float) (string) $totalWeight;
++        $orderTotalFloat = (float) (string) $orderTotal;
++        $isWeightMethod = $carrierData->getShippingMethod() === Carrier::SHIPPING_METHOD_WEIGHT;
++
++        if ($carrierData->getRangeBehavior()) {
++            $isInRange = $isWeightMethod
++                ? Carrier::checkDeliveryPriceByWeight($carrier->id, $weightFloat, $zoneId)
++                : Carrier::checkDeliveryPriceByPrice($carrier->id, $orderTotalFloat, $zoneId, $currencyId);
++
++            if ($isInRange === false) {
++                return null;
++            }
++        }
++
++        $cost = $isWeightMethod
++            ? $carrier->getDeliveryPriceByWeight($weightFloat, $zoneId)
++            : $carrier->getDeliveryPriceByPrice($orderTotalFloat, $zoneId, $currencyId);
++
++        if ($cost === false) {
++            return null;
++        }
++
++        return new DecimalNumber((string) $cost);
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php b/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php
+new file mode 100644
+index 0000000000000..05b2aaefe795f
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteria;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
++
++class ConfigFreeShippingCriteriaProvider implements FreeShippingCriteriaProviderInterface
++{
++    public function __construct(
++        private readonly AdapterConfiguration $configuration,
++    ) {
++    }
++
++    public function getCriteria(): FreeShippingCriteria
++    {
++        $freePrice = $this->configuration->get('PS_SHIPPING_FREE_PRICE');
++        $freeWeight = $this->configuration->get('PS_SHIPPING_FREE_WEIGHT');
++
++        return new FreeShippingCriteria(
++            $freePrice !== false && $freePrice > 0 ? new DecimalNumber((string) $freePrice) : null,
++            $freeWeight !== false && $freeWeight > 0 ? new DecimalNumber((string) $freeWeight) : null,
++        );
++    }
++}
+diff --git a/src/Adapter/Carrier/ShippingCost/Provider/ShippingTaxRateProvider.php b/src/Adapter/Carrier/ShippingCost/Provider/ShippingTaxRateProvider.php
+new file mode 100644
+index 0000000000000..8783d3c0dd2d7
+--- /dev/null
++++ b/src/Adapter/Carrier/ShippingCost/Provider/ShippingTaxRateProvider.php
+@@ -0,0 +1,46 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider;
++
++use Exception;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository;
++use PrestaShop\PrestaShop\Adapter\Carrier\Repository\CarrierRepository;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\ShippingTaxRateProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++use PrestaShop\PrestaShop\Core\Pricing\ValueObject\TaxRate;
++use Psr\Log\LoggerInterface;
++
++class ShippingTaxRateProvider implements ShippingTaxRateProviderInterface
++{
++    public function __construct(
++        private readonly CarrierRepository $carrierRepository,
++        private readonly AddressRepository $addressRepository,
++        private readonly LoggerInterface $logger,
++    ) {
++    }
++
++    public function getTaxRate(int $carrierId, int $addressId): TaxRate
++    {
++        try {
++            $carrier = $this->carrierRepository->get(new CarrierId($carrierId));
++            $address = $this->addressRepository->get(new AddressId($addressId));
++
++            return new TaxRate(new DecimalNumber((string) $carrier->getTaxesRate($address)));
++        } catch (Exception $e) {
++            $this->logger->error(
++                sprintf('Failed to retrieve tax rate for carrier %d and address %d: %s', $carrierId, $addressId, $e->getMessage()),
++                ['exception' => $e]
++            );
++
++            return TaxRate::zero();
++        }
++    }
++}
+diff --git a/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php b/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
+index f7b8e352a6d71..4b51a4423c497 100644
+--- a/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
+@@ -200,9 +200,6 @@ public function handle(AddProductToOrderCommand $command)
+                 $updateModifications
+             );
+ 
+-            // Update totals amount of order
+-            $this->orderAmountUpdater->update($order, $cart, null !== $invoice ? (int) $invoice->id : null);
+-
+             if (
+                 $this->featureFlagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)
+                 && $command->isVirtual() !== null && $command->isVirtual() === false
+@@ -221,6 +218,13 @@ public function handle(AddProductToOrderCommand $command)
+                 );
+             }
+ 
++            if (
++                !$this->featureFlagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)
++            ) {
++                // Update totals amount of order
++                $this->orderAmountUpdater->update($order, $cart, null !== $invoice ? (int) $invoice->id : null);
++            }
++
+             Hook::exec('actionOrderEdited', ['order' => $order]);
+         } finally {
+             $this->contextStateManager->restorePreviousContext();
+diff --git a/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php b/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php
+index 902d3c5612248..a6d2a99ea9414 100644
+--- a/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php
+@@ -14,8 +14,10 @@
+ use Order;
+ use OrderDetail;
+ use OrderInvoice;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderProductQuantityUpdater;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderNotFoundException;
+@@ -23,6 +25,8 @@
+ use PrestaShop\PrestaShop\Core\Domain\Order\Product\CommandHandler\DeleteProductFromOrderHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use Shop;
+ use Validate;
+@@ -42,14 +46,13 @@ final class DeleteProductFromOrderHandler extends AbstractOrderCommandHandler im
+      */
+     private $orderProductQuantityUpdater;
+ 
+-    /**
+-     * @param ContextStateManager $contextStateManager
+-     * @param OrderProductQuantityUpdater $orderProductQuantityUpdater
+-     */
+     public function __construct(
+         ContextStateManager $contextStateManager,
+         OrderProductQuantityUpdater $orderProductQuantityUpdater,
+-        private readonly ?ShipmentRepository $shipmentRepository = null,
++        private ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++        private AdapterConfiguration $configuration,
++        private ShipmentRepository $shipmentRepository,
++        private FeatureFlagStateCheckerInterface $featureFlagStateCheckerInterface,
+     ) {
+         $this->contextStateManager = $contextStateManager;
+         $this->orderProductQuantityUpdater = $orderProductQuantityUpdater;
+@@ -87,10 +90,8 @@ public function handle(DeleteProductFromOrderCommand $command)
+             $this->contextStateManager->restorePreviousContext();
+         }
+ 
+-        if ($this->shipmentRepository) {
++        if ($this->featureFlagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
+             $this->handleShipmentDeletion($command);
+-        } else {
+-            trigger_deprecation('prestashop/prestashop', '9.2', 'ShipmentRepository must be set.');
+         }
+     }
+ 
+@@ -126,6 +127,10 @@ private function handleShipmentDeletion(DeleteProductFromOrderCommand $command):
+         try {
+             $this->shipmentRepository->deleteShipmentProductByOrderAndOrderDetail($orderId, $orderDetailId);
+             $this->shipmentRepository->deleteEmptyShipmentByOrder($orderId);
++
++            if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                $this->shipmentShippingCostUpdater->recalculateForOrder($orderId);
++            }
+         } catch (Exception $e) {
+             throw new ShipmentException(sprintf('Failed to delete shipment product from order with id "%s"', $orderId), 0, $e);
+         }
+diff --git a/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php b/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
+index 8ec18d68b240d..50c453f867d79 100644
+--- a/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
+@@ -14,10 +14,12 @@
+ use Order;
+ use OrderDetail;
+ use OrderInvoice;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderDetailUpdater;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderProductQuantityUpdater;
+ use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotEditDeliveredOrderProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotFindProductInOrderException;
+@@ -42,8 +44,10 @@ public function __construct(
+         private OrderProductQuantityUpdater $orderProductQuantityUpdater,
+         private OrderDetailUpdater $orderDetailUpdater,
+         private ContextStateManager $contextStateManager,
+-        private ?ShipmentProductQuantityUpdater $shipmentProductQuantityUpdater = null,
+-        private ?FeatureFlagStateCheckerInterface $featureflagStateCheckerInterface = null,
++        private ShipmentProductQuantityUpdater $shipmentProductQuantityUpdater,
++        private FeatureFlagStateCheckerInterface $featureflagStateCheckerInterface,
++        private ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++        private AdapterConfiguration $configuration,
+     ) {
+     }
+ 
+@@ -85,14 +89,20 @@ public function handle(UpdateProductInOrderCommand $command)
+                 (int) $orderDetail->id_customization
+             );
+ 
+-            if ($this->featureflagStateCheckerInterface !== null && $this->featureflagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT) && !empty($command->getShipmentsQuantities())) {
++            if ($this->featureflagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT) && !empty($command->getShipmentsQuantities())) {
+                 $totalProductQuantity = array_sum(array_column($command->getShipmentsQuantities(), 'quantity'));
+ 
+                 // Update invoice, quantity and amounts
+                 $order = $this->orderProductQuantityUpdater->update($order, $orderDetail, $totalProductQuantity, $orderInvoice);
+ 
+                 $this->shipmentProductQuantityUpdater->updateShipmentQuantity($command->getOrderDetailId(), $command->getShipmentsQuantities());
+-            } else {
++
++                if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                    $this->shipmentShippingCostUpdater->recalculateForOrder((int) $order->id);
++                }
++            }
++
++            if (!$this->featureflagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
+                 // Update invoice, quantity and amounts
+                 $order = $this->orderProductQuantityUpdater->update($order, $orderDetail, $command->getQuantity(), $orderInvoice);
+             }
+diff --git a/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
+index 1315dcb3ffac6..1c622ecb0f273 100644
+--- a/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
+@@ -9,8 +9,15 @@
+ namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
+ 
+ use Exception;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
+ use PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository;
++use PrestaShop\PrestaShop\Adapter\Shipment\OrderShippingTotalUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotFindProductInOrderException;
++use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\CreateShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\CreateShipmentHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
+@@ -23,6 +30,9 @@ class CreateShipmentHandler implements CreateShipmentHandlerInterface
+     public function __construct(
+         private readonly ShipmentRepository $shipmentRepository,
+         private readonly OrderRepository $orderRepository,
++        private readonly ShippingCostCalculatorInterface $shippingCostCalculator,
++        private readonly AdapterConfiguration $configuration,
++        private readonly OrderShippingTotalUpdater $orderShippingTotalUpdater,
+     ) {
+     }
+ 
+@@ -31,22 +41,89 @@ public function handle(CreateShipment $command): int
+         try {
+             $order = $this->orderRepository->get($command->getOrderId());
+             $carrierId = $command->getCarrierId()->getValue();
++            $productId = $command->getProductId()->getValue();
++            $addressId = (int) $order->id_address_delivery;
++
++            $shippingCostTaxExcluded = 0.00;
++            $shippingCostTaxIncluded = 0.00;
++
++            if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                $product = $this->findOrderProduct($order->getProductsDetail(), $productId);
++                if ($product === null) {
++                    throw new CannotFindProductInOrderException(
++                        sprintf('Product with id %d not found in order %d', $productId, (int) $order->id)
++                    );
++                }
++
++                $request = new ShippingCalculationRequest(
++                    products: [
++                        [
++                            'id_product' => $productId,
++                            'id_product_attribute' => (int) ($product['product_attribute_id'] ?? 0),
++                            'quantity' => $command->getQuantity(),
++                            'weight' => (float) ($product['product_weight'] ?? 0),
++                            'weight_attribute' => null,
++                            'is_virtual' => (bool) ($product['is_virtual'] ?? false),
++                            'additional_shipping_cost' => (float) ($product['additional_shipping_cost'] ?? 0),
++                            'price_wt' => (float) ($product['unit_price_tax_incl'] ?? 0),
++                        ],
++                    ],
++                    carrierId: $carrierId,
++                    zoneId: null,
++                    addressId: $addressId,
++                    countryZoneId: 0,
++                    currencyId: (int) $order->id_currency,
++                    customerId: (int) $order->id_customer,
++                    orderTotal: (float) $order->total_products,
++                );
++
++                $context = ShippingCostPrice::createFromRequest($request);
++                $this->shippingCostCalculator->compute($context);
++                if ($context->getTaxExcluded() !== null && $context->getTaxIncluded() !== null) {
++                    $shippingCostTaxExcluded = (float) (string) $context->getTaxExcluded();
++                    $shippingCostTaxIncluded = (float) (string) $context->getTaxIncluded();
++                }
++            }
+ 
+             $shipment = new Shipment();
+             $shipment->setOrderId((int) $order->id);
+-            $shipment->setCarrierId((int) $carrierId);
+-            $shipment->setAddressId((int) $order->id_address_delivery);
++            $shipment->setCarrierId($carrierId);
++            $shipment->setAddressId($addressId);
+             $shipment->setTrackingNumber(null);
+-            // waiting for shippingCostCalculator, now we just set 0
+-            $shipment->setShippingCostTaxExcluded(0.00);
+-            $shipment->setShippingCostTaxIncluded(0.00);
++            $shipment->setShippingCostTaxExcluded($shippingCostTaxExcluded);
++            $shipment->setShippingCostTaxIncluded($shippingCostTaxIncluded);
+             $shipment->setDeliveredAt(null);
+             $shipment->setShippedAt(null);
+             $shipment->setCancelledAt(null);
+ 
+-            return $this->shipmentRepository->save($shipment);
++            $shipmentId = $this->shipmentRepository->save($shipment);
++
++            if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                $this->orderShippingTotalUpdater->update($order);
++            }
++
++            return $shipmentId;
+         } catch (Exception $e) {
++            if ($e instanceof ShipmentException || $e instanceof OrderException) {
++                throw $e;
++            }
+             throw new ShipmentException('Failed to create shipment', $e->getCode(), $e);
+         }
+     }
++
++    /**
++     * @param array<array<string, mixed>> $products
++     *
++     * @return array<string, mixed>|null
++     */
++    private function findOrderProduct(array $products, int $productId): ?array
++    {
++        foreach ($products as $product) {
++            if ((int) $product['product_id'] === $productId) {
++                return $product;
++            }
++        }
++
++        return null;
++    }
+ }
+diff --git a/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
+index b4b5ce62c3c71..f74d3a55fb127 100644
+--- a/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
+@@ -8,6 +8,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
+ 
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\EditShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\EditShipmentHandlerInterface;
+@@ -27,6 +29,8 @@ class EditShipmentHandler implements EditShipmentHandlerInterface
+     public function __construct(
+         private readonly ShipmentRepository $shipmentRepository,
+         private TranslatorInterface $translator,
++        private ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++        private AdapterConfiguration $configuration,
+     ) {
+     }
+ 
+@@ -72,6 +76,10 @@ public function handle(EditShipment $command): void
+ 
+         try {
+             $this->shipmentRepository->save($shipment);
++
++            if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                $this->shipmentShippingCostUpdater->recalculateForOrder($shipment->getOrderId());
++            }
+         } catch (Throwable $e) {
+             throw new CannotSaveShipmentException(
+                 $this->translator->trans(
+diff --git a/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+index f8d3d90a6ba02..89b911bb8fe4a 100644
+--- a/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+@@ -6,6 +6,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
+ 
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\MergeProductsToShipmentHandlerInterface;
+@@ -25,6 +27,8 @@ public function __construct(
+         private ShipmentRepository $repository,
+         private ShipmentMergerInterface $merger,
+         private TranslatorInterface $translator,
++        private ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++        private AdapterConfiguration $configuration,
+     ) {
+     }
+ 
+@@ -92,6 +96,10 @@ public function handle(MergeProductsToShipment $command): void
+             } else {
+                 $this->repository->save($sourceShipment);
+             }
++
++            if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++                $this->shipmentShippingCostUpdater->recalculateForOrder($targetShipment->getOrderId());
++            }
+         } catch (Throwable $e) {
+             throw new CannotMergeProductToShipmentException(
+                 $this->translator->trans(
+diff --git a/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+index 4049a9d40ff87..6c3df04051594 100644
+--- a/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+@@ -1,4 +1,5 @@
+ <?php
++
+ /**
+  * For the full copyright and license information, please view the
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+@@ -6,6 +7,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
+ 
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SplitShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\SplitShipmentHandlerInterface;
+@@ -23,6 +26,8 @@ public function __construct(
+         private ShipmentRepository $repository,
+         private ShipmentSplitterInterface $splitter,
+         private TranslatorInterface $translator,
++        private ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++        private AdapterConfiguration $configuration,
+     ) {
+     }
+ 
+@@ -72,5 +77,9 @@ public function handle(SplitShipment $command): void
+         } else {
+             $this->repository->save($shipment);
+         }
++
++        if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++            $this->shipmentShippingCostUpdater->recalculateForOrder($shipment->getOrderId());
++        }
+     }
+ }
+diff --git a/src/Adapter/Shipment/OrderShippingTotalUpdater.php b/src/Adapter/Shipment/OrderShippingTotalUpdater.php
+new file mode 100644
+index 0000000000000..a1f431941d88b
+--- /dev/null
++++ b/src/Adapter/Shipment/OrderShippingTotalUpdater.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use Order;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++
++/**
++ * Consolidates the logic for updating order shipping totals based on its shipments.
++ */
++class OrderShippingTotalUpdater
++{
++    public function __construct(
++        private readonly ShipmentRepository $shipmentRepository,
++    ) {
++    }
++
++    public function update(Order $order): void
++    {
++        $totalTaxExcluded = 0.00;
++        $totalTaxIncluded = 0.00;
++
++        foreach ($this->shipmentRepository->findByOrderId((int) $order->id) as $shipment) {
++            $totalTaxExcluded += $shipment->getShippingCostTaxExcluded();
++            $totalTaxIncluded += $shipment->getShippingCostTaxIncluded();
++        }
++
++        $order->total_shipping_tax_excl = $totalTaxExcluded;
++        $order->total_shipping_tax_incl = $totalTaxIncluded;
++        $order->total_shipping = $totalTaxIncluded;
++        $order->update();
++    }
++}
+diff --git a/src/Adapter/Shipment/ShipmentProductAssigner.php b/src/Adapter/Shipment/ShipmentProductAssigner.php
+index da2acbe02f6e1..26f67c7b89837 100644
+--- a/src/Adapter/Shipment/ShipmentProductAssigner.php
++++ b/src/Adapter/Shipment/ShipmentProductAssigner.php
+@@ -11,6 +11,7 @@
+ use Exception;
+ use Order;
+ use OrderDetail;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\Shipment;
+@@ -18,8 +19,11 @@
+ 
+ class ShipmentProductAssigner
+ {
+-    public function __construct(private ShipmentRepository $shipmentRepository)
+-    {
++    public function __construct(
++        private readonly ShipmentRepository $shipmentRepository,
++        private readonly AdapterConfiguration $configuration,
++        private readonly ShipmentShippingCostUpdater $shipmentShippingCostUpdater,
++    ) {
+     }
+ 
+     public function assign(?int $shipmentId, Order $order, OrderDetail $orderDetail, ?int $carrierId = null): void
+@@ -28,6 +32,7 @@ public function assign(?int $shipmentId, Order $order, OrderDetail $orderDetail,
+             if (empty($carrierId)) {
+                 throw new Exception('A carrier ID is required to create a new shipment');
+             }
++
+             $shipment = new Shipment();
+             $shipment->setOrderId((int) $order->id);
+             $shipment->setCarrierId($carrierId);
+@@ -52,5 +57,9 @@ public function assign(?int $shipmentId, Order $order, OrderDetail $orderDetail,
+         $shipment->addShipmentProduct($shipmentProduct);
+ 
+         $this->shipmentRepository->save($shipment);
++
++        if ($this->configuration->get('PS_ORDER_RECALCULATE_SHIPPING')) {
++            $this->shipmentShippingCostUpdater->recalculateForOrder((int) $order->id);
++        }
+     }
+ }
+diff --git a/src/Adapter/Shipment/ShipmentShippingCostUpdater.php b/src/Adapter/Shipment/ShipmentShippingCostUpdater.php
+new file mode 100644
+index 0000000000000..0206240195c9f
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentShippingCostUpdater.php
+@@ -0,0 +1,118 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use Order;
++use PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotFindProductInOrderException;
++use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use PrestaShopBundle\Entity\Shipment;
++
++/**
++ * Recalculates shipping cost for all active shipments of an order and updates the order totals.
++ */
++class ShipmentShippingCostUpdater
++{
++    public function __construct(
++        private readonly ShipmentRepository $shipmentRepository,
++        private readonly OrderRepository $orderRepository,
++        private readonly ShippingCostCalculatorInterface $shippingCostCalculator,
++        private readonly OrderShippingTotalUpdater $orderShippingTotalUpdater,
++    ) {
++    }
++
++    public function recalculateForOrder(int $orderId): void
++    {
++        $order = $this->orderRepository->get(new OrderId($orderId));
++        $productsDetail = $order->getProductsDetail();
++
++        foreach ($this->shipmentRepository->findByOrderId($orderId) as $shipment) {
++            $this->recalculateShipment($shipment, $order, $productsDetail);
++        }
++
++        $this->orderShippingTotalUpdater->update($order);
++    }
++
++    /**
++     * @param array<array<string, mixed>> $productsDetail
++     */
++    private function recalculateShipment(Shipment $shipment, Order $order, array $productsDetail): void
++    {
++        $products = [];
++        $shipmentTotalProducts = 0.00;
++
++        foreach ($shipment->getProducts() as $shipmentProduct) {
++            $product = $this->findOrderProductByDetailId($productsDetail, $shipmentProduct->getOrderDetailId());
++            if ($product === null) {
++                throw new CannotFindProductInOrderException(
++                    sprintf('Product with order detail id %d not found in order %d', $shipmentProduct->getOrderDetailId(), (int) $order->id)
++                );
++            }
++
++            $quantity = $shipmentProduct->getQuantity();
++            $unitPriceTaxExcl = (float) ($product['unit_price_tax_excl'] ?? 0);
++            $shipmentTotalProducts += $unitPriceTaxExcl * $quantity;
++
++            $products[] = [
++                'id_product' => (int) $product['product_id'],
++                'id_product_attribute' => (int) ($product['product_attribute_id'] ?? 0),
++                'quantity' => $quantity,
++                'weight' => (float) ($product['product_weight'] ?? 0),
++                'weight_attribute' => null,
++                'is_virtual' => (bool) ($product['is_virtual'] ?? false),
++                'additional_shipping_cost' => (float) ($product['additional_shipping_cost'] ?? 0),
++                'price_wt' => (float) ($product['unit_price_tax_incl'] ?? 0),
++            ];
++        }
++
++        if (empty($products)) {
++            return;
++        }
++
++        $request = new ShippingCalculationRequest(
++            products: $products,
++            carrierId: $shipment->getCarrierId(),
++            zoneId: null,
++            addressId: $shipment->getAddressId(),
++            countryZoneId: 0,
++            currencyId: (int) $order->id_currency,
++            customerId: (int) $order->id_customer,
++            orderTotal: $shipmentTotalProducts,
++        );
++
++        $context = ShippingCostPrice::createFromRequest($request);
++        $this->shippingCostCalculator->compute($context);
++
++        if ($context->getTaxExcluded() !== null && $context->getTaxIncluded() !== null) {
++            $shipment->setShippingCostTaxExcluded((float) (string) $context->getTaxExcluded());
++            $shipment->setShippingCostTaxIncluded((float) (string) $context->getTaxIncluded());
++            $this->shipmentRepository->save($shipment);
++        }
++    }
++
++    /**
++     * @param array<array<string, mixed>> $products
++     *
++     * @return array<string, mixed>|null
++     */
++    private function findOrderProductByDetailId(array $products, int $orderDetailId): ?array
++    {
++        foreach ($products as $product) {
++            if ((int) $product['id_order_detail'] === $orderDetailId) {
++                return $product;
++            }
++        }
++
++        return null;
++    }
++}
+diff --git a/src/Adapter/Tools.php b/src/Adapter/Tools.php
+index 1be34783e4fdc..82acb27823e51 100644
+--- a/src/Adapter/Tools.php
++++ b/src/Adapter/Tools.php
+@@ -6,6 +6,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter;
+ 
++use Context;
+ use PrestaShop\PrestaShop\Adapter\File\HtaccessFileGenerator;
+ use PrestaShopException;
+ use Tools as LegacyTools;
+@@ -107,6 +108,11 @@ public function round($value, $precision = 0, $round_mode = null)
+         return LegacyTools::ps_round($value, $precision, $round_mode);
+     }
+ 
++    public function convertPrice($price, $currency = null, $toCurrency = true, ?Context $context = null)
++    {
++        return LegacyTools::convertPrice($price, $currency, $toCurrency, $context);
++    }
++
+     /**
+      * Return domain name according to configuration and depending on ssl activation.
+      *
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculator.php b/src/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculator.php
+new file mode 100644
+index 0000000000000..2cf4e4e65c950
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculator.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class AdditionalProductCostCalculator implements ShippingCostCalculatorInterface
++{
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $additionalCost = new DecimalNumber('0');
++        foreach ($context->getPhysicalProducts() as $product) {
++            $productShippingCost = (string) ($product['additional_shipping_cost'] ?? 0);
++            if ((float) $productShippingCost > 0.0) {
++                $productCost = (new DecimalNumber($productShippingCost))
++                    ->times(new DecimalNumber((string) $product['quantity']));
++                $additionalCost = $additionalCost->plus($productCost);
++            }
++        }
++
++        if (!$additionalCost->equals(new DecimalNumber('0'))) {
++            $context->setCost($context->getCost()->plus($additionalCost));
++        }
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculator.php b/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculator.php
+new file mode 100644
+index 0000000000000..b2aa708c3b4b6
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculator.php
+@@ -0,0 +1,30 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class ShippingCostCalculator implements ShippingCostCalculatorInterface
++{
++    public function __construct(
++        private readonly iterable $calculators,
++    ) {
++    }
++
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        foreach ($this->calculators as $calculator) {
++            if (!$context->isAvailable()) {
++                return;
++            }
++
++            $calculator->compute($context);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculatorInterface.php b/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculatorInterface.php
+new file mode 100644
+index 0000000000000..ac6816760acd3
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Calculator/ShippingCostCalculatorInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++interface ShippingCostCalculatorInterface
++{
++    public function compute(ShippingCostPriceInterface $context): void;
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculator.php b/src/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculator.php
+new file mode 100644
+index 0000000000000..286923f1bac12
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculator.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class WeightCalculator implements ShippingCostCalculatorInterface
++{
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $totalWeight = new DecimalNumber('0');
++        foreach ($context->getPhysicalProducts() as $product) {
++            $rawWeight = $product['weight_attribute'] ?? $product['weight'] ?? 0;
++            $rawQuantity = $product['quantity'] ?? 0;
++            $weight = new DecimalNumber(is_numeric($rawWeight) ? (string) $rawWeight : '0');
++            $quantity = new DecimalNumber(is_numeric($rawQuantity) ? (string) $rawQuantity : '0');
++            $totalWeight = $totalWeight->plus($weight->times($quantity));
++        }
++
++        $context->setTotalWeight($totalWeight);
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php
+new file mode 100644
+index 0000000000000..4ecae163909c9
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php
+@@ -0,0 +1,24 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++use PrestaShop\Decimal\DecimalNumber;
++
++interface CarrierDataProviderInterface extends ShippingCostProviderInterface
++{
++    public function getCarrierShippingData(int $carrierId): ?CarrierShippingData;
++
++    public function getRangeCost(
++        CarrierShippingData $carrierData,
++        DecimalNumber $totalWeight,
++        DecimalNumber $orderTotal,
++        int $zoneId,
++        int $currencyId,
++    ): ?DecimalNumber;
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierShippingData.php b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierShippingData.php
+new file mode 100644
+index 0000000000000..3072c658dd413
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierShippingData.php
+@@ -0,0 +1,49 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++/**
++ * Value object holding the carrier configuration data needed for shipping cost calculation.
++ */
++final class CarrierShippingData
++{
++    public function __construct(
++        private readonly int $carrierId,
++        private readonly int $shippingMethod,
++        private readonly int $rangeBehavior,
++        private readonly bool $hasShippingHandling,
++        private readonly bool $isFreeShippingMethod,
++    ) {
++    }
++
++    public function getCarrierId(): int
++    {
++        return $this->carrierId;
++    }
++
++    public function getShippingMethod(): int
++    {
++        return $this->shippingMethod;
++    }
++
++    public function getRangeBehavior(): int
++    {
++        return $this->rangeBehavior;
++    }
++
++    public function hasShippingHandling(): bool
++    {
++        return $this->hasShippingHandling;
++    }
++
++    public function isFreeShippingMethod(): bool
++    {
++        return $this->isFreeShippingMethod;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteria.php b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteria.php
+new file mode 100644
+index 0000000000000..4bea8c1ea09e6
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteria.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++use PrestaShop\Decimal\DecimalNumber;
++
++final class FreeShippingCriteria
++{
++    private static DecimalNumber $zero;
++
++    public function __construct(
++        private readonly ?DecimalNumber $freePrice,
++        private readonly ?DecimalNumber $freeWeight,
++    ) {
++        self::$zero ??= new DecimalNumber('0');
++    }
++
++    public function getFreePrice(): ?DecimalNumber
++    {
++        return $this->freePrice;
++    }
++
++    public function getFreeWeight(): ?DecimalNumber
++    {
++        return $this->freeWeight;
++    }
++
++    public function hasFreePrice(): bool
++    {
++        return $this->freePrice !== null && $this->freePrice->isGreaterThan(self::$zero);
++    }
++
++    public function hasFreeWeight(): bool
++    {
++        return $this->freeWeight !== null && $this->freeWeight->isGreaterThan(self::$zero);
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php
+new file mode 100644
+index 0000000000000..12a13b5eb214b
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php
+@@ -0,0 +1,14 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++interface FreeShippingCriteriaProviderInterface extends ShippingCostProviderInterface
++{
++    public function getCriteria(): FreeShippingCriteria;
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingCostProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingCostProviderInterface.php
+new file mode 100644
+index 0000000000000..19ef45804c850
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingCostProviderInterface.php
+@@ -0,0 +1,18 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++/**
++ * Marker interface for all shipping cost data providers.
++ * Each provider is responsible for a single business concern
++ * (zone resolution, carrier data, free shipping thresholds, range cost, tax rate).
++ */
++interface ShippingCostProviderInterface
++{
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingTaxRateProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingTaxRateProviderInterface.php
+new file mode 100644
+index 0000000000000..4f49fb236af06
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/ShippingTaxRateProviderInterface.php
+@@ -0,0 +1,19 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
++
++use PrestaShop\PrestaShop\Core\Pricing\ValueObject\TaxRate;
++
++/**
++ * Provides the applicable tax rate for a given carrier and delivery address.
++ */
++interface ShippingTaxRateProviderInterface extends ShippingCostProviderInterface
++{
++    public function getTaxRate(int $carrierId, int $addressId): TaxRate;
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php
+new file mode 100644
+index 0000000000000..ff4ecff190af1
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php
+@@ -0,0 +1,208 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++/**
++ * Mutable DTO carrying all state through the shipping cost calculation pipeline.
++ * Populated incrementally by each calculator in the chain.
++ */
++final class ShippingCostPrice implements ShippingCostPriceInterface
++{
++    private DecimalNumber $totalWeight;
++    private ?int $resolvedZoneId = null;
++    private ?CarrierShippingData $carrierData = null;
++    private bool $isFreeShipping = false;
++    private bool $isAvailable = true;
++    private DecimalNumber $cost;
++    private ?DecimalNumber $taxExcluded = null;
++    private ?DecimalNumber $taxIncluded = null;
++    private ?int $precision = null;
++
++    /**
++     * @param array<array{
++     *     id_product: int,
++     *     id_product_attribute: int,
++     *     quantity: int,
++     *     weight: float,
++     *     weight_attribute: float|null,
++     *     is_virtual: bool,
++     *     additional_shipping_cost: float,
++     *     price_wt: float
++     * }> $physicalProducts
++     */
++    private function __construct(
++        private readonly array $physicalProducts,
++        private readonly int $carrierId,
++        private readonly ?int $addressId,
++        private readonly int $currencyId,
++        private readonly DecimalNumber $orderTotal,
++        private readonly int $countryZoneId,
++    ) {
++        $this->totalWeight = new DecimalNumber('0');
++        $this->cost = new DecimalNumber('0');
++    }
++
++    public static function createFromRequest(ShippingCalculationRequest $request): self
++    {
++        $physicalProducts = array_values(
++            array_filter($request->getProducts(), static fn (array $p): bool => $p['is_virtual'] === false)
++        );
++
++        $ctx = new self(
++            $physicalProducts,
++            $request->getCarrierId(),
++            $request->getAddressId(),
++            $request->getCurrencyId(),
++            new DecimalNumber((string) $request->getOrderTotal()),
++            $request->getCountryZoneId(),
++        );
++
++        if ($request->getZoneId() !== null) {
++            $ctx->setResolvedZoneId($request->getZoneId());
++        }
++
++        return $ctx;
++    }
++
++    /**
++     * @return array<array{
++     *     id_product: int,
++     *     id_product_attribute: int,
++     *     quantity: int,
++     *     weight: float,
++     *     weight_attribute: float|null,
++     *     is_virtual: bool,
++     *     additional_shipping_cost: float,
++     *     price_wt: float
++     * }>
++     */
++    public function getPhysicalProducts(): array
++    {
++        return $this->physicalProducts;
++    }
++
++    public function getCarrierId(): int
++    {
++        return $this->carrierId;
++    }
++
++    public function getAddressId(): ?int
++    {
++        return $this->addressId;
++    }
++
++    public function getCurrencyId(): int
++    {
++        return $this->currencyId;
++    }
++
++    public function getOrderTotal(): DecimalNumber
++    {
++        return $this->orderTotal;
++    }
++
++    public function getCountryZoneId(): int
++    {
++        return $this->countryZoneId;
++    }
++
++    public function getTotalWeight(): DecimalNumber
++    {
++        return $this->totalWeight;
++    }
++
++    public function setTotalWeight(DecimalNumber $totalWeight): void
++    {
++        $this->totalWeight = $totalWeight;
++    }
++
++    public function getResolvedZoneId(): ?int
++    {
++        return $this->resolvedZoneId;
++    }
++
++    public function setResolvedZoneId(int $zoneId): void
++    {
++        $this->resolvedZoneId = $zoneId;
++    }
++
++    public function getCarrierData(): ?CarrierShippingData
++    {
++        return $this->carrierData;
++    }
++
++    public function setCarrierData(CarrierShippingData $carrierData): void
++    {
++        $this->carrierData = $carrierData;
++    }
++
++    public function isFreeShipping(): bool
++    {
++        return $this->isFreeShipping;
++    }
++
++    public function setFreeShipping(bool $isFreeShipping): void
++    {
++        $this->isFreeShipping = $isFreeShipping;
++    }
++
++    public function getCost(): DecimalNumber
++    {
++        return $this->cost;
++    }
++
++    public function setCost(DecimalNumber $cost): void
++    {
++        $this->cost = $cost;
++    }
++
++    public function isAvailable(): bool
++    {
++        return $this->isAvailable;
++    }
++
++    public function setAvailable(bool $isAvailable): void
++    {
++        $this->isAvailable = $isAvailable;
++    }
++
++    public function getTaxExcluded(): ?DecimalNumber
++    {
++        return $this->taxExcluded;
++    }
++
++    public function setTaxExcluded(DecimalNumber $taxExcluded): void
++    {
++        $this->taxExcluded = $taxExcluded;
++    }
++
++    public function getTaxIncluded(): ?DecimalNumber
++    {
++        return $this->taxIncluded;
++    }
++
++    public function setTaxIncluded(DecimalNumber $taxIncluded): void
++    {
++        $this->taxIncluded = $taxIncluded;
++    }
++
++    public function getPrecision(): ?int
++    {
++        return $this->precision;
++    }
++
++    public function setPrecision(int $precision): void
++    {
++        $this->precision = $precision;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php
+new file mode 100644
+index 0000000000000..9a40a7e17cf5a
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php
+@@ -0,0 +1,66 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++
++/**
++ * Mutable DTO carrying all state through the shipping cost calculation pipeline.
++ */
++interface ShippingCostPriceInterface
++{
++    public function getPhysicalProducts(): array;
++
++    public function getCarrierId(): int;
++
++    public function getAddressId(): ?int;
++
++    public function getCurrencyId(): int;
++
++    public function getOrderTotal(): DecimalNumber;
++
++    public function getCountryZoneId(): int;
++
++    public function getTotalWeight(): DecimalNumber;
++
++    public function setTotalWeight(DecimalNumber $totalWeight): void;
++
++    public function getResolvedZoneId(): ?int;
++
++    public function setResolvedZoneId(int $zoneId): void;
++
++    public function getCarrierData(): ?CarrierShippingData;
++
++    public function setCarrierData(CarrierShippingData $carrierData): void;
++
++    public function isFreeShipping(): bool;
++
++    public function setFreeShipping(bool $isFreeShipping): void;
++
++    public function getCost(): DecimalNumber;
++
++    public function setCost(DecimalNumber $cost): void;
++
++    public function isAvailable(): bool;
++
++    public function setAvailable(bool $isAvailable): void;
++
++    public function getTaxExcluded(): ?DecimalNumber;
++
++    public function setTaxExcluded(DecimalNumber $taxExcluded): void;
++
++    public function getTaxIncluded(): ?DecimalNumber;
++
++    public function setTaxIncluded(DecimalNumber $taxIncluded): void;
++
++    public function getPrecision(): ?int;
++
++    public function setPrecision(int $precision): void;
++}
+diff --git a/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php b/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php
+new file mode 100644
+index 0000000000000..fcdaa1632fbaf
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php
+@@ -0,0 +1,121 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject;
++
++use InvalidArgumentException;
++
++final class ShippingCalculationRequest
++{
++    /**
++     * @param array<array{
++     *     id_product: int,
++     *     id_product_attribute: int,
++     *     quantity: int,
++     *     weight: float,
++     *     weight_attribute: float|null,
++     *     is_virtual: bool,
++     *     additional_shipping_cost: float,
++     *     price_wt: float
++     * }> $products Array of product data for shipping calculation
++     * @param int $carrierId Carrier ID
++     * @param int|null $zoneId Zone ID (optional, will be resolved from address or country)
++     * @param int|null $addressId Delivery address ID
++     * @param int $countryZoneId Country's default zone ID (fallback)
++     * @param int $currencyId Currency ID
++     * @param int|null $customerId Customer ID
++     * @param float $orderTotal Total order amount
++     *
++     * @throws InvalidArgumentException If products array is invalid or missing required fields
++     */
++    public function __construct(
++        private readonly array $products,
++        private readonly int $carrierId,
++        private readonly ?int $zoneId,
++        private readonly ?int $addressId,
++        private readonly int $countryZoneId,
++        private readonly int $currencyId,
++        private readonly ?int $customerId,
++        private readonly float $orderTotal,
++    ) {
++        foreach ($products as $product) {
++            $this->validateProduct($product);
++        }
++    }
++
++    /**
++     * @param array{
++     *     id_product: int,
++     *     quantity: int,
++     *     is_virtual: bool
++     * } $product
++     *
++     * @throws InvalidArgumentException
++     */
++    private function validateProduct(array $product): void
++    {
++        $required = ['id_product', 'quantity', 'is_virtual'];
++        foreach ($required as $field) {
++            if (!isset($product[$field])) {
++                throw new InvalidArgumentException("Product missing required field: {$field}");
++            }
++        }
++    }
++
++    /**
++     * @return array<array{
++     *     id_product: int,
++     *     id_product_attribute: int,
++     *     quantity: int,
++     *     weight: float,
++     *     weight_attribute: float|null,
++     *     is_virtual: bool,
++     *     additional_shipping_cost: float,
++     *     price_wt: float
++     * }>
++     */
++    public function getProducts(): array
++    {
++        return $this->products;
++    }
++
++    public function getCarrierId(): int
++    {
++        return $this->carrierId;
++    }
++
++    public function getZoneId(): ?int
++    {
++        return $this->zoneId;
++    }
++
++    public function getAddressId(): ?int
++    {
++        return $this->addressId;
++    }
++
++    public function getCountryZoneId(): int
++    {
++        return $this->countryZoneId;
++    }
++
++    public function getCurrencyId(): int
++    {
++        return $this->currencyId;
++    }
++
++    public function getCustomerId(): ?int
++    {
++        return $this->customerId;
++    }
++
++    public function getOrderTotal(): float
++    {
++        return $this->orderTotal;
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index 99f4cf641f3d6..f12b6d0be23f6 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -11,7 +11,6 @@
+ 
+ use Doctrine\ORM\EntityRepository;
+ use PrestaShopBundle\Entity\Shipment;
+-use Throwable;
+ 
+ class ShipmentRepository extends EntityRepository
+ {
+@@ -149,39 +148,30 @@ public function deleteShipmentProductByOrderAndOrderDetail(
+         int $orderId,
+         int $orderDetailId
+     ): void {
+-        $conn = $this->getEntityManager()->getConnection();
+-
+-        // Delete shipment products
+-        $conn->createQueryBuilder()
+-            ->delete($this->tablePrefix . 'shipment_product')
+-            ->where('id_order_detail = :orderDetailId')
+-            ->andWhere(
+-                'id_shipment IN (
+-                    SELECT id_shipment FROM ' . $this->tablePrefix . 'shipment WHERE id_order = :orderId
+-                )'
+-            )
+-            ->setParameter('orderDetailId', $orderDetailId)
+-            ->setParameter('orderId', $orderId)
+-            ->executeStatement();
++        $shipments = $this->findByOrderId($orderId);
++        foreach ($shipments as $shipment) {
++            foreach ($shipment->getProducts() as $product) {
++                if ($product->getOrderDetailId() === $orderDetailId) {
++                    $shipment->removeProduct($product);
++                }
++            }
++            if ($shipment->getProducts()->isEmpty()) {
++                $shipment->setDeleted(true);
++            }
++        }
++        $this->getEntityManager()->flush();
+     }
+ 
+     public function deleteEmptyShipmentByOrder(
+         int $orderId,
+     ): void {
+-        $conn = $this->getEntityManager()->getConnection();
+-
+-        // Soft delete empty shipments
+-        $conn->createQueryBuilder()
+-            ->update($this->tablePrefix . 'shipment')
+-            ->set('deleted', '1')
+-            ->where('id_order = :orderId')
+-            ->andWhere(
+-                'id_shipment NOT IN (
+-                    SELECT DISTINCT id_shipment FROM ' . $this->tablePrefix . 'shipment_product
+-                )'
+-            )
+-            ->setParameter('orderId', $orderId)
+-            ->executeStatement();
++        $shipments = $this->findByOrderId($orderId);
++        foreach ($shipments as $shipment) {
++            if ($shipment->getProducts()->isEmpty()) {
++                $shipment->setDeleted(true);
++            }
++        }
++        $this->getEntityManager()->flush();
+     }
+ 
+     public function updateShipmentProductQuantity(
+@@ -189,51 +179,26 @@ public function updateShipmentProductQuantity(
+         int $orderDetailId,
+         int $quantity
+     ): void {
+-        $conn = $this->getEntityManager()->getConnection();
+-
+-        $conn->beginTransaction();
+-
+-        try {
+-            if ($quantity <= 0) {
+-                $conn->createQueryBuilder()
+-                    ->delete($this->tablePrefix . 'shipment_product')
+-                    ->where('id_shipment = :shipmentId')
+-                    ->andWhere('id_order_detail = :orderDetailId')
+-                    ->setParameter('shipmentId', $shipmentId)
+-                    ->setParameter('orderDetailId', $orderDetailId)
+-                    ->executeStatement();
+-            } else {
+-                $conn->createQueryBuilder()
+-                    ->update($this->tablePrefix . 'shipment_product')
+-                    ->set('quantity', ':quantity')
+-                    ->where('id_shipment = :shipmentId')
+-                    ->andWhere('id_order_detail = :orderDetailId')
+-                    ->setParameter('quantity', $quantity)
+-                    ->setParameter('shipmentId', $shipmentId)
+-                    ->setParameter('orderDetailId', $orderDetailId)
+-                    ->executeStatement();
+-            }
++        $shipment = $this->findById($shipmentId);
++        if (!$shipment) {
++            return;
++        }
+ 
+-            $remainingProducts = $conn->createQueryBuilder()
+-                ->select('COUNT(*)')
+-                ->from($this->tablePrefix . 'shipment_product')
+-                ->where('id_shipment = :shipmentId')
+-                ->setParameter('shipmentId', $shipmentId)
+-                ->fetchOne();
+-
+-            if ((int) $remainingProducts === 0) {
+-                $conn->createQueryBuilder()
+-                    ->update($this->tablePrefix . 'shipment')
+-                    ->set('deleted', '1')
+-                    ->where('id_shipment = :shipmentId')
+-                    ->setParameter('shipmentId', $shipmentId)
+-                    ->executeStatement();
++        foreach ($shipment->getProducts() as $product) {
++            if ($product->getOrderDetailId() === $orderDetailId) {
++                if ($quantity <= 0) {
++                    $shipment->removeProduct($product);
++                } else {
++                    $product->setQuantity($quantity);
++                }
++                break;
+             }
++        }
+ 
+-            $conn->commit();
+-        } catch (Throwable $e) {
+-            $conn->rollBack();
+-            throw $e;
++        if ($shipment->getProducts()->isEmpty()) {
++            $shipment->setDeleted(true);
+         }
++
++        $this->getEntityManager()->flush();
+     }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index 0e3fa4dc9af8b..6d0590803e363 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -40,6 +40,8 @@ services:
+       - '@prestashop.adapter.context_state_manager'
+       - '@PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater'
+       - '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
++      - '@PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater'
++      - '@PrestaShop\PrestaShop\Adapter\Configuration'
+ 
+   prestashop.adapter.order.command_handler.change_order_delivery_address_handler:
+     class: PrestaShop\PrestaShop\Adapter\Order\CommandHandler\ChangeOrderDeliveryAddressHandler
+@@ -155,7 +157,10 @@ services:
+     arguments:
+       - '@prestashop.adapter.context_state_manager'
+       - '@prestashop.adapter.order.product_quantity.updater'
++      - '@PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater'
++      - '@PrestaShop\PrestaShop\Adapter\Configuration'
+       - '@PrestaShopBundle\Entity\Repository\ShipmentRepository'
++      - '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
+ 
+   prestashop.adapter.order.command_handler.bulk_change_order_status_handler:
+     class: 'PrestaShop\PrestaShop\Adapter\Order\CommandHandler\BulkChangeOrderStatusHandler'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/shipment.yml b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+index b4314bc0f27f6..10bac71eaf41a 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+@@ -12,3 +12,7 @@ services:
+   PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater:
+ 
+   PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductAssigner:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\OrderShippingTotalUpdater:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\ShipmentShippingCostUpdater:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml b/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml
+new file mode 100644
+index 0000000000000..d8d5be6e3d238
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml
+@@ -0,0 +1,63 @@
++services:
++  _defaults:
++    public: false
++    autowire: true
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\CarrierDataProvider: ~
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\ConfigFreeShippingCriteriaProvider: ~
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\ShippingTaxRateProvider: ~
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface:
++    alias: PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\CarrierDataProvider
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface:
++    alias: PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\ConfigFreeShippingCriteriaProvider
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\ShippingTaxRateProviderInterface:
++    alias: PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\ShippingTaxRateProvider
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\ZoneResolutionCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 900 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\CarrierDataCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 800 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\FreeShippingCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 600 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\BaseRangeCostCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 500 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\HandlingCostCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 300 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\CurrencyConversionCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 200 }
++
++  PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\TaxCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 100 }
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\WeightCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 700 }
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\AdditionalProductCostCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 400 }
++
++  prestashop.carrier.shipping_cost.pipeline:
++    class: PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculator
++    arguments:
++      $calculators: !tagged_iterator { tag: 'prestashop.carrier.shipping_cost_calculator' }
++
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface:
++    alias: prestashop.carrier.shipping_cost.pipeline
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index 469eb17a21a61..7abb0ed18bd90 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -678,9 +678,9 @@ private function updateProductInOrder(int $orderId, array $productOrderDetail, a
+             $shipments = [];
+ 
+             foreach (explode(',', $data['shipment_mapping']) as $pair) {
+-                list($shipmentId, $qty) = explode(':', trim($pair));
++                list($shipmentRef, $qty) = explode(':', trim($pair));
+                 $shipments[] = [
+-                    'shipment_id' => (int) $shipmentId,
++                    'shipment_id' => (int) SharedStorage::getStorage()->get(trim($shipmentRef)),
+                     'quantity' => (int) $qty,
+                 ];
+             }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index 44b8bf8ab69f1..1e216c362d052 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -86,6 +86,8 @@ public function verifyOrderShipment(string $orderReference, TableNode $table)
+             new GetOrderShipments($orderId)
+         );
+ 
++        usort($shipments, fn ($a, $b) => $a->getId() <=> $b->getId());
++
+         if (count($shipments) === 0) {
+             $msg = 'Order [' . $orderId . '] has no shipments';
+             throw new RuntimeException($msg);
+@@ -102,11 +104,11 @@ public function verifyOrderShipment(string $orderReference, TableNode $table)
+                 throw new RuntimeException('Shipment [' . $shipment->getId() . '] does not belong to order [' . $orderId . ']');
+             }
+ 
+-            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number']);
+-            Assert::assertEquals($shipment->getCarrierSummary()->getId(), $carrierId, 'Wrong carrier ID for ' . $carrierReference);
+-            Assert::assertEquals($shipment->getAddressId(), $addressId);
+-            Assert::assertEquals($shipment->getShippingCostTaxExcluded(), $shipmentData['shipping_cost_tax_excl'], 'Wrong shipping cast tax excluded for ' . $carrierReference);
+-            Assert::assertEquals($shipment->getShippingCostTaxIncluded(), $shipmentData['shipping_cost_tax_incl'], 'Wrong shipping cast tax included for ' . $carrierReference);
++            Assert::assertEquals($shipmentData['tracking_number'], $shipment->getTrackingNumber(), 'Tracking number mismatch');
++            Assert::assertEquals($carrierId, $shipment->getCarrierSummary()->getId(), 'Wrong carrier ID for ' . $carrierReference);
++            Assert::assertEquals($addressId, $shipment->getAddressId(), 'Address ID mismatch');
++            Assert::assertEqualsWithDelta((float) $shipmentData['shipping_cost_tax_excl'], (float) (string) $shipment->getShippingCostTaxExcluded(), 0.001, 'Wrong shipping cost tax excluded for ' . $carrierReference);
++            Assert::assertEqualsWithDelta((float) $shipmentData['shipping_cost_tax_incl'], (float) (string) $shipment->getShippingCostTaxIncluded(), 0.001, 'Wrong shipping cost tax included for ' . $carrierReference);
+             SharedStorage::getStorage()->set($shipmentData['shipment'], $shipment->getId());
+         }
+     }
+@@ -377,4 +379,32 @@ public function assertProductIsLinkedToShipments(
+             );
+         }
+     }
++
++    /**
++     * @Then order :orderReference should have the following shipping totals:
++     */
++    public function assertOrderShippingTotals(string $orderReference, TableNode $table): void
++    {
++        $data = $table->getRowsHash();
++        $orderId = $this->referenceToId($orderReference);
++        $order = new Order($orderId);
++
++        if (isset($data['total_shipping_tax_excl'])) {
++            Assert::assertEqualsWithDelta(
++                (float) $data['total_shipping_tax_excl'],
++                (float) $order->total_shipping_tax_excl,
++                0.001,
++                sprintf('Expected total_shipping_tax_excl %.4f, got %.4f', $data['total_shipping_tax_excl'], $order->total_shipping_tax_excl)
++            );
++        }
++
++        if (isset($data['total_shipping_tax_incl'])) {
++            Assert::assertEqualsWithDelta(
++                (float) $data['total_shipping_tax_incl'],
++                (float) $order->total_shipping_tax_incl,
++                0.001,
++                sprintf('Expected total_shipping_tax_incl %.4f, got %.4f', $data['total_shipping_tax_incl'], $order->total_shipping_tax_incl)
++            );
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/order_create_shipment.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_create_shipment.feature
+new file mode 100644
+index 0000000000000..f67629659c612
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_create_shipment.feature
+@@ -0,0 +1,94 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment --tags order_create_shipment
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@order_create_shipment
++Feature: Create shipment with shipping cost calculation
++  As a BO user
++  I want to create a shipment for an existing order
++  So that shipping costs are calculated and reflected on both the shipment and the order
++
++  Background:
++    Given I enable feature flag "improved_shipment"
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And there is a zone "north_america" named "North America"
++    And I identify tax rules group named "US-FL Rate (6%)" as "us-fl-tax-rate"
++    # Carrier A: price-based, 5.00 excl tax
++    When I create carrier "carrier_a" with specified properties:
++      | name             | Carrier A     |
++      | active           | true          |
++      | shippingMethod   | price         |
++      | zones            | north_america |
++      | shippingHandling | false         |
++    Then I set ranges for carrier "carrier_a" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 10000    | 5           |
++    When I set tax rule "us-fl-tax-rate" for carrier "carrier_a"
++    # Carrier B: price-based, 12.00 excl tax
++    When I create carrier "carrier_b" with specified properties:
++      | name             | Carrier B     |
++      | active           | true          |
++      | shippingMethod   | price         |
++      | zones            | north_america |
++      | shippingHandling | false         |
++    Then I set ranges for carrier "carrier_b" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 10000    | 12          |
++    When I set tax rule "us-fl-tax-rate" for carrier "carrier_b"
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order1" delivery address as "US"
++
++  Scenario: Creating a shipment calculates its shipping cost based on the carrier and updates the order total
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 1
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    When I create a shipment for order "bo_order1" with carrier "carrier_b" and product "Mug The best is yet to come" with quantity 1
++    Then the order "bo_order1" should have the following shipments:
++      | shipment     | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1    | carrier_a |                 | US      | 5.0                    | 5.3                    |
++      | new_shipment | carrier_b |                 | US      | 12.0                   | 12.72                  |
++    # Order total = sum of all shipments: 5.0 + 12.0 = 17.0 excl, 5.3 + 12.72 = 18.02 incl
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 17.0  |
++      | total_shipping_tax_incl | 18.02 |
++
++  Scenario: When PS_ORDER_RECALCULATE_SHIPPING is disabled, new shipment costs are set to 0 and order total is not recalculated
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 0
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    When I create a shipment for order "bo_order1" with carrier "carrier_b" and product "Mug The best is yet to come" with quantity 1
++    Then the order "bo_order1" should have the following shipments:
++      | shipment     | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1    | carrier_a |                 | US      | 5.0                    | 5.3                    |
++      | new_shipment | carrier_b |                 | US      | 0.0                    | 0.0                    |
++    # Order total unchanged since recalculation is disabled
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 5.0 |
++      | total_shipping_tax_incl | 5.3 |
++
++  Scenario: Creating multiple shipments accumulates shipping costs on the order
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 1
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    When I create a shipment for order "bo_order1" with carrier "carrier_b" and product "Mug The best is yet to come" with quantity 1
++    And the order "bo_order1" should have "2" shipments:
++    And I create a shipment for order "bo_order1" with carrier "carrier_a" and product "Mug The best is yet to come" with quantity 1
++    And the order "bo_order1" should have "3" shipments:
++    # Order total = 5.0 + 12.0 + 5.0 = 22.0 excl, 5.3 + 12.72 + 5.3 = 23.32 incl
++    Then order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 22.0  |
++      | total_shipping_tax_incl | 23.32 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature
+index 5c7c2a37a226b..f13a596f7a46c 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature
+@@ -48,7 +48,7 @@ Feature: Update order products with shipments
+       | product_name               | quantity |
+       | Mug Today is a good day    | 1        |
+     When I edit product "Mug Today is a good day" to order "bo_order1" with following products details:
+-      | shipment_mapping       | 1:2, 2:3     |
++      | shipment_mapping       | shipment1:2, shipment2:3     |
+       | price                  | 11.90        |
+       | amount                 | 5            |
+     Then order "bo_order1" should contain 5 products "Mug Today is a good day"
+@@ -89,7 +89,7 @@ Feature: Update order products with shipments
+       | product_name               | quantity |
+       | Mug Today is a good day    | 1        |
+     When I edit product "Mug Today is a good day" to order "bo_order2" with following products details:
+-      | shipment_mapping       | 3:1, 4:0     |
++      | shipment_mapping       | shipment3:1, shipment4:0     |
+       | price                  | 11.90        |
+       | amount                 | 1            |
+     Then order "bo_order2" should contain 1 products "Mug Today is a good day"
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/order_update_shipment_shipping_cost.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_update_shipment_shipping_cost.feature
+new file mode 100644
+index 0000000000000..259fe3ce38ee8
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_update_shipment_shipping_cost.feature
+@@ -0,0 +1,120 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment --tags order_update_shipment_shipping_cost
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@order_update_shipment_shipping_cost
++Feature: Shipping cost recalculation after product quantity update in shipment
++  As a BO user
++  I want to update the quantity of a product assigned to a shipment
++  So that the shipment shipping cost and the order total are recalculated accordingly
++
++  Background:
++    Given I enable feature flag "improved_shipment"
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And there is a zone "north_america" named "North America"
++    And I identify tax rules group named "US-FL Rate (6%)" as "us-fl-tax-rate"
++    # Carrier A: weight-based, 5.00 excl tax for 0-1kg, 10.00 excl tax for 1-50kg (mug=0.3kg, 2=0.6kg→5, 4=1.2kg→10)
++    When I create carrier "carrier_a" with specified properties:
++      | name             | Carrier A     |
++      | active           | true          |
++      | shippingMethod   | weight        |
++      | zones            | north_america |
++      | shippingHandling | false         |
++    Then I set ranges for carrier "carrier_a" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 1        | 5           |
++      | north_america | 1          | 50       | 10          |
++    When I set tax rule "us-fl-tax-rate" for carrier "carrier_a"
++    # Carrier B: price-based, 8.00 excl tax
++    When I create carrier "carrier_b" with specified properties:
++      | name             | Carrier B     |
++      | active           | true          |
++      | shippingMethod   | price         |
++      | zones            | north_america |
++      | shippingHandling | false         |
++    Then I set ranges for carrier "carrier_b" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 10000    | 8           |
++    When I set tax rule "us-fl-tax-rate" for carrier "carrier_b"
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order1" delivery address as "US"
++
++  Scenario: Increasing product quantity recalculates shipping cost on the shipment and order total
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 1
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    And the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 2        |
++    # Increase from 2 to 4
++    When I edit product "Mug The best is yet to come" to order "bo_order1" with following products details:
++      | shipment_mapping | shipment1:4 |
++      | price            | 11.9        |
++      | amount           | 4           |
++    Then order "bo_order1" should contain 4 products "Mug The best is yet to come"
++    And the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 4        |
++    # 4 × 0.3 kg = 1.2 kg crosses the 1 kg boundary → shifts into 1-50 kg range — verify cost updated on shipment
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 10.0                   | 10.6                   |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 10.0  |
++      | total_shipping_tax_incl | 10.6  |
++
++  Scenario: Decreasing product quantity recalculates shipping cost on the shipment and order total
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 1
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    And I create a shipment for order "bo_order1" with carrier "carrier_b" and product "Mug The best is yet to come" with quantity 1
++    And the order "bo_order1" should have "2" shipments:
++    And the order "bo_order1" should have the following shipments:
++      | shipment     | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1    | carrier_a |                 | US      | 5.0                    | 5.3                    |
++      | new_shipment | carrier_b |                 | US      | 8.0                    | 8.48                   |
++    # Decrease product quantity in shipment1 from 2 to 1
++    When I edit product "Mug The best is yet to come" to order "bo_order1" with following products details:
++      | shipment_mapping | shipment1:1 |
++      | price            | 11.9        |
++      | amount           | 1           |
++    Then order "bo_order1" should contain 1 products "Mug The best is yet to come"
++    And the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 1        |
++    And the order "bo_order1" should have the following shipments:
++      | shipment     | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1    | carrier_a |                 | US      | 5.0                    | 5.3                    |
++      | new_shipment | carrier_b |                 | US      | 8.0                    | 8.48                   |
++    # Order total = 5.0 + 8.0 = 13.0 excl, 5.3 + 8.48 = 13.78 incl
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 13.0  |
++      | total_shipping_tax_incl | 13.78 |
++
++  Scenario: Updating quantity when PS_ORDER_RECALCULATE_SHIPPING is disabled does not recalculate shipping cost
++    Given shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 0
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
++    # Increase from 2 to 4 — PS_ORDER_RECALCULATE_SHIPPING=0 means no recalculation at all
++    When I edit product "Mug The best is yet to come" to order "bo_order1" with following products details:
++      | shipment_mapping | shipment1:4 |
++      | price            | 11.9        |
++      | amount           | 4           |
++    Then order "bo_order1" should contain 4 products "Mug The best is yet to come"
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier   | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | carrier_a |                 | US      | 5.0                    | 5.3                    |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+index 29392b50409f0..e5d116541931a 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+@@ -84,11 +84,12 @@ Feature: Product associated with different carriers
+       | location | dtc |
+     And I assign product saucisson with following carriers:
+       | saucisson_carrier |
+-    Then product saucisson should have following shipping information:
++    And product "saucisson" should have following shipping information:
+       | carriers | [saucisson_carrier] |
+     And I enable product "saucisson"
++    And shop configuration for "PS_ORDER_RECALCULATE_SHIPPING" is set to 1
+ 
+-  Scenario: Retrieve shipments for existing order
++  Scenario: Order products with different carriers and manage shipments (split, merge, delete)
+     Given I create an empty cart "dummy_cart" for customer "testCustomer"
+     And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
+     And I add 1 products "bottle of beer" to the cart "dummy_cart"
+@@ -104,6 +105,9 @@ Feature: Product associated with different carriers
+       | shipment  | carrier           | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
+       | shipment1 | beer_carrier      |                 | US      | 5.0                    | 5.3                   |
+       | shipment2 | saucisson_carrier |                 | US      | 10.0                   | 10.6                  |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 15.0 |
++      | total_shipping_tax_incl | 15.9 |
+     Then the shipment "shipment1" should have the following products:
+       | product_name   | quantity |
+       | bottle of beer | 1        |
+@@ -112,7 +116,7 @@ Feature: Product associated with different carriers
+       | product_name | quantity |
+       | saucisson    | 2        |
+ 
+-  Scenario: Retrieve available shipments for merge action
++    # Retrieve available shipments for merge action
+     Then order "bo_order1" should get available shipments for product "bottle of beer":
+       | shipment_name                  | can_handle_merge |
+       | Shipment 1 Beer carrier        | 1             |
+@@ -122,9 +126,17 @@ Feature: Product associated with different carriers
+       | Shipment 1 Beer carrier        | 0             |
+       | Shipment 2 Saucisson carrier   | 1             |
+ 
+-  Scenario: Splitting a shipment
+-    Given I create carrier "pickup_carrier" with specified properties:
++    # Splitting a shipment
++    When I create carrier "pickup_carrier" with specified properties:
+       | name | Pickup |
++      | active         | true          |
++      | shippingMethod | price         |
++      | zones          | north_america |
++      | shippingHandling          | false |
++    Then I set ranges for carrier "pickup_carrier" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 1000     | 3           |
++    When I set tax rule "us-fl-tax-rate" for carrier "pickup_carrier"
+     And I assign product "saucisson" with following carriers:
+       | pickup_carrier |
+     And I split the shipment "shipment2" to create a new shipment with "pickup_carrier" with following products:
+@@ -134,18 +146,26 @@ Feature: Product associated with different carriers
+       | product_name | quantity |
+       | saucisson    | 1        |
+     And the order "bo_order1" should have "3" shipments:
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier           | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | beer_carrier      |                 | US      | 5.0                    | 5.3                   |
++      | shipment2 | saucisson_carrier |                 | US      | 10.0                   | 10.6                  |
++      | shipment3 | pickup_carrier    |                 | US      | 3.0                    | 3.18                  |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 18.0 |
++      | total_shipping_tax_incl | 19.08 |
+     Then the shipment "shipment3" should have the following products:
+       | product_name | quantity |
+       | saucisson    | 1        |
+ 
+-  Scenario: Retrieve shipments for order detail
++    # Retrieve shipments for order detail
+     Then the product "saucisson" in the order "bo_order1" is linked to shipments:
+       | shipment | quantity |
+       | shipment2 |       1 |
+       | shipment3 |       1 |
+ 
+-  Scenario: Merge product into a shipment with specified quantity
+-    Given I merge product from "shipment2" into "shipment1" with following information:
++    # Merge product into a shipment with specified quantity
++    When I merge product from "shipment2" into "shipment1" with following information:
+       | product_name | quantity |
+       | saucisson    | 1        |
+     Then the shipment "shipment1" should have the following products:
+@@ -153,13 +173,17 @@ Feature: Product associated with different carriers
+       | bottle of beer | 1        |
+       | bottle of sparking water | 2        |
+       | saucisson      | 1        |
+-    And the shipment "shipment2" should have the following products:
+-      | product_name   | quantity |
+-      | saucisson      | 1        |
+     And the shipment "shipment2" should be deleted
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier           | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | beer_carrier      |                 | US      | 5.0                    | 5.3                   |
++      | shipment3 | pickup_carrier    |                 | US      | 3.0                    | 3.18                  |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 8.0 |
++      | total_shipping_tax_incl | 8.48 |
+ 
+-  Scenario: Merge product into a shipment with full quantity
+-    Given I merge product from "shipment3" into "shipment1" with following information:
++    # Merge product into a shipment with full quantity
++    When I merge product from "shipment3" into "shipment1" with following information:
+       | product_name | quantity |
+       | saucisson    | 1        |
+     Then the shipment "shipment1" should have the following products:
+@@ -167,23 +191,30 @@ Feature: Product associated with different carriers
+       | bottle of beer | 1        |
+       | bottle of sparking water | 2        |
+       | saucisson      | 2        |
+-    And the shipment "shipment2" should be deleted
++    And the shipment "shipment3" should be deleted
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier           | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | beer_carrier      |                 | US      | 5.0                    | 5.3                   |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 5.0 |
++      | total_shipping_tax_incl | 5.3 |
+ 
+-  Scenario: Retrieve available shipments for merge action
++    # Retrieve available shipments for merge action
+     Then order "bo_order1" should get available shipments for product "bottle of beer":
+       | shipment_name                  | can_handle_merge |
+       | Shipment 1 Beer carrier        | 1             |
+-      | Shipment 2 Saucisson carrier   | 0             |
+     Then order "bo_order1" should get available shipments for product "saucisson":
+       | shipment_name                  | can_handle_merge |
+       | Shipment 1 Beer carrier        | 0             |
+-      | Shipment 2 Saucisson carrier   | 1             |
+ 
+-  Scenario: Delete product from a existing shipment:
++    # Delete product from a existing shipment
+     When I remove product from the shipment "shipment1" with following properties:
+-    | product_name |
+-    | bottle of beer |
++      | product_name |
++      | bottle of beer |
+     Then the shipment "shipment1" should have the following products:
+-    | product_name | quantity |
+-    |  bottle of sparking water   |     2    |
+-    |  saucisson   |     2    |
++      | product_name | quantity |
++      |  bottle of sparking water   |     2    |
++      |  saucisson   |     2    |
++    And order "bo_order1" should have the following shipping totals:
++      | total_shipping_tax_excl | 5.0 |
++      | total_shipping_tax_incl | 5.3 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+index dd1047a39dcee..d0996bfca54c4 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+@@ -74,7 +74,7 @@ Feature: Retrieving shipment for orders
+     Then the order "bo_order1" should have the following shipments:
+       | shipment     | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
+       | shipment1    | default_carrier |                 | US      |                    7.0 |                   7.42 |
+-      | new_shipment | default_carrier |                 | US      |                    0.0 |                    0.0 |
++      | new_shipment | default_carrier |                 | US      |                    7.0 |                   7.42 |
+ 
+   Scenario: Retrieve shipment for viewing
+     Given the order "bo_order1" should have the following shipments:
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php
+new file mode 100644
+index 0000000000000..c08900371ae78
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php
+@@ -0,0 +1,126 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\BaseRangeCostCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class BaseRangeCostCalculatorTest extends TestCase
++{
++    /** @var CarrierDataProviderInterface|\PHPUnit\Framework\MockObject\MockObject */
++    private $carrierDataProvider;
++
++    /** @var BaseRangeCostCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->carrierDataProvider = $this->createMock(CarrierDataProviderInterface::class);
++        $this->calculator = new BaseRangeCostCalculator($this->carrierDataProvider);
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContextWithData();
++        $context->setAvailable(false);
++
++        $this->carrierDataProvider->expects($this->never())->method('getRangeCost');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotComputeIfFreeShippingIsAlreadySet(): void
++    {
++        $context = $this->createMinimalContext();
++        $context->setFreeShipping(true);
++
++        $this->carrierDataProvider->expects($this->never())->method('getRangeCost');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItSetsUnavailableIfCarrierDataOrZoneIdAreMissing(): void
++    {
++        $context = $this->createMinimalContext();
++
++        $this->carrierDataProvider->expects($this->never())->method('getRangeCost');
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isAvailable());
++    }
++
++    public function testItSetsUnavailableIfCostIsNull(): void
++    {
++        $context = $this->createContextWithData();
++
++        $this->carrierDataProvider->method('getRangeCost')->willReturn(null);
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isAvailable());
++        $this->assertFalse($context->isFreeShipping());
++    }
++
++    public function testItSetsFreeShippingIfCostIsZero(): void
++    {
++        $context = $this->createContextWithData();
++
++        $this->carrierDataProvider->method('getRangeCost')->willReturn(new DecimalNumber('0'));
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->isFreeShipping());
++    }
++
++    public function testItSetsCostWhenRangeCostIsPositive(): void
++    {
++        $context = $this->createContextWithData();
++        $cost = new DecimalNumber('15.50');
++
++        $this->carrierDataProvider->method('getRangeCost')->willReturn($cost);
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isFreeShipping());
++        $this->assertTrue($context->getCost()->equals($cost));
++    }
++
++    private function createMinimalContext(): ShippingCostPriceInterface
++    {
++        return ShippingCostPrice::createFromRequest(new ShippingCalculationRequest(
++            [], 1, null, null, 1, 1, null, 10.0
++        ));
++    }
++
++    private function createContextWithData(): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            2, // zoneId
++            null, // addressId
++            2, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        $context = ShippingCostPrice::createFromRequest($request);
++        $context->setCarrierData(new CarrierShippingData(1, 0, 0, false, false));
++
++        return $context;
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php
+new file mode 100644
+index 0000000000000..b936e20d46a39
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php
+@@ -0,0 +1,82 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\CarrierDataCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierDataProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class CarrierDataCalculatorTest extends TestCase
++{
++    /** @var CarrierDataProviderInterface|\PHPUnit\Framework\MockObject\MockObject */
++    private $carrierDataProvider;
++
++    /** @var CarrierDataCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->carrierDataProvider = $this->createMock(CarrierDataProviderInterface::class);
++        $this->calculator = new CarrierDataCalculator($this->carrierDataProvider);
++    }
++
++    public function testItSetsUnavailableIfCarrierNotFound(): void
++    {
++        $context = $this->createContext(1);
++        $this->carrierDataProvider->method('getCarrierShippingData')->willReturn(null);
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isAvailable());
++    }
++
++    public function testItSetsCarrierDataInContext(): void
++    {
++        $context = $this->createContext(1);
++        $carrierData = new CarrierShippingData(1, 0, 0, false, false);
++
++        $this->carrierDataProvider->method('getCarrierShippingData')->willReturn($carrierData);
++
++        $this->calculator->compute($context);
++
++        $this->assertSame($carrierData, $context->getCarrierData());
++    }
++
++    public function testItSetsFreeShippingIfCarrierIsFree(): void
++    {
++        $context = $this->createContext(1);
++        $carrierData = new CarrierShippingData(1, 0, 0, false, true);
++
++        $this->carrierDataProvider->method('getCarrierShippingData')->willReturn($carrierData);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->isFreeShipping());
++    }
++
++    private function createContext(int $carrierId): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            $carrierId,
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php
+new file mode 100644
+index 0000000000000..23f81fd305905
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php
+@@ -0,0 +1,92 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use Currency;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\CurrencyConversionCalculator;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++
++class CurrencyConversionCalculatorTest extends TestCase
++{
++    /** @var Tools|\PHPUnit\Framework\MockObject\MockObject */
++    private $tools;
++
++    /** @var CurrencyRepository|\PHPUnit\Framework\MockObject\MockObject */
++    private $currencyRepository;
++
++    /** @var CurrencyConversionCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->tools = $this->createMock(Tools::class);
++        $this->currencyRepository = $this->createMock(CurrencyRepository::class);
++        $this->calculator = new CurrencyConversionCalculator($this->tools, $this->currencyRepository);
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext(1);
++        $context->setAvailable(false);
++
++        $this->tools->expects($this->never())->method('convertPrice');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotComputeIfFreeShippingIsAlreadySet(): void
++    {
++        $context = $this->createContext(1);
++        $context->setFreeShipping(true);
++
++        $this->tools->expects($this->never())->method('convertPrice');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItConvertsCostSuccessfully(): void
++    {
++        $context = $this->createContext(1);
++        $initialCost = new DecimalNumber('10.00');
++        $context->setCost($initialCost);
++
++        $currency = $this->createMock(Currency::class);
++        $this->currencyRepository->method('get')->with(new CurrencyId(1))->willReturn($currency);
++
++        $convertedAmount = 12.50;
++        $this->tools->method('convertPrice')->with('10', $currency)->willReturn($convertedAmount);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getCost()->equals(new DecimalNumber('12.5')));
++    }
++
++    private function createContext(int $currencyId): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            $currencyId,
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+new file mode 100644
+index 0000000000000..ba385a90030b0
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+@@ -0,0 +1,112 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use Currency;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\FreeShippingCalculator;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteria;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++
++class FreeShippingCalculatorTest extends TestCase
++{
++    /** @var FreeShippingCriteriaProviderInterface|\PHPUnit\Framework\MockObject\MockObject */
++    private $criteriaProvider;
++
++    /** @var Tools|\PHPUnit\Framework\MockObject\MockObject */
++    private $tools;
++
++    /** @var CurrencyRepository|\PHPUnit\Framework\MockObject\MockObject */
++    private $currencyRepository;
++
++    /** @var FreeShippingCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->criteriaProvider = $this->createMock(FreeShippingCriteriaProviderInterface::class);
++        $this->tools = $this->createMock(Tools::class);
++        $this->currencyRepository = $this->createMock(CurrencyRepository::class);
++        $this->calculator = new FreeShippingCalculator(
++            $this->criteriaProvider,
++            $this->tools,
++            $this->currencyRepository
++        );
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext(1, new DecimalNumber('10'));
++        $context->setAvailable(false);
++
++        $this->criteriaProvider->expects($this->never())->method('getCriteria');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotComputeIfFreeShippingIsAlreadySet(): void
++    {
++        $context = $this->createContext(1, new DecimalNumber('10'));
++        $context->setFreeShipping(true);
++
++        $this->criteriaProvider->expects($this->never())->method('getCriteria');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItSetsFreeShippingIfPriceThresholdIsMet(): void
++    {
++        $context = $this->createContext(1, new DecimalNumber('50'));
++        $criteria = new FreeShippingCriteria(new DecimalNumber('40'), null);
++        $this->criteriaProvider->method('getCriteria')->willReturn($criteria);
++
++        $currency = $this->createMock(Currency::class);
++        $this->currencyRepository->method('get')->with(new CurrencyId(1))->willReturn($currency);
++        $this->tools->method('convertPrice')->willReturn(40.0);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->isFreeShipping());
++    }
++
++    public function testItSetsFreeShippingIfWeightThresholdIsMet(): void
++    {
++        $context = $this->createContext(1, new DecimalNumber('10'));
++        $context->setTotalWeight(new DecimalNumber('10'));
++        $criteria = new FreeShippingCriteria(null, new DecimalNumber('5'));
++        $this->criteriaProvider->method('getCriteria')->willReturn($criteria);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->isFreeShipping());
++    }
++
++    private function createContext(int $currencyId, DecimalNumber $orderTotal): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            $currencyId,
++            null, // customerId
++            (float) $orderTotal->__toString()
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php
+new file mode 100644
+index 0000000000000..f4c2f775cbe86
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php
+@@ -0,0 +1,92 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\HandlingCostCalculator;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\CarrierShippingData;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class HandlingCostCalculatorTest extends TestCase
++{
++    /** @var AdapterConfiguration|\PHPUnit\Framework\MockObject\MockObject */
++    private $configuration;
++
++    /** @var HandlingCostCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->configuration = $this->createMock(AdapterConfiguration::class);
++        $this->calculator = new HandlingCostCalculator($this->configuration);
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext();
++        $context->setAvailable(false);
++
++        $this->configuration->expects($this->never())->method('get');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotComputeIfFreeShippingIsAlreadySet(): void
++    {
++        $context = $this->createContext();
++        $context->setFreeShipping(true);
++
++        $this->configuration->expects($this->never())->method('get');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotComputeIfCarrierHandlingIsNotEnabled(): void
++    {
++        $context = $this->createContext();
++        $context->setCarrierData(new CarrierShippingData(1, 0, 0, false, false));
++
++        $this->configuration->expects($this->never())->method('get');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItAddsHandlingCostToTotal(): void
++    {
++        $context = $this->createContext();
++        $context->setCarrierData(new CarrierShippingData(1, 0, 0, true, false));
++        $context->setCost(new DecimalNumber('10.00'));
++
++        $this->configuration->method('get')->with('PS_SHIPPING_HANDLING')->willReturn('5.00');
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getCost()->equals(new DecimalNumber('15.00')));
++    }
++
++    private function createContext(): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php
+new file mode 100644
+index 0000000000000..93ea0964890da
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php
+@@ -0,0 +1,122 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use Currency;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\TaxCalculator;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\ShippingTaxRateProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Pricing\Rounding\RoundingServiceInterface;
++use PrestaShop\PrestaShop\Core\Pricing\ValueObject\TaxRate;
++
++class TaxCalculatorTest extends TestCase
++{
++    /** @var AdapterConfiguration|\PHPUnit\Framework\MockObject\MockObject */
++    private $configuration;
++
++    /** @var ShippingTaxRateProviderInterface|\PHPUnit\Framework\MockObject\MockObject */
++    private $taxRateProvider;
++
++    /** @var CurrencyRepository|\PHPUnit\Framework\MockObject\MockObject */
++    private $currencyRepository;
++
++    /** @var RoundingServiceInterface|\PHPUnit\Framework\MockObject\MockObject */
++    private $roundingService;
++
++    /** @var TaxCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->configuration = $this->createMock(AdapterConfiguration::class);
++        $this->taxRateProvider = $this->createMock(ShippingTaxRateProviderInterface::class);
++        $this->currencyRepository = $this->createMock(CurrencyRepository::class);
++        $this->roundingService = $this->createMock(RoundingServiceInterface::class);
++        $this->calculator = new TaxCalculator(
++            $this->configuration,
++            $this->taxRateProvider,
++            $this->currencyRepository,
++            $this->roundingService
++        );
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext(1);
++        $context->setAvailable(false);
++
++        $this->currencyRepository->expects($this->never())->method('get');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItSetsZeroTaxesIfFreeShipping(): void
++    {
++        $context = $this->createContext(1);
++        $context->setFreeShipping(true);
++
++        $currency = $this->createMock(Currency::class);
++        $currency->precision = 2;
++        $this->currencyRepository->method('get')->willReturn($currency);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getTaxExcluded()->equalsZero());
++        $this->assertTrue($context->getTaxIncluded()->equalsZero());
++    }
++
++    public function testItCalculatesTaxesCorrectly(): void
++    {
++        $context = $this->createContext(1);
++        $context->setCost(new DecimalNumber('10.00'));
++
++        $currency = $this->createMock(Currency::class);
++        $currency->precision = 2;
++        $this->currencyRepository->method('get')->willReturn($currency);
++
++        $this->configuration->method('get')->willReturnCallback(function ($key) {
++            $map = [
++                'PS_TAX' => true,
++                'PS_ATCP_SHIPWRAP' => false,
++            ];
++
++            return $map[$key] ?? null;
++        });
++        $this->taxRateProvider->method('getTaxRate')->willReturn(new TaxRate(new DecimalNumber('20'))); // 20% tax
++
++        $this->roundingService->method('round')->willReturnCallback(fn (DecimalNumber $number) => $number);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getTaxExcluded()->equals(new DecimalNumber('10.00')));
++        $this->assertTrue($context->getTaxIncluded()->equals(new DecimalNumber('12.00')));
++    }
++
++    private function createContext(int $currencyId): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            1, // zoneId
++            1, // addressId
++            1, // countryZoneId
++            $currencyId,
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php
+new file mode 100644
+index 0000000000000..05bcd04e4a4c2
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php
+@@ -0,0 +1,107 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\ZoneResolutionCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class ZoneResolutionCalculatorTest extends TestCase
++{
++    /** @var AddressRepository|\PHPUnit\Framework\MockObject\MockObject */
++    private $addressRepository;
++
++    /** @var ZoneResolutionCalculator */
++    private $calculator;
++
++    protected function setUp(): void
++    {
++        $this->addressRepository = $this->createMock(AddressRepository::class);
++        $this->calculator = new ZoneResolutionCalculator($this->addressRepository);
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext(10);
++        $context->setAvailable(false);
++
++        $this->addressRepository->expects($this->never())->method('getZoneId');
++
++        $this->calculator->compute($context);
++    }
++
++    public function testItDoesNotResolveIfAlreadySet(): void
++    {
++        $context = $this->createContext(null);
++        $context->setResolvedZoneId(5);
++
++        $this->addressRepository->expects($this->never())->method('getZoneId');
++
++        $this->calculator->compute($context);
++        $this->assertSame(5, $context->getResolvedZoneId());
++    }
++
++    public function testItResolvesFromAddressRepository(): void
++    {
++        $context = $this->createContext(10); // Address ID 10
++
++        $this->addressRepository->method('getZoneId')
++            ->with(new AddressId(10))
++            ->willReturn(3);
++
++        $this->calculator->compute($context);
++        $this->assertSame(3, $context->getResolvedZoneId());
++        $this->assertTrue($context->isAvailable());
++    }
++
++    public function testItResolvesFromCountryZoneFallback(): void
++    {
++        $context = $this->createContext(null); // No Address ID
++        // Assuming default country zone ID is 2
++
++        $this->addressRepository->expects($this->never())->method('getZoneId');
++
++        $this->calculator->compute($context);
++        $this->assertSame(2, $context->getResolvedZoneId());
++        $this->assertTrue($context->isAvailable());
++    }
++
++    public function testItSetsUnavailableIfZoneCannotBeResolved(): void
++    {
++        $context = $this->createContext(10);
++
++        $this->addressRepository->method('getZoneId')
++            ->willThrowException(new \PrestaShop\PrestaShop\Core\Domain\Address\Exception\AddressNotFoundException());
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isAvailable());
++        $this->assertNull($context->getResolvedZoneId());
++    }
++
++    private function createContext(?int $addressId): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            null, // zoneId
++            $addressId,
++            2, // countryZoneId (default)
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php
+new file mode 100644
+index 0000000000000..bdaf7ff43c93f
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php
+@@ -0,0 +1,81 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\AdditionalProductCostCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class AdditionalProductCostCalculatorTest extends TestCase
++{
++    private AdditionalProductCostCalculator $calculator;
++
++    protected function setUp(): void
++    {
++        $this->calculator = new AdditionalProductCostCalculator();
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext([]);
++        $context->setAvailable(false);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getCost()->equals(new DecimalNumber('0')));
++    }
++
++    public function testItReturnsEarlyIfFreeShipping(): void
++    {
++        $context = $this->createContext([
++            ['id_product' => 1, 'additional_shipping_cost' => 5.0, 'quantity' => 1, 'is_virtual' => false],
++        ]);
++        $context->setFreeShipping(true);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getCost()->equals(new DecimalNumber('0')));
++    }
++
++    public function testItAddsAdditionalCostCorrectly(): void
++    {
++        $products = [
++            ['id_product' => 1, 'additional_shipping_cost' => 5.0, 'quantity' => 2, 'is_virtual' => false], // 10.0
++            ['id_product' => 2, 'additional_shipping_cost' => 2.5, 'quantity' => 1, 'is_virtual' => false], // 2.5
++            ['id_product' => 3, 'additional_shipping_cost' => 10.0, 'quantity' => 1, 'is_virtual' => true], // Ignored
++        ];
++
++        $context = $this->createContext($products);
++        $context->setCost(new DecimalNumber('10.00')); // Base cost
++
++        $this->calculator->compute($context);
++
++        // 10.00 + 10.0 + 2.5 = 22.5
++        $this->assertTrue($context->getCost()->equals(new DecimalNumber('22.5')));
++    }
++
++    private function createContext(array $products): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            $products,
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php
+new file mode 100644
+index 0000000000000..a02c4911aea81
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php
+@@ -0,0 +1,79 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\WeightCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class WeightCalculatorTest extends TestCase
++{
++    private WeightCalculator $calculator;
++
++    protected function setUp(): void
++    {
++        $this->calculator = new WeightCalculator();
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext([]);
++        $context->setAvailable(false);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getTotalWeight()->equals(new DecimalNumber('0')));
++    }
++
++    public function testItReturnsEarlyIfFreeShipping(): void
++    {
++        $context = $this->createContext([
++            ['id_product' => 1, 'weight' => 10, 'quantity' => 2, 'is_virtual' => false],
++        ]);
++        $context->setFreeShipping(true);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getTotalWeight()->equals(new DecimalNumber('0')));
++    }
++
++    public function testItComputesTotalWeightCorrectly(): void
++    {
++        $products = [
++            ['id_product' => 1, 'weight' => 1.5, 'quantity' => 2, 'is_virtual' => false],
++            ['id_product' => 2, 'weight_attribute' => 0.5, 'weight' => 1.0, 'quantity' => 3, 'is_virtual' => false],
++            ['id_product' => 3, 'weight' => 10, 'quantity' => 1, 'is_virtual' => true], // Should be filtered out by ShippingCostPrice
++        ];
++
++        $context = $this->createContext($products);
++        $this->calculator->compute($context);
++
++        // (1.5 * 2) + (0.5 * 3) = 3.0 + 1.5 = 4.5
++        $this->assertTrue($context->getTotalWeight()->equals(new DecimalNumber('4.5')));
++    }
++
++    private function createContext(array $products): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            $products,
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}

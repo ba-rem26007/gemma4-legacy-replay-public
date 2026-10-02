@@ -1,0 +1,331 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index a431513e1729c..401a4721c2012 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -1161,6 +1161,36 @@ public function checkProductRestrictionsFromCart(CartCore $cart, $returnProducts
+                             }
+                             $eligible_products_list = $this->filterProducts($eligible_products_list, $matching_products_list, $product_rule['type']);
+ 
++                            break;
++                        case 'combinations':
++                            $cart_combinations = Db::getInstance()->executeS('
++							SELECT cp.quantity, cp.`id_product`, cp.`id_product_attribute`
++							FROM `' . _DB_PREFIX_ . 'cart_product` cp
++							WHERE cp.`id_cart` = ' . (int) $cart->id . '
++							AND CONCAT(cp.`id_product`, "-", cp.`id_product_attribute`) IN (' . implode(',', array_map(fn ($combinationIdentifier) => '"' . $combinationIdentifier . '"', $eligible_products_list)) . ')');
++                            $count_matching_combinations = 0;
++                            $matching_combinations_list = [];
++                            foreach ($cart_combinations as $cart_combination) {
++                                if (in_array($cart_combination['id_product_attribute'], $product_rule['values'])) {
++                                    $count_matching_combinations += $cart_combination['quantity'];
++                                    // Todo: Handle correct check when combination gift is handled
++                                    if ($alreadyInCart && $this->gift_product == $cart_combination['id_product']) {
++                                        --$count_matching_combinations;
++                                    }
++                                    $matching_combinations_list[] = $cart_combination['id_product'] . '-' . $cart_combination['id_product_attribute'];
++                                }
++                            }
++                            if ($count_matching_combinations < $product_rule_group['quantity']) {
++                                if ($countRulesProduct === 1) {
++                                    return (!$displayError) ? false : $this->trans('You cannot use this voucher with these products', [], 'Shop.Notifications.Error');
++                                } else {
++                                    ++$condition;
++
++                                    break;
++                                }
++                            }
++                            $eligible_products_list = $this->filterProducts($eligible_products_list, $matching_combinations_list, $product_rule['type']);
++
+                             break;
+                         case 'categories':
+                             $cart_categories = Db::getInstance()->executeS('
+@@ -1253,6 +1283,8 @@ public function checkProductRestrictionsFromCart(CartCore $cart, $returnProducts
+                             $eligible_products_list = $this->filterProducts($eligible_products_list, $matching_products_list, $product_rule['type']);
+ 
+                             break;
++                        default:
++                            return (!$displayError) ? false : $this->trans('Unknown type of product restriction', [], 'Shop.Notifications.Error');
+                     }
+                     if (!count($eligible_products_list)) {
+                         if ($countRulesProduct === 1) {
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index a9c558c573e62..b499d4a20dee5 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -273,7 +273,7 @@ CREATE TABLE `PREFIX_cart_rule_product_rule` (
+   `id_product_rule_group` int(10) unsigned NOT NULL,
+   `type` ENUM(
+     'products', 'categories', 'attributes',
+-    'manufacturers', 'suppliers'
++    'manufacturers', 'suppliers', 'combinations'
+   ) NOT NULL,
+   PRIMARY KEY (`id_product_rule`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
+diff --git a/src/Core/Domain/Discount/ProductRuleType.php b/src/Core/Domain/Discount/ProductRuleType.php
+index 26cc9d1167c9e..0907caf4abd72 100644
+--- a/src/Core/Domain/Discount/ProductRuleType.php
++++ b/src/Core/Domain/Discount/ProductRuleType.php
+@@ -33,4 +33,5 @@ enum ProductRuleType: string
+ {
+     case CATEGORIES = 'categories';
+     case PRODUCTS = 'products';
++    case COMBINATIONS = 'combinations';
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
+index c9bdb90051833..a9e8c722a9c92 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CartFeatureContext.php
+@@ -194,6 +194,33 @@ public function addProductsToCart(int $quantity, string $productName, string $ca
+         }
+     }
+ 
++    /**
++     * @When /^I add (\d+) combination(?:s)? "(.+)" from product "(.+)" to the cart "(.+)"$/
++     *
++     * @param int $quantity
++     * @param string $combinationReference
++     * @param string $productReference
++     * @param string $cartReference
++     */
++    public function addCombinationsToCart(int $quantity, string $combinationReference, string $productReference, string $cartReference)
++    {
++        try {
++            $this->getCommandBus()->handle(
++                new AddProductToCartCommand(
++                    $this->referenceToId($cartReference),
++                    $this->referenceToId($productReference),
++                    $quantity,
++                    $this->referenceToId($combinationReference)
++                )
++            );
++
++            // Clear cart static cache or it will have no products in next calls
++            Cart::resetStaticCache();
++        } catch (MinimalQuantityException $e) {
++            $this->setLastException($e);
++        }
++    }
++
+     /**
+      * @When I update product :productName in the cart :cartReference to :price
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature
+index 3c0da4003f639..7daea0b9f829f 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature
+@@ -67,3 +67,34 @@ Feature: Update discount condition
+       | minimum_amount_tax_included      | true          |
+       | minimum_amount_shipping_included | true          |
+     And discount "discount_with_min_amount" should have no product conditions
++
++  Scenario: Create discount with restricted list of combinations
++    Given attribute group "Size" named "Size" in en language exists
++    And attribute "S" named "S" in en language exists
++    And attribute "M" named "M" in en language exists
++    And attribute "L" named "L" in en language exists
++    Given I add product "metal_tshirt" with following information:
++      | name[en-US] | metal tshirt |
++      | type        | combinations |
++    When I generate combinations for product metal_tshirt using following attributes:
++      | Size | [S,M,L] |
++    Then product "metal_tshirt" should have following combinations:
++      | id reference | combination name | reference | attributes | impact on price | quantity | is default |
++      | metalTshirtS | Size - S         |           | [Size:S]   | 0               | 0        | true       |
++      | metalTshirtM | Size - M         |           | [Size:M]   | 0               | 0        | false      |
++      | metalTshirtL | Size - L         |           | [Size:L]   | 0               | 0        | false      |
++    When I create a "free_shipping" discount "discount_with_restricted_combinations" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_restricted_combinations" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_restricted_combinations" with following conditions matching at least 42 products:
++      | condition_type | items                      |
++      | combinations   | metalTshirtM, metalTshirtL |
++    Then discount "discount_with_restricted_combinations" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_restricted_combinations" should have the following product conditions matching at least 42 products:
++      | condition_type | items                      |
++      | combinations   | metalTshirtM, metalTshirtL |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_combinations.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_combinations.feature
+new file mode 100644
+index 0000000000000..b0a2b2aa27075
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_combinations.feature
+@@ -0,0 +1,162 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-condition-restricted-combinations
++@restore-all-tables-before-feature
++@discount-condition-restricted-combinations
++Feature: Full UX discount test
++  PrestaShop allows discounts with restricted combinations as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  # Note: in this feature file scenarios are related because this initialisation must be done only once
++  Scenario: First create combinations that will be used in following scenarios
++    Given attribute group "Size" named "Size" in en language exists
++    And attribute "S" named "S" in en language exists
++    And attribute "M" named "M" in en language exists
++    And attribute "L" named "L" in en language exists
++    Given I add product "metal_tshirt" with following information:
++      | name[en-US] | metal tshirt |
++      | type        | combinations |
++    When I generate combinations for product metal_tshirt using following attributes:
++      | Size | [S,M,L] |
++    Then product "metal_tshirt" should have following combinations:
++      | id reference | combination name | reference | attributes | impact on price | quantity | is default |
++      | metalTshirtS | Size - S         |           | [Size:S]   | 0               | 0        | true       |
++      | metalTshirtM | Size - M         |           | [Size:M]   | 0               | 0        | false      |
++      | metalTshirtL | Size - L         |           | [Size:L]   | 0               | 0        | false      |
++    And I enable product "metal_tshirt"
++    And I update product "metal_tshirt" with following values:
++      | price | 12.00 |
++    And I update combination "metalTshirtS" stock with following details:
++      | delta quantity | 100 |
++    And I update combination "metalTshirtM" stock with following details:
++      | delta quantity | 100 |
++    And I update combination "metalTshirtL" stock with following details:
++      | delta quantity | 100 |
++    Given I add product "metal_sweat" with following information:
++      | name[en-US] | metal sweat  |
++      | type        | combinations |
++    When I generate combinations for product metal_sweat using following attributes:
++      | Size | [S,M,L] |
++    Then product "metal_sweat" should have following combinations:
++      | id reference | combination name | reference | attributes | impact on price | quantity | is default |
++      | metalSweatS  | Size - S         |           | [Size:S]   | 0               | 0        | true       |
++      | metalSweatM  | Size - M         |           | [Size:M]   | 0               | 0        | false      |
++      | metalSweatL  | Size - L         |           | [Size:L]   | 0               | 0        | false      |
++    And I enable product "metal_sweat"
++    And I update product "metal_sweat" with following values:
++      | price | 18.00 |
++    And I update combination "metalSweatS" stock with following details:
++      | delta quantity | 100 |
++    And I update combination "metalSweatM" stock with following details:
++      | delta quantity | 100 |
++    And I update combination "metalSweatL" stock with following details:
++      | delta quantity | 100 |
++    # Now create the discount
++    When I create a "free_shipping" discount "free_shipping_discount_with_restricted_combinations" with following properties:
++      | name[en-US] | Three Tshirt M or L size get free shipping        |
++      | name[fr-FR] | Livraison offerte pour Trois tshirt taille M ou L |
++      | active      | true                                              |
++      | valid_from  | 2025-01-01 11:05:00                               |
++      | valid_to    | 2025-12-01 00:00:00                               |
++      | code        | FREE_SHIPPING_THREE_COMBINATIONS                  |
++    And I update discount "free_shipping_discount_with_restricted_combinations" with following conditions matching at least 3 products:
++      | condition_type | items                      |
++      | combinations   | metalTshirtM, metalTshirtL |
++    Then discount "free_shipping_discount_with_restricted_combinations" should have the following properties:
++      | name[en-US]              | Three Tshirt M or L size get free shipping        |
++      | name[fr-FR]              | Livraison offerte pour Trois tshirt taille M ou L |
++      | active                   | true                                              |
++      | valid_from               | 2025-01-01 11:05:00                               |
++      | valid_to                 | 2025-12-01 00:00:00                               |
++      | code                     | FREE_SHIPPING_THREE_COMBINATIONS                  |
++      | minimum_product_quantity | 0                                                 |
++    And discount "free_shipping_discount_with_restricted_combinations" should have the following product conditions matching at least 3 products:
++      | condition_type | items                      |
++      | combinations   | metalTshirtM, metalTshirtL |
++
++  Scenario: Free shipping with three t shirts L
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 2 combinations "metalTshirtL" from product "metal_tshirt" to the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$31.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $24.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $31.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_combinations" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    # First try the condition is not met so the cart remains unchanged
++    Then cart "dummy_cart" total with tax included should be '$31.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $24.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $31.00 |
++    # Now we add the missing third combination
++    When I add 1 combination "metalTshirtL" from product "metal_tshirt" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$43.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $36.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $43.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_combinations" on the cart "dummy_cart"
++    # Now the condition is met so the cart shipping is offered
++    Then cart "dummy_cart" total with tax included should be '$36.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $36.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $36.00 |
++
++  Scenario: Free shipping with 2 tshirts M and 1 tshirt L (apply on first try)
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 2 combinations "metalTshirtM" from product "metal_tshirt" to the cart "dummy_cart"
++    And I add 1 combination "metalTshirtL" from product "metal_tshirt" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$43.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $36.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $43.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_combinations" on the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$36.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $36.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $36.00 |
++
++  Scenario: Three combinations but only two matching the rule
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 combination "metalTshirtM" from product "metal_tshirt" to the cart "dummy_cart"
++    And I add 1 combination "metalTshirtL" from product "metal_tshirt" to the cart "dummy_cart"
++    And I add 1 combination "metalSweatL" from product "metal_sweat" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$49.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $42.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $49.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_combinations" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$49.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $42.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $49.00 |
++    # With one more combination it matches the condition
++    When I add 1 combination "metalTshirtL" from product "metal_tshirt" to the cart "dummy_cart"
++    And I use a voucher "free_shipping_discount_with_restricted_combinations" on the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$54.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $54.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $54.00 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature
+index 15a830ea85ce0..b8880a84f2ec3 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature
+@@ -2,7 +2,7 @@
+ @restore-all-tables-before-feature
+ @discount-condition-restricted-products
+ Feature: Full UX discount test
+-  PrestaShop allows discounts with minimal quantity as the condition
++  PrestaShop allows discounts with restricted products as the condition
+ 
+   Background:
+     Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"

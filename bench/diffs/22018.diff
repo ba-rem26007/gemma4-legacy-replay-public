@@ -1,0 +1,138 @@
+diff --git a/classes/order/OrderDetail.php b/classes/order/OrderDetail.php
+index 1c44f2b0fa5c5..58b5a3a9be40b 100644
+--- a/classes/order/OrderDetail.php
++++ b/classes/order/OrderDetail.php
+@@ -392,10 +392,6 @@ public function saveTaxCalculator(Order $order, $replace = false)
+             return false;
+         }
+ 
+-        if ($order->total_products <= 0) {
+-            return true;
+-        }
+-
+         $shipping_tax_amount = 0;
+ 
+         foreach ($order->getCartRules() as $cart_rule) {
+@@ -406,7 +402,8 @@ public function saveTaxCalculator(Order $order, $replace = false)
+             }
+         }
+ 
+-        $ratio = $this->unit_price_tax_excl / $order->total_products;
++        $ratio = ($order->total_products > 0) ? ($this->unit_price_tax_excl / $order->total_products) : 1;
++
+         $order_reduction_amount = ($order->total_discounts_tax_excl - $shipping_tax_amount) * $ratio;
+         $discounted_price_tax_excl = $this->unit_price_tax_excl - $order_reduction_amount;
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index c3036ad6c29b7..62b237c7cf883 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -380,6 +380,49 @@ public function checkInvoiceShippingTaxDetails(string $invoicePosition, string $
+         }
+     }
+ 
++    /**
++     * @Then the :invoicePosition invoice from order :orderReference should have following product tax details:
++     *
++     * @param string $invoicePosition
++     * @param string $orderReference
++     * @param TableNode $table
++     */
++    public function checkInvoiceProductTaxDetails(string $invoicePosition, string $orderReference, TableNode $table)
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        $invoiceProductData = $table->getColumnsHash();
++
++        $order = new Order($orderId);
++        $orderInvoice = $this->getInvoiceFromOrder($order, $invoicePosition);
++        $invoiceProductTaxDetails = array_values($orderInvoice->getProductTaxesBreakdown($order));
++
++        Assert::assertLessThanOrEqual(
++            count($invoiceProductTaxDetails),
++            count($invoiceProductData),
++            sprintf(
++                'Invalid number of product tax details, expected at least %d instead of %d',
++                count($invoiceProductData),
++                count($invoiceProductTaxDetails)
++            )
++        );
++
++        foreach ($invoiceProductData as $invoiceProductIndex => $invoiceProductDetails) {
++            $productTaxDetails = $invoiceProductTaxDetails[$invoiceProductIndex];
++            foreach ($invoiceProductDetails as $taxField => $taxValue) {
++                Assert::assertEquals(
++                    (float) $taxValue,
++                    (float) $productTaxDetails[$taxField],
++                    sprintf(
++                        'Invalid order tax field %s, expected %s instead of %s',
++                        $taxField,
++                        $taxValue,
++                        (float) $productTaxDetails[$taxField]
++                    )
++                );
++            }
++        }
++    }
++
+     /**
+      * @Then order :orderReference should have :expectedCount cart rule(s)
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+index 9d9e0d4c38cba..60dbef35cc77f 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+@@ -642,3 +642,54 @@ Feature: Order from Back Office (BO)
+       | total_shipping_tax_incl | 0.000 |
+     Then order "bo_order1" has status "Awaiting bank wire payment"
+     And order "bo_order1" has 1 status in history
++
++  Scenario: Delete all products from order then add product in the empty order
++    Given there is a product in the catalog named "Test Added Product" with a price of 15.0 and 100 items in stock
++    And order with reference "bo_order1" does not contain product "Test Added Product"
++    And the available stock for product "Test Added Product" should be 100
++    When I add products to order "bo_order1" with new invoice and the following products details:
++      | name          | Test Added Product |
++      | amount        | 2                  |
++      | price         | 15                 |
++    # Remove products
++    When I remove product "Test Added Product" from order "bo_order1"
++    And I remove product "Mug The best is yet to come" from order "bo_order1"
++    Then order "bo_order1" should have 0 products in total
++    # Add again a product
++    When I add products to order "bo_order1" with new invoice and the following products details:
++      | name   | Test Added Product |
++      | amount | 2                  |
++      | price  | 15                 |
++    And I generate invoice for "bo_order1" order
++    ## Assert totals
++    And product "Test Added Product" in order "bo_order1" has following details:
++      | product_quantity       | 2     |
++      | product_price          | 15.00 |
++      | original_product_price | 15.00 |
++      | unit_price_tax_excl    | 15.00 |
++      | unit_price_tax_incl    | 15.90 |
++      | total_price_tax_excl   | 30.00 |
++      | total_price_tax_incl   | 31.80 |
++    And order "bo_order1" should have following details:
++      | total_products           | 30.00 |
++      | total_products_wt        | 31.80 |
++      | total_discounts_tax_excl | 0.000 |
++      | total_discounts_tax_incl | 0.000 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++    And the first invoice from order "bo_order1" should have following details:
++      | total_products          | 30.00 |
++      | total_products_wt       | 31.80 |
++      | total_discount_tax_excl | 0.0   |
++      | total_discount_tax_incl | 0.0   |
++      | total_shipping_tax_excl | 7.0   |
++      | total_shipping_tax_incl | 7.42  |
++    And order "bo_order1" should have following tax details:
++      | unit_tax_base | total_tax_base | unit_amount | total_amount |
++      | 15.00         | 30.0           | 0.9         | 1.8          |
++    And the first invoice from order "bo_order1" should have following product tax details:
++      | total_price_tax_excl | rate | total_amount |
++      | 30.0                 | 6.00 | 1.8          |
++    And the first invoice from order "bo_order1" should have following shipping tax details:
++      | total_tax_excl | rate | total_amount |
++      | 7              | 6.00 | 0.42         |

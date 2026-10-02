@@ -1,0 +1,136 @@
+diff --git a/classes/Category.php b/classes/Category.php
+index 5cfc4a4b995e0..ef43cc0eac837 100644
+--- a/classes/Category.php
++++ b/classes/Category.php
+@@ -24,8 +24,6 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
+-use PrestaShop\PrestaShop\Adapter\SymfonyContainer;
+-
+ /**
+  * Class CategoryCore.
+  */
+@@ -1730,9 +1728,7 @@ public function updateGroup($list)
+         }
+         $this->cleanGroups();
+         if (empty($list)) {
+-            $sfContainer = SymfonyContainer::getInstance();
+-            $groupDataProvider = $sfContainer->get('prestashop.adapter.group.group_data_provider');
+-            $list = $groupDataProvider->getAllGroupIds();
++            $list = Group::getAllGroupIds();
+         }
+         $this->addGroups($list);
+ 
+diff --git a/classes/Context.php b/classes/Context.php
+index 9d35d56616adf..f913004bba967 100644
+--- a/classes/Context.php
++++ b/classes/Context.php
+@@ -35,6 +35,7 @@
+ use PrestaShopBundle\Translation\TranslatorLanguageLoader;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
++use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
+ use Symfony\Component\Filesystem\Filesystem;
+ use Symfony\Component\Finder\Finder;
+ use Symfony\Component\HttpFoundation\Session\SessionInterface;
+@@ -456,17 +457,23 @@ public function getTranslatorFromLocale($locale)
+         if ($this instanceof Context) {
+             try {
+                 $containerFinder = new ContainerFinder($this);
+-                $containerFinder->getContainer()->get('prestashop.translation.translator_language_loader')
+-                    ->setIsAdminContext($adminContext)
+-                    ->loadLanguage($translator, $locale, $withDB, $theme);
+-            } catch (ContainerNotFoundException $exception) {
++                $container = $containerFinder->getContainer();
++                $translatorLoader = $container->get('prestashop.translation.translator_language_loader');
++            } catch (ContainerNotFoundException | ServiceNotFoundException $exception) {
++                $translatorLoader = null;
++            }
++
++            if (null === $translatorLoader) {
+                 // If a container is still not found, instantiate manually the translator loader
+                 // This will happen in the Front as we have legacy controllers, the Sf container won't be available.
+                 // As we get the translator in the controller's constructor and the container is built in the init method, we won't find it here
+-                (new TranslatorLanguageLoader(new ModuleRepository()))
+-                    ->setIsAdminContext($adminContext)
+-                    ->loadLanguage($translator, $locale, $withDB, $theme);
++                $translatorLoader = (new TranslatorLanguageLoader(new ModuleRepository()));
+             }
++
++            $translatorLoader
++                ->setIsAdminContext($adminContext)
++                ->loadLanguage($translator, $locale, $withDB, $theme)
++            ;
+         }
+ 
+         return $translator;
+diff --git a/classes/Group.php b/classes/Group.php
+index 51e4b10654c31..c0b43be953c17 100644
+--- a/classes/Group.php
++++ b/classes/Group.php
+@@ -407,6 +407,19 @@ public static function getCurrent()
+         return self::$groups[$id_group];
+     }
+ 
++    public static function getAllGroupIds(): array
++    {
++        $query = new DbQuery();
++        $query
++            ->select('g.`id_group`')
++            ->from('group', 'g')
++            ->orderby('g.`id_group` ASC')
++        ;
++        $result = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($query);
++
++        return array_column($result, 'id_group');
++    }
++
+     /**
+      * Light back office search for Group.
+      *
+diff --git a/src/Adapter/Group/GroupDataProvider.php b/src/Adapter/Group/GroupDataProvider.php
+index 6771e5cce306d..a6f0735e3dfd0 100644
+--- a/src/Adapter/Group/GroupDataProvider.php
++++ b/src/Adapter/Group/GroupDataProvider.php
+@@ -27,7 +27,6 @@
+ namespace PrestaShop\PrestaShop\Adapter\Group;
+ 
+ use Db;
+-use DbQuery;
+ use Group;
+ 
+ /**
+@@ -61,14 +60,6 @@ public static function getCurrent()
+ 
+     public function getAllGroupIds(): array
+     {
+-        $query = new DbQuery();
+-        $query
+-            ->select('g.`id_group`')
+-            ->from('group', 'g')
+-            ->orderby('g.`id_group` ASC')
+-        ;
+-        $result = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($query);
+-
+-        return array_column($result, 'id_group');
++        return Group::getAllGroupIds();
+     }
+ }
+diff --git a/webservice/dispatcher.php b/webservice/dispatcher.php
+index d0f037741c292..b2f61c4d0214e 100644
+--- a/webservice/dispatcher.php
++++ b/webservice/dispatcher.php
+@@ -30,12 +30,6 @@
+ 
+ require_once dirname(__FILE__) . '/../config/config.inc.php';
+ 
+-global $kernel;
+-if (null === $kernel) {
+-    $kernel = new AppKernel(_PS_ENV_, _PS_MODE_DEV_);
+-    $kernel->boot();
+-}
+-
+ // Cart is needed for some requests
+ Context::getContext()->cart = new Cart();
+ Context::getContext()->container = ContainerBuilder::getContainer('webservice', _PS_MODE_DEV_);

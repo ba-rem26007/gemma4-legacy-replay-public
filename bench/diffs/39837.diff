@@ -1,0 +1,84 @@
+diff --git a/app/config/admin/services.yml b/app/config/admin/services.yml
+index 8110164920d8e..11990420e5f67 100644
+--- a/app/config/admin/services.yml
++++ b/app/config/admin/services.yml
+@@ -58,7 +58,13 @@ services:
+   # Context listeners, these are event subscribers, so they define their priority themselves
+   PrestaShopBundle\EventListener\Admin\Context\EmployeeContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\LanguageContextSubscriber: ~
+-  PrestaShopBundle\EventListener\Admin\Context\ShopContextSubscriber: ~
++
++  PrestaShopBundle\EventListener\Admin\Context\ShopContextSubscriber:
++    autowire: true
++    autoconfigure: true
++    arguments:
++      $router: '@router'
++
+   PrestaShopBundle\EventListener\Admin\Context\CurrencyContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\CountryContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\LegacyControllerContextSubscriber: ~
+diff --git a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+index 7a2b8a91bef4a..d0bdc8b2dbe2e 100644
+--- a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
++++ b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+@@ -29,7 +29,7 @@
+ use Symfony\Component\HttpKernel\Event\RequestEvent;
+ use Symfony\Component\HttpKernel\KernelEvents;
+ use Symfony\Component\Routing\Exception\NoConfigurationException;
+-use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Routing\Matcher\RequestMatcherInterface;
+ use Symfony\Component\Security\Core\Event\AuthenticationSuccessEvent;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+@@ -53,7 +53,7 @@ public function __construct(
+         private readonly EmployeeContext $employeeContext,
+         private readonly ShopConfigurationInterface $configuration,
+         private readonly MultistoreFeature $multistoreFeature,
+-        private readonly RouterInterface $router,
++        private readonly RequestMatcherInterface $router,
+         private readonly Security $security,
+         private readonly LegacyContext $legacyContext,
+         private readonly TranslatorInterface $translator,
+@@ -351,8 +351,12 @@ private function getShopConstraintFromParameter(string $parameter): ShopConstrai
+     private function getShopConstraintFromRouteAttribute(Request $request): ?ShopConstraint
+     {
+         try {
+-            $routeInfo = $this->router->match($request->getPathInfo());
+-            $controller = $routeInfo['_controller'];
++            $controller = $request->attributes->get('_controller');
++            if (empty($controller)) {
++                // If the attribute is not present yet we handle the matching ourselves and get the controller via routing info
++                $routeInfo = $this->router->matchRequest($request);
++                $controller = $routeInfo['_controller'];
++            }
+             [$className, $methodName] = explode('::', $controller);
+ 
+             $reflectionClass = new ReflectionClass($className);
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+index 4f127ee660607..7e58bc6470b0c 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+@@ -21,7 +21,7 @@
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\Routing\Exception\NoConfigurationException;
+-use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Routing\Matcher\RequestMatcherInterface;
+ use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+ use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
+ use Symfony\Component\Security\Core\Event\AuthenticationSuccessEvent;
+@@ -524,11 +524,11 @@ public static function provideLoginShopContext(): iterable
+         ];
+     }
+ 
+-    private function mockRouter(): RouterInterface|MockObject
++    private function mockRouter(): RequestMatcherInterface|MockObject
+     {
+-        $router = $this->createMock(RouterInterface::class);
++        $router = $this->createMock(RequestMatcherInterface::class);
+         $router
+-            ->method('match')
++            ->method('matchRequest')
+             ->willThrowException(new NoConfigurationException())
+         ;
+ 

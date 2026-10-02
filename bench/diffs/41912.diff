@@ -1,0 +1,541 @@
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php
+index 0ae68a1c478c7..63c12b521bcbf 100644
+--- a/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculator.php
+@@ -38,7 +38,7 @@ public function compute(ShippingCostPriceInterface $context): void
+         $cost = $this->carrierDataProvider->getRangeCost(
+             $carrierData,
+             $context->getTotalWeight(),
+-            $context->getOrderTotal(),
++            $context->getShipmentTotal(),
+             $zoneId,
+             $context->getCurrencyId(),
+         );
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+index ca1143e9bb0eb..ab5818cfa6858 100644
+--- a/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+@@ -39,7 +39,7 @@ public function compute(ShippingCostPriceInterface $context): void
+                 $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()))
+             ));
+ 
+-            if ($context->getOrderTotal()->isGreaterOrEqualThan($convertedPrice)) {
++            if ($context->getShipmentTotal()->isGreaterOrEqualThan($convertedPrice)) {
+                 $context->setFreeShipping(true);
+ 
+                 return;
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php
+index b1026cf9f82e5..c26650bb2f40b 100644
+--- a/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/TaxCalculator.php
+@@ -35,7 +35,6 @@ public function compute(ShippingCostPriceInterface $context): void
+ 
+         $currency = $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()));
+         $precision = (int) $currency->precision;
+-        $context->setPrecision($precision);
+ 
+         if ($context->isFreeShipping()) {
+             $zero = new DecimalNumber('0');
+diff --git a/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php b/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php
+index fc7f387b17920..879ea3190dbbe 100644
+--- a/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php
++++ b/src/Adapter/Carrier/ShippingCost/Provider/CarrierDataProvider.php
+@@ -45,20 +45,20 @@ public function getCarrierShippingData(int $carrierId): ?CarrierShippingData
+     public function getRangeCost(
+         CarrierShippingData $carrierData,
+         DecimalNumber $totalWeight,
+-        DecimalNumber $orderTotal,
++        DecimalNumber $shipmentTotal,
+         int $zoneId,
+         int $currencyId,
+     ): ?DecimalNumber {
+         $carrier = $this->carrierRepository->get(new CarrierId($carrierData->getCarrierId()));
+ 
+         $weightFloat = (float) (string) $totalWeight;
+-        $orderTotalFloat = (float) (string) $orderTotal;
++        $shipmentTotalFloat = (float) (string) $shipmentTotal;
+         $isWeightMethod = $carrierData->getShippingMethod() === Carrier::SHIPPING_METHOD_WEIGHT;
+ 
+         if ($carrierData->getRangeBehavior()) {
+             $isInRange = $isWeightMethod
+                 ? Carrier::checkDeliveryPriceByWeight($carrier->id, $weightFloat, $zoneId)
+-                : Carrier::checkDeliveryPriceByPrice($carrier->id, $orderTotalFloat, $zoneId, $currencyId);
++                : Carrier::checkDeliveryPriceByPrice($carrier->id, $shipmentTotalFloat, $zoneId, $currencyId);
+ 
+             if ($isInRange === false) {
+                 return null;
+@@ -67,7 +67,7 @@ public function getRangeCost(
+ 
+         $cost = $isWeightMethod
+             ? $carrier->getDeliveryPriceByWeight($weightFloat, $zoneId)
+-            : $carrier->getDeliveryPriceByPrice($orderTotalFloat, $zoneId, $currencyId);
++            : $carrier->getDeliveryPriceByPrice($shipmentTotalFloat, $zoneId, $currencyId);
+ 
+         if ($cost === false) {
+             return null;
+diff --git a/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
+index 1c622ecb0f273..6f87e315dcca0 100644
+--- a/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/CreateShipmentHandler.php
+@@ -74,7 +74,7 @@ public function handle(CreateShipment $command): int
+                     countryZoneId: 0,
+                     currencyId: (int) $order->id_currency,
+                     customerId: (int) $order->id_customer,
+-                    orderTotal: (float) $order->total_products,
++                    shipmentTotal: (float) $order->total_products,
+                 );
+ 
+                 $context = ShippingCostPrice::createFromRequest($request);
+diff --git a/src/Adapter/Shipment/ShipmentShippingCostUpdater.php b/src/Adapter/Shipment/ShipmentShippingCostUpdater.php
+index 2531ae0f0ba89..4903f0f4dc609 100644
+--- a/src/Adapter/Shipment/ShipmentShippingCostUpdater.php
++++ b/src/Adapter/Shipment/ShipmentShippingCostUpdater.php
+@@ -87,7 +87,7 @@ private function recalculateShipment(Shipment $shipment, Order $order, array $pr
+             countryZoneId: 0,
+             currencyId: (int) $order->id_currency,
+             customerId: (int) $order->id_customer,
+-            orderTotal: $shipmentTotalProducts,
++            shipmentTotal: $shipmentTotalProducts,
+         );
+ 
+         $context = ShippingCostPrice::createFromRequest($request);
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Calculator/TotalShipmentPriceCalculator.php b/src/Core/Domain/Carrier/ShippingCost/Calculator/TotalShipmentPriceCalculator.php
+new file mode 100644
+index 0000000000000..10278e7b69e69
+--- /dev/null
++++ b/src/Core/Domain/Carrier/ShippingCost/Calculator/TotalShipmentPriceCalculator.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
++class TotalShipmentPriceCalculator implements ShippingCostCalculatorInterface
++{
++    public function compute(ShippingCostPriceInterface $context): void
++    {
++        if (!$context->isAvailable() || $context->isFreeShipping()) {
++            return;
++        }
++
++        $shipmentTotal = new DecimalNumber('0');
++        foreach ($context->getPhysicalProducts() as $product) {
++            $rawPrice = $product['price_wt'] ?? 0;
++            $rawQuantity = $product['quantity'] ?? 0;
++            $price = new DecimalNumber(is_numeric($rawPrice) ? (string) $rawPrice : '0');
++            $quantity = new DecimalNumber(is_numeric($rawQuantity) ? (string) $rawQuantity : '0');
++            $shipmentTotal = $shipmentTotal->plus($price->times($quantity));
++        }
++
++        $context->setShipmentTotal($shipmentTotal);
++    }
++}
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php
+index 4ecae163909c9..468a96b651c94 100644
+--- a/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/CarrierDataProviderInterface.php
+@@ -17,7 +17,7 @@ public function getCarrierShippingData(int $carrierId): ?CarrierShippingData;
+     public function getRangeCost(
+         CarrierShippingData $carrierData,
+         DecimalNumber $totalWeight,
+-        DecimalNumber $orderTotal,
++        DecimalNumber $shipmentTotal,
+         int $zoneId,
+         int $currencyId,
+     ): ?DecimalNumber;
+diff --git a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php
+index ff4ecff190af1..1b1b4264b204b 100644
+--- a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php
++++ b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPrice.php
+@@ -19,6 +19,7 @@
+ final class ShippingCostPrice implements ShippingCostPriceInterface
+ {
+     private DecimalNumber $totalWeight;
++    private DecimalNumber $shipmentTotal;
+     private ?int $resolvedZoneId = null;
+     private ?CarrierShippingData $carrierData = null;
+     private bool $isFreeShipping = false;
+@@ -26,7 +27,6 @@ final class ShippingCostPrice implements ShippingCostPriceInterface
+     private DecimalNumber $cost;
+     private ?DecimalNumber $taxExcluded = null;
+     private ?DecimalNumber $taxIncluded = null;
+-    private ?int $precision = null;
+ 
+     /**
+      * @param array<array{
+@@ -45,10 +45,10 @@ private function __construct(
+         private readonly int $carrierId,
+         private readonly ?int $addressId,
+         private readonly int $currencyId,
+-        private readonly DecimalNumber $orderTotal,
+         private readonly int $countryZoneId,
+     ) {
+         $this->totalWeight = new DecimalNumber('0');
++        $this->shipmentTotal = new DecimalNumber('0');
+         $this->cost = new DecimalNumber('0');
+     }
+ 
+@@ -63,7 +63,6 @@ public static function createFromRequest(ShippingCalculationRequest $request): s
+             $request->getCarrierId(),
+             $request->getAddressId(),
+             $request->getCurrencyId(),
+-            new DecimalNumber((string) $request->getOrderTotal()),
+             $request->getCountryZoneId(),
+         );
+ 
+@@ -71,6 +70,8 @@ public static function createFromRequest(ShippingCalculationRequest $request): s
+             $ctx->setResolvedZoneId($request->getZoneId());
+         }
+ 
++        $ctx->setShipmentTotal(new DecimalNumber((string) $request->getShipmentTotal()));
++
+         return $ctx;
+     }
+ 
+@@ -106,9 +107,14 @@ public function getCurrencyId(): int
+         return $this->currencyId;
+     }
+ 
+-    public function getOrderTotal(): DecimalNumber
++    public function getShipmentTotal(): DecimalNumber
+     {
+-        return $this->orderTotal;
++        return $this->shipmentTotal;
++    }
++
++    public function setShipmentTotal(DecimalNumber $shipmentTotal): void
++    {
++        $this->shipmentTotal = $shipmentTotal;
+     }
+ 
+     public function getCountryZoneId(): int
+@@ -195,14 +201,4 @@ public function setTaxIncluded(DecimalNumber $taxIncluded): void
+     {
+         $this->taxIncluded = $taxIncluded;
+     }
+-
+-    public function getPrecision(): ?int
+-    {
+-        return $this->precision;
+-    }
+-
+-    public function setPrecision(int $precision): void
+-    {
+-        $this->precision = $precision;
+-    }
+ }
+diff --git a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php
+index 9a40a7e17cf5a..6f9250f4f324c 100644
+--- a/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php
++++ b/src/Core/Domain/Carrier/ShippingCost/ShippingCostPriceInterface.php
+@@ -24,7 +24,9 @@ public function getAddressId(): ?int;
+ 
+     public function getCurrencyId(): int;
+ 
+-    public function getOrderTotal(): DecimalNumber;
++    public function getShipmentTotal(): DecimalNumber;
++
++    public function setShipmentTotal(DecimalNumber $shipmentTotal): void;
+ 
+     public function getCountryZoneId(): int;
+ 
+@@ -59,8 +61,4 @@ public function setTaxExcluded(DecimalNumber $taxExcluded): void;
+     public function getTaxIncluded(): ?DecimalNumber;
+ 
+     public function setTaxIncluded(DecimalNumber $taxIncluded): void;
+-
+-    public function getPrecision(): ?int;
+-
+-    public function setPrecision(int $precision): void;
+ }
+diff --git a/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php b/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php
+index fcdaa1632fbaf..b6a12f7a3c967 100644
+--- a/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php
++++ b/src/Core/Domain/Carrier/ValueObject/ShippingCalculationRequest.php
+@@ -29,7 +29,7 @@ final class ShippingCalculationRequest
+      * @param int $countryZoneId Country's default zone ID (fallback)
+      * @param int $currencyId Currency ID
+      * @param int|null $customerId Customer ID
+-     * @param float $orderTotal Total order amount
++     * @param float $shipmentTotal Total shipment amount
+      *
+      * @throws InvalidArgumentException If products array is invalid or missing required fields
+      */
+@@ -41,7 +41,7 @@ public function __construct(
+         private readonly int $countryZoneId,
+         private readonly int $currencyId,
+         private readonly ?int $customerId,
+-        private readonly float $orderTotal,
++        private readonly float $shipmentTotal,
+     ) {
+         foreach ($products as $product) {
+             $this->validateProduct($product);
+@@ -114,8 +114,8 @@ public function getCustomerId(): ?int
+         return $this->customerId;
+     }
+ 
+-    public function getOrderTotal(): float
++    public function getShipmentTotal(): float
+     {
+-        return $this->orderTotal;
++        return $this->shipmentTotal;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php b/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
+index e2fc6f15d5605..01ba312718ff7 100644
+--- a/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
+@@ -43,8 +43,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+ 
+         if ($this->featureFlagChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
+             $shippingWeightTraduction = $this->trans("Based on the shipment's total weight", 'Admin.Shipping.Feature');
++            $shippingTotalTraduction = $this->trans("Based on the shipment's total price", 'Admin.Shipping.Feature');
+         } else {
+             $shippingWeightTraduction = $this->trans("Based on the order's total weight", 'Admin.Shipping.Feature');
++            $shippingTotalTraduction = $this->trans("Based on the order's total price", 'Admin.Shipping.Feature');
+         }
+ 
+         $builder
+@@ -98,7 +100,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ->add('shipping_method', ChoiceType::class, [
+                 'label' => $this->trans('Shipping costs', 'Admin.Shipping.Feature'),
+                 'choices' => [
+-                    $this->trans("Based on the order's total price", 'Admin.Shipping.Feature') => ShippingMethod::BY_PRICE,
++                    $shippingTotalTraduction => ShippingMethod::BY_PRICE,
+                     $shippingWeightTraduction => ShippingMethod::BY_WEIGHT,
+                 ],
+                 'default_empty_data' => ShippingMethod::BY_PRICE,
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml b/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml
+index d8d5be6e3d238..d958c5aae5c61 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/shipping_cost.yml
+@@ -50,6 +50,10 @@ services:
+     tags:
+       - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 700 }
+ 
++  PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\TotalShipmentPriceCalculator:
++    tags:
++      - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 700 }
++
+   PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\AdditionalProductCostCalculator:
+     tags:
+       - { name: 'prestashop.carrier.shipping_cost_calculator', priority: 400 }
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php
+index c08900371ae78..c61712fa69088 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/BaseRangeCostCalculatorTest.php
+@@ -115,7 +115,7 @@ private function createContextWithData(): ShippingCostPriceInterface
+             2, // countryZoneId
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         $context = ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php
+index b936e20d46a39..74988ea4de703 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CarrierDataCalculatorTest.php
+@@ -74,7 +74,7 @@ private function createContext(int $carrierId): ShippingCostPriceInterface
+             1, // countryZoneId
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php
+index 23f81fd305905..20ba0e0dcba9c 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/CurrencyConversionCalculatorTest.php
+@@ -84,7 +84,7 @@ private function createContext(int $currencyId): ShippingCostPriceInterface
+             1, // countryZoneId
+             $currencyId,
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+index ba385a90030b0..bc551fa951939 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+@@ -94,7 +94,7 @@ public function testItSetsFreeShippingIfWeightThresholdIsMet(): void
+         $this->assertTrue($context->isFreeShipping());
+     }
+ 
+-    private function createContext(int $currencyId, DecimalNumber $orderTotal): ShippingCostPriceInterface
++    private function createContext(int $currencyId, DecimalNumber $shipmentTotal): ShippingCostPriceInterface
+     {
+         $request = new ShippingCalculationRequest(
+             [], // products
+@@ -104,7 +104,7 @@ private function createContext(int $currencyId, DecimalNumber $orderTotal): Ship
+             1, // countryZoneId
+             $currencyId,
+             null, // customerId
+-            (float) $orderTotal->__toString()
++            (float) $shipmentTotal->__toString()
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php
+index f4c2f775cbe86..2f4afddf97381 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/HandlingCostCalculatorTest.php
+@@ -84,7 +84,7 @@ private function createContext(): ShippingCostPriceInterface
+             1, // countryZoneId
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php
+index 93ea0964890da..dba7e7b3e3c7a 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/TaxCalculatorTest.php
+@@ -114,7 +114,7 @@ private function createContext(int $currencyId): ShippingCostPriceInterface
+             1, // countryZoneId
+             $currencyId,
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php
+index 05bcd04e4a4c2..fcecd22f32163 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/ZoneResolutionCalculatorTest.php
+@@ -99,7 +99,7 @@ private function createContext(?int $addressId): ShippingCostPriceInterface
+             2, // countryZoneId (default)
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php
+index bdaf7ff43c93f..03b4b9fcb66e2 100644
+--- a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php
++++ b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/AdditionalProductCostCalculatorTest.php
+@@ -73,7 +73,7 @@ private function createContext(array $products): ShippingCostPriceInterface
+             1, // countryZoneId
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);
+diff --git a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/PriceCalculatorTest.php b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/PriceCalculatorTest.php
+new file mode 100644
+index 0000000000000..3bc871f406693
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/PriceCalculatorTest.php
+@@ -0,0 +1,79 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Carrier\ShippingCost\Calculator;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\TotalShipmentPriceCalculator;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++
++class TotalShipmentPriceCalculatorTest extends TestCase
++{
++    private TotalShipmentPriceCalculator $calculator;
++
++    protected function setUp(): void
++    {
++        $this->calculator = new TotalShipmentPriceCalculator();
++    }
++
++    public function testItReturnsEarlyIfAlreadyUnavailable(): void
++    {
++        $context = $this->createContext([]);
++        $context->setAvailable(false);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getShipmentTotal()->equals(new DecimalNumber('10.0')));
++    }
++
++    public function testItReturnsEarlyIfFreeShipping(): void
++    {
++        $context = $this->createContext([
++            ['id_product' => 1, 'price_wt' => 10.0, 'quantity' => 2, 'is_virtual' => false],
++        ]);
++        $context->setFreeShipping(true);
++
++        $this->calculator->compute($context);
++
++        $this->assertTrue($context->getShipmentTotal()->equals(new DecimalNumber('10.0')));
++    }
++
++    public function testItComputesTotalPriceCorrectly(): void
++    {
++        $products = [
++            ['id_product' => 1, 'price_wt' => 1.5, 'quantity' => 2, 'is_virtual' => false],
++            ['id_product' => 2, 'price_wt' => 0.5, 'quantity' => 3, 'is_virtual' => false],
++            ['id_product' => 3, 'price_wt' => 10.0, 'quantity' => 1, 'is_virtual' => true], // Should be filtered out by ShippingCostPrice
++        ];
++
++        $context = $this->createContext($products);
++        $this->calculator->compute($context);
++
++        // (1.5 * 2) + (0.5 * 3) = 3.0 + 1.5 = 4.5
++        $this->assertTrue($context->getShipmentTotal()->equals(new DecimalNumber('4.5')));
++    }
++
++    private function createContext(array $products): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            $products,
++            1, // carrierId
++            1, // zoneId
++            null, // addressId
++            1, // countryZoneId
++            1, // currencyId
++            null, // customerId
++            10.0 // shipmentTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}
+diff --git a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php
+index a02c4911aea81..a9f8d9dffc610 100644
+--- a/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php
++++ b/tests/Unit/Core/Domain/Carrier/ShippingCost/Calculator/WeightCalculatorTest.php
+@@ -71,7 +71,7 @@ private function createContext(array $products): ShippingCostPriceInterface
+             1, // countryZoneId
+             1, // currencyId
+             null, // customerId
+-            10.0 // orderTotal
++            10.0 // shipmentTotal
+         );
+ 
+         return ShippingCostPrice::createFromRequest($request);

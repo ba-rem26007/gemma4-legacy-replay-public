@@ -1,0 +1,374 @@
+diff --git a/src/Adapter/Country/CountryOptionsConfiguration.php b/src/Adapter/Country/CountryOptionsConfiguration.php
+new file mode 100644
+index 0000000000000..bff1145445113
+--- /dev/null
++++ b/src/Adapter/Country/CountryOptionsConfiguration.php
+@@ -0,0 +1,56 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Country;
++
++use PrestaShop\PrestaShop\Core\Configuration\AbstractMultistoreConfiguration;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++/**
++ * Loads and saves the "Options" block configuration of the Countries page
++ * (Improve > International > Locations > Countries).
++ */
++class CountryOptionsConfiguration extends AbstractMultistoreConfiguration
++{
++    private const CONFIGURATION_FIELDS = ['restrict_country_to_delivery'];
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getConfiguration()
++    {
++        $shopConstraint = $this->getShopConstraint();
++
++        return [
++            'restrict_country_to_delivery' => (bool) $this->configuration->get('PS_RESTRICT_DELIVERED_COUNTRIES', false, $shopConstraint),
++        ];
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function updateConfiguration(array $configuration)
++    {
++        if ($this->validateConfiguration($configuration)) {
++            $shopConstraint = $this->getShopConstraint();
++            $this->updateConfigurationValue('PS_RESTRICT_DELIVERED_COUNTRIES', 'restrict_country_to_delivery', $configuration, $shopConstraint);
++        }
++
++        return [];
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    protected function buildResolver(): OptionsResolver
++    {
++        return (new OptionsResolver())
++            ->setDefined(self::CONFIGURATION_FIELDS)
++            ->setAllowedTypes('restrict_country_to_delivery', 'bool');
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+index 423cba1318484..6965625ef46e1 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+@@ -17,6 +17,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\DeleteCountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Query\GetCountryForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Country\QueryResult\CountryForEditing;
++use PrestaShop\PrestaShop\Core\Form\FormHandlerInterface as ConfigurationFormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
+@@ -47,18 +48,50 @@ public function indexAction(
+         Request $request,
+         CountryFilters $filters,
+         #[Autowire(service: 'prestashop.core.grid.factory.country')]
+-        GridFactoryInterface $countryGridFactory
++        GridFactoryInterface $countryGridFactory,
++        #[Autowire(service: 'prestashop.admin.country.options.form_handler')]
++        ConfigurationFormHandlerInterface $countryOptionsFormHandler
+     ): Response {
+         $countryGrid = $countryGridFactory->getGrid($filters);
++        $countryOptionsForm = $countryOptionsFormHandler->getForm();
+ 
+         return $this->render('@PrestaShop/Admin/Improve/International/Country/index.html.twig', [
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+             'countryGrid' => $this->presentGrid($countryGrid),
++            'countryOptionsForm' => $countryOptionsForm->createView(),
+             'enableSidebar' => true,
+             'layoutHeaderToolbarBtn' => $this->getCountryToolbarButtons(),
+         ]);
+     }
+ 
++    /**
++     * Persists the "Country options" block configuration.
++     */
++    #[DemoRestricted(redirectRoute: 'admin_countries_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller')) && is_granted('create', request.get('_legacy_controller')) && is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_countries_index', message: 'You do not have permission to edit this.')]
++    public function saveOptionsAction(
++        Request $request,
++        #[Autowire(service: 'prestashop.admin.country.options.form_handler')]
++        ConfigurationFormHandlerInterface $countryOptionsFormHandler
++    ): Response {
++        $form = $countryOptionsFormHandler->getForm();
++        $form->handleRequest($request);
++
++        if ($form->isSubmitted() && $form->isValid()) {
++            $saveErrors = $countryOptionsFormHandler->save($form->getData());
++
++            if (0 === count($saveErrors)) {
++                $this->addFlash('success', $this->trans('Update successful', [], 'Admin.Notifications.Success'));
++
++                return $this->redirectToRoute('admin_countries_index');
++            }
++
++            $this->addFlashErrors($saveErrors);
++        }
++
++        return $this->redirectToRoute('admin_countries_index');
++    }
++
+     /**
+      * Show "Add new" country form and handles its submit.
+      *
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsFormDataProvider.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsFormDataProvider.php
+new file mode 100644
+index 0000000000000..c88b8103f7f41
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsFormDataProvider.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Locations;
++
++use PrestaShop\PrestaShop\Core\Configuration\DataConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Form\FormDataProviderInterface;
++
++/**
++ * Bridges the "Country options" form data with the underlying configuration handler.
++ */
++class CountryOptionsFormDataProvider implements FormDataProviderInterface
++{
++    public function __construct(private readonly DataConfigurationInterface $dataConfiguration)
++    {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getData()
++    {
++        return $this->dataConfiguration->getConfiguration();
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function setData(array $data)
++    {
++        return $this->dataConfiguration->updateConfiguration($data);
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsType.php
+new file mode 100644
+index 0000000000000..5bc08dae0dfab
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryOptionsType.php
+@@ -0,0 +1,66 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Locations;
++
++use PrestaShopBundle\Form\Admin\Type\MultistoreConfigurationType;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use PrestaShopBundle\Form\Extension\MultistoreConfigurationTypeExtension;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++/**
++ * Generates the "Country options" block of the
++ * "Improve > International > Locations > Countries" page.
++ */
++class CountryOptionsType extends TranslatorAwareType
++{
++    /**
++     * {@inheritdoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder->add('restrict_country_to_delivery', SwitchType::class, [
++            'required' => false,
++            'multistore_configuration_key' => 'PS_RESTRICT_DELIVERED_COUNTRIES',
++            'label' => $this->trans(
++                'Restrict country selections in front office to those covered by active carriers',
++                'Admin.International.Help'
++            ),
++        ]);
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        $resolver->setDefaults([
++            'translation_domain' => 'Admin.International.Feature',
++        ]);
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getBlockPrefix()
++    {
++        return 'country_options_block';
++    }
++
++    /**
++     * {@inheritdoc}
++     *
++     * @see MultistoreConfigurationTypeExtension
++     */
++    public function getParent(): string
++    {
++        return MultistoreConfigurationType::class;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
+index 39b3eb419b07c..8df19d7c498e7 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/country.yml
+@@ -53,3 +53,12 @@ admin_countries_delete:
+       id_country: countryId
+   requirements:
+     countryId: \d+
++
++admin_countries_save_options:
++  path: /options
++  methods: [ POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Improve\International\CountryController::saveOptionsAction'
++    _legacy_controller: AdminCountries
++    _legacy_link: AdminCountries:submitOptionscountry
++    _legacy_feature_flag: country
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+index a3344d7b25d3a..b9919d3f4d6e7 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+@@ -215,6 +215,13 @@ services:
+       - '@prestashop.adapter.shop.context'
+       - '@prestashop.adapter.multistore_feature'
+ 
++  prestashop.adapter.country.country_options_configuration:
++    class: 'PrestaShop\PrestaShop\Adapter\Country\CountryOptionsConfiguration'
++    arguments:
++      - '@prestashop.adapter.legacy.configuration'
++      - '@prestashop.adapter.shop.context'
++      - '@prestashop.adapter.multistore_feature'
++
+   prestashop.core.email.email_configurator:
+     class: 'PrestaShop\PrestaShop\Core\Email\EmailDataConfigurator'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
+index 2e1246603a1e3..00d0f9befeef6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
+@@ -12,6 +12,11 @@ services:
+     arguments:
+       - '@prestashop.adapter.shipping_preferences.carrier_options_configuration'
+ 
++  prestashop.admin.country.options.data_provider:
++    class: 'PrestaShopBundle\Form\Admin\Improve\International\Locations\CountryOptionsFormDataProvider'
++    arguments:
++      - '@prestashop.adapter.country.country_options_configuration'
++
+   prestashop.admin.order.invoices.by_date.data_provider:
+     class: 'PrestaShopBundle\Form\Admin\Sell\Order\Invoices\InvoicesByDateDataProvider'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+index 7df76bca453f4..908c6fec31508 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+@@ -121,6 +121,16 @@ services:
+       - 'ShippingPreferencesPageCarrierOptions'
+       - 'carrier-options'
+ 
++  prestashop.admin.country.options.form_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\Handler'
++    arguments:
++      - '@form.factory'
++      - '@prestashop.core.hook.dispatcher'
++      - '@prestashop.admin.country.options.data_provider'
++      - 'PrestaShopBundle\Form\Admin\Improve\International\Locations\CountryOptionsType'
++      - 'CountriesPageOptions'
++      - 'country-options'
++
+   prestashop.admin.order.invoices.by_date.form_handler:
+     class: 'PrestaShopBundle\Form\Admin\Sell\Order\Invoices\InvoiceByDateFormHandler'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 6c54170a29d74..db408d4ffe811 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -571,6 +571,8 @@ services:
+     arguments:
+       $zoneChoiceProvider: '@prestashop.core.form.choice_provider.zone_by_id'
+ 
++  PrestaShopBundle\Form\Admin\Improve\International\Locations\CountryOptionsType:
++
+   PrestaShopBundle\Form\Admin\Sell\CustomerService\MerchandiseReturn\MerchandiseReturnOptionsType:
+ 
+   PrestaShopBundle\Form\Admin\Type\CarrierChoiceType:
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/options.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/options.html.twig
+new file mode 100644
+index 0000000000000..6d4b8c374bc53
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/Blocks/options.html.twig
+@@ -0,0 +1,26 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% trans_default_domain 'Admin.International.Feature' %}
++{% form_theme countryOptionsForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
++
++{% block country_options %}
++  <div id="country-options" class="card">
++    <h3 class="card-header">
++      <i class="material-icons">settings</i>
++      {{ 'Country options'|trans }}
++    </h3>
++    <div class="card-body">
++      <div class="form-wrapper">
++        {{ form_widget(countryOptionsForm) }}
++      </div>
++    </div>
++    <div class="card-footer">
++      <div class="d-flex justify-content-end">
++        <button class="btn btn-primary" id="save-country-options-button">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++      </div>
++    </div>
++  </div>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
+index d7cdc6b0259d4..c87261e3cf4dd 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/index.html.twig
+@@ -6,6 +6,10 @@
+ 
+ {% block content %}
+   {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {grid: countryGrid}) }}
++
++  {{ form_start(countryOptionsForm, {attr: {class: 'form', id: 'configuration_country_options_form'}, action: path('admin_countries_save_options')}) }}
++    {{ include('@PrestaShop/Admin/Improve/International/Country/Blocks/options.html.twig') }}
++  {{ form_end(countryOptionsForm) }}
+ {% endblock %}
+ 
+ {% block javascripts %}

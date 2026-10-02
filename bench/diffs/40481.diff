@@ -1,0 +1,150 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/api-client/api-client-map.ts b/admin-dev/themes/new-theme/js/pages/api-client/api-client-map.ts
+index f8a7d90efa4a0..00055b3ef0e47 100644
+--- a/admin-dev/themes/new-theme/js/pages/api-client/api-client-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/api-client/api-client-map.ts
+@@ -28,4 +28,8 @@ export default {
+   generateSecretModalId: 'generate-secret-modal',
+   copySecret: '.copy-secret-to-clipboard',
+   copySecretIcon: '.copy-secret-to-clipboard i',
++  clientIdSource: '.js-client-id-source',
++  clientIdDestination: '.js-client-id-destination',
++  toggleAllScopes: '.js-toggle-all-scopes',
++  scopesSwitches: '[id^="api_client_scopes_"] .ps-switch',
+ };
+diff --git a/admin-dev/themes/new-theme/js/pages/api-client/form/index.ts b/admin-dev/themes/new-theme/js/pages/api-client/form/index.ts
+index ff915ac5d0028..54c211b9f330e 100644
+--- a/admin-dev/themes/new-theme/js/pages/api-client/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/api-client/form/index.ts
+@@ -25,10 +25,34 @@
+ 
+ import ApiClientMap from '@pages/api-client/api-client-map';
+ import ConfirmModal from '@components/modal/confirm-modal';
++import textToLinkRewriteCopier from '@components/text-to-link-rewrite-copier';
+ 
+ const {$} = window;
+ 
+ $(() => {
++  // Auto-generate client_id from client_name (only for new clients)
++  textToLinkRewriteCopier({
++    sourceElementSelector: ApiClientMap.clientIdSource,
++    destinationElementSelector: ApiClientMap.clientIdDestination,
++  });
++
++  // Toggle all scopes enable/disable
++  document.querySelectorAll<HTMLButtonElement>(ApiClientMap.toggleAllScopes).forEach((button) => {
++    button.addEventListener('click', () => {
++      const {action} = button.dataset;
++      const targetValue = action === 'enable' ? '1' : '0';
++      const switches = document.querySelectorAll<HTMLElement>(ApiClientMap.scopesSwitches);
++
++      switches.forEach((switchElement) => {
++        const radioToSelect = switchElement.querySelector<HTMLInputElement>(`input[type="radio"][value="${targetValue}"]`);
++
++        if (radioToSelect && !radioToSelect.checked) {
++          radioToSelect.click();
++        }
++      });
++    });
++  });
++
+   // Display a confirmation modal when regeneration link is clicked before submitting the regeneration
+   document.querySelector<HTMLLinkElement>(ApiClientMap.generateSecretLink)?.addEventListener('click', (event) => {
+     event.preventDefault();
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AdminAPIController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AdminAPIController.php
+index d8d65f387c8b3..d242116a0a08c 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AdminAPIController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AdminAPIController.php
+@@ -172,6 +172,7 @@ public function editAction(
+         return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/edit.html.twig', [
+             'layoutTitle' => $this->trans('Editing API Client "%name%"', ['%name%' => $formData['client_name']], 'Admin.Navigation.Menu'),
+             'apiClientForm' => $apiClientForm->createView(),
++            'apiClientId' => $apiClientId,
+         ]);
+     }
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AdminAPI/ApiClientType.php b/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AdminAPI/ApiClientType.php
+index 99961c393688a..38cea66b35af5 100644
+--- a/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AdminAPI/ApiClientType.php
++++ b/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AdminAPI/ApiClientType.php
+@@ -52,6 +52,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         $builder
+             ->add('client_name', TextType::class, [
+                 'label' => $this->trans('Client Name', 'Admin.Advparameters.Feature'),
++                'help' => $this->trans('A friendly name to identify this API client.', 'Admin.Advparameters.Help'),
+                 'required' => !$isExternalApiClient,
+                 'constraints' => [
+                     new NotBlank(),
+@@ -67,9 +68,13 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ]),
+                 ],
+                 'disabled' => $isExternalApiClient,
++                'attr' => [
++                    'class' => 'js-client-id-source',
++                ],
+             ])
+             ->add('client_id', TextType::class, [
+                 'label' => $this->trans('Client ID', 'Admin.Advparameters.Feature'),
++                'help' => $this->trans('The unique identifier for this client, used for API authentication. Only lowercase letters, numbers and hyphens are allowed.', 'Admin.Advparameters.Help'),
+                 'required' => !$isExternalApiClient,
+                 'constraints' => [
+                     new NotBlank(),
+@@ -85,9 +90,13 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ]),
+                 ],
+                 'disabled' => $isExternalApiClient,
++                'attr' => [
++                    'class' => 'js-client-id-destination',
++                ],
+             ])
+             ->add('description', TextareaType::class, [
+                 'label' => $this->trans('Description', 'Admin.Global'),
++                'help' => $this->trans('Optional description to help identify the purpose of this API client.', 'Admin.Advparameters.Help'),
+                 'required' => false,
+                 'empty_data' => '',
+                 'constraints' => [
+@@ -109,6 +118,8 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             $builder
+                 ->add('lifetime', IntegerType::class, [
+                     'label' => $this->trans('Lifetime', 'Admin.Global'),
++                    'help' => $this->trans('The duration for which an access token remains valid.', 'Admin.Advparameters.Help'),
++                    'unit' => $this->trans('seconds', 'Admin.Advparameters.Feature'),
+                     'required' => false,
+                     'constraints' => [
+                         new NotBlank(),
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form.html.twig
+index d9be15ffb45d6..f19d735be9d1e 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form.html.twig
+@@ -49,7 +49,7 @@
+ 
+ {% block content %}
+   {% block api_client_form_block %}
+-    {{ form_start(apiClientForm) }}
++    {{ form_start(apiClientForm, {attr: {'data-id': apiClientId|default(0)}}) }}
+ 
+     <div class="card">
+       <h3 class="card-header">
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form_theme.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form_theme.html.twig
+index 813eefb74c462..20b6ab595744e 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form_theme.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AdminAPI/ApiClient/form_theme.html.twig
+@@ -26,6 +26,19 @@
+ {% use '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
+ 
+ {% block accordion_widget %}
++  {% if empty_scopes is not defined or empty_scopes == false %}
++    <div class="scopes-toggle-all-container mb-2">
++      <button type="button" class="btn btn-sm btn-primary mr-2 js-toggle-all-scopes" data-action="enable">
++        <i class="material-icons">done_all</i>
++        {{ 'Enable all'|trans({}, 'Admin.Advparameters.Feature') }}
++      </button>
++      <button type="button" class="btn btn-sm btn-outline-secondary js-toggle-all-scopes" data-action="disable">
++        <i class="material-icons">remove_done</i>
++        {{ 'Disable all'|trans({}, 'Admin.Advparameters.Feature') }}
++      </button>
++    </div>
++  {% endif %}
++
+   {{ parent() }}
+ 
+   {% if empty_scopes == true %}

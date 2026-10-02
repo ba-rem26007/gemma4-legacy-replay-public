@@ -1,0 +1,3805 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/product/combination/combination-modal/CombinationModal.vue b/admin-dev/themes/new-theme/js/pages/product/combination/combination-modal/CombinationModal.vue
+index c7a1565d7d7c2..5903ef1308c54 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/combination/combination-modal/CombinationModal.vue
++++ b/admin-dev/themes/new-theme/js/pages/product/combination/combination-modal/CombinationModal.vue
+@@ -278,6 +278,12 @@
+         this.getIframeDocument().addEventListener('datepickerChange', () => {
+           this.isFormUpdated = true;
+         });
++
++        // Feature values are managed through hidden inputs and DOM rows (add/delete), which do not
++        // trigger the input listeners above, so the widget signals its changes with a custom event.
++        this.getIframeDocument().addEventListener('combinationFeatureValuesChange', () => {
++          this.isFormUpdated = true;
++        });
+       },
+       applyIframeStyling(): void {
+         this.getIframeDocument().body.style.overflowX = 'hidden';
+diff --git a/admin-dev/themes/new-theme/js/pages/product/combination/form/index.ts b/admin-dev/themes/new-theme/js/pages/product/combination/form/index.ts
+index 8652b9c94fdf2..a0f438bc0dabb 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/combination/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/combination/form/index.ts
+@@ -6,6 +6,8 @@
+ import ImageSelector from '@pages/product/combination/form/image-selector';
+ import CombinationMap from '@pages/product/combination/form/combination-map';
+ import CombinationFormModel from '@pages/product/combination/form/combination-form-model';
++import FeatureValuesManager from '@pages/product/edit/manager/feature-values-manager';
++import ProductMap from '@pages/product/product-map';
+ import ProductSuppliersCollection from '@pages/product/supplier/product-suppliers-collection';
+ 
+ const {$} = window;
+@@ -33,4 +35,12 @@ $(() => {
+     combinationFormModel.getCombination().price.wholesalePrice,
+   );
+   new ImageSelector();
++  // Same widget as the product one, scoped to the combination form (so it doesn't interfere with
++  // the product widget) and using the combination selector map + a custom-event change notifier.
++  new FeatureValuesManager(eventEmitter, {
++    map: ProductMap.combinationFeatureValues,
++    container: $combinationForm,
++    deleteModalId: 'modal-confirm-delete-combination-feature-value',
++    onChange: () => document.dispatchEvent(new Event('combinationFeatureValuesChange')),
++  });
+ });
+diff --git a/admin-dev/themes/new-theme/js/pages/product/edit/manager/feature-values-manager.ts b/admin-dev/themes/new-theme/js/pages/product/edit/manager/feature-values-manager.ts
+index 55c51c81599d8..f5e4dfb3cc2a2 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/edit/manager/feature-values-manager.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/edit/manager/feature-values-manager.ts
+@@ -17,11 +17,63 @@ interface FeatureValue {
+   value: string,
+ }
+ 
++/**
++ * Set of CSS selectors used by the widget. Both the product (`ProductMap.featureValues`) and the
++ * combination (`ProductMap.combinationFeatureValues`) maps implement this shape, which is what
++ * allows the very same manager to drive both widgets.
++ */
++export interface FeatureValuesMap {
++  controlsContainer: string,
++  collectionContainer: string,
++  collectionRowsContainer: string,
++  featureSelect: string,
++  featureValueSelect: string,
++  newCustomValuesContainers: string,
++  newCustomValueInputs: string,
++  featureRow: string,
++  featureRowByFeatureId: (featureId: string) => string,
++  featureValueRow: string,
++  featureIdInput: string,
++  featureNameInput: string,
++  featureNameCell: string,
++  featureValueRowByFeatureId: (featureId: string) => string,
++  featureValueIdInput: string,
++  featureValueNameInput: string,
++  featureValueNamePreview: string,
++  isCustomInput: string,
++  customValuesContainer: string,
++  customValueByLangId: (langId: number) => string,
++  deleteFeatureValue: string,
++  addFeatureValue: string,
++  featureValueLoader: string,
++}
++
++export interface FeatureValuesManagerOptions {
++  // Selector map to use, defaults to the product one
++  map?: FeatureValuesMap,
++  // Root container the widget is scoped to. When null (default) selectors are resolved globally
++  // (product page); when provided the widget is scoped to it (combination form in a modal).
++  container?: JQuery | null,
++  // Id of the deletion confirmation modal, must be unique per widget instance on the page
++  deleteModalId?: string,
++  // Optional hook called whenever a value is added or removed, used by the combination form to flag
++  // itself as updated (its hidden inputs/DOM rows do not trigger the modal's input listeners).
++  onChange?: (() => void) | null,
++}
++
+ export default class FeatureValuesManager {
+   router: Router;
+ 
+   eventEmitter: typeof EventEmitter;
+ 
++  map: FeatureValuesMap;
++
++  $container: JQuery | null;
++
++  deleteModalId: string;
++
++  onChange: (() => void) | null;
++
+   $controlsContainer: JQuery;
+ 
+   $featureSelector: JQuery;
+@@ -44,22 +96,33 @@ export default class FeatureValuesManager {
+ 
+   /**
+    * @param eventEmitter {EventEmitter}
++   * @param options {FeatureValuesManagerOptions}
+    */
+-  constructor(eventEmitter: typeof EventEmitter) {
++  constructor(eventEmitter: typeof EventEmitter, options: FeatureValuesManagerOptions = {}) {
+     this.router = new Router();
+     this.eventEmitter = eventEmitter;
+-    this.$controlsContainer = $(ProductMap.featureValues.controlsContainer);
+-    this.$featureSelector = $(ProductMap.featureValues.featureSelect, this.$controlsContainer);
++    this.map = options.map ?? ProductMap.featureValues;
++    this.$container = options.container ?? null;
++    this.deleteModalId = options.deleteModalId ?? 'modal-confirm-delete-feature-value';
++    this.onChange = options.onChange ?? null;
++
++    this.$controlsContainer = this.find(this.map.controlsContainer);
++    this.$featureSelector = $(this.map.featureSelect, this.$controlsContainer);
++    this.$featureValueSelector = $(this.map.featureValueSelect, this.$controlsContainer);
++    this.$newCustomValuesContainers = $(this.map.newCustomValuesContainers, this.$controlsContainer);
++    this.$newCustomValueInputs = $(this.map.newCustomValueInputs, this.$newCustomValuesContainers);
++    this.$addFeatureValueButton = $(this.map.addFeatureValue, this.$controlsContainer);
++    this.$featureValueLoader = $(this.map.featureValueLoader, this.$controlsContainer);
++    this.$collectionContainer = this.find(this.map.collectionContainer);
++    this.$collectionRowsContainer = this.find(this.map.collectionRowsContainer);
++
++    // Nothing to manage if the features widget is not present (e.g. feature disabled)
++    if (!this.$controlsContainer.length) {
++      return;
++    }
++
+     this.$featureSelector.select2();
+-    this.$featureValueSelector = $(ProductMap.featureValues.featureValueSelect, this.$controlsContainer);
+     this.$featureValueSelector.select2();
+-    this.$newCustomValuesContainers = $(ProductMap.featureValues.newCustomValuesContainers, this.$controlsContainer);
+-    this.$newCustomValueInputs = $(ProductMap.featureValues.newCustomValueInputs, this.$newCustomValuesContainers);
+-    this.$addFeatureValueButton = $(ProductMap.featureValues.addFeatureValue, this.$controlsContainer);
+-    this.$featureValueLoader = $(ProductMap.featureValues.featureValueLoader, this.$controlsContainer);
+-
+-    this.$collectionContainer = $(ProductMap.featureValues.collectionContainer);
+-    this.$collectionRowsContainer = $(ProductMap.featureValues.collectionRowsContainer);
+ 
+     this.watchFeatureSelectors();
+     this.watchDeleteButtons();
+@@ -69,6 +132,13 @@ export default class FeatureValuesManager {
+     $('select[data-toggle="select2"]', this.$collectionRowsContainer).select2();
+   }
+ 
++  /**
++   * Resolve a selector, scoped to the container when one was provided.
++   */
++  private find(selector: string): JQuery {
++    return this.$container ? $(selector, this.$container) : $(selector);
++  }
++
+   private watchAddButton(): void {
+     this.$addFeatureValueButton.on('click', () => {
+       // Check feature value first, placeholder can not be added
+@@ -95,7 +165,7 @@ export default class FeatureValuesManager {
+       const featureName = <string> $selectedFeature.text();
+ 
+       // Check if feature collection is already present for the selected feature
+-      const $featureRow = $(ProductMap.featureValues.featureRowByFeatureId(featureId), this.$collectionRowsContainer);
++      const $featureRow = $(this.map.featureRowByFeatureId(featureId), this.$collectionRowsContainer);
+ 
+       // Feature collection not present we must add it
+       if (!$featureRow.length) {
+@@ -108,8 +178,8 @@ export default class FeatureValuesManager {
+         const $newFeatureRow = $(featurePrototype.replace(new RegExp(featurePrototypeName, 'g'), rowIndex)).first();
+         $newFeatureRow.attr('feature-id', featureId);
+         this.$collectionRowsContainer.append($newFeatureRow);
+-        $(ProductMap.featureValues.featureIdInput, $newFeatureRow).val(featureId);
+-        $(ProductMap.featureValues.featureNameInput, $newFeatureRow).val(featureName);
++        $(this.map.featureIdInput, $newFeatureRow).val(featureId);
++        $(this.map.featureNameInput, $newFeatureRow).val(featureName);
+         this.addFeatureValueRow($newFeatureRow, featureId, featureName, featureValueId);
+       } else {
+         this.addFeatureValueRow($featureRow, featureId, featureName, featureValueId);
+@@ -118,9 +188,19 @@ export default class FeatureValuesManager {
+       // Display list that can't be empty anymore
+       this.$collectionContainer.removeClass('d-none');
+       this.resetControls();
++      this.notifyChange();
+     });
+   }
+ 
++  /**
++   * Notify the host form that the feature values changed.
++   */
++  private notifyChange(): void {
++    if (this.onChange) {
++      this.onChange();
++    }
++  }
++
+   private getNewCustomValues(): string[] {
+     const newCustomValues: string[] = [];
+     $('.js-locale-input', this.$newCustomValuesContainers).each((index: number, localeInputContainer: HTMLElement) => {
+@@ -141,7 +221,7 @@ export default class FeatureValuesManager {
+     // The feature row keeps track of the next index to use for its values, we increment it right away
+     const rowIndex = $featureRow.data('rowIndex');
+     $featureRow.data('rowIndex', rowIndex + 1);
+-    const $featureValueRows = $(ProductMap.featureValues.featureValueRowByFeatureId(featureId), this.$collectionRowsContainer);
++    const $featureValueRows = $(this.map.featureValueRowByFeatureId(featureId), this.$collectionRowsContainer);
+     const $newFeatureValueRow = $(rowValuePrototype.replace(new RegExp(rowValuePrototypeName, 'g'), rowIndex));
+     $newFeatureValueRow.attr('feature-id', featureId);
+ 
+@@ -157,26 +237,26 @@ export default class FeatureValuesManager {
+     const featureValueName = <string> $selectedFeatureValue.text();
+ 
+     if (featureValueId !== '-1') {
+-      $(ProductMap.featureValues.featureValueIdInput, $newFeatureValueRow).val(featureValueId);
+-      $(ProductMap.featureValues.featureValueNameInput, $newFeatureValueRow).val(featureValueName);
+-      $(ProductMap.featureValues.featureValueNamePreview, $newFeatureValueRow).text(featureValueName);
+-      $(ProductMap.featureValues.isCustomInput, $newFeatureValueRow).val(0);
+-      $(ProductMap.featureValues.customValuesContainer, $newFeatureValueRow).hide();
++      $(this.map.featureValueIdInput, $newFeatureValueRow).val(featureValueId);
++      $(this.map.featureValueNameInput, $newFeatureValueRow).val(featureValueName);
++      $(this.map.featureValueNamePreview, $newFeatureValueRow).text(featureValueName);
++      $(this.map.isCustomInput, $newFeatureValueRow).val(0);
++      $(this.map.customValuesContainer, $newFeatureValueRow).hide();
+     } else {
+-      $(ProductMap.featureValues.featureValueIdInput, $newFeatureValueRow).val('');
+-      $(ProductMap.featureValues.featureValueNameInput, $newFeatureValueRow).val('');
+-      $(ProductMap.featureValues.featureValueNamePreview, $newFeatureValueRow).text('');
+-      $(ProductMap.featureValues.isCustomInput, $newFeatureValueRow).val(1);
+-      $(ProductMap.featureValues.customValuesContainer, $newFeatureValueRow).show();
++      $(this.map.featureValueIdInput, $newFeatureValueRow).val('');
++      $(this.map.featureValueNameInput, $newFeatureValueRow).val('');
++      $(this.map.featureValueNamePreview, $newFeatureValueRow).text('');
++      $(this.map.isCustomInput, $newFeatureValueRow).val(1);
++      $(this.map.customValuesContainer, $newFeatureValueRow).show();
+ 
+       const newCustomValues = this.getNewCustomValues();
+       newCustomValues.forEach((customValue: string, langId: number) => {
+-        const customValueInputSelector = ProductMap.featureValues.customValueByLangId(langId);
++        const customValueInputSelector = this.map.customValueByLangId(langId);
+         const $customValueInput = $(customValueInputSelector, $newFeatureValueRow);
+         $customValueInput.val(customValue);
+       });
+     }
+-    $(ProductMap.featureValues.featureNameCell, $newFeatureValueRow).text(featureName);
++    $(this.map.featureNameCell, $newFeatureValueRow).text(featureName);
+   }
+ 
+   private resetControls(): void {
+@@ -188,12 +268,12 @@ export default class FeatureValuesManager {
+   }
+ 
+   private watchDeleteButtons(): void {
+-    $(this.$collectionRowsContainer).on('click', ProductMap.featureValues.deleteFeatureValue, (event) => {
++    $(this.$collectionRowsContainer).on('click', this.map.deleteFeatureValue, (event) => {
+       const $deleteButton = $(event.currentTarget);
+-      const $collectionRow = $deleteButton.closest(ProductMap.featureValues.featureValueRow);
++      const $collectionRow = $deleteButton.closest(this.map.featureValueRow);
+       const modal = new (ConfirmModal as any)(
+         {
+-          id: 'modal-confirm-delete-feature-value',
++          id: this.deleteModalId,
+           confirmTitle: $deleteButton.data('modal-title'),
+           confirmMessage: $deleteButton.data('modal-message'),
+           confirmButtonLabel: $deleteButton.data('modal-apply'),
+@@ -206,14 +286,15 @@ export default class FeatureValuesManager {
+           $collectionRow.remove();
+ 
+           // Check if the collection has some values left
+-          const $valueRows = $(ProductMap.featureValues.featureValueRowByFeatureId(featureId), this.$collectionRowsContainer);
++          const $valueRows = $(this.map.featureValueRowByFeatureId(featureId), this.$collectionRowsContainer);
+ 
+           if ($valueRows.length === 0) {
+-            const $featureRow = $(ProductMap.featureValues.featureRowByFeatureId(featureId), this.$collectionRowsContainer);
++            const $featureRow = $(this.map.featureRowByFeatureId(featureId), this.$collectionRowsContainer);
+             $featureRow.remove();
+           }
+           this.eventEmitter.emit(ProductEventMap.updateSubmitButtonState);
+           this.$collectionContainer.toggleClass('d-none', this.$collectionRowsContainer.children().length === 0);
++          this.notifyChange();
+         },
+       );
+       modal.show();
+@@ -298,7 +379,7 @@ export default class FeatureValuesManager {
+ 
+   private getFeatureValueIds(): number[] {
+     const featureValueIds: number[] = [];
+-    $(ProductMap.featureValues.featureValueIdInput, this.$collectionRowsContainer).each((index, featureValueInput) => {
++    $(this.map.featureValueIdInput, this.$collectionRowsContainer).each((index, featureValueInput) => {
+       if (featureValueInput instanceof HTMLInputElement) {
+         featureValueIds.push(parseInt(<string> featureValueInput.value, 10));
+       }
+diff --git a/admin-dev/themes/new-theme/js/pages/product/product-map.ts b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+index 938252d32608d..b06d77330b18a 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/product-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+@@ -96,6 +96,31 @@ export default {
+     addFeatureValue: '.feature-value-add-button',
+     featureValueLoader: '.feature-value-spinner',
+   },
++  combinationFeatureValues: {
++    controlsContainer: '.combination-product-features-controls',
++    collectionContainer: '.combination-feature-values-table-collection',
++    collectionRowsContainer: '.combination-feature-values-table-collection > tbody',
++    featureSelect: 'select.combination-feature-selector',
++    featureValueSelect: 'select.combination-feature-value-selector',
++    newCustomValuesContainers: '.combination-new-custom-values',
++    newCustomValueInputs: 'input.form-control',
++    featureRow: 'tr.combination-product-feature-collection',
++    featureRowByFeatureId: (featureId: string): string => `tr.combination-product-feature-collection[feature-id=${featureId}]`,
++    featureValueRow: 'tr.combination-product-feature-value',
++    featureIdInput: 'input.combination-feature-id',
++    featureNameInput: 'input.combination-feature-name',
++    featureNameCell: 'td.combination-feature-column',
++    featureValueRowByFeatureId: (featureId: string): string => `tr.combination-product-feature-value[feature-id=${featureId}]`,
++    featureValueIdInput: 'input.combination-feature-value-id',
++    featureValueNameInput: 'input.combination-feature-value-name',
++    featureValueNamePreview: '.combination-feature-value-preview .text-preview-value',
++    isCustomInput: 'input.combination-is-custom-feature-value',
++    customValuesContainer: '.combination-custom-values-form-group',
++    customValueByLangId: (langId: number): string => `.js-locale-input[data-lang-id="${langId}"] input.form-control`,
++    deleteFeatureValue: 'button.combination-delete-feature-value',
++    addFeatureValue: '.combination-feature-value-add-button',
++    featureValueLoader: '.combination-feature-value-spinner',
++  },
+   customizations: {
+     customizationsContainer: '.product-customizations-collection',
+     customizationFieldsList: '.product-customizations-collection ul',
+diff --git a/admin-dev/themes/new-theme/scss/pages/product/product_page.scss b/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
+index ad9015d65b7aa..79f7186dc2001 100644
+--- a/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
++++ b/admin-dev/themes/new-theme/scss/pages/product/product_page.scss
+@@ -2083,6 +2083,62 @@ $product-page-padding-bottom: 80px !default;
+     color: var(--#{$cdk}red-300);
+     border-top: var(--#{$cdk}size-3) solid var(--#{$cdk}red-300);
+   }
++
++  .combination-product-features-controls {
++    display: flex;
++    flex-direction: row;
++    // The combination form lives in a modal narrower than the page, wrap instead of
++    // switching to a full column layout so the controls stay side by side when possible.
++    flex-wrap: wrap;
++    gap: var(--#{$cdk}size-36);
++
++    .select2 {
++      min-width: 250px;
++    }
++
++    .combination-feature-value-spinner {
++      position: relative;
++      min-width: 250px;
++      line-height: var(--#{$cdk}size-36);
++
++      .spinner {
++        position: relative;
++        top: var(--#{$cdk}size-4);
++        width: var(--#{$cdk}size-18);
++        height: var(--#{$cdk}size-18);
++      }
++    }
++
++    .combination-new-custom-values {
++      &.d-none {
++        // stylelint-disable-next-line
++        display: none !important;
++      }
++
++      max-width: 350px;
++    }
++
++    .combination-feature-value-add-button {
++      padding: var(--#{$cdk}size-6) var(--#{$cdk}size-16);
++    }
++  }
++
++  .combination-feature-values-table-collection {
++    max-width: 860px;
++
++    .form-group {
++      margin-bottom: 0;
++      text-align: left;
++
++      .locale-input-group {
++        max-width: var(--#{$cdk}size-320);
++      }
++    }
++
++    .combination-product-feature-collection {
++      display: none;
++    }
++  }
+ }
+ 
+ .product-page,
+diff --git a/classes/Combination.php b/classes/Combination.php
+index b2873cf2dcd1a..c7c505304b6ae 100644
+--- a/classes/Combination.php
++++ b/classes/Combination.php
+@@ -275,6 +275,10 @@ public function deleteAssociations()
+             'product_attribute_image',
+             '`id_product_attribute` = ' . (int) $this->id
+         );
++        $result = $result && Db::getInstance()->delete(
++            'feature_product_attribute',
++            '`id_product_attribute` = ' . (int) $this->id
++        );
+ 
+         if ($result) {
+             Hook::exec('actionAttributeCombinationDelete', ['id_product_attribute' => (int) $this->id]);
+diff --git a/classes/Product.php b/classes/Product.php
+index c583f4a6c8868..9bcb9809d60dd 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -397,6 +397,9 @@ class ProductCore extends ObjectModel
+     /** @var array */
+     protected static $_frontFeaturesCache = [];
+ 
++    /** @var array */
++    protected static $_frontFeaturesCombinationCache = [];
++
+     /** @var array */
+     protected static $productPropertiesCache = [];
+ 
+@@ -1212,6 +1215,7 @@ public static function resetStaticCache()
+         static::$productPropertiesCache = [];
+         static::$_cacheFeatures = [];
+         static::$_frontFeaturesCache = [];
++        static::$_frontFeaturesCombinationCache = [];
+         static::$_prices = [];
+         static::$_pricesLevel2 = [];
+         static::$_incat = [];
+@@ -5804,14 +5808,22 @@ public static function getProductsProperties($id_lang, $query_result)
+     }
+ 
+     /**
+-     * Select all features for a given language
++     * Select all features for a given language.
++     *
++     * When $id_product_attribute is provided and the "combination_feature_values" feature flag is
++     * enabled, the feature values defined at combination level are merged over the product ones:
++     * if a feature is defined both at product and combination level, the combination values take
++     * precedence. This keeps the historical signature backward compatible (modules calling it with
++     * only the product id still get the product features) while letting callers that know the
++     * displayed combination benefit from the new behavior.
+      *
+      * @param int $id_lang Language identifier
+      * @param int $id_product Product identifier
++     * @param int $id_product_attribute Combination identifier (0 to ignore combination features)
+      *
+      * @return array Array with feature's data
+      */
+-    public static function getFrontFeaturesStatic($id_lang, $id_product)
++    public static function getFrontFeaturesStatic($id_lang, $id_product, $id_product_attribute = 0)
+     {
+         if (!Feature::isFeatureActive()) {
+             return [];
+@@ -5837,7 +5849,16 @@ public static function getFrontFeaturesStatic($id_lang, $id_product)
+             );
+         }
+ 
+-        return self::$_frontFeaturesCache[$id_product . '-' . $id_lang];
++        $productFeatures = self::$_frontFeaturesCache[$id_product . '-' . $id_lang];
++
++        if (!(int) $id_product_attribute || !self::isCombinationFeatureValuesEnabled()) {
++            return $productFeatures;
++        }
++
++        return self::mergeFrontFeatures(
++            $productFeatures,
++            self::getFrontFeaturesCombinationStatic((int) $id_lang, (int) $id_product_attribute)
++        );
+     }
+ 
+     /**
+@@ -5850,6 +5871,86 @@ public function getFrontFeatures($id_lang)
+         return Product::getFrontFeaturesStatic($id_lang, $this->id);
+     }
+ 
++    /**
++     * Returns the feature values associated to a given combination (product_attribute).
++     *
++     * @param int $id_lang Language identifier
++     * @param int $id_product_attribute Combination identifier
++     *
++     * @return array Array with feature's data
++     */
++    protected static function getFrontFeaturesCombinationStatic(int $id_lang, int $id_product_attribute): array
++    {
++        if (!Feature::isFeatureActive() || !$id_product_attribute) {
++            return [];
++        }
++        $cacheKey = (int) $id_product_attribute . '-' . (int) $id_lang;
++        if (!array_key_exists($cacheKey, self::$_frontFeaturesCombinationCache)) {
++            if (Configuration::get('PS_FEATURE_VALUES_ORDER') === 'name') {
++                $secondaryOrder = 'fvl.value';
++            } else {
++                $secondaryOrder = 'fv.position';
++            }
++
++            self::$_frontFeaturesCombinationCache[$cacheKey] = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS(
++                '
++                SELECT name, value, fpa.id_feature, f.position, fvl.id_feature_value
++                FROM ' . _DB_PREFIX_ . 'feature_product_attribute fpa
++                LEFT JOIN ' . _DB_PREFIX_ . 'feature_lang fl ON (fl.id_feature = fpa.id_feature AND fl.id_lang = ' . (int) $id_lang . ')
++                LEFT JOIN ' . _DB_PREFIX_ . 'feature_value fv ON (fv.id_feature_value = fpa.id_feature_value)
++                LEFT JOIN ' . _DB_PREFIX_ . 'feature_value_lang fvl ON (fvl.id_feature_value = fpa.id_feature_value AND fvl.id_lang = ' . (int) $id_lang . ')
++                LEFT JOIN ' . _DB_PREFIX_ . 'feature f ON (f.id_feature = fpa.id_feature AND fl.id_lang = ' . (int) $id_lang . ')
++                ' . Shop::addSqlAssociation('feature', 'f') . '
++                WHERE fpa.id_product_attribute = ' . (int) $id_product_attribute . '
++                ORDER BY f.position ASC, ' . $secondaryOrder . ' ASC'
++            );
++        }
++
++        return self::$_frontFeaturesCombinationCache[$cacheKey];
++    }
++
++    /**
++     * Merges two lists of front features (as returned by getFrontFeaturesStatic /
++     * getFrontFeaturesCombinationStatic). When a feature is present in both lists (same id_feature),
++     * the combination values take precedence and the product values for that feature are dropped;
++     * features present in only one list are kept. The result is ordered by feature position.
++     *
++     * @param array $productFeatures
++     * @param array $combinationFeatures
++     *
++     * @return array
++     */
++    protected static function mergeFrontFeatures(array $productFeatures, array $combinationFeatures): array
++    {
++        if (empty($combinationFeatures)) {
++            return $productFeatures;
++        }
++
++        // Collect the features overridden by the combination
++        $overriddenFeatureIds = [];
++        foreach ($combinationFeatures as $combinationFeature) {
++            $overriddenFeatureIds[(int) $combinationFeature['id_feature']] = true;
++        }
++
++        // Keep product features that are not overridden, then append combination features
++        $mergedFeatures = [];
++        foreach ($productFeatures as $productFeature) {
++            if (!isset($overriddenFeatureIds[(int) $productFeature['id_feature']])) {
++                $mergedFeatures[] = $productFeature;
++            }
++        }
++        foreach ($combinationFeatures as $combinationFeature) {
++            $mergedFeatures[] = $combinationFeature;
++        }
++
++        // Preserve the position-based ordering used by the front office
++        usort($mergedFeatures, function ($a, $b) {
++            return (int) $a['position'] <=> (int) $b['position'];
++        });
++
++        return $mergedFeatures;
++    }
++
+     /**
+      * @param int $id_lang Language identifier
+      * @param int $id_product Product identifier
+@@ -8189,6 +8290,13 @@ protected static function isNewPricingEnabled(): bool
+         return $manager !== null && $manager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_NEW_PRICING);
+     }
+ 
++    protected static function isCombinationFeatureValuesEnabled(): bool
++    {
++        $manager = self::getFeatureFlagManager();
++
++        return $manager !== null && $manager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_COMBINATION_FEATURE_VALUES);
++    }
++
+     protected static function getFeatureFlagManager(): ?FeatureFlagStateCheckerInterface
+     {
+         if (!self::$featureFlagManager) {
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 7fb5352b98b57..21ab4fd0fd6e8 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -934,6 +934,18 @@ CREATE TABLE `PREFIX_feature_product` (
+   KEY `id_product` (`id_product`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
+ 
++/* Association between a feature and a product combination (product_attribute) */
++CREATE TABLE `PREFIX_feature_product_attribute` (
++  `id_feature` int(10) unsigned NOT NULL,
++  `id_product_attribute` int(10) unsigned NOT NULL,
++  `id_feature_value` int(10) unsigned NOT NULL,
++  PRIMARY KEY (
++    `id_feature`, `id_product_attribute`, `id_feature_value`
++  ),
++  KEY `id_feature_value` (`id_feature_value`),
++  KEY `id_product_attribute` (`id_product_attribute`)
++) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
++
+ /* Various choice associated with a feature */
+ CREATE TABLE `PREFIX_feature_value` (
+   `id_feature_value` int(10) unsigned NOT NULL auto_increment,
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index beeeb28d67e00..05dea9ccf81f5 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -31,6 +31,7 @@
+     <feature_flag id="email_body_translation" name="email_body_translation" type="env,dotenv,db" label_wording="Email body translations" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated email body translations page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+     <feature_flag id="hook_module_v2" name="hook_module_v2" type="env,dotenv,db" label_wording="Hook a module" label_domain="Admin.Design.Feature" description_wording="Enable / Disable the migrated Hook a module form page." description_domain="Admin.Design.Help" state="1" stability="stable" />
+     <feature_flag id="quick_access" name="quick_access" type="env,dotenv,db" label_wording="Quick access" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated quick access page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
++    <feature_flag id="combination_feature_values" name="combination_feature_values" type="env,dotenv,db" label_wording="Combination feature values" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable feature values at combination level, in addition to product level." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="stats" name="stats" type="env,dotenv,db" label_wording="Stats" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated stats page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="dashboard" name="dashboard" type="env,dotenv,db" label_wording="Dashboard page" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated Symfony dashboard page. Native dashboard modules are not yet compatible with the new page and will not display until they are migrated." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+   </entities>
+diff --git a/src/Adapter/Feature/Repository/FeatureValueRepository.php b/src/Adapter/Feature/Repository/FeatureValueRepository.php
+index 8389e7060719c..f7ec5e7fd0673 100644
+--- a/src/Adapter/Feature/Repository/FeatureValueRepository.php
++++ b/src/Adapter/Feature/Repository/FeatureValueRepository.php
+@@ -18,6 +18,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureValueNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\InvalidFeatureValueIdException;
+ use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureValueId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -168,6 +169,42 @@ public function getAllProductFeatureValues(ProductId $productId, ShopId $shopId)
+         return array_values($featureValues);
+     }
+ 
++    /**
++     * @param CombinationId $combinationId
++     * @param ShopId $shopId
++     *
++     * @return array
++     */
++    public function getAllCombinationFeatureValues(CombinationId $combinationId, ShopId $shopId): array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->from($this->dbPrefix . 'feature_value', 'fv')
++            ->innerJoin('fv', $this->dbPrefix . 'feature_product_attribute', 'fpa', 'fpa.id_feature_value = fv.id_feature_value AND fpa.id_product_attribute = :combinationId')
++            ->innerJoin('fpa', $this->dbPrefix . 'feature_shop', 'fs', 'fpa.id_feature = fs.id_feature AND fs.id_shop = :shopId')
++            ->leftJoin('fv', $this->dbPrefix . 'feature_value_lang', 'fvl', 'fvl.id_feature_value = fv.id_feature_value')
++            ->select('fv.*, fvl.*')
++            ->setParameter('combinationId', $combinationId->getValue())
++            ->setParameter('shopId', $shopId->getValue())
++        ;
++
++        $result = $qb->executeQuery()->fetchAllAssociative();
++        $featureValues = [];
++        foreach ($result as $featureValue) {
++            $featureValueId = (int) $featureValue['id_feature_value'];
++            if (!isset($featureValues[$featureValueId])) {
++                $featureValues[$featureValueId] = [
++                    'id_feature_value' => $featureValueId,
++                    'id_feature' => (int) $featureValue['id_feature'],
++                    'custom' => (int) $featureValue['custom'],
++                ];
++            }
++            $featureValues[$featureValueId]['localized_values'][(int) $featureValue['id_lang']] = $featureValue['value'];
++        }
++
++        return array_values($featureValues);
++    }
++
+     /**
+      * @param int $langId
+      * @param array $filters
+diff --git a/src/Adapter/Presenter/Product/ProductLazyArray.php b/src/Adapter/Presenter/Product/ProductLazyArray.php
+index 2a9bb32d68ddb..972a3e43d203d 100644
+--- a/src/Adapter/Presenter/Product/ProductLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductLazyArray.php
+@@ -496,7 +496,8 @@ public function getFeatures()
+         if (!isset($this->product['features'])) {
+             $this->product['features'] = Product::getFrontFeaturesStatic(
+                 (int) $this->language->id,
+-                $this->product['id_product']
++                $this->product['id_product'],
++                (int) ($this->product['id_product_attribute'] ?? 0)
+             );
+         }
+ 
+diff --git a/src/Adapter/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandler.php b/src/Adapter/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandler.php
+new file mode 100644
+index 0000000000000..1cd16bc4d3c19
+--- /dev/null
++++ b/src/Adapter/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandler.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\Update\CombinationFeatureValueUpdater;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\RemoveAllFeatureValuesFromCombinationCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\CommandHandler\RemoveAllFeatureValuesFromCombinationHandlerInterface;
++
++/**
++ * Handles @see RemoveAllFeatureValuesFromCombinationCommand using legacy object model
++ */
++#[AsCommandHandler]
++class RemoveAllFeatureValuesFromCombinationHandler implements RemoveAllFeatureValuesFromCombinationHandlerInterface
++{
++    /**
++     * @var CombinationFeatureValueUpdater
++     */
++    private $combinationFeatureValueUpdater;
++
++    public function __construct(CombinationFeatureValueUpdater $combinationFeatureValueUpdater)
++    {
++        $this->combinationFeatureValueUpdater = $combinationFeatureValueUpdater;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function handle(RemoveAllFeatureValuesFromCombinationCommand $command): void
++    {
++        $this->combinationFeatureValueUpdater->setFeatureValues($command->getCombinationId(), []);
++    }
++}
+diff --git a/src/Adapter/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandler.php b/src/Adapter/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandler.php
+new file mode 100644
+index 0000000000000..d476050f33ae6
+--- /dev/null
++++ b/src/Adapter/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandler.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\Update\CombinationFeatureValueUpdater;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\CommandHandler\SetCombinationFeatureValuesHandlerInterface;
++
++/**
++ * Handles @see SetCombinationFeatureValuesCommand using legacy object model
++ */
++#[AsCommandHandler]
++class SetCombinationFeatureValuesHandler implements SetCombinationFeatureValuesHandlerInterface
++{
++    /**
++     * @var CombinationFeatureValueUpdater
++     */
++    private $combinationFeatureValueUpdater;
++
++    public function __construct(CombinationFeatureValueUpdater $combinationFeatureValueUpdater)
++    {
++        $this->combinationFeatureValueUpdater = $combinationFeatureValueUpdater;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function handle(SetCombinationFeatureValuesCommand $command): array
++    {
++        return $this->combinationFeatureValueUpdater->setFeatureValues($command->getCombinationId(), $command->getFeatureValues());
++    }
++}
+diff --git a/src/Adapter/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandler.php b/src/Adapter/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandler.php
+new file mode 100644
+index 0000000000000..d7a6a5af9cb9c
+--- /dev/null
++++ b/src/Adapter/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandler.php
+@@ -0,0 +1,54 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureValueRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query\GetCombinationFeatureValues;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryHandler\GetCombinationFeatureValuesHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult\CombinationFeatureValue;
++
++/**
++ * Handles @see GetCombinationFeatureValues query
++ */
++#[AsQueryHandler]
++class GetCombinationFeatureValuesHandler implements GetCombinationFeatureValuesHandlerInterface
++{
++    /**
++     * @var FeatureValueRepository
++     */
++    private $featureValueRepository;
++
++    public function __construct(FeatureValueRepository $featureValueRepository)
++    {
++        $this->featureValueRepository = $featureValueRepository;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function handle(GetCombinationFeatureValues $query): array
++    {
++        $featureValuesData = $this->featureValueRepository->getAllCombinationFeatureValues(
++            $query->getCombinationId(),
++            $query->getShopId()
++        );
++        $combinationFeatureValues = [];
++        foreach ($featureValuesData as $featureValuesDatum) {
++            $combinationFeatureValues[] = new CombinationFeatureValue(
++                (int) $featureValuesDatum['id_feature'],
++                (int) $featureValuesDatum['id_feature_value'],
++                $featureValuesDatum['localized_values'],
++                1 === (int) $featureValuesDatum['custom']
++            );
++        }
++
++        return $combinationFeatureValues;
++    }
++}
+diff --git a/src/Adapter/Product/Combination/FeatureValue/Update/CombinationFeatureValueUpdater.php b/src/Adapter/Product/Combination/FeatureValue/Update/CombinationFeatureValueUpdater.php
+new file mode 100644
+index 0000000000000..27b1dcfb3c269
+--- /dev/null
++++ b/src/Adapter/Product/Combination/FeatureValue/Update/CombinationFeatureValueUpdater.php
+@@ -0,0 +1,230 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\Update;
++
++use Doctrine\DBAL\Connection;
++use Doctrine\DBAL\Exception as DBALException;
++use Doctrine\DBAL\Exception\InvalidArgumentException;
++use FeatureValue;
++use PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureRepository;
++use PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureValueRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Combination\Repository\CombinationRepository;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\CannotAddFeatureValueException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\CannotUpdateFeatureValueException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureValueNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureValueId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\ValueObject\CombinationFeatureValue;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\DuplicateFeatureValueAssociationException;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidAssociatedFeatureException;
++use PrestaShop\PrestaShop\Core\Exception\CoreException;
++
++/**
++ * Updates FeatureValue & Combination (product_attribute) relation
++ */
++class CombinationFeatureValueUpdater
++{
++    /**
++     * @var Connection
++     */
++    private $connection;
++
++    /**
++     * @var string
++     */
++    private $dbPrefix;
++
++    /**
++     * @var CombinationRepository
++     */
++    private $combinationRepository;
++
++    /**
++     * @var FeatureRepository
++     */
++    private $featureRepository;
++
++    /**
++     * @var FeatureValueRepository
++     */
++    private $featureValueRepository;
++
++    /**
++     * @param Connection $connection
++     * @param string $dbPrefix
++     * @param CombinationRepository $combinationRepository
++     * @param FeatureRepository $featureRepository
++     * @param FeatureValueRepository $featureValueRepository
++     */
++    public function __construct(
++        Connection $connection,
++        string $dbPrefix,
++        CombinationRepository $combinationRepository,
++        FeatureRepository $featureRepository,
++        FeatureValueRepository $featureValueRepository
++    ) {
++        $this->connection = $connection;
++        $this->dbPrefix = $dbPrefix;
++        $this->combinationRepository = $combinationRepository;
++        $this->featureRepository = $featureRepository;
++        $this->featureValueRepository = $featureValueRepository;
++    }
++
++    /**
++     * @param CombinationId $combinationId
++     * @param CombinationFeatureValue[] $combinationFeatureValues
++     *
++     * @return FeatureValueId[]
++     *
++     * @throws CannotAddFeatureValueException
++     * @throws CannotUpdateFeatureValueException
++     * @throws CoreException
++     * @throws DBALException
++     * @throws FeatureValueNotFoundException
++     * @throws InvalidArgumentException
++     * @throws FeatureNotFoundException
++     */
++    public function setFeatureValues(CombinationId $combinationId, array $combinationFeatureValues): array
++    {
++        // First assert that all entities exist
++        $this->combinationRepository->assertCombinationExists($combinationId);
++        $previousFeatureValueIds = [];
++        foreach ($combinationFeatureValues as $combinationFeatureValue) {
++            $this->featureRepository->assertExists($combinationFeatureValue->getFeatureId());
++            if (null !== $combinationFeatureValue->getFeatureValueId()) {
++                $featureValue = $this->featureValueRepository->get($combinationFeatureValue->getFeatureValueId());
++                if ((int) $featureValue->id_feature !== $combinationFeatureValue->getFeatureId()->getValue()) {
++                    throw new InvalidAssociatedFeatureException('You cannot associate a value to another feature.');
++                }
++                if (in_array($combinationFeatureValue->getFeatureValueId()->getValue(), $previousFeatureValueIds)) {
++                    throw new DuplicateFeatureValueAssociationException('You cannot associate the same feature value more than once.');
++                }
++                $previousFeatureValueIds[] = $combinationFeatureValue->getFeatureValueId()->getValue();
++            }
++        }
++
++        foreach ($combinationFeatureValues as $combinationFeatureValue) {
++            if (null !== $combinationFeatureValue->getFeatureValueId()) {
++                $this->updateFeatureValue($combinationFeatureValue);
++            } else {
++                $this->addFeatureValue($combinationFeatureValue);
++            }
++        }
++
++        return $this->updateAssociations($combinationId, $combinationFeatureValues);
++    }
++
++    /**
++     * @param CombinationId $combinationId
++     * @param array $combinationFeatureValues
++     *
++     * @return FeatureValueId[]
++     *
++     * @throws DBALException
++     * @throws InvalidArgumentException
++     */
++    private function updateAssociations(CombinationId $combinationId, array $combinationFeatureValues): array
++    {
++        // First delete all associations from the combination
++        $this->connection->delete(
++            $this->dbPrefix . 'feature_product_attribute',
++            ['id_product_attribute' => $combinationId->getValue()]
++        );
++
++        // Then create all new ones
++        $combinationFeatureValueIds = [];
++        foreach ($combinationFeatureValues as $combinationFeatureValue) {
++            $insertedValues = [
++                'id_product_attribute' => $combinationId->getValue(),
++                'id_feature' => $combinationFeatureValue->getFeatureId()->getValue(),
++                'id_feature_value' => $combinationFeatureValue->getFeatureValueId()->getValue(),
++            ];
++            $this->connection->insert($this->dbPrefix . 'feature_product_attribute', $insertedValues);
++
++            $combinationFeatureValueIds[] = $combinationFeatureValue->getFeatureValueId();
++        }
++
++        $this->cleanOrphanCustomFeatureValues();
++
++        return $combinationFeatureValueIds;
++    }
++
++    /**
++     * Remove custom feature values that are no longer associated to a product nor a combination.
++     * A custom value can be referenced either by feature_product or feature_product_attribute,
++     * so both tables must be checked before deleting.
++     */
++    private function cleanOrphanCustomFeatureValues(): void
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb->from($this->dbPrefix . 'feature_value', 'fv')
++            ->select('fv.id_feature_value')
++            ->leftJoin('fv', $this->dbPrefix . 'feature_product', 'fp', 'fp.id_feature_value = fv.id_feature_value')
++            ->leftJoin('fv', $this->dbPrefix . 'feature_product_attribute', 'fpa', 'fpa.id_feature_value = fv.id_feature_value')
++            ->where($qb->expr()->andX(
++                $qb->expr()->isNull('fp.id_product'),
++                $qb->expr()->isNull('fpa.id_product_attribute'),
++                $qb->expr()->neq('fv.custom', 0)
++            ))
++        ;
++
++        $orphanCustomFeatureValues = $qb->executeQuery()->fetchAllAssociative();
++        if (empty($orphanCustomFeatureValues)) {
++            return;
++        }
++
++        $orphanIds = [];
++        foreach ($orphanCustomFeatureValues as $orphanCustomFeatureValue) {
++            $orphanIds[] = $orphanCustomFeatureValue['id_feature_value'];
++        }
++
++        $qb = $this->connection->createQueryBuilder();
++        $qb->delete($this->dbPrefix . 'feature_value')
++            ->where($qb->expr()->in('id_feature_value', $orphanIds))
++        ;
++        $qb->executeStatement();
++    }
++
++    /**
++     * @param CombinationFeatureValue $combinationFeatureValue
++     *
++     * @throws CannotUpdateFeatureValueException
++     * @throws CoreException
++     * @throws FeatureValueNotFoundException
++     */
++    private function updateFeatureValue(CombinationFeatureValue $combinationFeatureValue): void
++    {
++        // Only custom values need to be updated
++        if (null === $combinationFeatureValue->getLocalizedCustomValues()) {
++            return;
++        }
++        $featureValue = $this->featureValueRepository->get($combinationFeatureValue->getFeatureValueId());
++        $featureValue->value = $combinationFeatureValue->getLocalizedCustomValues();
++        $this->featureValueRepository->update($featureValue);
++    }
++
++    /**
++     * @param CombinationFeatureValue $combinationFeatureValue
++     *
++     * @throws CannotAddFeatureValueException
++     * @throws CoreException
++     */
++    private function addFeatureValue(CombinationFeatureValue $combinationFeatureValue): void
++    {
++        $featureValue = new FeatureValue();
++        $featureValue->id_feature = (int) $combinationFeatureValue->getFeatureId()->getValue();
++        $featureValue->custom = null !== $combinationFeatureValue->getLocalizedCustomValues();
++        if (null !== $combinationFeatureValue->getLocalizedCustomValues()) {
++            $featureValue->value = $combinationFeatureValue->getLocalizedCustomValues();
++        }
++        $featureValueId = $this->featureValueRepository->add($featureValue);
++        $combinationFeatureValue->setFeatureValueId($featureValueId);
++    }
++}
+diff --git a/src/Adapter/Product/FeatureValue/Update/ProductFeatureValueUpdater.php b/src/Adapter/Product/FeatureValue/Update/ProductFeatureValueUpdater.php
+index 0765870a844b1..c5cf6eb5ca5a7 100644
+--- a/src/Adapter/Product/FeatureValue/Update/ProductFeatureValueUpdater.php
++++ b/src/Adapter/Product/FeatureValue/Update/ProductFeatureValueUpdater.php
+@@ -157,18 +157,23 @@ private function updateAssociations(ProductId $productId, array $productFeatureV
+     }
+ 
+     /**
+-     * Remove custom feature values that are no longer associated to a product
++     * Remove custom feature values that are no longer associated to a product nor a combination.
++     * A custom value can be referenced either by feature_product or feature_product_attribute,
++     * so both tables must be checked before deleting (otherwise saving a product would delete
++     * custom values that are only used at combination level).
+      */
+     private function cleanOrphanCustomFeatureValues(): void
+     {
+         $qb = $this->connection->createQueryBuilder();
+         $qb->from($this->dbPrefix . 'feature_value', 'fv')
+-            ->select('fv.*, fp.id_product')
++            ->select('fv.id_feature_value')
+             ->leftJoin('fv', $this->dbPrefix . 'feature_product', 'fp', 'fp.id_feature_value = fv.id_feature_value')
++            ->leftJoin('fv', $this->dbPrefix . 'feature_product_attribute', 'fpa', 'fpa.id_feature_value = fv.id_feature_value')
+             ->where($qb->expr()->andX(
+-                $qb->expr()->isNull('fp.id_product')),
++                $qb->expr()->isNull('fp.id_product'),
++                $qb->expr()->isNull('fpa.id_product_attribute'),
+                 $qb->expr()->neq('fv.custom', 0)
+-            )
++            ))
+         ;
+ 
+         $orphanCustomFeatureValues = $qb->executeQuery()->fetchAllAssociative();
+diff --git a/src/Adapter/Product/Update/ProductDuplicator.php b/src/Adapter/Product/Update/ProductDuplicator.php
+index 59ce77cced6fb..2393999341e2d 100644
+--- a/src/Adapter/Product/Update/ProductDuplicator.php
++++ b/src/Adapter/Product/Update/ProductDuplicator.php
+@@ -269,6 +269,7 @@ private function duplicateRelations(int $oldProductId, int $newProductId, ShopCo
+         $this->duplicateGroupReduction($oldProductId, $newProductId);
+         $this->duplicateRelatedProducts($oldProductId, $newProductId);
+         $this->duplicateFeatures($oldProductId, $newProductId);
++        $this->duplicateCombinationFeatures($combinationMatching);
+         $this->duplicateSpecificPrices($oldProductId, $newProductId, $combinationMatching);
+         $this->duplicatePackedProducts($oldProductId, $newProductId);
+         $this->duplicateCustomizationFields($oldProductId, $newProductId);
+@@ -617,6 +618,76 @@ private function duplicateFeatures(int $oldProductId, int $newProductId): void
+         $this->bulkInsert('feature_product', $newProductFeatures, CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
+     }
+ 
++    /**
++     * Duplicates the feature values associated to the combinations of a product.
++     *
++     * @param array<int, int> $combinationMatching old combination id => new combination id
++     *
++     * @throws CannotDuplicateProductException
++     * @throws CoreException
++     */
++    private function duplicateCombinationFeatures(array $combinationMatching): void
++    {
++        if (empty($combinationMatching)) {
++            return;
++        }
++
++        $oldCombinationIds = array_keys($combinationMatching);
++        $oldCombinationFeatures = $this->getRows('feature_product_attribute', ['id_product_attribute' => $oldCombinationIds], CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++        if (empty($oldCombinationFeatures)) {
++            return;
++        }
++
++        // Custom values need to be copied and assigned to new combinations
++        $featureValuesIds = array_map(static function (array $oldCombinationFeature) {
++            return (int) $oldCombinationFeature['id_feature_value'];
++        }, $oldCombinationFeatures);
++        $customFeatureValues = $this->getRows('feature_value', ['id_feature_value' => $featureValuesIds, 'custom' => 1], CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++        $customValuesMapping = [];
++        if (!empty($customFeatureValues)) {
++            $lastFeatureValueId = (int) $this->connection->createQueryBuilder()
++                ->from($this->dbPrefix . 'feature_value')
++                ->select('id_feature_value')
++                ->addOrderBy('id_feature_value', 'DESC')
++                ->executeQuery()
++                ->fetchOne()
++            ;
++
++            $newCustomFeatureValues = [];
++            $newCustomFeatureValuesLang = [];
++            foreach ($customFeatureValues as $customFeatureValue) {
++                $newCustomFeatureValueId = ++$lastFeatureValueId;
++                $oldCustomFeatureValueId = (int) $customFeatureValue['id_feature_value'];
++                $customValuesMapping[$oldCustomFeatureValueId] = $newCustomFeatureValueId;
++                $newCustomFeatureValues[] = array_merge($customFeatureValue, [
++                    'id_feature_value' => $newCustomFeatureValueId,
++                ]);
++
++                $langData = $this->getRows('feature_value_lang', ['id_feature_value' => $oldCustomFeatureValueId], CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++                $langData = $this->replaceInRows($langData, ['id_feature_value' => $newCustomFeatureValueId]);
++                $newCustomFeatureValuesLang = array_merge($newCustomFeatureValuesLang, $langData);
++            }
++            $this->bulkInsert('feature_value', $newCustomFeatureValues, CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++            $this->bulkInsert('feature_value_lang', $newCustomFeatureValuesLang, CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++        }
++
++        // Now we can duplicate relations (and replace custom ones with newly copied feature values)
++        $newCombinationFeatures = [];
++        foreach ($oldCombinationFeatures as $oldCombinationFeature) {
++            $oldCombinationId = (int) $oldCombinationFeature['id_product_attribute'];
++            if (!isset($combinationMatching[$oldCombinationId])) {
++                continue;
++            }
++            $oldFeatureValueId = (int) $oldCombinationFeature['id_feature_value'];
++            $newCombinationFeatures[] = [
++                'id_product_attribute' => $combinationMatching[$oldCombinationId],
++                'id_feature' => $oldCombinationFeature['id_feature'],
++                'id_feature_value' => $customValuesMapping[$oldFeatureValueId] ?? $oldCombinationFeature['id_feature_value'],
++            ];
++        }
++        $this->bulkInsert('feature_product_attribute', $newCombinationFeatures, CannotDuplicateProductException::FAILED_DUPLICATE_FEATURES);
++    }
++
+     /**
+      * @param int $oldProductId
+      * @param int $newProductId
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/Command/RemoveAllFeatureValuesFromCombinationCommand.php b/src/Core/Domain/Product/Combination/FeatureValue/Command/RemoveAllFeatureValuesFromCombinationCommand.php
+new file mode 100644
+index 0000000000000..3f970df1c1fc4
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/Command/RemoveAllFeatureValuesFromCombinationCommand.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++
++/**
++ * Removes all combination feature values
++ */
++class RemoveAllFeatureValuesFromCombinationCommand
++{
++    /**
++     * @var CombinationId
++     */
++    private $combinationId;
++
++    public function __construct(int $combinationId)
++    {
++        $this->combinationId = new CombinationId($combinationId);
++    }
++
++    /**
++     * @return CombinationId
++     */
++    public function getCombinationId(): CombinationId
++    {
++        return $this->combinationId;
++    }
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommand.php b/src/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommand.php
+new file mode 100644
+index 0000000000000..a93a55df09994
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommand.php
+@@ -0,0 +1,106 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\ValueObject\CombinationFeatureValue;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidProductFeatureValuesFormatException;
++
++/**
++ * Sets combination feature values
++ */
++class SetCombinationFeatureValuesCommand
++{
++    /**
++     * @var CombinationId
++     */
++    private $combinationId;
++
++    /**
++     * @var CombinationFeatureValue[]
++     */
++    private $featureValues;
++
++    /**
++     * Set combination feature values, expected format is:
++     * $featureValues = [
++     *      ['feature_id' => 2, 'feature_value_id' => 3], // Associate predefined feature value
++     *      ['feature_id' => 2, 'custom_values' => [1 => 'Custom']], // Create new custom value
++     *      ['feature_id' => 2, 'feature_value_id' => 5, 'custom_values' => [1 => 'Custom']], // Updates existing custom value
++     * ];
++     *
++     * @param int $combinationId
++     * @param array $featureValues
++     *
++     * @throws InvalidProductFeatureValuesFormatException
++     * @throws ProductConstraintException
++     */
++    public function __construct(int $combinationId, array $featureValues)
++    {
++        $this->combinationId = new CombinationId($combinationId);
++        $this->setCombinationFeatures($featureValues);
++    }
++
++    /**
++     * @return CombinationId
++     */
++    public function getCombinationId(): CombinationId
++    {
++        return $this->combinationId;
++    }
++
++    /**
++     * @return CombinationFeatureValue[]
++     */
++    public function getFeatureValues(): array
++    {
++        return $this->featureValues;
++    }
++
++    /**
++     * @param array $featureValues
++     *
++     * @throws InvalidProductFeatureValuesFormatException
++     */
++    private function setCombinationFeatures(array $featureValues): void
++    {
++        if (empty($featureValues)) {
++            throw new InvalidProductFeatureValuesFormatException(sprintf(
++                'Cannot use empty feature values to remove all use %s instead',
++                RemoveAllFeatureValuesFromCombinationCommand::class
++            ));
++        }
++
++        $this->featureValues = [];
++        foreach ($featureValues as $featureValue) {
++            $this->assertFeatureValueFormat($featureValue);
++            $this->featureValues[] = new CombinationFeatureValue(
++                $featureValue['feature_id'],
++                !empty($featureValue['feature_value_id']) ? (int) $featureValue['feature_value_id'] : null,
++                !empty($featureValue['custom_values']) ? $featureValue['custom_values'] : null
++            );
++        }
++    }
++
++    /**
++     * @param array $featureValue
++     *
++     * @throws InvalidProductFeatureValuesFormatException
++     */
++    private function assertFeatureValueFormat(array $featureValue): void
++    {
++        if (empty($featureValue['feature_id'])) {
++            throw new InvalidProductFeatureValuesFormatException('Invalid input array, feature_id is expected');
++        }
++        if (empty($featureValue['feature_value_id']) && empty($featureValue['custom_values'])) {
++            throw new InvalidProductFeatureValuesFormatException('Feature value missing, specify a feature_value_id or new custom_values');
++        }
++    }
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandlerInterface.php b/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandlerInterface.php
+new file mode 100644
+index 0000000000000..55158e36771f3
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/RemoveAllFeatureValuesFromCombinationHandlerInterface.php
+@@ -0,0 +1,20 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\RemoveAllFeatureValuesFromCombinationCommand;
++
++/**
++ * Defines contract to handle @see RemoveAllFeatureValuesFromCombinationCommand
++ */
++interface RemoveAllFeatureValuesFromCombinationHandlerInterface
++{
++    /**
++     * @param RemoveAllFeatureValuesFromCombinationCommand $command
++     */
++    public function handle(RemoveAllFeatureValuesFromCombinationCommand $command): void;
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandlerInterface.php b/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandlerInterface.php
+new file mode 100644
+index 0000000000000..5c20dbfb9aefa
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/CommandHandler/SetCombinationFeatureValuesHandlerInterface.php
+@@ -0,0 +1,23 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureValueId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++
++/**
++ * Defines contract to handle @see SetCombinationFeatureValuesCommand
++ */
++interface SetCombinationFeatureValuesHandlerInterface
++{
++    /**
++     * @param SetCombinationFeatureValuesCommand $command
++     *
++     * @return FeatureValueId[]
++     */
++    public function handle(SetCombinationFeatureValuesCommand $command): array;
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/Query/GetCombinationFeatureValues.php b/src/Core/Domain/Product/Combination/FeatureValue/Query/GetCombinationFeatureValues.php
+new file mode 100644
+index 0000000000000..ab02406615ddc
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/Query/GetCombinationFeatureValues.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
++
++/**
++ * Get FeatureValue associated to a Combination
++ */
++class GetCombinationFeatureValues
++{
++    private CombinationId $combinationId;
++
++    protected ShopId $shopId;
++
++    public function __construct(int $combinationId, int $shopId)
++    {
++        $this->combinationId = new CombinationId($combinationId);
++        $this->shopId = new ShopId($shopId);
++    }
++
++    public function getCombinationId(): CombinationId
++    {
++        return $this->combinationId;
++    }
++
++    public function getShopId(): ShopId
++    {
++        return $this->shopId;
++    }
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandlerInterface.php b/src/Core/Domain/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandlerInterface.php
+new file mode 100644
+index 0000000000000..edba9b8b0439c
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/QueryHandler/GetCombinationFeatureValuesHandlerInterface.php
+@@ -0,0 +1,23 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query\GetCombinationFeatureValues;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult\CombinationFeatureValue;
++
++/**
++ * Defines contract to handle @see GetCombinationFeatureValues
++ */
++interface GetCombinationFeatureValuesHandlerInterface
++{
++    /**
++     * @param GetCombinationFeatureValues $query
++     *
++     * @return CombinationFeatureValue[]
++     */
++    public function handle(GetCombinationFeatureValues $query): array;
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/QueryResult/CombinationFeatureValue.php b/src/Core/Domain/Product/Combination/FeatureValue/QueryResult/CombinationFeatureValue.php
+new file mode 100644
+index 0000000000000..9fe4aca05c474
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/QueryResult/CombinationFeatureValue.php
+@@ -0,0 +1,85 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult;
++
++/**
++ * Transfers combination feature value data in query result
++ */
++class CombinationFeatureValue
++{
++    /**
++     * @var int
++     */
++    private $featureId;
++
++    /**
++     * @var int
++     */
++    private $featureValueId;
++
++    /**
++     * @var string[]
++     */
++    private $localizedValues;
++
++    /**
++     * @var bool
++     */
++    private $custom;
++
++    /**
++     * @param int $featureId
++     * @param int $featureValueId
++     * @param array $localizedValues
++     * @param bool $custom
++     */
++    public function __construct(
++        int $featureId,
++        int $featureValueId,
++        array $localizedValues,
++        bool $custom
++    ) {
++        $this->featureId = $featureId;
++        $this->featureValueId = $featureValueId;
++        $this->localizedValues = $localizedValues;
++        $this->custom = $custom;
++    }
++
++    /**
++     * @return int
++     */
++    public function getFeatureId(): int
++    {
++        return $this->featureId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getFeatureValueId(): int
++    {
++        return $this->featureValueId;
++    }
++
++    /**
++     * @return string[]
++     */
++    public function getLocalizedValues(): array
++    {
++        return $this->localizedValues;
++    }
++
++    /**
++     * @return bool
++     */
++    public function isCustom(): bool
++    {
++        return $this->custom;
++    }
++}
+diff --git a/src/Core/Domain/Product/Combination/FeatureValue/ValueObject/CombinationFeatureValue.php b/src/Core/Domain/Product/Combination/FeatureValue/ValueObject/CombinationFeatureValue.php
+new file mode 100644
+index 0000000000000..4451cf9b4c65b
+--- /dev/null
++++ b/src/Core/Domain/Product/Combination/FeatureValue/ValueObject/CombinationFeatureValue.php
+@@ -0,0 +1,77 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureId;
++use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureValueId;
++
++/**
++ * Transfers combination feature value data in command
++ */
++class CombinationFeatureValue
++{
++    /**
++     * @var FeatureId
++     */
++    private $featureId;
++
++    /**
++     * @var FeatureValueId|null
++     */
++    private $featureValueId;
++
++    /**
++     * @var string[]|null
++     */
++    private $localizedCustomValues;
++
++    /**
++     * @param int $featureId
++     * @param int|null $featureValueId
++     * @param array|null $localizedCustomValues
++     */
++    public function __construct(int $featureId, ?int $featureValueId = null, ?array $localizedCustomValues = null)
++    {
++        $this->featureId = new FeatureId($featureId);
++        $this->featureValueId = null !== $featureValueId ? new FeatureValueId($featureValueId) : null;
++        $this->localizedCustomValues = $localizedCustomValues;
++    }
++
++    /**
++     * @return FeatureId
++     */
++    public function getFeatureId(): FeatureId
++    {
++        return $this->featureId;
++    }
++
++    /**
++     * @return FeatureValueId|null
++     */
++    public function getFeatureValueId(): ?FeatureValueId
++    {
++        return $this->featureValueId;
++    }
++
++    /**
++     * @param FeatureValueId $featureValueId
++     */
++    public function setFeatureValueId(FeatureValueId $featureValueId): void
++    {
++        $this->featureValueId = $featureValueId;
++    }
++
++    /**
++     * @return string[]|null
++     */
++    public function getLocalizedCustomValues(): ?array
++    {
++        return $this->localizedCustomValues;
++    }
++}
+diff --git a/src/Core/FeatureFlag/FeatureFlagSettings.php b/src/Core/FeatureFlag/FeatureFlagSettings.php
+index bfb4750dbf672..bfc5b84989b64 100644
+--- a/src/Core/FeatureFlag/FeatureFlagSettings.php
++++ b/src/Core/FeatureFlag/FeatureFlagSettings.php
+@@ -39,4 +39,5 @@ class FeatureFlagSettings
+     public const FEATURE_FLAG_NEW_PRICING = 'new_pricing';
+     public const FEATURE_FLAG_EMAIL_BODY_TRANSLATION = 'email_body_translation';
+     public const FEATURE_FLAG_HOOK_MODULE_V2 = 'hook_module_v2';
++    public const FEATURE_FLAG_COMBINATION_FEATURE_VALUES = 'combination_feature_values';
+ }
+diff --git a/src/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilder.php b/src/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilder.php
+new file mode 100644
+index 0000000000000..cb1ade7c8983c
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilder.php
+@@ -0,0 +1,92 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination;
++
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\RemoveAllFeatureValuesFromCombinationCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++
++class CombinationFeatureValuesCommandsBuilder implements CombinationCommandsBuilderInterface
++{
++    /**
++     * {@inheritDoc}
++     */
++    public function buildCommands(CombinationId $combinationId, array $formData, ShopConstraint $singleShopConstraint): array
++    {
++        if (!isset($formData['features']['feature_collection'])) {
++            return [];
++        }
++
++        $featuresCollection = $formData['features']['feature_collection'];
++        if (empty($featuresCollection)) {
++            return [new RemoveAllFeatureValuesFromCombinationCommand($combinationId->getValue())];
++        }
++
++        $command = new SetCombinationFeatureValuesCommand(
++            $combinationId->getValue(),
++            $this->formatFeatureValues($featuresCollection)
++        );
++
++        return [$command];
++    }
++
++    /**
++     * @param array $featuresCollection
++     *
++     * @return array
++     */
++    private function formatFeatureValues(array $featuresCollection): array
++    {
++        $featureValues = [];
++        foreach ($featuresCollection as $featureData) {
++            if (empty($featureData['feature_id']) || empty($featureData['feature_values'])) {
++                continue;
++            }
++
++            $featureId = (int) $featureData['feature_id'];
++            foreach ($featureData['feature_values'] as $featureValueData) {
++                $formattedFeature = [
++                    'feature_id' => $featureId,
++                ];
++
++                if (isset($featureValueData['feature_value_id'])) {
++                    $formattedFeature['feature_value_id'] = (int) $featureValueData['feature_value_id'];
++                }
++                if ($this->hasCustomValues($featureValueData)) {
++                    $formattedFeature['custom_values'] = $featureValueData['custom_value'];
++                }
++
++                $featureValues[] = $formattedFeature;
++            }
++        }
++
++        return $featureValues;
++    }
++
++    /**
++     * @param array $featureValueData
++     *
++     * @return bool
++     */
++    private function hasCustomValues(array $featureValueData): bool
++    {
++        if (empty($featureValueData['custom_value']) || empty($featureValueData['is_custom'])) {
++            return false;
++        }
++
++        foreach ($featureValueData['custom_value'] as $localizedValue) {
++            if (!empty($localizedValue)) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
+index 5c0cbe202bf91..b77933e8f0044 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProvider.php
+@@ -8,8 +8,12 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
+-use PrestaShop\PrestaShop\Adapter\Shop\Context;
++use PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\FeaturesChoiceProvider;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query\GetCombinationFeatureValues;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult\CombinationFeatureValue;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Query\GetCombinationForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Query\GetCombinationSuppliers;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\QueryResult\CombinationForEditing;
+@@ -19,6 +23,8 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Supplier\QueryResult\AssociatedSuppliers;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Supplier\QueryResult\ProductSupplierForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime;
+ use PrestaShopBundle\Form\Extension\DisablingSwitchExtension;
+ 
+@@ -33,20 +39,49 @@ class CombinationFormDataProvider implements FormDataProviderInterface
+     private $queryBus;
+ 
+     /**
+-     * @var Context
++     * @var ShopContext
+      */
+     private $shopContext;
+ 
++    /**
++     * @var LanguageContext
++     */
++    private $languageContext;
++
++    /**
++     * @var FeaturesChoiceProvider
++     */
++    private $featuresChoiceProvider;
++
++    /**
++     * @var FeatureFlagStateCheckerInterface
++     */
++    private $featureFlagStateChecker;
++
++    /**
++     * @var array<int, string>|null
++     */
++    private $featureNames = null;
++
+     /**
+      * @param CommandBusInterface $queryBus
+-     * @param Context $shopContext
++     * @param ShopContext $shopContext
++     * @param LanguageContext $languageContext
++     * @param FeaturesChoiceProvider $featuresChoiceProvider
++     * @param FeatureFlagStateCheckerInterface $featureFlagStateChecker
+      */
+     public function __construct(
+         CommandBusInterface $queryBus,
+-        Context $shopContext
++        ShopContext $shopContext,
++        LanguageContext $languageContext,
++        FeaturesChoiceProvider $featuresChoiceProvider,
++        FeatureFlagStateCheckerInterface $featureFlagStateChecker
+     ) {
+         $this->queryBus = $queryBus;
+         $this->shopContext = $shopContext;
++        $this->languageContext = $languageContext;
++        $this->featuresChoiceProvider = $featuresChoiceProvider;
++        $this->featureFlagStateChecker = $featureFlagStateChecker;
+     }
+ 
+     /**
+@@ -64,7 +99,7 @@ public function getData($id): array
+ 
+         $suppliersData = $this->extractSuppliersData($combinationForEditing);
+ 
+-        return array_merge([
++        $data = array_merge([
+             'id' => $combinationId,
+             'product_id' => $combinationForEditing->getProductId(),
+             'cover_thumbnail_url' => $combinationForEditing->getCoverThumbnailUrl(),
+@@ -76,6 +111,73 @@ public function getData($id): array
+             'price_impact' => $this->extractPriceImpactData($combinationForEditing),
+             'references' => $this->extractReferencesData($combinationForEditing),
+         ], $suppliersData, ['images' => $combinationForEditing->getImageIds()]);
++
++        // The feature values section only exists when the feature flag is enabled (so does the matching
++        // form type), hence the data is only populated in that case to avoid feeding an absent field.
++        if ($this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_COMBINATION_FEATURE_VALUES)) {
++            $data['features'] = $this->extractFeatureValues($combinationId, $shopConstraint);
++        }
++
++        return $data;
++    }
++
++    /**
++     * @param int $combinationId
++     * @param ShopConstraint $shopConstraint
++     *
++     * @return array
++     */
++    private function extractFeatureValues(int $combinationId, ShopConstraint $shopConstraint): array
++    {
++        /** @var CombinationFeatureValue[] $featureValues */
++        $featureValues = $this->queryBus->handle(new GetCombinationFeatureValues($combinationId, $shopConstraint->getShopId()->getValue()));
++        if (empty($featureValues)) {
++            return [];
++        }
++
++        $featureNames = $this->getFeatureNames();
++        $combinationFeatureCollection = [];
++        foreach ($featureValues as $featureValue) {
++            if (!isset($combinationFeatureCollection[$featureValue->getFeatureId()])) {
++                $combinationFeatureCollection[$featureValue->getFeatureId()] = [
++                    'feature_id' => $featureValue->getFeatureId(),
++                    'feature_name' => $featureNames[$featureValue->getFeatureId()] ?? '',
++                    'feature_values' => [],
++                ];
++            }
++
++            $combinationFeatureValue = [
++                'feature_value_id' => $featureValue->getFeatureValueId(),
++                'feature_value_name' => $featureValue->getLocalizedValues()[$this->languageContext->getId()] ?? '',
++                'is_custom' => $featureValue->isCustom(),
++            ];
++            if ($featureValue->isCustom()) {
++                $combinationFeatureValue['custom_value'] = $featureValue->getLocalizedValues();
++            }
++
++            $combinationFeatureCollection[$featureValue->getFeatureId()]['feature_values'][] = $combinationFeatureValue;
++        }
++
++        return [
++            // Return 0-indexed array, not mapped by feature ID
++            'feature_collection' => array_values($combinationFeatureCollection),
++        ];
++    }
++
++    /**
++     * @return array<int, string>
++     */
++    private function getFeatureNames(): array
++    {
++        if (null === $this->featureNames) {
++            $this->featureNames = [];
++            $featureChoices = $this->featuresChoiceProvider->getChoices();
++            foreach ($featureChoices as $featureName => $featureId) {
++                $this->featureNames[$featureId] = $featureName;
++            }
++        }
++
++        return $this->featureNames;
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationFormType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationFormType.php
+index 47c0722e5a829..2221f13406691 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationFormType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationFormType.php
+@@ -8,6 +8,10 @@
+ 
+ namespace PrestaShopBundle\Form\Admin\Sell\Product\Combination;
+ 
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use PrestaShopBundle\Form\Admin\Sell\Product\Combination\Feature\CombinationFeaturesType;
+ use PrestaShopBundle\Form\Admin\Sell\Product\Details\ReferencesType;
+ use PrestaShopBundle\Form\Admin\Sell\Product\Options\ProductSupplierCollectionType;
+ use PrestaShopBundle\Form\Admin\Type\ImagePreviewType;
+@@ -28,18 +32,34 @@ class CombinationFormType extends TranslatorAwareType
+      */
+     private $combinationListener;
+ 
++    /**
++     * @var Configuration
++     */
++    private $configuration;
++
++    /**
++     * @var FeatureFlagStateCheckerInterface
++     */
++    private $featureFlagStateChecker;
++
+     /**
+      * @param TranslatorInterface $translator
+      * @param array $locales
+      * @param EventSubscriberInterface $combinationListener
++     * @param Configuration $configuration
++     * @param FeatureFlagStateCheckerInterface $featureFlagStateChecker
+      */
+     public function __construct(
+         TranslatorInterface $translator,
+         array $locales,
+-        EventSubscriberInterface $combinationListener
++        EventSubscriberInterface $combinationListener,
++        Configuration $configuration,
++        FeatureFlagStateCheckerInterface $featureFlagStateChecker
+     ) {
+         parent::__construct($translator, $locales);
+         $this->combinationListener = $combinationListener;
++        $this->configuration = $configuration;
++        $this->featureFlagStateChecker = $featureFlagStateChecker;
+     }
+ 
+     /**
+@@ -73,6 +93,12 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+         ;
+ 
++        if ($this->configuration->getBoolean('PS_FEATURE_FEATURE_ACTIVE')
++            && $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_COMBINATION_FEATURE_VALUES)
++        ) {
++            $builder->add('features', CombinationFeaturesType::class);
++        }
++
+         /*
+          * This listener adapts the content of the form based on the data, it can remove add or transforms some
+          * of the internal fields @see CombinationListener
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionItemType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionItemType.php
+new file mode 100644
+index 0000000000000..caa48b467befe
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionItemType.php
+@@ -0,0 +1,58 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\Product\Combination\Feature;
++
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\CollectionType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Validator\Constraints\NotBlank;
++
++class CombinationFeatureCollectionItemType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add('feature_id', HiddenType::class, [
++                'attr' => [
++                    'class' => 'combination-feature-id',
++                ],
++                'constraints' => [
++                    new NotBlank([
++                        'message' => $this->trans('Choose a feature', 'Admin.Catalog.Feature'),
++                    ]),
++                ],
++            ])
++            ->add('feature_name', HiddenType::class, [
++                'attr' => [
++                    'class' => 'combination-feature-name',
++                ],
++                'label' => false,
++            ])
++            ->add('feature_values', CollectionType::class, [
++                'entry_type' => CombinationFeatureValueType::class,
++                'required' => false,
++                'allow_add' => true,
++                'allow_delete' => true,
++                'prototype_name' => '__FEATURE_VALUE_INDEX__',
++                'label' => false,
++            ])
++        ;
++    }
++
++    /**
++     * Change block prefix for theme override.
++     *
++     * @return string
++     */
++    public function getBlockPrefix()
++    {
++        return 'combination_feature_collection_item';
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionType.php
+new file mode 100644
+index 0000000000000..826bbe1fba647
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureCollectionType.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\Product\Combination\Feature;
++
++use Symfony\Component\Form\Extension\Core\Type\CollectionType;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++class CombinationFeatureCollectionType extends CollectionType
++{
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        parent::configureOptions($resolver);
++        $resolver->setDefaults([
++            'entry_type' => CombinationFeatureCollectionItemType::class,
++            'required' => false,
++            'allow_add' => true,
++            'allow_delete' => true,
++            'prototype_name' => '__FEATURE_ITEM_INDEX__',
++            'label' => false,
++        ]);
++    }
++
++    /**
++     * Change block prefix for theme override.
++     *
++     * @return string
++     */
++    public function getBlockPrefix(): string
++    {
++        return 'combination_feature_collection';
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureValueType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureValueType.php
+new file mode 100644
+index 0000000000000..f0ab292856451
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeatureValueType.php
+@@ -0,0 +1,119 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\Product\Combination\Feature;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DefaultLanguage;
++use PrestaShopBundle\Form\Admin\Type\IconButtonType;
++use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
++use PrestaShopBundle\Form\Admin\Type\TranslatableType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormInterface;
++use Symfony\Component\Form\FormView;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++class CombinationFeatureValueType extends TranslatorAwareType
++{
++    /**
++     * {@inheritDoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add('feature_value_id', HiddenType::class, [
++                'attr' => [
++                    'class' => 'combination-feature-value-id',
++                ],
++            ])
++            ->add('feature_value_name', TextPreviewType::class, [
++                'row_attr' => [
++                    'class' => 'combination-feature-value-preview',
++                ],
++                'attr' => [
++                    'class' => 'combination-feature-value-name',
++                ],
++                'label' => false,
++            ])
++            ->add('is_custom', HiddenType::class, [
++                'attr' => [
++                    'class' => 'combination-is-custom-feature-value',
++                ],
++                'required' => false,
++                'empty_data' => false,
++            ])
++            ->add('custom_value', TranslatableType::class, [
++                'label' => false,
++                'required' => false,
++                'type' => TextType::class,
++                'row_attr' => [
++                    'class' => 'combination-custom-values-form-group',
++                ],
++                'constraints' => [
++                    new DefaultLanguage([
++                        'message' => $this->trans(
++                            'The field %field_name% is required at least in your default language.',
++                            'Admin.Notifications.Error',
++                            [
++                                '%field_name%' => sprintf(
++                                    '"%s"',
++                                    $this->trans('Custom value', 'Admin.Catalog.Feature')
++                                ),
++                            ]
++                        ),
++                        'groups' => 'custom_value',
++                    ]),
++                ],
++            ])
++            ->add('delete', IconButtonType::class, [
++                'icon' => 'delete',
++                'attr' => [
++                    'class' => 'tooltip-link combination-delete-feature-value pl-0 pr-0',
++                    'data-modal-title' => $this->trans('Delete item', 'Admin.Notifications.Warning'),
++                    'data-modal-message' => $this->trans('Are you sure you want to delete this item?', 'Admin.Notifications.Warning'),
++                    'data-modal-apply' => $this->trans('Delete', 'Admin.Actions'),
++                    'data-modal-cancel' => $this->trans('Cancel', 'Admin.Actions'),
++                    'data-toggle' => 'pstooltip',
++                    'data-original-title' => $this->trans('Delete', 'Admin.Actions'),
++                ],
++            ])
++        ;
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver->setDefaults([
++            'validation_groups' => function (FormInterface $form): array {
++                $formData = $form->getData();
++
++                return !empty($formData['is_custom']) ? ['Default', 'custom_value'] : ['Default'];
++            },
++        ]);
++    }
++
++    public function buildView(FormView $view, FormInterface $form, array $options)
++    {
++        parent::buildView($view, $form, $options);
++        $formData = $form->getData();
++
++        // When data is null the prototype is being rendered so the input is not custom and is not not custom either (schrodinger custom input)
++        $view->vars['is_custom'] = null === $formData ? null : !empty($formData['is_custom']);
++    }
++
++    /**
++     * Change block prefix for theme override.
++     *
++     * @return string
++     */
++    public function getBlockPrefix(): string
++    {
++        return 'combination_feature_value';
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeaturesType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeaturesType.php
+new file mode 100644
+index 0000000000000..72250dd46a343
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/Feature/CombinationFeaturesType.php
+@@ -0,0 +1,109 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\Product\Combination\Feature;
++
++use PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\FeaturesChoiceProvider;
++use PrestaShopBundle\Form\Admin\Type\IconButtonType;
++use PrestaShopBundle\Form\Admin\Type\TranslatableType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class CombinationFeaturesType extends TranslatorAwareType
++{
++    /**
++     * @var FeaturesChoiceProvider
++     */
++    private $featuresChoiceProvider;
++
++    /**
++     * @var UrlGeneratorInterface
++     */
++    private $urlGenerator;
++
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++        FeaturesChoiceProvider $featuresChoiceProvider,
++        UrlGeneratorInterface $urlGenerator
++    ) {
++        parent::__construct($translator, $locales);
++        $this->featuresChoiceProvider = $featuresChoiceProvider;
++        $this->urlGenerator = $urlGenerator;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $features = array_merge([
++            $this->trans('Choose a feature', 'Admin.Catalog.Feature') => 0,
++        ], $this->featuresChoiceProvider->getChoices());
++
++        $builder
++            ->add('feature_id', ChoiceType::class, [
++                'empty_data' => 0,
++                'choices' => $features,
++                'label' => $this->trans('Feature', 'Admin.Catalog.Feature'),
++                'attr' => [
++                    'class' => 'combination-feature-selector',
++                ],
++                'external_link' => [
++                    'text' => $this->trans('[1]Manage features[/1]', 'Admin.Catalog.Feature'),
++                    'href' => $this->urlGenerator->generate('admin_features_index'),
++                    'position' => 'prepend',
++                ],
++            ])
++            ->add('feature_value_id', ChoiceType::class, [
++                'empty_data' => 0,
++                'placeholder' => $this->trans('Choose a value or provide a customized one', 'Admin.Catalog.Feature'),
++                'label' => false,
++                'disabled' => true,
++                'attr' => [
++                    'data-placeholder-label' => $this->trans('Choose a value or provide a customized one', 'Admin.Catalog.Feature'),
++                    'data-custom-value-label' => $this->trans('Add a customized value', 'Admin.Catalog.Feature'),
++                    'class' => 'combination-feature-value-selector',
++                ],
++            ])
++            ->add('custom_value', TranslatableType::class, [
++                'label' => false,
++                'required' => false,
++                'type' => TextType::class,
++                'attr' => [
++                    'class' => 'combination-new-custom-values d-none',
++                ],
++            ])
++            ->add('add_feature', IconButtonType::class, [
++                'label' => $this->trans('Add a feature', 'Admin.Catalog.Feature'),
++                'icon' => 'add_circle',
++                'attr' => [
++                    'class' => 'btn-outline-secondary combination-feature-value-add-button',
++                ],
++                'disabled' => true,
++            ])
++            ->add('feature_collection', CombinationFeatureCollectionType::class)
++        ;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        parent::configureOptions($resolver);
++        $resolver->setDefaults([
++            'form_theme' => '@PrestaShop/Admin/Sell/Catalog/Product/FormTheme/combination_features.html.twig',
++        ]);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/product/_combination_feature_value.yml b/src/PrestaShopBundle/Resources/config/services/adapter/product/_combination_feature_value.yml
+new file mode 100644
+index 0000000000000..8d69c31def37a
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/product/_combination_feature_value.yml
+@@ -0,0 +1,16 @@
++services:
++  _defaults:
++    public: true
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\CommandHandler\SetCombinationFeatureValuesHandler: ~
++
++  PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\CommandHandler\RemoveAllFeatureValuesFromCombinationHandler: ~
++
++  PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\QueryHandler\GetCombinationFeatureValuesHandler: ~
++
++  PrestaShop\PrestaShop\Adapter\Product\Combination\FeatureValue\Update\CombinationFeatureValueUpdater:
++    arguments:
++      $connection: '@doctrine.dbal.default_connection'
++      $dbPrefix: '%database_prefix%'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index ca8f59e7592fe..c5e345e2861aa 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -557,6 +557,8 @@ services:
+   PrestaShopBundle\Form\Admin\Sell\Product\Combination\CombinationFormType:
+     arguments:
+       $combinationListener: '@PrestaShopBundle\Form\Admin\Sell\Product\EventListener\CombinationListener'
++      $configuration: '@prestashop.adapter.legacy.configuration'
++      $featureFlagStateChecker: '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
+ 
+   PrestaShopBundle\Form\Admin\Sell\Product\Combination\CombinationPriceImpactType:
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
+index bb8105df0164f..868fe793e8d58 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
+@@ -72,6 +72,9 @@ services:
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationImagesCommandsBuilder:
+     tags: [ 'core.combination_command_builder' ]
+ 
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationFeatureValuesCommandsBuilder:
++    tags: [ 'core.combination_command_builder' ]
++
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\UpdateCombinationCommandsBuilder:
+     tags: [ 'core.combination_command_builder' ]
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+index c2742383d6de8..00cdc83ae3c96 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+@@ -197,9 +197,9 @@ services:
+ 
+   prestashop.core.form.identifiable_object.data_provider.combination_form_data_provider:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\CombinationFormDataProvider'
++    autowire: true
+     arguments:
+-      - '@prestashop.core.query_bus'
+-      - '@prestashop.adapter.shop.context'
++      $featuresChoiceProvider: '@prestashop.adapter.form.choice_provider.features_choice_provider'
+ 
+   prestashop.core.form.identifiable_object.data_provider.bulk_combination_form_data_provider:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\BulkCombinationFormDataProvider'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/combination_features.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/combination_features.html.twig
+new file mode 100644
+index 0000000000000..f95f1f116a492
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/combination_features.html.twig
+@@ -0,0 +1,110 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{%- block combination_features_row -%}
++  <div class="form-group">
++    <h3>{{ 'Features'|trans({}, 'Admin.Catalog.Feature') }}</h3>
++
++    <p class="subtitle">
++      {{ 'Feature values added here override the product ones, feature by feature. Any feature you leave out keeps its product-level value.'|trans({}, 'Admin.Catalog.Feature') }}
++    </p>
++
++    {{ form_errors(form) }}
++    <div class="combination-product-features-controls">
++      {{ form_widget(form.feature_id) }}
++      <div class="combination-feature-value-spinner d-none">
++        <div class="spinner"></div>
++        {{ 'Loading feature values...'|trans({}, 'Admin.Catalog.Feature') }}
++      </div>
++      {{ form_widget(form.feature_value_id) }}
++      {{ form_widget(form.custom_value) }}
++      {{ form_widget(form.add_feature) }}
++    </div>
++    {# Manually add the external link block because we don't use form_row and this way it's under the whole block #}
++    {% with {external_link: form.feature_id.vars.external_link} %}
++      {{- block('form_external_link') -}}
++    {% endwith %}
++
++    {{- block('form_rows') -}}
++  </div>
++{%- endblock -%}
++
++{# Override feature collection template to remove the label and init the table #}
++{%- block combination_feature_collection_row -%}
++  {# We put prototype name in a data attribute, so the JS code can get it dynamically #}
++  {%- set attr = attr|merge({'data-prototype': form_row(prototype), 'data-prototype-name': prototype.vars.name}) -%}
++  {%- set attr = attr|merge({class: (attr.class|default('') ~ ' table combination-feature-values-table-collection')|trim}) -%}
++
++  {# Hide table if content is empty #}
++  {% if form.vars.value is empty %}
++    {%- set attr = attr|merge({class: (attr.class|default('') ~ ' d-none')|trim}) -%}
++  {% endif %}
++
++  <table {{ block('widget_attributes') }} data-row-index="{{ form.children|length }}">
++    <thead class="thead-default">
++    <tr>
++      <th>{{ 'Feature'|trans({}, 'Admin.Catalog.Feature') }}</th>
++      <th>{{ 'Feature value'|trans({}, 'Admin.Catalog.Feature') }}</th>
++      <th></th>
++    </tr>
++    </thead>
++    <tbody>
++    {{- block('form_rows') -}}
++    </tbody>
++  </table>
++{%- endblock -%}
++
++{%- block combination_feature_collection_item_row -%}
++  {# Feature inputs are rendered even if they are hidden types, and hidden via CSS, so their data is still submitted #}
++  {% set featureId = form.feature_id.vars.value %}
++  {%- set attr = attr|merge({class: (attr.class|default('') ~ ' combination-product-feature-collection')|trim, 'feature-id': featureId}) -%}
++  {# We put prototype name in a data attribute, so the JS code can get it dynamically #}
++  {%- set attr = attr|merge({'data-prototype': form_row(form.feature_values.vars.prototype), 'data-prototype-name': form.feature_values.vars.prototype.vars.name}) -%}
++  <tr {{ block('widget_attributes') }} data-row-index="{{ form.feature_values|length }}">
++    <td colspan="3">
++      {{ form_widget(form.feature_id) }}
++      {{ form_widget(form.feature_name) }}
++    </td>
++  </tr>
++  {# The children of the collection are rendered as TR rows in the same table, we only pass the data from parent #}
++  {{- block('form_rows') -}}
++{%- endblock -%}
++
++{%- block combination_feature_value_row -%}
++  {# Get feature values from the ancestor #}
++  {% set featureCollectionParent = form.parent.parent %}
++  {% set featureId = featureCollectionParent.feature_id.vars.value %}
++  {% set featureName = featureCollectionParent.feature_name.vars.value %}
++  <tr class="combination-product-feature-value" feature-id="{{ featureId }}">
++    <td class="combination-feature-column">
++      {{ featureName }}
++    </td>
++    <td>
++      {% if is_custom is null %}
++        {# Rendering the prototype we keep everything visible by default #}
++        {% set featureValueAttributes = {} %}
++        {% set customValueAttributes = {} %}
++      {% elseif is_custom %}
++        {# Hide feature value name when feature value is custom #}
++        {% set featureValueAttributes = {row_attr: {class: (form.feature_value_name.vars.row_attr.class|default('') ~ ' d-none')|trim}} %}
++        {% set customValueAttributes = {} %}
++      {% else %}
++        {# Hide custom inputs when feature value is not custom #}
++        {% set featureValueAttributes = {} %}
++        {% set customValueAttributes = {row_attr: {class: (form.custom_value.vars.row_attr.class|default('') ~ ' d-none')|trim}} %}
++      {% endif %}
++      {{ form_row(form.feature_value_name, form.feature_value_name.vars.attr|merge(featureValueAttributes)) }}
++      {{ form_row(form.custom_value, form.custom_value.vars.attr|merge(customValueAttributes)) }}
++      {{ form_row(form.feature_value_id) }}
++      {{ form_row(form.is_custom) }}
++    </td>
++    <td class="feature-actions">
++      {{ form_widget(form.delete) }}
++
++      {# Not ideal place but still we render the rest in case some inputs were added #}
++      {{ form_rest(form) }}
++    </td>
++  </tr>
++{%- endblock -%}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureValuesFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureValuesFeatureContext.php
+new file mode 100644
+index 0000000000000..c994a1ff95492
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureValuesFeatureContext.php
+@@ -0,0 +1,213 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination;
++
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureValueRepository;
++use PrestaShop\PrestaShop\Core\Domain\Feature\ValueObject\FeatureValueId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\RemoveAllFeatureValuesFromCombinationCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query\GetCombinationFeatureValues;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult\CombinationFeatureValue;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\DuplicateFeatureValueAssociationException;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidAssociatedFeatureException;
++use RuntimeException;
++use Tests\Integration\Behaviour\Features\Context\Domain\Product\AbstractProductFeatureContext;
++
++class UpdateCombinationFeatureValuesFeatureContext extends AbstractProductFeatureContext
++{
++    /**
++     * @When I set to combination :combinationReference the following feature values:
++     *
++     * @param string $combinationReference
++     * @param TableNode $table
++     */
++    public function setCombinationFeatureValues(string $combinationReference, TableNode $table): void
++    {
++        $featuresData = $table->getColumnsHash();
++        $combinationFeatures = [];
++        foreach ($featuresData as $featuresDatum) {
++            $combinationFeature = ['feature_id' => $this->referenceToId($featuresDatum['feature'])];
++            if (!empty($featuresDatum['feature_value'])) {
++                $combinationFeature['feature_value_id'] = $this->referenceToId($featuresDatum['feature_value']);
++            }
++            if (!empty($featuresDatum['custom_values'])) {
++                $combinationFeature['custom_values'] = $this->localizeByCell($featuresDatum['custom_values']);
++            }
++
++            $combinationFeatures[] = $combinationFeature;
++        }
++        $command = new SetCombinationFeatureValuesCommand($this->referenceToId($combinationReference), $combinationFeatures);
++        try {
++            $featureIds = $this->getCommandBus()->handle($command);
++            if (count($featureIds) !== count($combinationFeatures)) {
++                throw new RuntimeException(sprintf(
++                    'Incorrect number of feature ids returned for combination %s, expected %d but got %d instead',
++                    $combinationReference,
++                    count($featureIds),
++                    count($combinationFeatures)
++                ));
++            }
++            $this->storeCreatedFeatureValuesReferences($featureIds, $featuresData);
++        } catch (ProductException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I remove all feature values from combination :combinationReference
++     *
++     * @param string $combinationReference
++     */
++    public function removeAllFeatureValuesFromCombination(string $combinationReference): void
++    {
++        $this->getCommandBus()->handle(new RemoveAllFeatureValuesFromCombinationCommand($this->referenceToId($combinationReference)));
++    }
++
++    /**
++     * @param FeatureValueId[] $featureValueIds
++     * @param array $featureValuesData
++     */
++    private function storeCreatedFeatureValuesReferences(array $featureValueIds, array $featureValuesData): void
++    {
++        /** @var FeatureValueRepository $featureValueRepository */
++        $featureValueRepository = $this->getContainer()->get(FeatureValueRepository::class);
++        foreach ($featureValueIds as $featureValueId) {
++            $featureValue = $featureValueRepository->get($featureValueId);
++            foreach ($featureValuesData as $featureValueDatum) {
++                if (empty($featureValueDatum['custom_reference'])
++                    || $this->getSharedStorage()->exists($featureValueDatum['custom_reference'])) {
++                    continue;
++                }
++
++                $featureId = $this->referenceToId($featureValueDatum['feature']);
++                if ((int) $featureValue->id_feature !== $featureId) {
++                    continue;
++                }
++
++                $localizedValues = $this->localizeByCell($featureValueDatum['custom_values']);
++                if ($featureValue->value === $localizedValues) {
++                    $this->getSharedStorage()->set($featureValueDatum['custom_reference'], $featureValueId->getValue());
++                    continue 2;
++                }
++            }
++        }
++    }
++
++    /**
++     * @Then combination :combinationReference should have following feature values:
++     *
++     * @param string $combinationReference
++     * @param TableNode $table
++     */
++    public function assertCombinationFeatureValues(string $combinationReference, TableNode $table): void
++    {
++        $query = new GetCombinationFeatureValues(
++            $this->referenceToId($combinationReference),
++            $this->getDefaultShopId()
++        );
++        /** @var CombinationFeatureValue[] $combinationFeatureValues */
++        $combinationFeatureValues = $this->getQueryBus()->handle($query);
++
++        $expectedFeatureValues = $table->getColumnsHash();
++        if (count($combinationFeatureValues) !== count($expectedFeatureValues)) {
++            throw new RuntimeException(sprintf(
++                'Incorrect number of feature values for combination %s, expected %d but got %d instead',
++                $combinationReference,
++                count($expectedFeatureValues),
++                count($combinationFeatureValues)
++            ));
++        }
++
++        foreach ($expectedFeatureValues as $key => $expectedFeatureValue) {
++            // If a new custom value is found (e.g. after a duplication) store its new reference and use
++            // it as the expected feature value reference for the assertion loop below.
++            if (!empty($expectedFeatureValue['new_feature_value']) && !empty($expectedFeatureValue['custom_values'])) {
++                $localizedValues = $this->localizeByCell($expectedFeatureValue['custom_values']);
++                foreach ($combinationFeatureValues as $combinationFeatureValue) {
++                    if ($localizedValues === $combinationFeatureValue->getLocalizedValues()) {
++                        $this->getSharedStorage()->set($expectedFeatureValue['new_feature_value'], $combinationFeatureValue->getFeatureValueId());
++                        $expectedFeatureValues[$key]['feature_value'] = $expectedFeatureValue['new_feature_value'];
++                    }
++                }
++            }
++        }
++
++        foreach ($expectedFeatureValues as $expectedFeatureValue) {
++            $foundMatchingFeatureValue = false;
++            $expectedFeatureId = $this->referenceToId($expectedFeatureValue['feature']);
++            $expectedFeatureValueId = $this->referenceToId($expectedFeatureValue['feature_value']);
++            foreach ($combinationFeatureValues as $combinationFeatureValue) {
++                if ($expectedFeatureId !== $combinationFeatureValue->getFeatureId()) {
++                    continue;
++                }
++                if ($expectedFeatureValueId !== $combinationFeatureValue->getFeatureValueId()) {
++                    continue;
++                }
++                $foundMatchingFeatureValue = true;
++                if (!empty($expectedFeatureValue['custom_values'])) {
++                    Assert::assertTrue($combinationFeatureValue->isCustom());
++                    $localizedValues = $this->localizeByCell($expectedFeatureValue['custom_values']);
++                    Assert::assertEquals($localizedValues, $combinationFeatureValue->getLocalizedValues());
++                } else {
++                    Assert::assertFalse($combinationFeatureValue->isCustom());
++                }
++            }
++            if (!$foundMatchingFeatureValue) {
++                throw new RuntimeException(sprintf(
++                    'Could not find feature value %s from feature %s in combination %s',
++                    $expectedFeatureValue['feature_value'],
++                    $expectedFeatureValue['feature'],
++                    $combinationReference
++                ));
++            }
++        }
++    }
++
++    /**
++     * @Then combination :combinationReference should have no feature values
++     *
++     * @param string $combinationReference
++     */
++    public function assertCombinationHasNoFeatureValues(string $combinationReference): void
++    {
++        $query = new GetCombinationFeatureValues(
++            $this->referenceToId($combinationReference),
++            $this->getDefaultShopId()
++        );
++        /** @var CombinationFeatureValue[] $combinationFeatureValues */
++        $combinationFeatureValues = $this->getQueryBus()->handle($query);
++
++        if (!empty($combinationFeatureValues)) {
++            throw new RuntimeException(sprintf(
++                'Expected combination %s to have no feature values but got %d instead',
++                $combinationReference,
++                count($combinationFeatureValues)
++            ));
++        }
++    }
++
++    /**
++     * @Then I should get an error that a combination feature can only be associated once
++     */
++    public function assertDuplicateException(): void
++    {
++        $this->assertLastErrorIs(DuplicateFeatureValueAssociationException::class);
++    }
++
++    /**
++     * @Then I should get an error that a combination feature value cannot be associated to another feature
++     */
++    public function assertInvalidFeatureAssociation(): void
++    {
++        $this->assertLastErrorIs(InvalidAssociatedFeatureException::class);
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Combination/update_combination_feature_values.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Combination/update_combination_feature_values.feature
+new file mode 100644
+index 0000000000000..e66d726588abb
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Combination/update_combination_feature_values.feature
+@@ -0,0 +1,226 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s product --tags update-combination-feature-values
++@restore-products-before-feature
++@restore-languages-after-feature
++@clear-cache-before-feature
++@product-combination
++@update-combination-feature-values
++Feature: Update product combination feature values from Back Office (BO)
++  As a BO user
++  I need to be able to update feature values of a product combination from BO
++
++  Background:
++    Given language "en" with locale "en-US" exists
++    And language "fr" with locale "fr-FR" exists
++    And language with iso code "en" is the default one
++    And shop "shop1" with name "test_shop" exists
++    And attribute group "Color" named "Color" in en language exists
++    And attribute "Blue" named "Blue" in en language exists
++    And attribute "Red" named "Red" in en language exists
++    When I create product feature "element" with specified properties:
++      | name[en-US]      | Nature Element |
++      | associated shops | shop1          |
++    When I create feature value "fire" for feature "element" with following properties:
++      | value[en-US] | Fire |
++      | value[fr-FR] | Feu  |
++    And I create feature value "water" for feature "element" with following properties:
++      | value[en-US] | Water |
++      | value[fr-FR] | Eau   |
++    When I create product feature "emotion" with specified properties:
++      | name[en-US]      | Emotion |
++      | associated shops | shop1   |
++    When I create feature value "joy" for feature "emotion" with following properties:
++      | value[en-US] | Joy  |
++      | value[fr-FR] | Joie |
++    When I create feature value "anger" for feature "emotion" with following properties:
++      | value[en-US] | Anger  |
++      | value[fr-FR] | Colère |
++
++  Scenario: I can associate predefined feature values to a combination
++    Given I add product "shirt" with following information:
++      | name[en-US] | Magic shirt  |
++      | type        | combinations |
++    And I generate combinations for product shirt using following attributes:
++      | Color | [Blue,Red] |
++    And product "shirt" should have following combinations:
++      | id reference | combination name | reference | attributes   | impact on price | quantity | is default |
++      | shirtBlue    | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++      | shirtRed     | Color - Red      |           | [Color:Red]  | 0               | 0        | false      |
++    Then combination "shirtBlue" should have no feature values
++    When I set to combination "shirtBlue" the following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++      | emotion | anger         |
++      | element | fire          |
++    Then combination "shirtBlue" should have following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++      | emotion | anger         |
++      | element | fire          |
++    # Other combinations are not impacted
++    And combination "shirtRed" should have no feature values
++
++  Scenario: I can create and edit custom feature values on a combination
++    Given I add product "book" with following information:
++      | name[en-US] | Magic book   |
++      | type        | combinations |
++    And I generate combinations for product book using following attributes:
++      | Color | [Blue] |
++    And product "book" should have following combinations:
++      | id reference | combination name | reference | attributes   | impact on price | quantity | is default |
++      | bookBlue     | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    Then combination "bookBlue" should have no feature values
++    When I set to combination "bookBlue" the following feature values:
++      | feature | feature_value | custom_values                 | custom_reference |
++      | emotion | anger         |                               |                  |
++      | element |               | en-US:Darkness;fr-FR:Ténèbres | darkness         |
++    Then combination "bookBlue" should have following feature values:
++      | feature | feature_value | custom_values                 |
++      | emotion | anger         |                               |
++      | element | darkness      | en-US:Darkness;fr-FR:Ténèbres |
++    And feature value "darkness" should be associated to feature "element"
++    When I set to combination "bookBlue" the following feature values:
++      | feature | feature_value | custom_values              |
++      | emotion | anger         |                            |
++      | element | darkness      | en-US:Shadows;fr-FR:Ombres |
++    Then combination "bookBlue" should have following feature values:
++      | feature | feature_value | custom_values              |
++      | emotion | anger         |                            |
++      | element | darkness      | en-US:Shadows;fr-FR:Ombres |
++
++  Scenario: I remove a custom feature value from a combination it is cleaned in the DB
++    Given I add product "candyBook" with following information:
++      | name[en-US] | Candy book   |
++      | type        | combinations |
++    And I generate combinations for product candyBook using following attributes:
++      | Color | [Blue] |
++    And product "candyBook" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | candyBookBlue  | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    When I set to combination "candyBookBlue" the following feature values:
++      | feature | feature_value | custom_values            | custom_reference |
++      | emotion | joy           |                          |                  |
++      | element |               | en-US:Candy;fr-FR:Bonbon | candy            |
++    Then combination "candyBookBlue" should have following feature values:
++      | feature | feature_value | custom_values            |
++      | emotion | joy           |                          |
++      | element | candy         | en-US:Candy;fr-FR:Bonbon |
++    And feature value "candy" should be associated to feature "element"
++    When I set to combination "candyBookBlue" the following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++    Then combination "candyBookBlue" should have following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++    And feature value "candy" should not exist
++
++  Scenario: I can remove all feature values from a combination
++    Given I add product "lightBook" with following information:
++      | name[en-US] | Light book   |
++      | type        | combinations |
++    And I generate combinations for product lightBook using following attributes:
++      | Color | [Blue] |
++    And product "lightBook" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | lightBookBlue  | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    When I set to combination "lightBookBlue" the following feature values:
++      | feature | feature_value | custom_values             | custom_reference |
++      | emotion | joy           |                           |                  |
++      | element |               | en-US:Light;fr-FR:Lumière | light            |
++    Then combination "lightBookBlue" should have following feature values:
++      | feature | feature_value | custom_values             |
++      | emotion | joy           |                           |
++      | element | light         | en-US:Light;fr-FR:Lumière |
++    When I remove all feature values from combination "lightBookBlue"
++    Then combination "lightBookBlue" should have no feature values
++    And feature value "light" should not exist
++
++  Scenario: I can not set the same feature value twice on a combination
++    Given I add product "twiceBook" with following information:
++      | name[en-US] | Twice book   |
++      | type        | combinations |
++    And I generate combinations for product twiceBook using following attributes:
++      | Color | [Blue] |
++    And product "twiceBook" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | twiceBookBlue  | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    When I set to combination "twiceBookBlue" the following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++      | emotion | joy           |
++    Then I should get an error that a combination feature can only be associated once
++    And combination "twiceBookBlue" should have no feature values
++
++  Scenario: I can not set a value to another feature on a combination
++    Given I add product "wrongBook" with following information:
++      | name[en-US] | Wrong book   |
++      | type        | combinations |
++    And I generate combinations for product wrongBook using following attributes:
++      | Color | [Blue] |
++    And product "wrongBook" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | wrongBookBlue  | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    When I set to combination "wrongBookBlue" the following feature values:
++      | feature | feature_value |
++      | element | joy           |
++    Then I should get an error that a combination feature value cannot be associated to another feature
++    And combination "wrongBookBlue" should have no feature values
++
++  Scenario: Saving product feature values does not delete combination custom feature values
++    Given I add product "sharedBook" with following information:
++      | name[en-US] | Shared book  |
++      | type        | combinations |
++    And I generate combinations for product sharedBook using following attributes:
++      | Color | [Blue] |
++    And product "sharedBook" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | sharedBookBlue | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    When I set to combination "sharedBookBlue" the following feature values:
++      | feature | feature_value | custom_values                | custom_reference |
++      | element |               | en-US:Shared;fr-FR:Partagé   | sharedCustom     |
++    Then combination "sharedBookBlue" should have following feature values:
++      | feature | feature_value | custom_values              |
++      | element | sharedCustom  | en-US:Shared;fr-FR:Partagé |
++    And feature value "sharedCustom" should be associated to feature "element"
++    # Saving the product-level features triggers a global orphan custom-value cleanup;
++    # the combination custom value must survive (regression: it used to be deleted)
++    When I set to product "sharedBook" the following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++    Then feature value "sharedCustom" should be associated to feature "element"
++    And combination "sharedBookBlue" should have following feature values:
++      | feature | feature_value | custom_values              |
++      | element | sharedCustom  | en-US:Shared;fr-FR:Partagé |
++
++  Scenario: A custom feature value shared by a product and its combination is only cleaned when removed from both
++    Given I add product "linkBook" with following information:
++      | name[en-US] | Link book    |
++      | type        | combinations |
++    And I generate combinations for product linkBook using following attributes:
++      | Color | [Blue] |
++    And product "linkBook" should have following combinations:
++      | id reference | combination name | reference | attributes   | impact on price | quantity | is default |
++      | linkBookBlue | Color - Blue     |           | [Color:Blue] | 0               | 0        | true       |
++    # A custom value is first created at product level
++    When I set to product "linkBook" the following feature values:
++      | feature | feature_value | custom_values          | custom_reference |
++      | element |               | en-US:Linked;fr-FR:Lié | linked           |
++    Then feature value "linked" should be associated to feature "element"
++    # The very same custom value is then also associated to the combination
++    When I set to combination "linkBookBlue" the following feature values:
++      | feature | feature_value |
++      | element | linked        |
++    Then combination "linkBookBlue" should have following feature values:
++      | feature | feature_value | custom_values          |
++      | element | linked        | en-US:Linked;fr-FR:Lié |
++    # Removing it from the product must NOT delete it: the combination still references it
++    When I set to product "linkBook" the following feature values:
++      | feature | feature_value |
++      | emotion | joy           |
++    Then feature value "linked" should be associated to feature "element"
++    And combination "linkBookBlue" should have following feature values:
++      | feature | feature_value | custom_values          |
++      | element | linked        | en-US:Linked;fr-FR:Lié |
++    # Removing it from the combination too leaves it orphaned, so it is finally cleaned up
++    When I remove all feature values from combination "linkBookBlue"
++    Then combination "linkBookBlue" should have no feature values
++    And feature value "linked" should not exist
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+index 577fd47c66921..ebd4f538208b9 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+@@ -609,6 +609,46 @@ Feature: Duplicate product from Back Office (BO).
+       | element |               | darknessCopy      | en-US:Darkness;fr-FR:Ténèbres |
+     And darkness and darknessCopy have different values
+ 
++  Scenario: I duplicate a product its combination feature values are copied
++    Given I create product feature "combiElement" with specified properties:
++      | name[en-US]      | Combi Element |
++      | associated shops | shop1         |
++    And I create feature value "water" for feature "combiElement" with following properties:
++      | value[en-US]     | Water |
++      | value[fr-FR]     | Eau   |
++      | associated shops | shop1 |
++    And I add product "magicShirt" with following information:
++      | name[en-US] | Magic shirt  |
++      | type        | combinations |
++    And I generate combinations for product magicShirt using following attributes:
++      | Color | [Red,Blue] |
++    And product "magicShirt" should have following combinations:
++      | id reference   | combination name | reference | attributes   | impact on price | quantity | is default |
++      | magicShirtRed  | Color - Red      |           | [Color:Red]  | 0               | 0        | true       |
++      | magicShirtBlue | Color - Blue     |           | [Color:Blue] | 0               | 0        | false      |
++    # Associate a predefined and a custom feature value to one combination only
++    When I set to combination "magicShirtRed" the following feature values:
++      | feature      | feature_value | custom_values           | custom_reference |
++      | combiElement | water         |                         |                  |
++      | combiElement |               | en-US:Magma;fr-FR:Magma | magma            |
++    Then combination "magicShirtRed" should have following feature values:
++      | feature      | feature_value | custom_values           |
++      | combiElement | water         |                         |
++      | combiElement | magma         | en-US:Magma;fr-FR:Magma |
++    When I duplicate product magicShirt to a magicShirtCopy
++    Then product "magicShirtCopy" should have following combinations:
++      | id reference       | combination name | reference | attributes   | impact on price | quantity | is default |
++      | magicShirtCopyRed  | Color - Red      |           | [Color:Red]  | 0               | 0        | true       |
++      | magicShirtCopyBlue | Color - Blue     |           | [Color:Blue] | 0               | 0        | false      |
++    # The predefined value is shared, the custom one is duplicated into a brand new value
++    And combination "magicShirtCopyRed" should have following feature values:
++      | feature      | feature_value | new_feature_value | custom_values           |
++      | combiElement | water         |                   |                         |
++      | combiElement |               | magmaCopy         | en-US:Magma;fr-FR:Magma |
++    And magma and magmaCopy have different values
++    # The combination without feature values stays empty
++    And combination "magicShirtCopyBlue" should have no feature values
++
+   Scenario: I duplicate a product with images they are correctly duplicated and associated
+     When I add product "productWithCombinationAndImages" with following information:
+       | name[en-US] | Jar of sand  |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 267bbc0aca74b..47eb2ccc04636 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -586,6 +586,7 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchCombinationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchProductCombinationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureValuesFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationImagesFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationSuppliersFeatureContext
+diff --git a/tests/Integration/Classes/GetFrontFeaturesStaticTest.php b/tests/Integration/Classes/GetFrontFeaturesStaticTest.php
+new file mode 100644
+index 0000000000000..012a502a1cc92
+--- /dev/null
++++ b/tests/Integration/Classes/GetFrontFeaturesStaticTest.php
+@@ -0,0 +1,191 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Classes;
++
++use Configuration;
++use Db;
++use Feature;
++use FeatureValue;
++use Language;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagManager;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use Product;
++use Shop;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Tests\Integration\Utility\ContextMockerTrait;
++use Tests\Resources\Resetter\FeatureFlagResetter;
++
++/**
++ * Covers the front-office feature retrieval that merges product-level and combination-level
++ * feature values. The merge is gated by the "combination_feature_values" feature flag: when the
++ * flag is off Product::getFrontFeaturesStatic() keeps its historical product-only behavior, and
++ * when it is on the combination values take precedence over the product ones for a shared feature.
++ */
++class GetFrontFeaturesStaticTest extends KernelTestCase
++{
++    use ContextMockerTrait;
++
++    private const ID_PRODUCT = 999001;
++    private const ID_PRODUCT_ATTRIBUTE = 999001;
++
++    /**
++     * @var int
++     */
++    private $langId;
++
++    /**
++     * @var int
++     */
++    private $shopId;
++
++    /**
++     * @var int
++     */
++    private $featureId;
++
++    /**
++     * @var FeatureFlagManager
++     */
++    private $featureFlagManager;
++
++    public static function tearDownAfterClass(): void
++    {
++        parent::tearDownAfterClass();
++        FeatureFlagResetter::resetFeatureFlags();
++    }
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        self::mockContext();
++
++        // Init Symfony so the container is reachable: Product::getFrontFeaturesStatic resolves the
++        // feature flag checker through ContainerFinder.
++        self::bootKernel();
++        // Global var read by SymfonyContainer::getInstance() / ContainerFinder.
++        global $kernel;
++        $kernel = self::$kernel;
++
++        $this->featureFlagManager = self::getContainer()->get(FeatureFlagManager::class);
++
++        $this->langId = (int) Configuration::get('PS_LANG_DEFAULT');
++        $this->shopId = (int) Shop::getContextShopID() ?: 1;
++        Configuration::updateValue('PS_FEATURE_FEATURE_ACTIVE', 1);
++
++        $this->createFixtures();
++    }
++
++    protected function tearDown(): void
++    {
++        $this->cleanFixtures();
++        $this->setCombinationFeatureValuesEnabled(false);
++        Product::resetStaticCache();
++        parent::tearDown();
++    }
++
++    public function testProductFeaturesAreReturnedWhenNoCombinationIsTargeted(): void
++    {
++        $this->setCombinationFeatureValuesEnabled(true);
++
++        $features = Product::getFrontFeaturesStatic($this->langId, self::ID_PRODUCT);
++
++        $this->assertSame(['Product value'], array_column($features, 'value'));
++    }
++
++    public function testCombinationFeaturesAreIgnoredWhenFlagIsDisabled(): void
++    {
++        $this->setCombinationFeatureValuesEnabled(false);
++
++        $features = Product::getFrontFeaturesStatic($this->langId, self::ID_PRODUCT, self::ID_PRODUCT_ATTRIBUTE);
++
++        // Flag off: the combination is ignored, only the product value is returned.
++        $this->assertSame(['Product value'], array_column($features, 'value'));
++    }
++
++    public function testCombinationFeaturesOverrideProductFeaturesWhenFlagIsEnabled(): void
++    {
++        $this->setCombinationFeatureValuesEnabled(true);
++
++        $features = Product::getFrontFeaturesStatic($this->langId, self::ID_PRODUCT, self::ID_PRODUCT_ATTRIBUTE);
++
++        // Flag on + same feature at both levels: the combination value wins.
++        $this->assertSame(['Combination value'], array_column($features, 'value'));
++    }
++
++    private function createFixtures(): void
++    {
++        $langIds = Language::getIDs(false);
++
++        $feature = new Feature();
++        $feature->name = array_fill_keys($langIds, 'Test feature');
++        $feature->add();
++        $this->featureId = (int) $feature->id;
++
++        Db::getInstance()->insert('feature_shop', [
++            'id_feature' => $this->featureId,
++            'id_shop' => $this->shopId,
++        ], false, true, Db::INSERT_IGNORE);
++
++        $productFeatureValueId = $this->createFeatureValue('Product value', $langIds);
++        $combinationFeatureValueId = $this->createFeatureValue('Combination value', $langIds);
++
++        Db::getInstance()->insert('feature_product', [
++            'id_feature' => $this->featureId,
++            'id_product' => self::ID_PRODUCT,
++            'id_feature_value' => $productFeatureValueId,
++        ]);
++        Db::getInstance()->insert('feature_product_attribute', [
++            'id_feature' => $this->featureId,
++            'id_product_attribute' => self::ID_PRODUCT_ATTRIBUTE,
++            'id_feature_value' => $combinationFeatureValueId,
++        ]);
++    }
++
++    /**
++     * @param int[] $langIds
++     */
++    private function createFeatureValue(string $value, array $langIds): int
++    {
++        $featureValue = new FeatureValue();
++        $featureValue->id_feature = $this->featureId;
++        $featureValue->custom = false;
++        $featureValue->value = array_fill_keys($langIds, $value);
++        $featureValue->add();
++
++        return (int) $featureValue->id;
++    }
++
++    private function cleanFixtures(): void
++    {
++        if (empty($this->featureId)) {
++            return;
++        }
++
++        Db::getInstance()->delete('feature_product', 'id_product = ' . self::ID_PRODUCT);
++        Db::getInstance()->delete('feature_product_attribute', 'id_product_attribute = ' . self::ID_PRODUCT_ATTRIBUTE);
++        Db::getInstance()->delete('feature_shop', 'id_feature = ' . $this->featureId);
++
++        $feature = new Feature($this->featureId);
++        $feature->delete();
++    }
++
++    private function setCombinationFeatureValuesEnabled(bool $enabled): void
++    {
++        if ($enabled) {
++            $this->featureFlagManager->enable(FeatureFlagSettings::FEATURE_FLAG_COMBINATION_FEATURE_VALUES);
++        } else {
++            $this->featureFlagManager->disable(FeatureFlagSettings::FEATURE_FLAG_COMBINATION_FEATURE_VALUES);
++        }
++        // Drop the per-request state cache so the new DB value is read back, and the product caches
++        // so the merge is recomputed.
++        $this->featureFlagManager->reset();
++        Product::resetStaticCache();
++    }
++}
+diff --git a/tests/Resources/Resetter/ProductResetter.php b/tests/Resources/Resetter/ProductResetter.php
+index 0f33ddf6e6938..29a94dbdb9e72 100644
+--- a/tests/Resources/Resetter/ProductResetter.php
++++ b/tests/Resources/Resetter/ProductResetter.php
+@@ -54,6 +54,7 @@ public static function resetProducts(): void
+             // Miscellaneous relationships
+             'category_product',
+             'feature_product',
++            'feature_product_attribute',
+         ]);
+     }
+ }
+diff --git a/tests/Unit/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommandTest.php b/tests/Unit/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommandTest.php
+new file mode 100644
+index 0000000000000..9a5d548eba627
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Product/Combination/FeatureValue/Command/SetCombinationFeatureValuesCommandTest.php
+@@ -0,0 +1,148 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Product\Combination\FeatureValue\Command;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Exception\CombinationConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidProductFeatureValuesFormatException;
++
++class SetCombinationFeatureValuesCommandTest extends TestCase
++{
++    /**
++     * @dataProvider getValidInput
++     *
++     * @param int $combinationId
++     * @param array $featureValues
++     */
++    public function testValidInput(int $combinationId, array $featureValues)
++    {
++        $command = new SetCombinationFeatureValuesCommand($combinationId, $featureValues);
++        $this->assertNotNull($command);
++    }
++
++    /**
++     * @dataProvider getInvalidInput
++     *
++     * @param int $combinationId
++     * @param array $featureValues
++     * @param string $expectedException
++     */
++    public function testInvalidInput(int $combinationId, array $featureValues, string $expectedException)
++    {
++        $this->expectException($expectedException);
++        new SetCombinationFeatureValuesCommand($combinationId, $featureValues);
++    }
++
++    public function getInvalidInput()
++    {
++        yield [
++            42,
++            [
++                [
++                    'feature_value_id' => 51,
++                ],
++            ],
++            InvalidProductFeatureValuesFormatException::class,
++        ];
++
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 51,
++                ],
++            ],
++            InvalidProductFeatureValuesFormatException::class,
++        ];
++
++        yield [
++            -42,
++            [
++                [
++                    'feature_id' => 51,
++                    'feature_value_id' => 51,
++                ],
++            ],
++            CombinationConstraintException::class,
++        ];
++
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 0,
++                    'feature_value_id' => 51,
++                ],
++            ],
++            InvalidProductFeatureValuesFormatException::class,
++        ];
++    }
++
++    public function getValidInput()
++    {
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 51,
++                    'feature_value_id' => 51,
++                ],
++            ],
++        ];
++
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 51,
++                    'custom_values' => [
++                        1 => 'value',
++                    ],
++                ],
++            ],
++        ];
++
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 51,
++                    'feature_value_id' => 51,
++                    'custom_values' => [
++                        1 => 'value',
++                    ],
++                ],
++            ],
++        ];
++
++        yield [
++            42,
++            [
++                [
++                    'feature_id' => 51,
++                    'feature_value_id' => 51,
++                ],
++                [
++                    'feature_id' => 51,
++                    'custom_values' => [
++                        1 => 'value',
++                    ],
++                ],
++                [
++                    'feature_id' => 51,
++                    'feature_value_id' => 51,
++                    'custom_values' => [
++                        1 => 'value',
++                    ],
++                ],
++            ],
++        ];
++    }
++}
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilderTest.php b/tests/Unit/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilderTest.php
+new file mode 100644
+index 0000000000000..5e0eb392de3ce
+--- /dev/null
++++ b/tests/Unit/Core/Form/IdentifiableObject/CommandBuilder/Product/Combination/CombinationFeatureValuesCommandsBuilderTest.php
+@@ -0,0 +1,222 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination;
++
++use Generator;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\RemoveAllFeatureValuesFromCombinationCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Command\SetCombinationFeatureValuesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidProductFeatureValuesFormatException;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationFeatureValuesCommandsBuilder;
++
++class CombinationFeatureValuesCommandsBuilderTest extends AbstractCombinationCommandBuilderTestCase
++{
++    /**
++     * @dataProvider getExpectedCommands
++     *
++     * @param array $formData
++     * @param array $expectedCommands
++     */
++    public function testBuildCommand(array $formData, array $expectedCommands): void
++    {
++        $builder = new CombinationFeatureValuesCommandsBuilder();
++        $builtCommands = $builder->buildCommands($this->getCombinationId(), $formData, $this->getSingleShopConstraint());
++        $this->assertEquals($expectedCommands, $builtCommands);
++    }
++
++    public function getExpectedCommands(): Generator
++    {
++        yield 'random useless no commands' => [
++            [
++                'random' => ['useless'],
++            ],
++            [],
++        ];
++
++        yield 'empty features no commands' => [
++            [
++                'features' => [],
++            ],
++            [],
++        ];
++
++        yield 'empty feature values, remove all command' => [
++            [
++                'features' => [
++                    'feature_collection' => [],
++                ],
++            ],
++            [new RemoveAllFeatureValuesFromCombinationCommand($this->getCombinationId()->getValue())],
++        ];
++
++        $command = new SetCombinationFeatureValuesCommand(
++            $this->getCombinationId()->getValue(),
++            [
++                ['feature_id' => 42, 'feature_value_id' => 51],
++            ]
++        );
++        yield 'assign existing feature value' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                ['feature_value_id' => 51],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [$command],
++        ];
++
++        $localizedValues = [
++            1 => 'english',
++            2 => 'french',
++        ];
++        $command = new SetCombinationFeatureValuesCommand(
++            $this->getCombinationId()->getValue(),
++            [
++                ['feature_id' => 42, 'custom_values' => $localizedValues],
++            ]
++        );
++        yield 'create new custom values' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                ['is_custom' => 1, 'custom_value' => $localizedValues],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [$command],
++        ];
++
++        $command = new SetCombinationFeatureValuesCommand(
++            $this->getCombinationId()->getValue(),
++            [
++                ['feature_id' => 42, 'feature_value_id' => 69],
++            ]
++        );
++        yield 'custom values are not used if is_custom is not specified' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                ['feature_value_id' => 69, 'custom_value' => $localizedValues],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [$command],
++        ];
++
++        $command = new SetCombinationFeatureValuesCommand(
++            $this->getCombinationId()->getValue(),
++            [
++                ['feature_id' => 42, 'feature_value_id' => 51, 'custom_values' => $localizedValues],
++            ]
++        );
++        yield 'updating existing custom values' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                ['feature_value_id' => 51, 'is_custom' => 1, 'custom_value' => $localizedValues],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [$command],
++        ];
++
++        $localizedValues = [
++            1 => 'french',
++            2 => 'english',
++        ];
++        $newLocalizedValues = [
++            1 => 'new french',
++            2 => 'new english',
++        ];
++        $command = new SetCombinationFeatureValuesCommand(
++            $this->getCombinationId()->getValue(),
++            [
++                ['feature_id' => 42, 'feature_value_id' => 51, 'custom_values' => $localizedValues],
++                ['feature_id' => 42, 'feature_value_id' => 69],
++                ['feature_id' => 42, 'custom_values' => $newLocalizedValues],
++                ['feature_id' => 13, 'feature_value_id' => 21],
++            ]
++        );
++        yield 'rich command with multiple different feature values' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                ['feature_value_id' => 51, 'is_custom' => 1, 'custom_value' => $localizedValues],
++                                ['feature_value_id' => 69],
++                                ['is_custom' => 1, 'custom_value' => $newLocalizedValues],
++                            ],
++                        ],
++                        [
++                            'feature_id' => 13,
++                            'feature_values' => [
++                                ['feature_value_id' => 21],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [$command],
++        ];
++    }
++
++    /**
++     * @dataProvider getInvalidCommands
++     *
++     * @param array $formData
++     * @param string $exceptionClass
++     */
++    public function testInvalidBuildCommand(array $formData, string $exceptionClass): void
++    {
++        $this->expectException($exceptionClass);
++        $builder = new CombinationFeatureValuesCommandsBuilder();
++        $builder->buildCommands($this->getCombinationId(), $formData, $this->getSingleShopConstraint());
++    }
++
++    public function getInvalidCommands(): Generator
++    {
++        yield 'feature collection without values' => [
++            [
++                'features' => [
++                    'feature_collection' => [
++                        [
++                            'feature_id' => 42,
++                            'feature_values' => [
++                                [],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            InvalidProductFeatureValuesFormatException::class,
++        ];
++    }
++}
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
+index be2ee1a1b58ae..56dd8b481c42b 100644
+--- a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
++++ b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CombinationFormDataProviderTest.php
+@@ -13,8 +13,12 @@
+ use PHPUnit\Framework\MockObject\MockObject;
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\Decimal\DecimalNumber;
+-use PrestaShop\PrestaShop\Adapter\Shop\Context;
++use PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\FeaturesChoiceProvider;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\Query\GetCombinationFeatureValues;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\FeatureValue\QueryResult\CombinationFeatureValue;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Query\GetCombinationForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Query\GetCombinationSuppliers;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\QueryResult\CombinationDetails;
+@@ -28,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Supplier\QueryResult\ProductSupplierForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Supplier\ValueObject\NoSupplierId;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\CombinationFormDataProvider;
+ use PrestaShopBundle\Form\Extension\DisablingSwitchExtension;
+ use RuntimeException;
+@@ -68,6 +73,59 @@ public function testGetData(array $combinationData, array $expectedData): void
+         $this->assertSame($expectedData, $formData);
+     }
+ 
++    public function testFeatureValuesAreAddedWhenFlagIsEnabled(): void
++    {
++        $langId = 1;
++        $combinationData = [
++            'feature_values' => [
++                ['feature_id' => 7, 'feature_value_id' => 70, 'localized_values' => [$langId => 'Red'], 'custom' => false],
++                ['feature_id' => 7, 'feature_value_id' => 71, 'localized_values' => [$langId => 'My color'], 'custom' => true],
++            ],
++        ];
++
++        $languageContext = $this->createMock(LanguageContext::class);
++        $languageContext->method('getId')->willReturn($langId);
++
++        $featuresChoiceProvider = $this->createMock(FeaturesChoiceProvider::class);
++        $featuresChoiceProvider->method('getChoices')->willReturn(['Color' => 7]);
++
++        $featureFlagStateChecker = $this->createMock(FeatureFlagStateCheckerInterface::class);
++        $featureFlagStateChecker->method('isEnabled')->willReturn(true);
++
++        $provider = new CombinationFormDataProvider(
++            $this->createQueryBusMock($combinationData),
++            $this->mockShopContext(),
++            $languageContext,
++            $featuresChoiceProvider,
++            $featureFlagStateChecker
++        );
++
++        $formData = $provider->getData(self::COMBINATION_ID);
++
++        $this->assertArrayHasKey('features', $formData);
++        $this->assertSame([
++            'feature_collection' => [
++                [
++                    'feature_id' => 7,
++                    'feature_name' => 'Color',
++                    'feature_values' => [
++                        [
++                            'feature_value_id' => 70,
++                            'feature_value_name' => 'Red',
++                            'is_custom' => false,
++                        ],
++                        [
++                            'feature_value_id' => 71,
++                            'feature_value_name' => 'My color',
++                            'is_custom' => true,
++                            'custom_value' => [$langId => 'My color'],
++                        ],
++                    ],
++                ],
++            ],
++        ], $formData['features']);
++    }
++
+     public function getExpectedData(): Generator
+     {
+         $datasetsByType = [
+@@ -429,7 +487,8 @@ private function createQueryBusMock(array $combinationData)
+                 $this->isInstanceOf(GetCombinationForEditing::class),
+                 $this->isInstanceOf(GetAssociatedSuppliers::class),
+                 $this->isInstanceOf(GetCombinationSuppliers::class),
+-                $this->isInstanceOf(GetCombinationStockMovements::class)
++                $this->isInstanceOf(GetCombinationStockMovements::class),
++                $this->isInstanceOf(GetCombinationFeatureValues::class)
+             ))
+             ->willReturnCallback(function ($query) use ($combinationData) {
+                 return $this->createResultBasedOnQuery($query, $combinationData);
+@@ -443,7 +502,7 @@ private function createQueryBusMock(array $combinationData)
+      * @param GetCombinationForEditing $query
+      * @param array $combinationData
+      *
+-     * @return CombinationForEditing|AssociatedSuppliers|ProductSupplierForEditing[]|StockMovement[]
++     * @return CombinationForEditing|AssociatedSuppliers|ProductSupplierForEditing[]|StockMovement[]|CombinationFeatureValue[]
+      */
+     private function createResultBasedOnQuery($query, array $combinationData)
+     {
+@@ -456,6 +515,8 @@ private function createResultBasedOnQuery($query, array $combinationData)
+                 return $this->createCombinationSupplierInfos($combinationData);
+             case GetCombinationStockMovements::class:
+                 return $this->createStockMovementHistories($combinationData);
++            case GetCombinationFeatureValues::class:
++                return $this->createCombinationFeatureValues($combinationData);
+         }
+ 
+         throw new RuntimeException(sprintf('Query "%s" was not expected in query bus mock', $queryClass));
+@@ -618,6 +679,30 @@ static function (array $historyData): StockMovement {
+         );
+     }
+ 
++    /**
++     * @param array $combinationData
++     *
++     * @return CombinationFeatureValue[]
++     */
++    private function createCombinationFeatureValues(array $combinationData): array
++    {
++        if (empty($combinationData['feature_values'])) {
++            return [];
++        }
++
++        return array_map(
++            static function (array $featureValue): CombinationFeatureValue {
++                return new CombinationFeatureValue(
++                    $featureValue['feature_id'],
++                    $featureValue['feature_value_id'],
++                    $featureValue['localized_values'],
++                    $featureValue['custom']
++                );
++            },
++            $combinationData['feature_values']
++        );
++    }
++
+     /**
+      * @return array
+      */
+@@ -680,16 +765,35 @@ private function createFormDataProvider(
+     ): CombinationFormDataProvider {
+         return new CombinationFormDataProvider(
+             $queryBusMock,
+-            $this->mockShopContext()
++            $this->mockShopContext(),
++            $this->createMock(LanguageContext::class),
++            $this->createMock(FeaturesChoiceProvider::class),
++            $this->mockFeatureFlagStateChecker()
+         );
+     }
+ 
+     /**
+-     * @return Context
++     * @return FeatureFlagStateCheckerInterface
++     */
++    private function mockFeatureFlagStateChecker(): FeatureFlagStateCheckerInterface
++    {
++        $featureFlagStateChecker = $this->createMock(FeatureFlagStateCheckerInterface::class);
++        // Feature flag disabled by default, combination feature values are not loaded
++        $featureFlagStateChecker
++            ->method('isEnabled')
++            ->willReturn(false)
++        ;
++
++        return $featureFlagStateChecker;
++    }
++
++    /**
++     * @return ShopContext
+      */
+-    private function mockShopContext(): Context
++    private function mockShopContext(): ShopContext
+     {
+-        $shopContext = $this->getMockBuilder(Context::class)
++        $shopContext = $this->getMockBuilder(ShopContext::class)
++            ->disableOriginalConstructor()
+             ->onlyMethods(['getShopConstraint'])
+             ->getMock()
+         ;

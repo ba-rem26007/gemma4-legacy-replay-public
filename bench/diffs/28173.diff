@@ -1,0 +1,107 @@
+diff --git a/src/Core/Module/ModuleManager.php b/src/Core/Module/ModuleManager.php
+index 05ad4d2f51c68..4d2b82763db6b 100644
+--- a/src/Core/Module/ModuleManager.php
++++ b/src/Core/Module/ModuleManager.php
+@@ -99,6 +99,10 @@ public function install(string $name, $source = null): bool
+             $handler->handle($source);
+         }
+ 
++        if ($this->moduleDataProvider->isInstalled($name)) {
++            return $this->upgrade($name);
++        }
++
+         $this->hookManager->exec('actionBeforeInstallModule', ['moduleName' => $name]);
+ 
+         $module = $this->moduleRepository->getModule($name);
+diff --git a/src/Core/Module/ModuleRepository.php b/src/Core/Module/ModuleRepository.php
+index 893724af06bc1..aa8f4685bf0b6 100644
+--- a/src/Core/Module/ModuleRepository.php
++++ b/src/Core/Module/ModuleRepository.php
+@@ -51,9 +51,6 @@ class ModuleRepository implements ModuleRepositoryInterface
+         'confirmUninstall',
+     ];
+ 
+-    /** @var Finder */
+-    private $finder;
+-
+     /** @var ModuleDataProvider */
+     private $moduleDataProvider;
+ 
+@@ -79,7 +76,6 @@ public function __construct(
+         HookManager $hookManager,
+         string $modulePath
+     ) {
+-        $this->finder = new Finder();
+         $this->moduleDataProvider = $moduleDataProvider;
+         $this->adminModuleDataProvider = $adminModuleDataProvider;
+         $this->cacheProvider = $cacheProvider;
+@@ -90,7 +86,7 @@ public function __construct(
+     public function getList(): ModuleCollection
+     {
+         $modules = [];
+-        $modulesDirsList = $this->finder->directories()
++        $modulesDirsList = (new Finder())->directories()
+             ->in($this->modulePath)
+             ->depth('== 0')
+             ->exclude(['__MACOSX'])
+diff --git a/tests/Unit/Core/Module/ModuleManagerTest.php b/tests/Unit/Core/Module/ModuleManagerTest.php
+index 5a401855ec6ac..cb67c0ddb54d7 100644
+--- a/tests/Unit/Core/Module/ModuleManagerTest.php
++++ b/tests/Unit/Core/Module/ModuleManagerTest.php
+@@ -44,8 +44,9 @@
+ 
+ class ModuleManagerTest extends TestCase
+ {
+-    private const INSTALLED_MODULE_NAME = 'installed';
+-    private const UNINSTALLED_MODULE_NAME = 'uninstalled';
++    public const INSTALLED_MODULE_NAME = 'installed';
++    public const UNINSTALLED_MODULE_NAME = 'uninstalled';
++    public const INSTALLED_THEN_UNINSTALLED_MODULE_NAME = 'installed_uninstalled';
+ 
+     /** @var ModuleManager */
+     private $moduleManager;
+@@ -148,7 +149,7 @@ public function testReset(): void
+         $this->module->expects($this->once())->method('onReset');
+         $this->module->expects($this->once())->method('onInstall');
+         $this->module->expects($this->once())->method('onUninstall');
+-        $this->assertTrue($this->moduleManager->reset(self::INSTALLED_MODULE_NAME, false));
++        $this->assertTrue($this->moduleManager->reset(self::INSTALLED_THEN_UNINSTALLED_MODULE_NAME, false));
+         $this->assertTrue($this->moduleManager->reset(self::INSTALLED_MODULE_NAME, true));
+ 
+         $this->expectException(Exception::class);
+@@ -211,6 +212,7 @@ private function getModuleMock(): Module
+             ->getMock()
+         ;
+ 
++        $module->method('get')->with('version')->willReturn('1.0.0');
+         $module->method('onInstall')->willReturn(true);
+         $module->method('onUninstall')->willReturn(true);
+         $module->method('onEnable')->willReturn(true);
+@@ -230,11 +232,23 @@ private function getModuleDataProviderMock(): ModuleDataProvider
+     {
+         $moduleDataProvider = $this->createMock(ModuleDataProvider::class);
+ 
++        // When you reset a module, there is 2 ways: using the reset function or using uninstall then install.
++        // With the second way, we need to be sure that the module is installed before calling uninstall and uninstalled
++        // before calling install. This callback returns true twice and then false to simulate the expected behavior
++        // for the `INSTALLED_THEN_UNINSTALLED_MODULE_NAME` module name
++        $isInstalledCallback = new class() {
++            private $count = 0;
++
++            public function isInstalled($name)
++            {
++                return $name === ModuleManagerTest::INSTALLED_MODULE_NAME
++                    || ($name === ModuleManagerTest::INSTALLED_THEN_UNINSTALLED_MODULE_NAME
++                        && ++$this->count < 3);
++            }
++        };
++
+         $moduleDataProvider->method('isInstalled')
+-            ->willReturnMap([
+-                [self::INSTALLED_MODULE_NAME, true],
+-                [self::UNINSTALLED_MODULE_NAME, false],
+-            ])
++            ->willReturnCallback([$isInstalledCallback, 'isInstalled'])
+         ;
+ 
+         $moduleDataProvider->method('isEnabled')

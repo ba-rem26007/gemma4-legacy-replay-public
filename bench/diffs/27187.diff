@@ -1,0 +1,87 @@
+diff --git a/classes/Tools.php b/classes/Tools.php
+index ce74ce8c43898..9c42432ff6965 100644
+--- a/classes/Tools.php
++++ b/classes/Tools.php
+@@ -45,6 +45,8 @@ class ToolsCore
+     public const PASSWORDGEN_FLAG_RANDOM = 'RANDOM';
+     public const PASSWORDGEN_FLAG_ALPHANUMERIC = 'ALPHANUMERIC';
+ 
++    public const LANGUAGE_EXTRACTOR_REGEXP = '#(?<=-)\w\w|\w\w(?!-)#';
++
+     protected static $file_exists_cache = [];
+     protected static $_forceCompile;
+     protected static $_caching;
+@@ -4128,6 +4130,34 @@ public static function isFileFresh(string $file, int $timeout = self::CACHE_LIFE
+         return false;
+     }
+ 
++    /**
++     * @return bool
++     */
++    public static function isCountryFromBrowserAvailable(): bool
++    {
++        $languageAvailable = static::getCountryIsoCodeFromHeader();
++        if ($languageAvailable === null) {
++            return false;
++        }
++
++        return Configuration::get('PS_DETECT_COUNTRY')
++            && Validate::isLanguageIsoCode($languageAvailable);
++    }
++
++    /**
++     * @return string|null
++     */
++    public static function getCountryIsoCodeFromHeader(): ?string
++    {
++        if (!isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {
++            return null;
++        }
++
++        preg_match(static::LANGUAGE_EXTRACTOR_REGEXP, $_SERVER['HTTP_ACCEPT_LANGUAGE'], $languages);
++
++        return $languages[0] ?? null;
++    }
++
+     /**
+      * Inserts a new element in array after a given index
+      *
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 57d0fb0202727..c2bff60d10fa6 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -334,12 +334,8 @@ public function init()
+             if ((!$has_currency || $has_country) && !$has_address_type) {
+                 if ($has_country && Validate::isLanguageIsoCode($this->context->cookie->iso_code_country)) {
+                     $id_country = (int) Country::getByIso(strtoupper($this->context->cookie->iso_code_country));
+-                } elseif (
+-                    isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])
+-                    && preg_match('#(?<=-)\w\w|\w\w(?!-)#', $_SERVER['HTTP_ACCEPT_LANGUAGE'], $array)
+-                    && Validate::isLanguageIsoCode($array[0])
+-                ) {
+-                    $id_country = (int) Country::getByIso($array[0], true);
++                } elseif (Tools::isCountryFromBrowserAvailable()) {
++                    $id_country = (int) Country::getByIso(Tools::getCountryIsoCodeFromHeader(), true);
+                 } else {
+                     $id_country = Tools::getCountry();
+                 }
+diff --git a/classes/form/CustomerAddressForm.php b/classes/form/CustomerAddressForm.php
+index 47580cb7dfdd5..98b6b381c9e8e 100644
+--- a/classes/form/CustomerAddressForm.php
++++ b/classes/form/CustomerAddressForm.php
+@@ -95,7 +95,14 @@ public function fillWith(array $params = [])
+         // This form is very tricky: fields may change depending on which
+         // country is being submitted!
+         // So we first update the format if a new id_country was set.
+-        if (isset($params['id_country'])
++        // If detect country from browser language is selected, default country will be overridden
++        if (Tools::isCountryFromBrowserAvailable()) {
++            $languageAvailable = Tools::getCountryIsoCodeFromHeader();
++            $this->formatter->setCountry(new Country(
++                (int) Country::getByIso($languageAvailable, true),
++                Language::getIdByIso($languageAvailable)
++            ));
++        } elseif (isset($params['id_country'])
+             && $params['id_country'] != $this->formatter->getCountry()->id
+         ) {
+             $this->formatter->setCountry(new Country(

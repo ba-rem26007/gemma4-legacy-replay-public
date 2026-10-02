@@ -1,0 +1,178 @@
+diff --git a/classes/stock/Warehouse.php b/classes/stock/Warehouse.php
+index 8a42f82dc2f1f..95e25883a34dd 100644
+--- a/classes/stock/Warehouse.php
++++ b/classes/stock/Warehouse.php
+@@ -307,8 +307,7 @@ public static function getProductLocation($id_product, $id_product_attribute, $i
+      */
+     public static function getProductWarehouseList($id_product, $id_product_attribute = 0, $id_shop = null)
+     {
+-        $share_stock = false;
+-        $shop_group_id = false;
++        // if it's a pack, returns warehouses if and only if some products use the advanced stock management
+         if ($id_shop === null) {
+             if (Shop::getContext() == Shop::CONTEXT_GROUP) {
+                 $shop_group = Shop::getContextShopGroup();
+@@ -326,7 +325,7 @@ public static function getProductWarehouseList($id_product, $id_product_attribut
+         }
+ 
+         if ($share_stock && $shop_group_id) {
+-            $ids_shop = Shop::getShops(true, (int) $shop_group_id, true);
++            $ids_shop = Shop::getShops(true, $shop_group_id, true);
+         } else {
+             $ids_shop = [(int) $id_shop];
+         }
+diff --git a/controllers/admin/AdminShopController.php b/controllers/admin/AdminShopController.php
+index a4af82f641cc8..5e4d650289498 100644
+--- a/controllers/admin/AdminShopController.php
++++ b/controllers/admin/AdminShopController.php
+@@ -24,6 +24,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeManagerBuilder;
++use PrestaShop\PrestaShop\Core\Domain\CmsPageCategory\ValueObject\CmsPageCategoryId;
+ use PrestaShopBundle\Utils\Tree;
+ 
+ /**
+@@ -322,16 +323,43 @@ protected function afterAdd($new_shop)
+ 
+         // The root category should be at least imported
+         $new_shop->copyShopData((int) Tools::getValue('importFromShop'), $import_data);
++        $useImportData = Tools::getValue('useImportData');
++        $db = Db::getInstance(_PS_USE_SQL_SLAVE_);
+ 
+         // copy default data
+-        if (!Tools::getValue('useImportData') || (is_array($import_data) && !isset($import_data['group']))) {
++        if (!$useImportData || (is_array($import_data) && !isset($import_data['group']))) {
+             $sql = 'INSERT INTO `' . _DB_PREFIX_ . 'group_shop` (`id_shop`, `id_group`)
+-					VALUES
+-					(' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_UNIDENTIFIED_GROUP') . '),
+-					(' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_GUEST_GROUP') . '),
+-					(' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_CUSTOMER_GROUP') . ')
+-				';
+-            Db::getInstance()->execute($sql);
++                    VALUES
++                    (' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_UNIDENTIFIED_GROUP') . '),
++                    (' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_GUEST_GROUP') . '),
++                    (' . (int) $new_shop->id . ', ' . (int) Configuration::get('PS_CUSTOMER_GROUP') . ')
++                ';
++            $db->execute($sql);
++        }
++
++        if (!$useImportData || (is_array($import_data) && !isset($import_data['cms']))) {
++            $allLangs = Language::getLanguages(false);
++
++            $db->insert(
++                'cms_category_shop',
++                [
++                    'id_cms_category' => CmsPageCategoryId::ROOT_CMS_PAGE_CATEGORY_ID,
++                    'id_shop' => (int) $new_shop->id,
++                ]
++            );
++
++            foreach ($allLangs as $lang) {
++                $db->insert(
++                    'cms_category_lang',
++                    [
++                        'id_cms_category' => CmsPageCategoryId::ROOT_CMS_PAGE_CATEGORY_ID,
++                        'id_lang' => (int) $lang['id_lang'],
++                        'id_shop' => (int) $new_shop->id,
++                        'name' => 'Home',
++                        'link_rewrite' => 'home',
++                    ]
++                );
++            }
+         }
+ 
+         return parent::afterAdd($new_shop);
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index e411a049bb806..7c8fa46154bf1 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -296,6 +296,11 @@
+       <title>Customer account displayed in Front Office</title>
+       <description>This hook displays new elements on the customer account page</description>
+     </hook>
++    <hook id="displayCustomerAccountTop">
++      <name>displayCustomerAccountTop</name>
++      <title>Customer account displayed in Front Office (Top part)</title>
++      <description>This hook displays new elements on the customer account page on Top</description>
++    </hook>
+     <hook id="actionOrderSlipAdd">
+       <name>actionOrderSlipAdd</name>
+       <title>Order slip creation</title>
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/Security/PasswordPolicyType.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/Security/PasswordPolicyType.php
+index 39d4b502bdfa5..9ad1963dc7af3 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/Security/PasswordPolicyType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/Security/PasswordPolicyType.php
+@@ -62,7 +62,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'label' => $this->trans('Maximum length', 'Admin.Advparameters.Feature'),
+                     'attr' => [
+                         'min' => 1,
+-                        'max' => 100,
++                        'max' => 72,
+                     ],
+                     'required' => true,
+                 ]
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Customer/CustomerType.php b/src/PrestaShopBundle/Form/Admin/Sell/Customer/CustomerType.php
+index 0f30e7506aa2c..13210665f9cfb 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Customer/CustomerType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Customer/CustomerType.php
+@@ -31,7 +31,6 @@
+ use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\CustomerName;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\FirstName;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\LastName;
+-use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\Password;
+ use PrestaShop\PrestaShop\Core\Domain\ValueObject\Email as DomainEmail;
+ use PrestaShop\PrestaShop\Core\Security\PasswordPolicyConfiguration;
+ use PrestaShopBundle\Form\Admin\Type\ApeType;
+@@ -137,17 +136,17 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+          */
+         $passwordConstraints = [
+             new Length([
+-                'max' => Password::MAX_LENGTH,
++                'max' => $maxLength,
+                 'maxMessage' => $this->trans(
+                     'This field cannot be longer than %limit% characters',
+                     'Admin.Notifications.Error',
+-                    ['%limit%' => Password::MAX_LENGTH]
++                    ['%limit%' => $maxLength]
+                 ),
+-                'min' => Password::MIN_LENGTH,
++                'min' => $minLength,
+                 'minMessage' => $this->trans(
+                     'This field cannot be shorter than %limit% characters',
+                     'Admin.Notifications.Error',
+-                    ['%limit%' => Password::MIN_LENGTH]
++                    ['%limit%' => $minLength]
+                 ),
+             ]),
+         ];
+@@ -254,13 +253,14 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'data-minscore' => $minScore,
+                     'data-minlength' => $minLength,
+                     'data-maxlength' => $maxLength,
++                    /* Some browsers (for example Google Chrome) are totally ignoring "off" value, so we use "new-password" - which is working well for this purpose */
+                     'autocomplete' => 'new-password',
+                 ],
+                 'help' => $this->trans(
+                     'Password should be at least %length% characters long.',
+                     'Admin.Notifications.Info',
+                     [
+-                        '%length%' => Password::MIN_LENGTH,
++                        '%length%' => $minLength,
+                     ]
+                 ),
+                 'constraints' => $passwordConstraints,
+diff --git a/src/PrestaShopBundle/Service/TranslationService.php b/src/PrestaShopBundle/Service/TranslationService.php
+index 7b5027d8bbecd..02ce6d8d7da59 100644
+--- a/src/PrestaShopBundle/Service/TranslationService.php
++++ b/src/PrestaShopBundle/Service/TranslationService.php
+@@ -244,7 +244,7 @@ public function saveTranslationMessage($lang, $domain, $key, $translationValue,
+                 ->createQueryBuilder('t')
+                 ->where('t.lang = :lang')->setParameter('lang', $lang)
+                 ->andWhere('t.domain = :domain')->setParameter('domain', $domain)
+-                ->andWhere('t.key LIKE :key')->setParameter('key', $key)
++                ->andWhere('t.key = :key')->setParameter('key', $key)
+             ;
+             if ($theme !== null) {
+                 $queryBuilder->andWhere('t.theme = :theme')->setParameter('theme', $theme);

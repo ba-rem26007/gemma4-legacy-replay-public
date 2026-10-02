@@ -1,0 +1,99 @@
+diff --git a/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl b/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
+index 343a9c14a0bdc..63b6fc011c487 100644
+--- a/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
++++ b/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
+@@ -238,7 +238,7 @@
+ 						<td>
+ 							<p>{l s='Uncombinable cart rules' d='Admin.Catalog.Feature'}</p>
+ 							<input id="cart_rule_select_1_filter" autocomplete="off" class="form-control uncombinable_search_filter" type="text" name="uncombinable_filter" placeholder="{l s='Search' d='Admin.Actions'}" value="">
+-							<select id="cart_rule_select_1" class="jscroll" multiple="">
++							<select id="cart_rule_select_1" class="jscroll" multiple="" name="cart_rule_unselected[]">
+ 							</select>
+ 							<a class="jscroll-next btn btn-default btn-block clearfix" href="">{l s='Next' d='Admin.Global'}</a>
+ 							<a id="cart_rule_select_add" class="btn btn-default btn-block clearfix">{l s='Add' d='Admin.Actions'} <i class="icon-arrow-right"></i></a>
+diff --git a/admin-dev/themes/default/template/controllers/cart_rules/form.js b/admin-dev/themes/default/template/controllers/cart_rules/form.js
+index ed99ca1933f14..671e6525af4f5 100644
+--- a/admin-dev/themes/default/template/controllers/cart_rules/form.js
++++ b/admin-dev/themes/default/template/controllers/cart_rules/form.js
+@@ -241,6 +241,12 @@ $('#cart_rule_form').on('submit', () => {
+     $(`#${restrictions[i]}_select_2 option`).each(function (i) {
+       $(this).prop('selected', true);
+     });
++
++    if (restrictions[i] === 'cart_rule') {
++      $(`#cart_rule_select_1 option`).each(function (i) {
++        $(this).prop('selected', true);
++      });
++    }
+   }
+ 
+   $('.product_rule_toselect option').each(function (i) {
+diff --git a/controllers/admin/AdminCartRulesController.php b/controllers/admin/AdminCartRulesController.php
+index b06b59ec8d3f7..f0dae63fe57cc 100644
+--- a/controllers/admin/AdminCartRulesController.php
++++ b/controllers/admin/AdminCartRulesController.php
+@@ -80,7 +80,15 @@ public function ajaxProcessLoadCartRules()
+ 
+             /** @var CartRule $current_object */
+             $current_object = $this->loadObject(true);
+-            $cart_rules = $current_object->getAssociatedRestrictions('cart_rule', false, true, $page * $limit, $limit, $search);
++
++            if ($type == 'selected') {
++                $offset = $page * $limit;
++            } else {
++                $limit = null;
++                $offset = 0;
++            }
++
++            $cart_rules = $current_object->getAssociatedRestrictions('cart_rule', false, true, $offset, $limit, $search);
+ 
+             if ($type == 'selected') {
+                 $i = 1;
+@@ -103,9 +111,6 @@ public function ajaxProcessLoadCartRules()
+                     }
+                     ++$i;
+                 }
+-                if ($i == $limit) {
+-                    $next_link = Context::getContext()->link->getAdminLink('AdminCartRules') . '&ajaxMode=1&ajax=1&id_cart_rule=' . (int) $id_cart_rule . '&action=loadCartRules&limit=' . (int) $limit . '&type=unselected&count=' . ($count - 1 + count($cart_rules['unselected']) . '&search=' . urlencode($search));
+-                }
+             }
+         }
+         echo json_encode(['html' => $html, 'next_link' => $next_link]);
+@@ -338,14 +343,32 @@ protected function afterAdd($currentObject)
+                 Db::getInstance()->execute('INSERT INTO `' . _DB_PREFIX_ . 'cart_rule_' . $type . '` (`id_cart_rule`, `id_' . $type . '`) VALUES ' . implode(',', $values));
+             }
+         }
++
+         // Add cart rule restrictions
+-        if (Tools::getValue('cart_rule_restriction') && is_array($array = Tools::getValue('cart_rule_select')) && count($array)) {
+-            $values = [];
+-            foreach ($array as $id) {
+-                $values[] = '(' . (int) $currentObject->id . ',' . (int) $id . ')';
++        if (Tools::getValue('cart_rule_unselected') && is_array($unselectedIds = Tools::getValue('cart_rule_unselected')) && count($unselectedIds)) {
++            $allCartRuleIds = Db::getInstance()->executeS('
++                SELECT id_cart_rule 
++                FROM `' . _DB_PREFIX_ . 'cart_rule`
++                WHERE id_cart_rule != ' . (int) $currentObject->id
++            );
++
++            $allCartRuleIds = array_map(
++                'intval',
++                array_column($allCartRuleIds, 'id_cart_rule')
++            );
++
++            $selectedIds = array_diff($allCartRuleIds, $unselectedIds);
++
++            if (!empty($selectedIds)) {
++                $values = [];
++                foreach ($selectedIds as $id) {
++                    $values[] = '(' . (int) $currentObject->id . ',' . (int) $id . ')';
++                }
++
++                Db::getInstance()->execute('INSERT INTO `' . _DB_PREFIX_ . 'cart_rule_combination` (`id_cart_rule_1`, `id_cart_rule_2`) VALUES ' . implode(',', $values));
+             }
+-            Db::getInstance()->execute('INSERT INTO `' . _DB_PREFIX_ . 'cart_rule_combination` (`id_cart_rule_1`, `id_cart_rule_2`) VALUES ' . implode(',', $values));
+         }
++
+         // Add product rule restrictions
+         if (Tools::getValue('product_restriction') && is_array($ruleGroupArray = Tools::getValue('product_rule_group')) && count($ruleGroupArray)) {
+             foreach ($ruleGroupArray as $ruleGroupId) {

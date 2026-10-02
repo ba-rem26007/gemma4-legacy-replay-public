@@ -1,0 +1,116 @@
+diff --git a/src/Core/Grid/Data/Factory/LogDataFactory.php b/src/Core/Grid/Data/Factory/LogDataFactory.php
+index 0155a394ee4e1..01326190d32bb 100644
+--- a/src/Core/Grid/Data/Factory/LogDataFactory.php
++++ b/src/Core/Grid/Data/Factory/LogDataFactory.php
+@@ -28,6 +28,9 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Grid\Data\Factory;
+ 
++use Employee;
++use PrestaShop\PrestaShop\Adapter\Validate;
++use PrestaShop\PrestaShop\Core\Employee\AvatarProviderInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
+ use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
+@@ -38,6 +41,11 @@
+  */
+ final class LogDataFactory implements GridDataFactoryInterface
+ {
++    /**
++     * @var AvatarProviderInterface
++     */
++    private $avatarProvider;
++
+     /**
+      * @var GridDataFactoryInterface
+      */
+@@ -53,15 +61,24 @@ final class LogDataFactory implements GridDataFactoryInterface
+      */
+     private const DEFAULT_EMPTY_DATA = '---';
+ 
++    /**
++     * @var array<int, string>
++     */
++    private $avatars = [];
++
+     /**
+      * @param GridDataFactoryInterface $dataFactory
++     * @param TranslatorInterface $translator
++     * @param AvatarProviderInterface $avatarProvider
+      */
+     public function __construct(
+         GridDataFactoryInterface $dataFactory,
+-        TranslatorInterface $translator
++        TranslatorInterface $translator,
++        AvatarProviderInterface $avatarProvider
+     ) {
+         $this->dataFactory = $dataFactory;
+         $this->translator = $translator;
++        $this->avatarProvider = $avatarProvider;
+     }
+ 
+     /**
+@@ -92,6 +109,7 @@ private function modifyRecords(array $records): array
+         foreach ($records as $key => $record) {
+             $records[$key]['shop_name'] = $this->ShopContextFormatted($record);
+             $records[$key]['language'] = $records[$key]['language'] ?? self::DEFAULT_EMPTY_DATA;
++            $records[$key]['image'] = $this->getEmployeeAvatar((int) $record['id_employee']);
+         }
+ 
+         return $records;
+@@ -126,4 +144,23 @@ private function ShopContextFormatted(array $record): string
+ 
+         return self::DEFAULT_EMPTY_DATA;
+     }
++
++    /**
++     * @param int $idEmployee
++     *
++     * @return string
++     */
++    private function getEmployeeAvatar(int $idEmployee): string
++    {
++        if (!isset($this->avatars[$idEmployee])) {
++            $employee = new Employee($idEmployee);
++            if (Validate::isLoadedObject($employee)) {
++                $this->avatars[$idEmployee] = $employee->getImage();
++            } else {
++                $this->avatars[$idEmployee] = $this->avatarProvider->getDefaultAvatarUrl();
++            }
++        }
++
++        return $this->avatars[$idEmployee];
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+index dc2c769856c3a..352263b64b8f1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+@@ -15,6 +15,7 @@ services:
+         arguments:
+             - '@prestashop.core.grid.data_factory.log'
+             - '@translator'
++            - '@prestashop.adapter.employee.avatar_provider'
+ 
+     prestashop.core.grid.data_factory.email_logs:
+         class: '%prestashop.core.grid.data.factory.doctrine_grid_data_factory%'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/employee_name_with_avatar.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/employee_name_with_avatar.html.twig
+index 02254695860ec..63da646e19a00 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/employee_name_with_avatar.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/employee_name_with_avatar.html.twig
+@@ -24,13 +24,10 @@
+  *#}
+ 
+ {% if record.employee is not null %}
+-  {%
+-    set employeeName, employeeImage = record.employee, 'https://profile.prestashop.com/'~record.email|url_encode~'.jpg'
+-  %}
+   <span class="employee_avatar_small">
+-    <img class="img rounded-circle" alt="{{ employeeName }}" src="{{ employeeImage }}" height="32" width="32" />
++    <img class="img rounded-circle" alt="{{ record.employee }}" src="{{ asset(record.image) }}" height="32" width="32" />
+   </span>
+-  {{ employeeName }}
++  {{ record.employee }}
+ {% else %}
+   {{ 'N/A'|trans({}, 'Admin.Global') }}
+ {% endif %}

@@ -1,0 +1,298 @@
+diff --git a/controllers/front/PdfInvoiceController.php b/controllers/front/PdfInvoiceController.php
+index 72a267d45cf2b..f259146945236 100644
+--- a/controllers/front/PdfInvoiceController.php
++++ b/controllers/front/PdfInvoiceController.php
+@@ -63,7 +63,11 @@ public function postProcess()
+ 
+         // Check if the user is not trying to download an invoice of an order of different customer
+         // Either the ID of the customer in context must match the customer in order OR a secure_key matching the one on the order must be provided
+-        if ((isset($this->context->customer->id) && $order->id_customer != $this->context->customer->id) && (Tools::isSubmit('secure_key') && $order->secure_key != Tools::getValue('secure_key'))) {
++        if (Tools::isSubmit('secure_key') && $order->secure_key != Tools::getValue('secure_key')) {
++            die($this->trans('The invoice was not found.', [], 'Shop.Notifications.Error'));
++        }
++
++        if (!Tools::isSubmit('secure_key') && (!isset($this->context->customer->id) || $order->id_customer != $this->context->customer->id)) {
+             die($this->trans('The invoice was not found.', [], 'Shop.Notifications.Error'));
+         }
+ 
+diff --git a/docs/CHANGELOG.txt b/docs/CHANGELOG.txt
+index 04a5b2bfa55eb..a57b333a67c4a 100644
+--- a/docs/CHANGELOG.txt
++++ b/docs/CHANGELOG.txt
+@@ -23,6 +23,17 @@ needs please refer to https://devdocs.prestashop.com/ for more information.
+ 
+ Changelog for PrestaShop 8
+ 
++####################################
++#   v8.1.6 - (2024-05-13)
++####################################
++
++- Front Office:
++  - Improvement:
++    - GHSA-7pjr-2rgh-fc5g Fix invoice access vulnerability in FO (by @matthieu-rolland & @m0rgan01)
++- Core
++  - Imrovement:
++    - GHSA-45vm-3j38-7p78 Fix XSS vulnerability from FO contact form to BO (by @m0rgan01 & @matthieu-rolland)
++
+ ####################################
+ #   v8.1.5 - (2024-03-07)
+ ####################################
+@@ -70,6 +81,8 @@ Changelog for PrestaShop 8
+     - #34954: Fix Link->getModuleLink() function for other shop contexts (by @hherreros-webimpacto)
+     - #35321: Fix display of categories from other shops (by @kpodemski)
+     - #34873: Prevent uncheck cast (by @gross-nvs)
++    - #GHSA-vr7m-r9vm-m4wf:  (by @matthieu-rolland)
++    - #GHSA-xgpm-q3mq-46rq:  (by @matthieu-rolland)
+   - Refactoring:
+     - #35456: Comment cart and quantity methods (by @Hlavtox)
+     - #35215: Fix alias hooks and add the missing ones (by @Hlavtox)
+diff --git a/install-dev/install_version.php b/install-dev/install_version.php
+index aac9c49495933..ec4497ee869a1 100644
+--- a/install-dev/install_version.php
++++ b/install-dev/install_version.php
+@@ -24,7 +24,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
+-define('_PS_INSTALL_VERSION_', '8.1.5');
++define('_PS_INSTALL_VERSION_', '8.1.6');
+ define('_PS_INSTALL_MINIMUM_PHP_VERSION_ID_', 70205);
+ define('_PS_INSTALL_MAXIMUM_PHP_VERSION_ID_', 81099);
+ 
+diff --git a/phpstan.neon.dist b/phpstan.neon.dist
+index 372981ede1b9f..8d53644b56c79 100644
+--- a/phpstan.neon.dist
++++ b/phpstan.neon.dist
+@@ -46,6 +46,9 @@ parameters:
+     - '#^Function smartyRegisterFunction not found\.$#'
+     ## Doctrine Entities
+     - '#Property PrestaShopBundle\\Entity\\[A-Za-z]+\:\:\$[A-Za-z]+ is never written, only read.#'
++    - message: "#^Dead catch \\- Symfony\\\\Component\\\\HttpFoundation\\\\File\\\\Exception\\\\FileNotFoundException is never thrown in the try block\\.$#"
++      count: 1
++      path: src/PrestaShopBundle/Controller/Admin/SecuredFileReaderController.php
+   reportUnmatchedIgnoredErrors: false
+   universalObjectCratesClasses:
+     - Cookie
+diff --git a/src/Core/Domain/CustomerService/QueryHandler/GetCustomerThreadForViewingHandler.php b/src/Core/Domain/CustomerService/QueryHandler/GetCustomerThreadForViewingHandler.php
+index 6ba582f2bcf23..2e0ba97e0cdb8 100644
+--- a/src/Core/Domain/CustomerService/QueryHandler/GetCustomerThreadForViewingHandler.php
++++ b/src/Core/Domain/CustomerService/QueryHandler/GetCustomerThreadForViewingHandler.php
+@@ -116,7 +116,7 @@ private function getCustomerThreadMessages(array $messages)
+             if (!empty($message['file_name'])
+                 && file_exists(_PS_UPLOAD_DIR_ . $message['file_name'])
+             ) {
+-                $attachmentFile = _THEME_PROD_PIC_DIR_ . $message['file_name'];
++                $attachmentFile = $message['file_name'];
+             }
+ 
+             $productId = null;
+diff --git a/src/Core/Version.php b/src/Core/Version.php
+index 821b9e1a6f7de..a002e8a1cdb77 100644
+--- a/src/Core/Version.php
++++ b/src/Core/Version.php
+@@ -32,11 +32,11 @@
+  */
+ final class Version
+ {
+-    public const VERSION = '8.1.5';
++    public const VERSION = '8.1.6';
+     public const MAJOR_VERSION_STRING = '8';
+     public const MAJOR_VERSION = 8;
+     public const MINOR_VERSION = 1;
+-    public const RELEASE_VERSION = 5;
++    public const RELEASE_VERSION = 6;
+ 
+     // This class should not be instanciated
+     private function __construct()
+diff --git a/src/PrestaShopBundle/Controller/Admin/SecuredFileReaderController.php b/src/PrestaShopBundle/Controller/Admin/SecuredFileReaderController.php
+new file mode 100644
+index 0000000000000..12b6d7c1de76f
+--- /dev/null
++++ b/src/PrestaShopBundle/Controller/Admin/SecuredFileReaderController.php
+@@ -0,0 +1,116 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Controller\Admin;
++
++use PrestaShopException;
++use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
++use Symfony\Component\HttpFoundation\BinaryFileResponse;
++use Symfony\Component\HttpFoundation\File\Exception\FileNotFoundException;
++use Symfony\Component\HttpFoundation\HeaderUtils;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
++
++/*
++ * For security purpose, this controller allow you to securely display documents
++ */
++class SecuredFileReaderController extends AbstractController
++{
++    private const allowedExtensions = [
++        'txt' => 'text/plain',
++        'rtf' => 'application/rtf',
++        'doc' => 'application/msword',
++        'docx' => 'application/msword',
++        'pdf' => 'application/pdf',
++        'zip' => 'multipart/x-zip',
++        'png' => 'image/png',
++        'jpeg' => 'image/jpeg',
++        'gif' => 'image/gif',
++        'jpg' => 'image/jpeg',
++        'webp' => 'image/webp',
++    ];
++
++    private const allowedImageExtensions = [
++        'png' => 'image/png',
++        'jpeg' => 'image/jpeg',
++        'gif' => 'image/gif',
++        'jpg' => 'image/jpeg',
++        'webp' => 'image/webp',
++    ];
++
++    /** @var string */
++    private $uploadDir;
++
++    /**
++     * @param string $uploadDir
++     */
++    public function __construct(string $uploadDir)
++    {
++        $this->uploadDir = $uploadDir;
++    }
++
++    /**
++     * @throws PrestaShopException
++     */
++    public function readUploadDocument(Request $request): Response
++    {
++        $fileName = basename($request->query->get('fileName'));
++        if (!$fileName) {
++            throw new PrestaShopException('No file name specified');
++        }
++
++        $fileExtensions = explode('.', $fileName);
++        if (count($fileExtensions) > 2) {
++            throw new PrestaShopException('Too many extensions for ' . $fileName);
++        } elseif (!array_key_exists($fileExtensions[1], self::allowedExtensions)) {
++            throw new PrestaShopException('Invalid extension for ' . $fileName);
++        }
++
++        // If file is not an image, the browser directly open it as attachment
++        if (!array_key_exists($fileExtensions[1], self::allowedImageExtensions)) {
++            $file = file_get_contents($this->uploadDir . $fileName);
++            $response = new Response($file);
++            $disposition = HeaderUtils::makeDisposition(
++                HeaderUtils::DISPOSITION_ATTACHMENT,
++                $fileName
++            );
++            $response->headers->set('Content-Disposition', $disposition);
++            $response->headers->set('X-Content-Type-Options', 'nosniff');
++        // else we retrieve image and we display it with appropriate header
++        } else {
++            try {
++                $response = new BinaryFileResponse($this->uploadDir . $fileName);
++            } catch (FileNotFoundException $e) {
++                throw new NotFoundHttpException();
++            }
++
++            $response->headers->set('Content-type', self::allowedExtensions[$fileExtensions[1]]);
++        }
++
++        return $response;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/_common.yml b/src/PrestaShopBundle/Resources/config/routing/admin/_common.yml
+index b2dca9b5c7b5f..78b8364eb9532 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/_common.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/_common.yml
+@@ -50,3 +50,9 @@ admin_common_reset_search_by_filter_id:
+     _controller: 'PrestaShopBundle\Controller\Admin\CommonController::resetSearchAction'
+     controller: ''
+     action: ''
++
++admin_common_secured_file_image_reader:
++  path: /secured/upload/document
++  methods: [ GET ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\SecuredFileReaderController::readUploadDocument'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/controller.yml b/src/PrestaShopBundle/Resources/config/services/bundle/controller.yml
+index acf731f5ddfdf..9300302b9e9cb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/controller.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/controller.yml
+@@ -161,3 +161,7 @@ services:
+       productRepository: '@PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository'
+     tags:
+       - { name: !php/const PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController::PRESTASHOP_CORE_CONTROLLERS_TAG }
++
++  PrestaShopBundle\Controller\Admin\SecuredFileReaderController:
++    arguments:
++      $uploadDir: !php/const _PS_UPLOAD_DIR_
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/CustomerService/CustomerThread/Block/thread_messages.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/CustomerService/CustomerThread/Block/thread_messages.html.twig
+index d167ce2839da7..d83a992641729 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/CustomerService/CustomerThread/Block/thread_messages.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/CustomerService/CustomerThread/Block/thread_messages.html.twig
+@@ -59,7 +59,7 @@
+ 
+           {% if message.attachmentFile %}
+             <i class="material-icons font-16">attachment</i>
+-            <a href="{{ message.attachmentFile }}" target="_blank">
++            <a href="{{ path('admin_common_secured_file_image_reader', { 'fileName': message.attachmentFile }) }}" target="_blank">
+               {{ 'Attachment'|trans({}, 'Admin.Catalog.Feature') }}
+             </a>
+           {% endif %}
+diff --git a/upload/.htaccess b/upload/.htaccess
+index e47b74dcad29f..3de9e4008bd96 100644
+--- a/upload/.htaccess
++++ b/upload/.htaccess
+@@ -1,19 +1,10 @@
+-<IfModule mod_headers.c>
+-    <FilesMatch "\.pdf$">
+-      Header set Content-Disposition "Attachment"
+-      Header set X-Content-Type-Options "nosniff"
+-    </FilesMatch>
++# Apache 2.2
++<IfModule !mod_authz_core.c>
++    Order deny,allow
++    Deny from all
+ </IfModule>
+ 
+-<IfModule !mod_rewrite.c>
+-  # Apache 2.2
+-  <IfModule !mod_authz_core.c>
+-      Order deny,allow
+-      Deny from all
+-  </IfModule>
+-
+-  # Apache 2.4
+-  <IfModule mod_authz_core.c>
+-      Require all denied
+-  </IfModule>
++# Apache 2.4
++<IfModule mod_authz_core.c>
++    Require all denied
+ </IfModule>

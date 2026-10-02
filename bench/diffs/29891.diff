@@ -1,0 +1,284 @@
+diff --git a/admin-dev/themes/new-theme/scss/components/_alert.scss b/admin-dev/themes/new-theme/scss/components/_alert.scss
+index cbd11b615d3cd..1926c37f6bb45 100644
+--- a/admin-dev/themes/new-theme/scss/components/_alert.scss
++++ b/admin-dev/themes/new-theme/scss/components/_alert.scss
+@@ -1,4 +1,6 @@
+ .alert {
++  min-height: 55px;
++
+   > a {
+     padding: 0;
+   }
+diff --git a/controllers/admin/AdminShopController.php b/controllers/admin/AdminShopController.php
+index 876dbc78b97c6..7520392758c7b 100644
+--- a/controllers/admin/AdminShopController.php
++++ b/controllers/admin/AdminShopController.php
+@@ -24,6 +24,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeManagerBuilder;
++use PrestaShopBundle\Utils\Tree;
+ 
+ /**
+  * @property Shop|null $object
+@@ -226,14 +227,26 @@ public function renderList()
+     public function displayAjaxGetCategoriesFromRootCategory()
+     {
+         if (Tools::isSubmit('id_category')) {
+-            $selected_cat = [(int) Tools::getValue('id_category')];
+-            $children = Category::getChildren((int) Tools::getValue('id_category'), $this->context->language->id);
+-            foreach ($children as $child) {
+-                $selected_cat[] = $child['id_category'];
+-            }
++            $getId = function ($category) {
++                return (int) $category['id_category'];
++            };
++
++            $languageId = $this->context->language->id;
++            $getChildren = function (array $category) use ($languageId, $getId) {
++                return Category::getChildren($getId($category), $languageId);
++            };
++
++            // selected categories ids.
++            $selectedCategories = Tree::extractChildrenId(
++                [
++                    ['id_category' => (int) Tools::getValue('id_category')],
++                ],
++                $getChildren,
++                $getId
++            );
+ 
+             $helper = new HelperTreeCategories('categories-tree', null, (int) Tools::getValue('id_category'), null, false);
+-            $this->content = $helper->setSelectedCategories($selected_cat)->setUseSearch(true)->setUseCheckBox(true)
++            $this->content = $helper->setSelectedCategories($selectedCategories)->setUseSearch(true)->setUseCheckBox(true)
+                 ->render();
+         }
+         parent::displayAjax();
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index 193eb7023b1fe..b4aabdfe0b9d3 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -151,24 +151,9 @@ protected function bootstrap()
+     protected function saveDataToPersist(CheckoutProcess $process)
+     {
+         $data = $process->getDataToPersist();
+-        $addressValidator = new AddressValidator();
+-        $customer = $this->context->customer;
+         $cart = $this->context->cart;
+ 
+-        $shouldGenerateChecksum = false;
+-
+-        if ($customer->isGuest()) {
+-            $shouldGenerateChecksum = true;
+-        } else {
+-            $invalidAddressIds = $addressValidator->validateCartAddresses($cart);
+-            if (empty($invalidAddressIds)) {
+-                $shouldGenerateChecksum = true;
+-            }
+-        }
+-
+-        $data['checksum'] = $shouldGenerateChecksum
+-            ? $this->cartChecksum->generateChecksum($cart)
+-            : null;
++        $data['checksum'] = $this->cartChecksum->generateChecksum($cart);
+ 
+         Db::getInstance()->execute(
+             'UPDATE ' . _DB_PREFIX_ . 'cart SET checkout_session_data = "' . pSQL(json_encode($data)) . '"
+@@ -206,10 +191,6 @@ protected function restorePersistedData(CheckoutProcess $process)
+                     'Shop.Notifications.Error'
+                 ),
+             ];
+-
+-            $checksum = null;
+-        } else {
+-            $checksum = $this->cartChecksum->generateChecksum($cart);
+         }
+ 
+         // Prevent check for guests
+@@ -220,7 +201,7 @@ protected function restorePersistedData(CheckoutProcess $process)
+             $this->checkoutWarning['invalid_addresses'] = $allInvalidAddressIds;
+         }
+ 
+-        if (isset($data['checksum']) && $data['checksum'] === $checksum) {
++        if (isset($data['checksum']) && $data['checksum'] === $this->cartChecksum->generateChecksum($cart)) {
+             $process->restorePersistedData($data);
+         }
+     }
+diff --git a/src/PrestaShopBundle/Utils/Tree.php b/src/PrestaShopBundle/Utils/Tree.php
+new file mode 100644
+index 0000000000000..3730886273a3d
+--- /dev/null
++++ b/src/PrestaShopBundle/Utils/Tree.php
+@@ -0,0 +1,54 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Utils;
++
++class Tree
++{
++    /**
++     * @param array $elementlist
++     * @param callable $getChildren; must return an array of children for the given element; signature function($element): array
++     * @param callable $getId; must return the id of the given element; signature function($element): int
++     * @param array $idStorage; store found ids (ensure recursion optimisation and avoiding infinite loop)
++     *
++     * @return array [ (int) 'id' => (int) 'id'] (make array construction easier)
++     */
++    public static function extractChildrenId(array $elementlist, callable $getChildren, callable $getId, array &$idStorage = []): array
++    {
++        foreach ($elementlist as $child) {
++            $childId = $getId($child);
++            // Test made to ensure avoiding unecessary recursive call
++            if (!isset($idStorage[$childId])) {
++                $idStorage[$childId] = $childId;
++                static::extractChildrenId($getChildren($child), $getChildren, $getId, $idStorage);
++            }
++        }
++
++        return $idStorage;
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/Utils/TreeTest.php b/tests/Unit/PrestaShopBundle/Utils/TreeTest.php
+new file mode 100644
+index 0000000000000..c032f105d0424
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Utils/TreeTest.php
+@@ -0,0 +1,112 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Utils;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShopBundle\Utils\Tree;
++
++class TreeTest extends TestCase
++{
++    public function testItListsChildrenIds(): void
++    {
++        $tree = [
++            [
++                'element_id' => 1,
++                'children' => [
++                    [
++                        'element_id' => 2,
++                        'children' => [
++                            [
++                                'element_id' => '4',
++                                'children' => [],
++                            ],
++                            [
++                                'element_id' => 6,
++                                'children' => [],
++                            ],
++                            [
++                                'element_id' => 7,
++                            ],
++                        ],
++                    ],
++                    [
++                        'element_id' => 10,
++                        'children' => [
++                            [
++                                'element_id' => 12,
++                                'children' => [],
++                            ],
++                            [
++                                'element_id' => 13,
++                                'children' => [],
++                            ],
++                        ],
++                    ],
++                    [
++                        'element_id' => 15,
++                        'children' => [
++                            [
++                                'element_id' => 13,
++                                'children' => [],
++                            ],
++                            [
++                                'element_id' => 20,
++                                'children' => [],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++        ];
++
++        $idList = [
++            1 => 1,
++            2 => 2,
++            4 => 4,
++            6 => 6,
++            7 => 7,
++            10 => 10,
++            12 => 12,
++            13 => 13,
++            15 => 15,
++            20 => 20,
++        ];
++
++        $getChildren = function (array $element) {
++            return isset($element['children']) ? $element['children'] : [];
++        };
++
++        $getId = function ($element) {
++            return (int) $element['element_id'];
++        };
++
++        $this->assertSame($idList, Tree::extractChildrenId($tree, $getChildren, $getId));
++    }
++}

@@ -1,0 +1,110 @@
+diff --git a/classes/Context.php b/classes/Context.php
+index 21c92bffcbe72..713d65f4133f5 100644
+--- a/classes/Context.php
++++ b/classes/Context.php
+@@ -86,7 +86,7 @@ class ContextCore
+     public $mode;
+ 
+     /** @var Translator */
+-    protected $translator;
++    protected $translator = null;
+ 
+     /**
+      * Mobile device of the customer
+@@ -343,37 +343,52 @@ public function updateCustomer(Customer $customer)
+      */
+     public function getTranslator()
+     {
+-        $cacheDir = _PS_CACHE_DIR_.'/translations/'.$this->language->locale;
++        if (null !== $this->translator) {
++            return $this->translator;
++        }
++        
++        $cacheDir = _PS_CACHE_DIR_.'translations';
+         $this->translator = new Translator($this->language->locale, null, $cacheDir, false);
+ 
+-        if (!is_dir($cacheDir)) {
+-            $fs = new Filesystem();
+-            $fs->mkdir($cacheDir);
+-            $adminContext = defined('_PS_ADMIN_DIR_');
+-            $this->translator->addLoader('xlf', new XliffFileLoader());
++        // In case we have at least 1 translated message, we return the current translator.
++        // If some translations are missing, clear cache
++        if (count($this->translator->getCatalogue($this->language->locale)->all())) {
++            return $this->translator;
++        }
++
++        // However, in some case, even empty catalog were stored in the cache and then used as-is.
++        // For this one, we drop the cache and try to regenerate it.
++        $cache_file = Finder::create()
++            ->files()
++            ->in($cacheDir)
++            ->depth('==0')
++            ->name('*.'.$this->language->locale.'.*');
++        (new Filesystem())->remove($cache_file);
+ 
+-            $sqlTranslationLoader = new SqlTranslationLoader();
+-            if (!is_null($this->shop)) {
+-                $sqlTranslationLoader->setTheme($this->shop->theme);
+-            }
++        $adminContext = defined('_PS_ADMIN_DIR_');
++        $this->translator->addLoader('xlf', new XliffFileLoader());
+ 
+-            $this->translator->addLoader('db', $sqlTranslationLoader);
+-            $notName = $adminContext ? '^Shop*' : '^Admin*';
++        $sqlTranslationLoader = new SqlTranslationLoader();
++        if (!is_null($this->shop)) {
++            $sqlTranslationLoader->setTheme($this->shop->theme);
++        }
+ 
+-            $finder = Finder::create()
+-                ->files()
+-                ->name('*.*.xlf')
+-                ->notName($notName)
+-                ->in($this->getTranslationResourcesDirectories())
+-            ;
++        $this->translator->addLoader('db', $sqlTranslationLoader);
++        $notName = $adminContext ? '^Shop*' : '^Admin*';
+ 
+-            foreach ($finder as $file) {
+-                list($domain, $locale, $format) = explode('.', $file->getBasename(), 3);
++        $finder = Finder::create()
++            ->files()
++            ->name('*.'.$this->language->locale.'.xlf')
++            ->notName($notName)
++            ->in($this->getTranslationResourcesDirectories())
++        ;
+ 
+-                $this->translator->addResource($format, $file, $locale, $domain);
+-                if (!is_a($this->language, 'PrestashopBundle\Install\Language')) {
+-                    $this->translator->addResource('db', $domain.'.'.$locale.'.db', $locale, $domain);
+-                }
++        foreach ($finder as $file) {
++            list($domain, $locale, $format) = explode('.', $file->getBasename(), 3);
++
++            $this->translator->addResource($format, $file, $locale, $domain);
++            if (!is_a($this->language, 'PrestashopBundle\Install\Language')) {
++                $this->translator->addResource('db', $domain.'.'.$locale.'.db', $locale, $domain);
+             }
+         }
+ 
+diff --git a/classes/Language.php b/classes/Language.php
+index 0d90abfa2dbda..014bf8bde1b12 100644
+--- a/classes/Language.php
++++ b/classes/Language.php
+@@ -1013,6 +1013,7 @@ public static function installSfLanguagePack($locale, &$errors = array())
+             $zipArchive = new ZipArchive();
+             $zipArchive->open(_PS_TRANSLATIONS_DIR_.'sf-'.$locale.'.zip');
+             $zipArchive->extractTo(_PS_ROOT_DIR_.'/app/Resources/translations');
++            $zipArchive->close();
+         }
+     }
+ 
+@@ -1029,6 +1030,7 @@ public static function installEmailsLanguagePack($lang_pack, &$errors = array())
+             $zipArchive = new ZipArchive();
+             $zipArchive->open($folder.'.zip');
+             $zipArchive->extractTo($folder);
++            $zipArchive->close();
+ 
+             $coreDestPath = _PS_ROOT_DIR_.'/mails/'.$lang_pack['iso_code'];
+             $fileSystem->mkdir($coreDestPath, 0755);

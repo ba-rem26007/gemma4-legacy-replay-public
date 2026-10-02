@@ -1,0 +1,77 @@
+diff --git a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+index d0bdc8b2dbe2e..dec857486ab16 100644
+--- a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
++++ b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+@@ -357,7 +357,13 @@ private function getShopConstraintFromRouteAttribute(Request $request): ?ShopCon
+                 $routeInfo = $this->router->matchRequest($request);
+                 $controller = $routeInfo['_controller'];
+             }
+-            [$className, $methodName] = explode('::', $controller);
++            $controllerParts = explode('::', $controller);
++            if (2 !== count($controllerParts)) {
++                // Invokable or service-id controllers (e.g. the API Platform docs action) have no
++                // "Class::method" form, so they cannot declare the AllShopContext attribute this way. (#39468)
++                return null;
++            }
++            [$className, $methodName] = $controllerParts;
+ 
+             $reflectionClass = new ReflectionClass($className);
+             $classAttributes = $reflectionClass->getAttributes(AllShopContext::class);
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+index 7e58bc6470b0c..1fe9ef0eb4c59 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+@@ -128,6 +128,53 @@ public function testLegacyControllerForceMultiShop(): void
+         $this->assertEquals($expectedShopConstraint, $event->getRequest()->attributes->get('shopConstraint'));
+     }
+ 
++    /**
++     * The Admin API docs route (api_doc) maps to an invokable controller with no "Class::method"
++     * form. Resolving the shop context for it must not emit an "Undefined array key 1" warning,
++     * which fataled the API documentation when multistore was enabled. See #39468.
++     */
++    public function testMultiShopWithInvokableControllerRouteDoesNotFail(): void
++    {
++        $expectedShopConstraint = ShopConstraint::shop(1);
++        $event = $this->createRequestEvent(new Request());
++
++        $router = $this->createMock(RequestMatcherInterface::class);
++        $router->method('matchRequest')->willReturn(['_controller' => 'Some\\Invokable\\DocsAction']);
++
++        $shopContextBuilder = new ShopContextBuilder(
++            $this->mockShopRepository(1),
++            $this->mockContextStateManager(),
++            $this->mockMultistoreFeature(true),
++        );
++
++        $listener = new ShopContextSubscriber(
++            $shopContextBuilder,
++            $this->mockEmployeeContext(),
++            $this->mockConfiguration(['PS_SHOP_DEFAULT' => self::DEFAULT_SHOP_ID, 'PS_SSL_ENABLED' => self::PS_SSL_ENABLED]),
++            $this->mockMultistoreFeature(true),
++            $router,
++            $this->mockSecurity($expectedShopConstraint),
++            $this->mockLegacyContext(),
++            $this->createMock(TranslatorInterface::class),
++        );
++
++        $warnings = [];
++        set_error_handler(static function (int $errno, string $errstr) use (&$warnings): bool {
++            $warnings[] = $errstr;
++
++            return true;
++        }, E_WARNING);
++
++        try {
++            $listener->initShopContext($event);
++        } finally {
++            restore_error_handler();
++        }
++
++        $this->assertSame([], $warnings, 'Resolving the shop context for an invokable controller must not emit a PHP warning.');
++        $this->assertEquals($expectedShopConstraint, $event->getRequest()->attributes->get('shopConstraint'));
++    }
++
+     public static function getMultiShopValues(): iterable
+     {
+         yield 'single shop, employee has all permissions' => [

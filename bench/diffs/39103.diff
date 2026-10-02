@@ -1,0 +1,902 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+index 6e6dd64edd6fb..e8dcf63e29a30 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+@@ -36,4 +36,8 @@ export default {
+   discountTypeRadios: '#discount_type_selector_discount_type_selector input[type="radio"]',
+   discountTypeSubmit: '#discountTypeSubmit',
+   specificProductsSearchContainer: '#discount_conditions_cart_conditions_specific_products',
++  specificProductItem: '.specific-product-item',
++  specificProductId: '.specific-product-id',
++  specificProductType: '.specific-product-type',
++  specificCombinationId: '.specific-combination-choice',
+ };
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/specific-products.ts b/admin-dev/themes/new-theme/js/pages/discount/form/specific-products.ts
+index 1844c3fe208dc..a91a8b4724ac8 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/specific-products.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/specific-products.ts
+@@ -25,23 +25,108 @@
+ 
+ import EntitySearchInput from '@components/entity-search-input';
+ import DiscountMap from '@pages/discount/discount-map';
++import Router from '@components/router';
++
++interface CombinationChoice {
++  combinationId: number,
++  combinationName: string,
++}
++
++interface ProductCombinationsResult {
++  combinations: CombinationChoice[]
++}
++
++interface jQuerySelect2Choice {
++  id: number,
++  text: string,
++}
++interface jQuerySelect2Results {
++  results: jQuerySelect2Choice[]
++}
+ 
+ const {$} = window;
+ export default class SpecificProducts {
+-  $specificProductsSearchInput: JQuery;
++  private $specificProductsSearchInput: JQuery;
++
++  private entitySearchInput!: EntitySearchInput;
+ 
+-  entitySearchInput!: EntitySearchInput;
++  private router: Router;
+ 
+   constructor() {
++    this.router = new Router();
+     this.$specificProductsSearchInput = $(DiscountMap.specificProductsSearchContainer);
+ 
++    this.init();
++  }
++
++  init(): void {
+     if (this.$specificProductsSearchInput.length) {
+       const autocompleteUrl = (document.querySelector(DiscountMap.specificProductsSearchContainer) as HTMLElement)
+         ?.dataset.remoteUrl;
++
+       this.entitySearchInput = new EntitySearchInput(
+         this.$specificProductsSearchInput,
+-        {remoteUrl: autocompleteUrl},
++        {
++          remoteUrl: autocompleteUrl,
++          onSelectedContent: ($node: JQuery, item: any) => {
++            const $combinationIdSelect = $(DiscountMap.specificCombinationId, $node);
++
++            if (item.product_type === 'combinations') {
++              this.initCombinationSelector($combinationIdSelect, item.id);
++            }
++          },
++          filterSelected: false,
++        },
+       );
+     }
++
++    // Init specific products already present
++    $(DiscountMap.specificProductItem).each((index: number, element: Element) => {
++      const productId = Number(element.querySelector<HTMLInputElement>(DiscountMap.specificProductId)?.value);
++      const productType = String(element.querySelector<HTMLInputElement>(DiscountMap.specificProductType)?.value);
++      const $combinationIdSelect = $(DiscountMap.specificCombinationId, element);
++
++      if (productType === 'combinations') {
++        this.initCombinationSelector($combinationIdSelect, productId);
++      }
++    });
++  }
++
++  initCombinationSelector($combinationIdSelect: JQuery, productId: number): void {
++    const limit = $combinationIdSelect.data('minimum-results-for-search');
++
++    $combinationIdSelect.removeClass('d-none');
++    $combinationIdSelect.select2({
++      minimumResultsForSearch: limit,
++      ajax: {
++        url: () => this.router.generate('admin_products_search_product_combinations', {productId, limit}),
++        dataType: 'json',
++        type: 'GET',
++        delay: 250,
++        data(params: Record<string, string>): Record<string, string> {
++          return {
++            q: params.term,
++          };
++        },
++        processResults(data: ProductCombinationsResult): jQuerySelect2Results {
++          // prepend the "all combinations" choice to the top of the list
++          const allCombinationsChoice: CombinationChoice = {
++            combinationId: Number($combinationIdSelect.data('allCombinationsValue')),
++            combinationName: String($combinationIdSelect.data('allCombinationsLabel')),
++          };
++          const results = <jQuerySelect2Choice[]> [{
++            id: allCombinationsChoice.combinationId,
++            text: allCombinationsChoice.combinationName,
++          }];
++
++          results.push(...data.combinations.map((combination: CombinationChoice) => ({
++            id: combination.combinationId,
++            text: combination.combinationName,
++          })));
++
++          return {results};
++        },
++      },
++    });
+   }
+ }
+diff --git a/admin-dev/themes/new-theme/scss/pages/_discount.scss b/admin-dev/themes/new-theme/scss/pages/_discount.scss
+index 0d5ab8d06e2ca..aa3140d8dd7b3 100644
+--- a/admin-dev/themes/new-theme/scss/pages/_discount.scss
++++ b/admin-dev/themes/new-theme/scss/pages/_discount.scss
+@@ -7,3 +7,26 @@
+     }
+   }
+ }
++
++.specific-product-item {
++  .form-group {
++    margin-bottom: 0;
++  }
++
++  .specific-product-quantity-row {
++    max-width: 250px;
++  }
++
++  .specific-product-combination-row {
++    min-width: 250px;
++  }
++
++  .select2-selection,
++  .select2-container:not(.select2-container--bootstrap4) .select2-selection {
++    padding: var(--cdk-size-5) var(--cdk-size-32) var(--cdk-size-4) var(--cdk-size-16);
++  }
++
++  .select2 {
++    margin-right: var(--cdk-size-8);
++  }
++}
+diff --git a/src/Adapter/Product/QueryHandler/SearchProductsForAssociationHandler.php b/src/Adapter/Product/QueryHandler/SearchProductsForAssociationHandler.php
+index c6eec613b7e9a..456a335af8b62 100644
+--- a/src/Adapter/Product/QueryHandler/SearchProductsForAssociationHandler.php
++++ b/src/Adapter/Product/QueryHandler/SearchProductsForAssociationHandler.php
+@@ -101,7 +101,8 @@ private function createResult(array $foundProduct): ProductForAssociation
+             (int) $foundProduct['id_product'],
+             $foundProduct['name'],
+             $foundProduct['reference'] ?? '',
+-            $imagePath
++            $imagePath,
++            $foundProduct['product_type'],
+         );
+     }
+ }
+diff --git a/src/Adapter/Product/Repository/ProductRepository.php b/src/Adapter/Product/Repository/ProductRepository.php
+index 110650dc14452..6924cd779e560 100644
+--- a/src/Adapter/Product/Repository/ProductRepository.php
++++ b/src/Adapter/Product/Repository/ProductRepository.php
+@@ -797,7 +797,7 @@ public function searchProducts(string $searchPhrase, LanguageId $languageId, Sho
+             [],
+             $limit);
+         $qb
+-            ->addSelect('p.id_product, pl.name, p.reference, i.id_image')
++            ->addSelect('p.id_product, pl.name, p.reference, i.id_image, p.product_type')
+             ->addGroupBy('p.id_product')
+             ->addOrderBy('pl.name', 'ASC')
+             ->addOrderBy('p.id_product', 'ASC')
+diff --git a/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+index 0ab9386ec3ac6..163541227be6f 100644
+--- a/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
++++ b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+@@ -118,6 +118,24 @@ public function setProductConditions(array $productConditions): self
+             if (!$productCondition instanceof ProductRuleGroup) {
+                 throw new DiscountConstraintException(sprintf('Product conditions must be an array of %s', ProductRuleGroup::class), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
+             }
++            if (empty($productCondition->getRules())) {
++                throw new DiscountConstraintException(sprintf('Product conditions rules cannot be empty'), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
++            }
++
++            foreach ($productCondition->getRules() as $rule) {
++                if (empty($rule->getItemIds())) {
++                    throw new DiscountConstraintException(sprintf('Product conditions rule items cannot be empty'), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
++                }
++
++                foreach ($rule->getItemIds() as $itemId) {
++                    if (!is_int($itemId)) {
++                        throw new DiscountConstraintException(sprintf('Product conditions rule item ID must be an integer'), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
++                    }
++                    if ((int) $itemId <= 0) {
++                        throw new DiscountConstraintException(sprintf('Product conditions rule item ID must be strictly positive'), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
++                    }
++                }
++            }
+         }
+ 
+         $this->productConditions = $productConditions;
+diff --git a/src/Core/Domain/Product/QueryResult/ProductForAssociation.php b/src/Core/Domain/Product/QueryResult/ProductForAssociation.php
+index f74ced4573fad..8d57a49a11461 100644
+--- a/src/Core/Domain/Product/QueryResult/ProductForAssociation.php
++++ b/src/Core/Domain/Product/QueryResult/ProductForAssociation.php
+@@ -30,69 +30,37 @@
+ 
+ class ProductForAssociation
+ {
+-    /**
+-     * @var int
+-     */
+-    private $productId;
+-
+-    /**
+-     * @var string
+-     */
+-    private $name;
+-
+-    /**
+-     * @var string
+-     */
+-    private $reference;
+-
+-    /**
+-     * @var string
+-     */
+-    private $imageUrl;
+-
+-    /**
+-     * @param int $productId
+-     * @param string $name
+-     * @param string $reference
+-     * @param string $imageUrl
+-     */
+-    public function __construct(int $productId, string $name, string $reference, string $imageUrl)
+-    {
+-        $this->productId = $productId;
+-        $this->name = $name;
+-        $this->reference = $reference;
+-        $this->imageUrl = $imageUrl;
++    public function __construct(
++        private readonly int $productId,
++        private readonly string $name,
++        private readonly string $reference,
++        private readonly string $imageUrl,
++        private readonly string $productType,
++    ) {
+     }
+ 
+-    /**
+-     * @return int
+-     */
+     public function getProductId(): int
+     {
+         return $this->productId;
+     }
+ 
+-    /**
+-     * @return string
+-     */
+     public function getName(): string
+     {
+         return $this->name;
+     }
+ 
+-    /**
+-     * @return string
+-     */
+     public function getReference(): string
+     {
+         return $this->reference;
+     }
+ 
+-    /**
+-     * @return string
+-     */
+     public function getImageUrl(): string
+     {
+         return $this->imageUrl;
+     }
++
++    public function getProductType(): string
++    {
++        return $this->productType;
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 8d1d50c8c2a40..7378a57b4dc65 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -41,6 +41,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+ use PrestaShop\PrestaShop\Core\Domain\Exception\DomainConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\NoCombinationId;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\CartConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountUsabilityModeType;
+@@ -185,12 +186,21 @@ private function updateDiscountConditions(int $discountId, array $data): void
+                 $productRuleGroups = [];
+ 
+                 foreach ($specificProducts as $specificProduct) {
+-                    $productRuleGroups[] = new ProductRuleGroup(
+-                        $specificProduct['quantity'] ?? 1,
+-                        [
+-                            new ProductRule(ProductRuleType::PRODUCTS, [$specificProduct['id']]),
+-                        ]
+-                    );
++                    if (!empty($specificProduct['combination_id']) && $specificProduct['combination_id'] !== NoCombinationId::NO_COMBINATION_ID) {
++                        $productRuleGroups[] = new ProductRuleGroup(
++                            $specificProduct['quantity'],
++                            [
++                                new ProductRule(ProductRuleType::COMBINATIONS, [(int) $specificProduct['combination_id']]),
++                            ]
++                        );
++                    } else {
++                        $productRuleGroups[] = new ProductRuleGroup(
++                            $specificProduct['quantity'],
++                            [
++                                new ProductRule(ProductRuleType::PRODUCTS, [(int) $specificProduct['id']]),
++                            ]
++                        );
++                    }
+                 }
+ 
+                 $conditionsCommand->setProductConditions($productRuleGroups);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 6f72c04af5851..4b48e19b92818 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -27,16 +27,19 @@
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
+ use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Combination\Repository\CombinationRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleType;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Exception\CombinationConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\NoCombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Image\Provider\ProductImageProviderInterface;
+@@ -46,17 +49,21 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Product\Combination\NameBuilder\CombinationNameBuilder;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountUsabilityModeType;
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\HttpFoundation\Session\FlashBagAwareSessionInterface;
+ 
+ class DiscountFormDataProvider implements FormDataProviderInterface
+ {
+     public function __construct(
+         private readonly CommandBusInterface $queryBus,
+         private readonly ProductRepository $productRepository,
++        private readonly CombinationRepository $combinationRepository,
+         private readonly CombinationNameBuilder $combinationNameBuilder,
+         private readonly ProductImageProviderInterface $productImageProvider,
+         private readonly LanguageContext $languageContext,
+         private readonly AttributeRepository $attributeRepository,
+         private readonly ShopContext $shopContext,
++        private readonly RequestStack $requestStack,
+     ) {
+     }
+ 
+@@ -132,7 +139,7 @@ public function getData($id)
+                         'currency' => $discountForEditing->getMinimumAmountCurrencyId(),
+                         'include_tax' => $discountForEditing->getMinimumAmountTaxIncluded(),
+                     ],
+-                    'specific_products' => $this->getProductConditionsDetails($discountForEditing),
++                    'specific_products' => $this->getSpecificProducts($discountForEditing),
+                 ],
+             ],
+             'usability' => [
+@@ -144,31 +151,61 @@ public function getData($id)
+         ];
+     }
+ 
+-    private function getProductConditionsDetails(DiscountForEditing $discountForEditing): array
++    private function getSpecificProducts(DiscountForEditing $discountForEditing): array
+     {
+-        $productConditions = [];
++        $specificProducts = [];
+         foreach ($discountForEditing->getProductConditions() as $conditions) {
+             foreach ($conditions->getRules() as $rule) {
+-                $product = $this->productRepository->getProductByDefaultShop(new ProductId($rule->getItemIds()[0]));
+-                $name = $product->name[$this->languageContext->getId()];
++                if ($rule->getType() == ProductRuleType::PRODUCTS) {
++                    // The data is not formatted as expected and would break the page (it may happen with data from old page),
++                    // to be resilient against this kind of data so we ignore it. But it means some data is going be lost so
++                    // we warn the user
++                    if (count($rule->getItemIds()) === 0) {
++                        $this->displayWarning('Invalid specific product has been removed from form data, it will be erased if you submit this form.');
++                        continue;
++                    }
+ 
+-                $productConditions[] = [
++                    $productId = new ProductId($rule->getItemIds()[0]);
++                    $productDefaultShopId = $this->productRepository->getProductDefaultShopId($productId);
++                    $product = $this->productRepository->get($productId, $productDefaultShopId);
++                    $combinationIdValue = NoCombinationId::NO_COMBINATION_ID;
++                    $imageUrl = $this->productImageProvider->getProductCoverUrl($productId, $productDefaultShopId);
++                } elseif ($rule->getType() == ProductRuleType::COMBINATIONS) {
++                    // The data is not formatted as expected and would break the page (it may happen with data from old page),
++                    // to be resilient against this kind of data so we ignore it. But it means some data is going be lost so
++                    // we warn the user
++                    if (count($rule->getItemIds()) === 0) {
++                        $this->displayWarning('Invalid specific combination has been removed from form data, it will be erased if you submit this form.');
++                        continue;
++                    }
++
++                    $combinationIdValue = $rule->getItemIds()[0];
++                    $combinationId = new CombinationId($combinationIdValue);
++                    $productId = $this->combinationRepository->getProductId($combinationId);
++                    $productDefaultShopId = $this->productRepository->getProductDefaultShopId($productId);
++                    $product = $this->productRepository->get($productId, $productDefaultShopId);
++                    $imageUrl = $this->productImageProvider->getCombinationCoverUrl($combinationId, $productDefaultShopId);
++                } else {
++                    continue;
++                }
++
++                $productName = $product->name[$this->languageContext->getId()];
++                if (!empty($product->reference)) {
++                    $productName .= sprintf(' (ref: %s)', $product->reference);
++                }
++
++                $specificProducts[] = [
+                     'id' => $product->id,
+-                    'name' => $name,
+-                    'image' => $this->productImageProvider->getProductCoverUrl(
+-                        new ProductId($product->id),
+-                        new ShopId($this->shopContext->getId())
+-                    ),
+-                    'unique_identifier' => null,
+-                    'product_id' => null,
+-                    'combination_id' => null,
+-                    'reference' => null,
++                    'combination_id' => $combinationIdValue,
++                    'product_type' => $product->product_type,
++                    'name' => $productName,
++                    'image' => $imageUrl,
+                     'quantity' => $conditions->getQuantity(),
+                 ];
+             }
+         }
+ 
+-        return $productConditions;
++        return $specificProducts;
+     }
+ 
+     /**
+@@ -213,4 +250,12 @@ private function getGiftDetails(DiscountForEditing $discountForEditing): array
+             'imageUrl' => $imageUrl,
+         ];
+     }
++
++    private function displayWarning(string $message): void
++    {
++        $session = $this->requestStack->getCurrentRequest()->getSession();
++        if ($session instanceof FlashBagAwareSessionInterface) {
++            $session->getFlashBag()->add('warning', $message);
++        }
++    }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
+index 6116f35aa66ff..778e976985e86 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
+@@ -1205,6 +1205,7 @@ private function formatProductsForAssociation(array $productsForAssociation): ar
+                 'id' => $productForAssociation->getProductId(),
+                 'name' => $productName,
+                 'image' => $productForAssociation->getImageUrl(),
++                'product_type' => $productForAssociation->getProductType(),
+             ];
+         }
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+index 72cfe0b2acb0f..036a3f2a88187 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+@@ -33,6 +33,7 @@
+ use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\Validator\Constraints\Collection;
++use Symfony\Component\Validator\Constraints\Count;
+ use Symfony\Component\Validator\Constraints\GreaterThan;
+ use Symfony\Component\Validator\Constraints\When;
+ 
+@@ -84,11 +85,26 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add(self::SPECIFIC_PRODUCTS, ProductSearchType::class, [
+                 'layout' => EntitySearchInputType::LIST_LAYOUT,
+-                'entry_type' => ProductConditionType::class,
++                'entry_type' => SpecificProductType::class,
+                 'limit' => 0,
+                 'label' => $this->trans('Specific products', 'Admin.Catalog.Feature'),
+                 'include_combinations' => false,
+                 'required' => false,
++                'constraints' => [
++                    new When(
++                        expression: sprintf(
++                            'this.getParent().getParent().get("children_selector").getData() === "%s" && this.getParent().get("children_selector").getData() === "%s"',
++                            DiscountConditionsType::CART_CONDITIONS,
++                            self::SPECIFIC_PRODUCTS
++                        ),
++                        constraints: [
++                            new Count(
++                                min: 1,
++                                minMessage: $this->trans('You need to select at least one product.', 'Admin.Catalog.Notification'),
++                            ),
++                        ],
++                    ),
++                ],
+             ])
+         ;
+     }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/ProductConditionType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/ProductConditionType.php
+deleted file mode 100644
+index 40aabb8f8bfe3..0000000000000
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/ProductConditionType.php
++++ /dev/null
+@@ -1,78 +0,0 @@
+-<?php
+-/**
+- * Copyright since 2007 PrestaShop SA and Contributors
+- * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
+- *
+- * NOTICE OF LICENSE
+- *
+- * This source file is subject to the Open Software License (OSL 3.0)
+- * that is bundled with this package in the file LICENSE.md.
+- * It is also available through the world-wide-web at this URL:
+- * https://opensource.org/licenses/OSL-3.0
+- * If you did not receive a copy of the license and are unable to
+- * obtain it through the world-wide-web, please send an email
+- * to license@prestashop.com so we can send you a copy immediately.
+- *
+- * DISCLAIMER
+- *
+- * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
+- * versions in the future. If you wish to customize PrestaShop for your
+- * needs please refer to https://devdocs.prestashop.com/ for more information.
+- *
+- * @author    PrestaShop SA and Contributors <contact@prestashop.com>
+- * @copyright Since 2007 PrestaShop SA and Contributors
+- * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+- */
+-
+-namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+-
+-use PrestaShopBundle\Form\Admin\Sell\Product\SearchedProductItemType;
+-use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+-use Symfony\Component\Form\Extension\Core\Type\TextType;
+-use Symfony\Component\Form\FormBuilderInterface;
+-use Symfony\Component\OptionsResolver\OptionsResolver;
+-use Symfony\Component\Validator\Constraints\GreaterThanOrEqual;
+-use Symfony\Component\Validator\Constraints\NotBlank;
+-use Symfony\Component\Validator\Constraints\Type;
+-
+-class ProductConditionType extends TranslatorAwareType
+-{
+-    /**
+-     * {@inheritDoc}
+-     */
+-    public function buildForm(FormBuilderInterface $builder, array $options)
+-    {
+-        $builder
+-            // @Todo must be an IntegerType or NumberType, but according with a prototype EntitySearchInputType limitation, set to TextType
+-            // @link https://github.com/PrestaShop/PrestaShop/issues/28513
+-            ->add('quantity', TextType::class, [
+-                'label' => false,
+-                'attr' => [
+-                    'class' => 'js-comma-transformer',
+-                ],
+-                'constraints' => [
+-                    new NotBlank([]),
+-                    new Type([
+-                        'type' => 'numeric',
+-                    ]),
+-                    new GreaterThanOrEqual([
+-                        'value' => 1,
+-                    ]),
+-                ],
+-            ])
+-        ;
+-    }
+-
+-    public function getParent(): string
+-    {
+-        return SearchedProductItemType::class;
+-    }
+-
+-    public function configureOptions(OptionsResolver $resolver)
+-    {
+-        parent::configureOptions($resolver);
+-        $resolver->setDefaults([
+-            'form_theme' => '@PrestaShop/Admin/Sell/Catalog/Discount/FormTheme/product_condition_type.html.twig',
+-        ]);
+-    }
+-}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/SpecificProductType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/SpecificProductType.php
+new file mode 100644
+index 0000000000000..b1b5dfd1dab7e
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/SpecificProductType.php
+@@ -0,0 +1,220 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Form\Admin\Sell\Discount;
++
++use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Combination\Repository\CombinationRepository;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\NoCombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
++use PrestaShop\PrestaShop\Core\Product\Combination\NameBuilder\CombinationNameBuilderInterface;
++use PrestaShopBundle\Form\Admin\Type\ImagePreviewType;
++use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use PrestaShopBundle\Form\FormCloner;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\Extension\Core\Type\IntegerType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormEvent;
++use Symfony\Component\Form\FormEvents;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\GreaterThanOrEqual;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Component\Validator\Constraints\Type;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class SpecificProductType extends TranslatorAwareType
++{
++    private const COMBINATION_RESULTS_LIMIT = 20;
++
++    public function __construct(
++        private readonly CombinationNameBuilderInterface $combinationNameBuilder,
++        private readonly AttributeRepository $attributeRepository,
++        private readonly LanguageContext $languageContext,
++        private readonly CombinationRepository $combinationRepository,
++        private readonly FormCloner $formCloner,
++        TranslatorInterface $translator,
++        array $locales,
++    ) {
++        parent::__construct($translator, $locales);
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add('id', HiddenType::class, [
++                'label' => false,
++                'attr' => [
++                    'class' => 'specific-product-id',
++                ],
++            ])
++            ->add('product_type', HiddenType::class, [
++                'label' => false,
++                'attr' => [
++                    'class' => 'specific-product-type',
++                ],
++            ])
++            ->add('name', TextPreviewType::class, [
++                'label' => false,
++            ])
++            ->add('image', ImagePreviewType::class, [
++                'label' => false,
++            ])
++            ->add('combination_id', ChoiceType::class, [
++                'label' => false,
++                'required' => false,
++                'placeholder' => null,
++                'attr' => [
++                    'class' => 'specific-combination-choice',
++                    // select2 jQuery component is added in javascript manually for this ChoiceType
++                    'data-minimum-results-for-search' => self::COMBINATION_RESULTS_LIMIT,
++                    // we still need to pass all combinations choice to javascript
++                    // to prepend it to the ajax-fetched list of combination choices
++                    'data-all-combinations-label' => $this->getAllCombinationsChoiceLabel(),
++                    'data-all-combinations-value' => NoCombinationId::NO_COMBINATION_ID,
++                ],
++                'choices' => [
++                    $this->getAllCombinationsChoiceLabel() => NoCombinationId::NO_COMBINATION_ID,
++                ],
++                'row_attr' => [
++                    'class' => 'specific-product-combination-row',
++                ],
++            ])
++            ->add('quantity', IntegerType::class, [
++                'label' => false,
++                'attr' => [
++                    'class' => 'js-comma-transformer',
++                ],
++                'row_attr' => [
++                    'class' => 'specific-product-quantity-row',
++                ],
++                'constraints' => [
++                    new NotBlank([]),
++                    new Type([
++                        'type' => 'numeric',
++                    ]),
++                    new GreaterThanOrEqual([
++                        'value' => 1,
++                    ]),
++                ],
++            ])
++        ;
++
++        // Dynamically update combination choices to include the posted value
++        $builder->addEventListener(FormEvents::PRE_SUBMIT, function (FormEvent $event) {
++            $this->updateCombinationChoices($event);
++        });
++        $builder->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event) {
++            $this->updateCombinationChoices($event);
++        });
++    }
++
++    public function updateCombinationChoices(FormEvent $event): void
++    {
++        $form = $event->getForm();
++        $data = $event->getData();
++
++        // Prototype rendering
++        if (empty($data)) {
++            return;
++        }
++
++        // If product has no combinations we hide the combination selector
++        if ($data['product_type'] !== ProductType::TYPE_COMBINATIONS) {
++            $oldCombinationChoicesForm = $form->get('combination_id');
++            $combinationOptions = $oldCombinationChoicesForm->getConfig()->getOptions();
++            $combinationOptions['attr']['class'] = trim(($combinationOptions['attr']['class'] ?? '') . ' d-none');
++            $newCombinationChoicesForm = $this->formCloner->cloneForm($oldCombinationChoicesForm, $combinationOptions);
++        } else {
++            // We need to update the choices list in the form, it must contain the default All combinations and the selected
++            // combination if present, if the selected combination is not present in the choices an error is raised
++            $combinationId = (int) $data['combination_id'];
++            $choices = [
++                $this->getAllCombinationsChoiceLabel() => NoCombinationId::NO_COMBINATION_ID,
++            ];
++
++            if ($combinationId !== NoCombinationId::NO_COMBINATION_ID) {
++                $this->combinationRepository->assertCombinationExists(new CombinationId($combinationId));
++                $choices[$this->getCombinationName($combinationId)] = $combinationId;
++            }
++
++            $newCombinationChoicesForm = $this->formCloner->cloneForm($form->get('combination_id'), [
++                'choices' => $choices,
++            ]);
++        }
++
++        $form->add($newCombinationChoicesForm);
++    }
++
++    /**
++     * This block prefix is important it allows inheriting the templates from the default EntitySearchInputType
++     *
++     * @return string
++     */
++    public function getBlockPrefix(): string
++    {
++        return 'entity_item';
++    }
++
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        parent::configureOptions($resolver);
++        $resolver->setDefaults([
++            'form_theme' => '@PrestaShop/Admin/Sell/Catalog/Discount/FormTheme/specific_product.html.twig',
++            'default_empty_data' => [
++                // Force the default quantity to 1, and this allows using an IntegerType for quantity field as well
++                'quantity' => 1,
++            ],
++        ]);
++    }
++
++    private function getCombinationName(int $combinationIdValue): string
++    {
++        if (NoCombinationId::NO_COMBINATION_ID === $combinationIdValue) {
++            return $this->getAllCombinationsChoiceLabel();
++        }
++
++        $combinationId = new CombinationId($combinationIdValue);
++        $attributesInformation = $this->attributeRepository->getAttributesInfoByCombinationIds(
++            [$combinationId],
++            new LanguageId($this->languageContext->getId())
++        );
++
++        return $this->combinationNameBuilder->buildName($attributesInformation[$combinationId->getValue()]);
++    }
++
++    private function getAllCombinationsChoiceLabel(): string
++    {
++        return $this->trans('All combinations', 'Admin.Global');
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/EntitySearchInputType.php b/src/PrestaShopBundle/Form/Admin/Type/EntitySearchInputType.php
+index c501cbfaef3e7..7b01b74f0d7d8 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/EntitySearchInputType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/EntitySearchInputType.php
+@@ -161,8 +161,10 @@ public function buildView(FormView $view, FormInterface $form, array $options)
+             }
+         }
+ 
+-        // Force the data in prototype so that placeholders are injected in the prototype template then render the view
+-        $prototype->setData($options['prototype_mapping']);
++        // Force the data in prototype so that placeholders are injected in the prototype template then render the view,
++        // unless some default_empty_data has been specified on the prototype, in which case the prototype default data is
++        // preferred over the placeholder
++        $prototype->setData(($prototype->getConfig()->getOption('default_empty_data') ?? []) + $options['prototype_mapping']);
+         parent::buildView($view, $form, $options);
+ 
+         // Reformat parameter name for javascript (PHP and JS don't have same naming conventions)
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/product_condition_type.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/specific_product.html.twig
+similarity index 83%
+rename from src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/product_condition_type.html.twig
+rename to src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/specific_product.html.twig
+index 2088aa837b0c7..99ac6ba0d08c5 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/product_condition_type.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/FormTheme/specific_product.html.twig
+@@ -24,20 +24,21 @@
+  * #}
+ 
+ {% block entity_item_list_row %}
+-  {% set attr = attr|merge({class: (attr.class|default('') ~ ' media entity-item')|trim}) %}
++  {% set attr = attr|merge({class: (attr.class|default('') ~ ' media entity-item specific-product-item')|trim}) %}
+   <li {{ block('widget_container_attributes') }}>
+     <div class="media-left">
+       {{ form_widget(form.image) }}
+     </div>
+     <div class="media-body media-middle">
+-      {{ form_widget(form.name) }}
++      <div class="d-inline-flex">
++        {{ form_row(form.name) }}
++      </div>
+     </div>
+-    <div class="media-body media-middle">
+-      {{ form_widget(form.quantity) }}
+-    </div>
+-    <div class="media-right">
++    <div class="media-right d-inline-flex">
++      {{ form_row(form.combination_id) }}
++      {{ form_row(form.quantity) }}
++      {{ form_rest(form) }}
+       <i class="material-icons entity-item-delete">clear</i>
+     </div>
+-    {{ form_rest(form) }}
+   </li>
+ {% endblock %}

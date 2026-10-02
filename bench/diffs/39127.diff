@@ -1,0 +1,186 @@
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php b/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
+index e62a3f713f649..f18a2d874bdf5 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
+@@ -48,6 +48,7 @@
+ use PrestaShop\PrestaShop\Core\Localization\CLDR\ComputingPrecision;
+ use PrestaShop\PrestaShop\Core\Localization\Locale;
+ use PrestaShop\PrestaShop\Core\Util\Sorter;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use Product;
+ use Shop;
+ use StockAvailable;
+@@ -58,29 +59,12 @@
+ #[AsQueryHandler]
+ final class GetOrderProductsForViewingHandler extends AbstractOrderHandler implements GetOrderProductsForViewingHandlerInterface
+ {
+-    /**
+-     * @var ImageTagSourceParserInterface
+-     */
+-    private $imageTagSourceParser;
+-
+-    /**
+-     * @var int
+-     */
+-    private $contextLanguageId;
+-
+-    /**
+-     * @var Locale
+-     */
+-    private $locale;
+-
+     public function __construct(
+-        ImageTagSourceParserInterface $imageTagSourceParser,
+-        int $contextLanguageId,
+-        Locale $locale
++        private readonly ImageTagSourceParserInterface $imageTagSourceParser,
++        private readonly int $contextLanguageId,
++        private readonly Locale $locale,
++        private readonly ShipmentRepository $shipmentRepository
+     ) {
+-        $this->imageTagSourceParser = $imageTagSourceParser;
+-        $this->contextLanguageId = $contextLanguageId;
+-        $this->locale = $locale;
+     }
+ 
+     public function handle(GetOrderProductsForViewing $query): OrderProductsForViewing
+@@ -199,6 +183,20 @@ public function handle(GetOrderProductsForViewing $query): OrderProductsForViewi
+                 OrderProductForViewing::TYPE_PRODUCT_WITHOUT_COMBINATIONS;
+ 
+             $orderInvoice = new OrderInvoice($product['id_order_invoice']);
++            $shipments = $this->shipmentRepository->findByOrderId($order->id);
++            $shipmentId = null;
++
++            if ($shipments) {
++                foreach ($shipments as $shipment) {
++                    $shipmentProducts = $shipment->getProducts();
++                    foreach ($shipmentProducts as $shipmentProduct) {
++                        if ($shipmentProduct->getOrderDetailId() == $product['id_order_detail']) {
++                            $shipmentId = $shipment->getId();
++                            break 2;
++                        }
++                    }
++                }
++            }
+ 
+             $packItems = [];
+             foreach ($product['pack_items'] as $pack_item) {
+@@ -265,7 +263,8 @@ public function handle(GetOrderProductsForViewing $query): OrderProductsForViewi
+                 (bool) Product::isAvailableWhenOutOfStock(StockAvailable::outOfStock($product['product_id'])),
+                 $packItems,
+                 $product['customizations'],
+-                $product['product_mpn']
++                $product['product_mpn'],
++                $shipmentId
+             );
+         }
+ 
+diff --git a/src/Core/Domain/Order/QueryResult/OrderProductForViewing.php b/src/Core/Domain/Order/QueryResult/OrderProductForViewing.php
+index b7ca051f3ca61..d224fe9103570 100644
+--- a/src/Core/Domain/Order/QueryResult/OrderProductForViewing.php
++++ b/src/Core/Domain/Order/QueryResult/OrderProductForViewing.php
+@@ -164,6 +164,11 @@ class OrderProductForViewing implements JsonSerializable
+      */
+     private $mpn;
+ 
++    /**
++     * @var int
++     */
++    private $shipmentId;
++
+     /**
+      * @param int $orderDetailId
+      * @param int $id
+@@ -191,6 +196,7 @@ class OrderProductForViewing implements JsonSerializable
+      * @param array $packItems
+      * @param OrderProductCustomizationsForViewing|null $customizations
+      * @param string $mpn
++     * @param int|null $shipmentId
+      */
+     public function __construct(
+         ?int $orderDetailId,
+@@ -218,7 +224,8 @@ public function __construct(
+         bool $availableOutOfStock,
+         array $packItems = [],
+         ?OrderProductCustomizationsForViewing $customizations = null,
+-        string $mpn = ''
++        string $mpn = '',
++        ?int $shipmentId = null
+     ) {
+         $this->id = $id;
+         $this->combinationId = $combinationId;
+@@ -246,6 +253,7 @@ public function __construct(
+         $this->packItems = $packItems;
+         $this->customizations = $customizations;
+         $this->mpn = $mpn;
++        $this->shipmentId = $shipmentId;
+     }
+ 
+     /**
+@@ -268,6 +276,11 @@ public function getId(): int
+         return $this->id;
+     }
+ 
++    public function getShipmentId(): ?int
++    {
++        return $this->shipmentId;
++    }
++
+     /**
+      * @return int
+      */
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+index 6128d379a6593..e608be31e47d1 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+@@ -603,6 +603,7 @@ public function viewAction(
+             'meta_title' => $metatitle,
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+             'orderForViewing' => $orderForViewing,
++            'isMultiShipmentFeatureFlagIsEnabled' => $this->isFeatureFlagIsEnabledForMultiShipment(),
+             'addOrderCartRuleForm' => $addOrderCartRuleForm->createView(),
+             'updateOrderStatusForm' => $updateOrderStatusForm->createView(),
+             'updateOrderStatusActionBarForm' => $updateOrderStatusActionBarForm->createView(),
+@@ -2346,4 +2347,12 @@ private function getCustomerMessageErrorMapping(Exception $exception): array
+             ],
+         ];
+     }
++
++    private function isFeatureFlagIsEnabledForMultiShipment(): bool
++    {
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $this->getFeatureFlagStateChecker();
++
++        return $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index 0df767b8f5170..1b0661f3312a9 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -175,6 +175,7 @@ services:
+       - '@prestashop.core.image.parser.image_tag_source_parser'
+       - '@=service("prestashop.adapter.legacy.context").getContext().language.id'
+       - "@prestashop.core.localization.locale.context_locale"
++      - '@PrestaShopBundle\Entity\Repository\ShipmentRepository'
+ 
+   prestashop.adapter.order.command_handler.resend_order_email_handler:
+     class: PrestaShop\PrestaShop\Adapter\Order\CommandHandler\ResendOrderEmailHandler
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/product.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/product.html.twig
+index ab9a06f80c26e..caf54f3252f82 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/product.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/product.html.twig
+@@ -51,6 +51,13 @@
+           {{ product.supplierReference }}
+         </p>
+       {% endif %}
++      {% if isMultiShipmentFeatureFlagIsEnabled and product.shipmentId is not empty %}
++        <p class="mb-0 productShipmentNumber">
++          {{ 'Shipment number: %shipment_id%'|trans({
++              '%shipment_id%': product.shipmentId
++          }, 'Admin.Orderscustomers.Feature') }}
++        </p>
++      {% endif %}
+     </a>
+     {% if product.type == constant('PrestaShop\\PrestaShop\\Core\\Domain\\Order\\QueryResult\\OrderProductForViewing::TYPE_PACK') and product.customizations is null %}
+       <span class="btn-product-pack-modal d-print-none" data-toggle="modal" data-target="#product-pack-modal" data-pack-items="{{ product.packItems|json_encode }}">

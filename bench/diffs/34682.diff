@@ -1,0 +1,296 @@
+diff --git a/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php b/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
+index 30fdecfb2f8ca..f85e4cff0b03c 100644
+--- a/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
++++ b/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
+@@ -173,9 +173,23 @@ public function handle(GetCartForViewing $query)
+ 
+         $orderInformation = [
+             'id' => $order->id,
+-            'placed_date' => (new DateTime($order->date_add))->format($context->language->date_format_lite),
++            'placed_date' => (new DateTime($order->date_add))->format($context->language->date_format_full),
+         ];
+ 
++        // Prepare link to share this cart, if it was not ordered yet
++        $cartLink = null;
++        if (!Validate::isLoadedObject($order)) {
++            $cartLink = $context->link->getPageLink(
++                'cart',
++                false,
++                (int) $cart->getAssociatedLanguage()->getId(),
++                [
++                    'recover_cart' => $cart->id,
++                    'token_cart' => md5(_COOKIE_KEY_ . 'recover_cart_' . (int) $cart->id),
++                ]
++            );
++        }
++
+         $cartSummary = [
+             'products' => $products,
+             'cart_rules' => $this->getCartRulesForView($cart),
+@@ -190,6 +204,9 @@ public function handle(GetCartForViewing $query)
+             'total' => $total_price,
+             'total_formatted' => $this->locale->formatPrice($total_price, $currency->iso_code),
+             'is_tax_included' => $tax_calculation_method == PS_TAX_INC,
++            'cart_link' => $cartLink,
++            'date_add' => (new DateTime($cart->date_add))->format($context->language->date_format_full),
++            'date_upd' => (new DateTime($cart->date_upd))->format($context->language->date_format_full),
+         ];
+ 
+         return new CartView($cart->id, $cart->id_currency, $customerInformation, $orderInformation, $cartSummary);
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
+index c56609f68a693..105bc1cb0ff59 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
+@@ -81,6 +81,7 @@ public function viewAction(Request $request, $cartId)
+             return $this->redirect($this->getAdminLink('AdminCarts', [], true));
+         }
+ 
++        // Prepare KPI row
+         $kpiRowFactory = $this->get('prestashop.core.kpi_row.factory.cart');
+         $kpiRowFactory->setOptions([
+             'cart_id' => $cartId,
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig
+index c1b2bcbb36491..994ed036a5d67 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig
+@@ -28,45 +28,51 @@
+     {{ 'Customer information'|trans({}, 'Admin.Orderscustomers.Feature') }}
+   </h3>
+   <div class="card-body">
+-    <div class="row">
+-      {% if cartView.customerInformation.id %}
+-        <div class="col">
+-          <h2>
+-            <a href="{{ path('admin_customers_view', {'customerId': cartView.customerInformation.id }) }}">
+-              {% if cartView.customerInformation.gender %}
+-                {{ cartView.customerInformation.gender }}
+-              {% endif %}
+-              {{ cartView.customerInformation.first_name }}
+-              {{ cartView.customerInformation.last_name }}
+-            </a>
+-          </h2>
++    {% if cartView.customerInformation.id %}
++      <p class="mb-0">
++        {{ 'Customer ID:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++        {{ cartView.customerInformation.id }}
++      </p>
+ 
+-          <p class="mb-0">
+-            {{ 'Account registration date:'|trans({}, 'Admin.Orderscustomers.Feature') }}
+-            {{ cartView.customerInformation.registration_date }}
+-          </p>
++      <p class="mb-0">
++        {{ 'Name:'|trans({}, 'Admin.Global') }}
++        {% if cartView.customerInformation.gender %}
++          {{ cartView.customerInformation.gender }}
++        {% endif %}
++        {{ cartView.customerInformation.first_name }} {{ cartView.customerInformation.last_name }}
++      </p>
+ 
+-          <p class="mb-0">
+-            {{ 'Valid orders placed:'|trans({}, 'Admin.Orderscustomers.Feature') }}
+-            {{ cartView.customerInformation.valid_orders_count }}
+-          </p>
++      <p class="mb-0">
++        {{ 'Email:'|trans({}, 'Admin.Global') }}
++        {{ cartView.customerInformation.email }}
++      </p>
+ 
+-          <p class="mb-0">
+-            {{ 'Total spent since registration:'|trans({}, 'Admin.Orderscustomers.Feature') }}
+-            {{ cartView.customerInformation.total_spent_since_registration }}
+-          </p>
+-        </div>
++      <p class="mb-0">
++        {{ 'Account creation date:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++        {{ cartView.customerInformation.registration_date }}
++      </p>
+ 
+-        <div class="col text-right">
+-          <a href="mailto:{{ cartView.customerInformation.email }}" class="btn btn-outline-secondary">
+-            {{ cartView.customerInformation.email }}
+-          </a>
+-        </div>
+-      {% else %}
+-        <div class="col">
+-          <h2 class="mb-0">{{ 'Guest not registered'|trans({}, 'Admin.Orderscustomers.Feature') }}</h2>
+-        </div>
+-      {% endif %}
+-    </div>
++      <p class="mb-0">
++        {{ 'Number of orders:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++        {{ cartView.customerInformation.valid_orders_count }}
++      </p>
++
++      <p>
++        {{ 'Amount spent:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++        {{ cartView.customerInformation.total_spent_since_registration }}
++      </p>
++
++      <a href="{{ path('admin_customers_view', {'customerId': cartView.customerInformation.id }) }}" class="btn btn-primary">
++        <i class="material-icons">remove_red_eye</i>
++        {{ 'View customer'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      </a>
++      <a href="mailto:{{ cartView.customerInformation.email }}" class="btn btn-secondary">
++        <i class="material-icons">mail</i>
++        {{ 'Write an email'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      </a>
++
++    {% else %}
++      <p class="mb-0">{{ 'No customer information available yet.'|trans({}, 'Admin.Orderscustomers.Feature') }}</h2>
++    {% endif %}
+   </div>
+ </div>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/order_information.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/order_information.html.twig
+index 0966ea49aa5a0..1282c42b4cbb9 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/order_information.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/Blocks/View/order_information.html.twig
+@@ -24,25 +24,35 @@
+  *#}
+ 
+ <div class="card" data-role="order-information">
+-  <h3 class="card-header">{{ 'Order information'|trans({}, 'Admin.Orderscustomers.Feature') }}</h3>
++  <h3 class="card-header">{{ 'Cart information'|trans({}, 'Admin.Orderscustomers.Feature') }}</h3>
+   <div class="card-body">
+-    {% if cartView.orderInformation.id %}
+-      <h2>
+-        <a href="{{ getAdminLink('AdminOrders', true, {'id_order': cartView.orderInformation.id, 'vieworder': 1}) }}">
+-          {{ 'Order #%d'|trans({
+-            '%d': cartView.orderInformation.id|format('"%06d')
+-          }, 'Admin.Orderscustomers.Feature') }}
+-        </a>
+-      </h2>
+-      <p class="mb-0">
+-        {{ 'Made on:'|trans({}, 'Admin.Orderscustomers.Feature') }}
+-        {{ cartView.orderInformation.placed_date }}
+-      </p>
++    <p class="mb-0">
++      {{ 'Created:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      {{ cartView.cartSummary.date_add }}
++    </p>
++    <p class="mb-0">
++      {{ 'Last updated:'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      {{ cartView.cartSummary.date_upd }}
++    </p>
++    <hr class="mt-2 mb-2">
++    {% if cartView.orderInformation.id is not empty %}
++
++      <p>{{ 'Order %orderid% was created from this cart on %orderdate%.'|trans({}, 'Admin.Orderscustomers.Feature')|replace({
++        '%orderid%': '<a href="' ~ path('admin_orders_view', {'orderId': cartView.orderInformation.id}) ~ '">#' ~ cartView.orderInformation.id|format('"%06d') ~ '</a>',
++        '%orderdate%': cartView.orderInformation.placed_date,
++      })|raw }}</p>
++
++      <a href="{{ path('admin_orders_view', {'orderId': cartView.orderInformation.id}) }}" class="btn btn-primary">
++        <i class="material-icons">remove_red_eye</i>
++        {{ 'View order'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      </a>
+     {% else %}
+-      <h2>{{ 'No order was created from this cart.'|trans({}, 'Admin.Orderscustomers.Feature') }}</h2>
++      <p class="mb-0">{{ 'The customer has not proceeded to checkout yet.'|trans({}, 'Admin.Orderscustomers.Feature') }}</p>
++
+       {% if cartView.customerInformation.id %}
+-        <a href="{{ createOrderFromCartLink }}" class="btn btn-outline-secondary" id="create-order-from-cart">
+-          {{ 'Create an order from this cart.'|trans({}, 'Admin.Orderscustomers.Feature') }}
++        <a href="{{ createOrderFromCartLink }}" class="btn btn-primary mt-3" id="create-order-from-cart">
++          <i class="material-icons">add_circle_outline</i>
++          {{ 'Create an order from this cart'|trans({}, 'Admin.Orderscustomers.Feature') }}
+         </a>
+       {% endif %}
+     {% endif %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/view.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/view.html.twig
+index ab9b0b360461f..b60b67f8e6e8c 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/view.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Cart/view.html.twig
+@@ -34,19 +34,35 @@
+   {% endblock %}
+ 
+   <div class="row">
+-    <div class="col">
+-      {% block cart_customer_information %}
+-        {% include '@PrestaShop/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig' %}
+-      {% endblock %}
+-    </div>
+-    <div class="col">
++    <div class="col-md-6">
+       {% block cart_order_information %}
+         {% include '@PrestaShop/Admin/Sell/Order/Cart/Blocks/View/order_information.html.twig' %}
+       {% endblock %}
+     </div>
++    <div class="col-md-6">
++      {% block cart_customer_information %}
++        {% include '@PrestaShop/Admin/Sell/Order/Cart/Blocks/View/customer_information.html.twig' %}
++      {% endblock %}
++    </div>
+   </div>
+ 
+   {% block cart_summary %}
+     {% include '@PrestaShop/Admin/Sell/Order/Cart/Blocks/View/cart_summary.html.twig' %}
+   {% endblock %}
++
++  {% if cartView.cartSummary.cart_link is not empty %}
++    <div class="card" data-role="customer-information">
++      <h3 class="card-header">
++        <i class="material-icons">mail</i>
++        {{ 'Share this cart'|trans({}, 'Admin.Orderscustomers.Feature') }}
++      </h3>
++      <div class="card-body">
++        <p>{{ 'Thanks to this link, your customer can open the cart, check its contents and validate the order, if it suits them.'|trans({}, 'Admin.Orderscustomers.Feature') }}</p>
++        <div class="card bg-light p-2 mb-0">
++        {{ cartView.cartSummary.cart_link }}
++        </div>
++      </div>
++    </div>
++  {% endif %}
++  
+ {% endblock %}
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/01_orders/createOrders/04_selectPreviousCarts.ts b/tests/UI/campaigns/functional/BO/02_orders/01_orders/createOrders/04_selectPreviousCarts.ts
+index e3be4d9ab8938..596ce78e57de8 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/01_orders/createOrders/04_selectPreviousCarts.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/01_orders/createOrders/04_selectPreviousCarts.ts
+@@ -471,11 +471,11 @@ describe('BO - Orders - Create Order : Select Previous Carts', async () => {
+         .and.to.contains(todayCartFormat);
+     });
+ 
+-    it('should check the order Information Block', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkOrderInformationBlock', baseContext);
++    it('should check the cart Information Block', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCartInformationBlock', baseContext);
+ 
+       const orderInformation = await viewShoppingCartPage.getOrderInformation(shoppingCartPage!);
+-      await expect(orderInformation).to.contains('No order was created from this cart.');
++      await expect(orderInformation).to.contains('The customer has not proceeded to checkout yet.');
+ 
+       const hasButtonCreateOrderFromCart = await viewShoppingCartPage.hasButtonCreateOrderFromCart(shoppingCartPage!);
+       await expect(hasButtonCreateOrderFromCart).to.be.true;
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/03_viewCarts.ts b/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/03_viewCarts.ts
+index 9bdd4e5f8e4e7..3cf342588d4e6 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/03_viewCarts.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/03_viewCarts.ts
+@@ -146,11 +146,11 @@ describe('BO - Orders - Shopping carts : View carts', async () => {
+         .and.to.contains(todayCartFormat);
+     });
+ 
+-    it('should check the order Information Block', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkOrderInformationBlock1', baseContext);
++    it('should check the cart Information Block', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCartInformationBlock1', baseContext);
+ 
+       const orderInformation = await shoppingCartViewPage.getOrderInformation(page);
+-      await expect(orderInformation).to.contains('No order was created from this cart.');
++      await expect(orderInformation).to.contains('The customer has not proceeded to checkout yet.');
+ 
+       const hasButtonCreateOrderFromCart = await shoppingCartViewPage.hasButtonCreateOrderFromCart(page);
+       await expect(hasButtonCreateOrderFromCart).to.be.true;
+diff --git a/tests/UI/pages/BO/orders/shoppingCarts/view.ts b/tests/UI/pages/BO/orders/shoppingCarts/view.ts
+index 851f672e5b53c..db4d5adfb8741 100644
+--- a/tests/UI/pages/BO/orders/shoppingCarts/view.ts
++++ b/tests/UI/pages/BO/orders/shoppingCarts/view.ts
+@@ -59,7 +59,7 @@ class ViewShoppingCarts extends BOBasePage {
+     this.orderInformationBlock = '#main-div div[data-role="order-information"]';
+     this.orderInformationBlockBody = `${this.orderInformationBlock} .card-body`;
+     this.orderInformationButtonCreateOrder = `${this.orderInformationBlockBody} #create-order-from-cart`;
+-    this.orderInformationLinkOrder = `${this.orderInformationBlockBody} h2 a`;
++    this.orderInformationLinkOrder = `${this.orderInformationBlockBody} a`;
+ 
+     // Cart Summary Block
+     this.cartSummaryBlock = '#main-div div[data-role="cart-summary"]';

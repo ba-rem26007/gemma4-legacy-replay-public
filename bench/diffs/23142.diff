@@ -1,0 +1,70 @@
+diff --git a/classes/order/OrderState.php b/classes/order/OrderState.php
+index 7a2d8b532ca6b..8aab0e3f93310 100644
+--- a/classes/order/OrderState.php
++++ b/classes/order/OrderState.php
+@@ -162,4 +162,26 @@ public function isRemovable()
+     {
+         return !($this->unremovable);
+     }
++
++    /**
++     * Check if a localized name in database for a specific lang (and excluding some IDs)
++     *
++     * @param string $name
++     * @param int $idLang
++     * @param int|null $excludeIdOrderState ID of the order state excluded for the search
++     *
++     * @return bool
++     */
++    public static function existsLocalizedNameInDatabase(string $name, int $idLang, ?int $excludeIdOrderState): bool
++    {
++        return (bool) DB::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
++            'SELECT COUNT(*) AS count' .
++            ' FROM ' . _DB_PREFIX_ . 'order_state_lang osl' .
++            ' INNER JOIN ' . _DB_PREFIX_ . 'order_state os ON (os.`id_order_state` = osl.`id_order_state` AND osl.`id_lang` = ' . $idLang . ')' .
++            ' WHERE osl.id_lang = ' . $idLang .
++            ' AND osl.name =  \'' . pSQL($name) . '\'' .
++            ' AND os.deleted = 0' .
++            ($excludeIdOrderState ? ' AND osl.id_order_state != ' . $excludeIdOrderState : '')
++        );
++    }
+ }
+diff --git a/controllers/admin/AdminStatusesController.php b/controllers/admin/AdminStatusesController.php
+index e3d721d9e38bb..632fac82046e0 100644
+--- a/controllers/admin/AdminStatusesController.php
++++ b/controllers/admin/AdminStatusesController.php
+@@ -603,6 +603,25 @@ public function postProcess()
+                 return;
+             }
+ 
++            $langIds = Language::getIDs(false);
++            $langDefault = (int) Configuration::get('PS_LANG_DEFAULT');
++            foreach ($langIds as $id_lang) {
++                $name = (string) Tools::getValue('name_' . $id_lang);
++                if (empty($name)) {
++                    $name = (string) Tools::getValue('name_' . $langDefault);
++                }
++
++                $exists = OrderState::existsLocalizedNameInDatabase(
++                    $name,
++                    (int) $id_lang,
++                    Tools::getIsset('id_order_state') ? (int) Tools::getValue('id_order_state') : null
++                );
++                if ($exists) {
++                    $this->errors[] = $this->trans('This name already exists.', [], 'Admin.Design.Notification');
++                    break;
++                }
++            }
++
+             $this->deleted = false; // Disabling saving historisation
+             $_POST['invoice'] = (int) Tools::getValue('invoice_on');
+             $_POST['logable'] = (int) Tools::getValue('logable_on');
+@@ -614,7 +633,7 @@ public function postProcess()
+             $_POST['pdf_delivery'] = (int) Tools::getValue('pdf_delivery_on');
+             $_POST['pdf_invoice'] = (int) Tools::getValue('pdf_invoice_on');
+             if (!$_POST['send_email']) {
+-                foreach (Language::getIDs(false) as $id_lang) {
++                foreach ($langIds as $id_lang) {
+                     $_POST['template_' . $id_lang] = '';
+                 }
+             }

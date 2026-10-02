@@ -1,0 +1,1467 @@
+diff --git a/src/Adapter/Form/ChoiceProvider/AvailableCarriersForShipmentChoiceProvider.php b/src/Adapter/Form/ChoiceProvider/AvailableCarriersForShipmentChoiceProvider.php
+index 0c3e36fd2587d..d619d9e1e2770 100644
+--- a/src/Adapter/Form/ChoiceProvider/AvailableCarriersForShipmentChoiceProvider.php
++++ b/src/Adapter/Form/ChoiceProvider/AvailableCarriersForShipmentChoiceProvider.php
+@@ -37,11 +37,15 @@
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceFormatter;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ final class AvailableCarriersForShipmentChoiceProvider implements ConfigurableFormChoiceProviderInterface
+ {
+-    public function __construct(private readonly CommandBusInterface $commandBus, private readonly ShipmentRepository $shipmentRepository)
+-    {
++    public function __construct(
++        private readonly CommandBusInterface $commandBus,
++        private readonly ShipmentRepository $shipmentRepository,
++        private readonly TranslatorInterface $translator,
++    ) {
+     }
+ 
+     /**
+@@ -54,11 +58,16 @@ public function getChoices(array $options): array
+         $shipment = $this->shipmentRepository->findById($shipmentId);
+ 
+         if ($shipment === null) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         $productQuantities = [];
+-
+         foreach ($options['selectedProducts'] as $productId => $quantity) {
+             $productQuantities[] = new ProductQuantity(
+                 new ProductId($productId),
+diff --git a/src/Adapter/Presenter/Order/OrderLazyArray.php b/src/Adapter/Presenter/Order/OrderLazyArray.php
+index 0aab8d269e405..1925eec5a7304 100644
+--- a/src/Adapter/Presenter/Order/OrderLazyArray.php
++++ b/src/Adapter/Presenter/Order/OrderLazyArray.php
+@@ -44,6 +44,7 @@
+ use PrestaShop\PrestaShop\Adapter\Presenter\LazyArrayAttribute;
+ use PrestaShop\PrestaShop\Adapter\Presenter\Object\ObjectPresenter;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentTotalsCalculatorInterface;
+ use PrestaShop\PrestaShop\Core\Util\ColorBrightnessCalculator;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\ShipmentProduct;
+@@ -80,6 +81,9 @@ class OrderLazyArray extends AbstractLazyArray
+     /** @var ShipmentRepository */
+     private $shipmentRepository;
+ 
++    /** @var ShipmentTotalsCalculatorInterface */
++    private $shipmentTotalCalculator;
++
+     /**
+      * OrderArray constructor.
+      *
+@@ -96,8 +100,8 @@ public function __construct(Order $order)
+         $this->taxConfiguration = new TaxConfiguration();
+         $this->subTotals = new OrderSubtotalLazyArray($this->order);
+         $containerFinder = new ContainerFinder(Context::getContext());
+-        /* @var ShipmentRepository $shipmentRepository */
+         $this->shipmentRepository = $containerFinder->getContainer()->get(ShipmentRepository::class);
++        $this->shipmentTotalCalculator = $containerFinder->getContainer()->get(ShipmentTotalsCalculatorInterface::class);
+ 
+         parent::__construct();
+     }
+@@ -274,7 +278,15 @@ public function getOrderShipments(): array
+ 
+                 if (isset($indexedOrderProducts[$orderDetailId])) {
+                     $product = $indexedOrderProducts[$orderDetailId];
++                    $product['quantity'] = $shipmentProduct->getQuantity();
++
++                    $includeTaxes = $this->includeTaxes();
++                    $total = $this->shipmentTotalCalculator->calculate($orderDetailId, $shipmentProduct->getQuantity(), $includeTaxes);
+ 
++                    $product['total'] = $this->priceFormatter->format(
++                        $total,
++                        Currency::getCurrencyInstance((int) $this->order->id_currency)
++                    );
+                     $mappedProducts[] = array_merge(
+                         $product,
+                         [
+diff --git a/src/Adapter/Shipment/CommandHandler/DeleteProductFromShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/DeleteProductFromShipmentHandler.php
+index a855cc066321a..fe8e015b87644 100644
+--- a/src/Adapter/Shipment/CommandHandler/DeleteProductFromShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/DeleteProductFromShipmentHandler.php
+@@ -28,19 +28,21 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
+ 
+-use Exception;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\DeleteProductFromShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\DeleteProductFromShipmentHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Symfony\Contracts\Translation\TranslatorInterface;
++use Throwable;
+ 
+ #[AsCommandHandler]
+ class DeleteProductFromShipmentHandler implements DeleteProductFromShipmentHandlerInterface
+ {
+     public function __construct(
+-        private readonly ShipmentRepository $shipmentRepository
++        private readonly ShipmentRepository $shipmentRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -50,7 +52,13 @@ public function handle(DeleteProductFromShipment $command): void
+         $shipment = $this->shipmentRepository->findOneBy(['id' => $shipmentId]);
+ 
+         if (null === $shipment) {
+-            throw new ShipmentNotFoundException(sprintf('Shipment with id "%s" was not found', $shipmentId));
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Cannot find product with order detail id %id%.',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         foreach ($shipment->getProducts() as $product) {
+@@ -61,8 +69,16 @@ public function handle(DeleteProductFromShipment $command): void
+ 
+         try {
+             $this->shipmentRepository->save($shipment);
+-        } catch (Exception $e) {
+-            throw new ShipmentException(sprintf('Failed to delete products from shipment with id "%s"', $shipmentId), 0, $e);
++        } catch (Throwable $e) {
++            throw new ShipmentException(
++                $this->translator->trans(
++                    'Failed to delete products from shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+     }
+ }
+diff --git a/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
+index 7df56d68df85c..afe40052cb6e7 100644
+--- a/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/EditShipmentHandler.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\Shipment;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ /**
+@@ -44,7 +45,8 @@
+ class EditShipmentHandler implements EditShipmentHandlerInterface
+ {
+     public function __construct(
+-        private readonly ShipmentRepository $shipmentRepository
++        private readonly ShipmentRepository $shipmentRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -64,11 +66,25 @@ public function handle(EditShipment $command): void
+             /** @var Shipment|null $shipment */
+             $shipment = $this->shipmentRepository->findOneBy(['id' => $shipmentId]);
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+ 
+         if ($shipment === null) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         $shipment->setCarrierId($carrierId);
+@@ -77,7 +93,15 @@ public function handle(EditShipment $command): void
+         try {
+             $this->shipmentRepository->save($shipment);
+         } catch (Throwable $e) {
+-            throw new CannotSaveShipmentException(sprintf('Could not save shipment update with id "%s"', $shipmentId), 0, $e);
++            throw new CannotSaveShipmentException(
++                $this->translator->trans(
++                    'Could not save shipment update with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+     }
+ }
+diff --git a/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+index db2fd96484adf..e4608ee6d7fe2 100644
+--- a/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+@@ -32,58 +32,96 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\CannotEditShipmentShippedException;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\CannotMergeProductToShipmentException;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentMergerInterface;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\ShipmentProduct;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ #[AsCommandHandler]
+ class MergeProductsToShipmentHandler implements MergeProductsToShipmentHandlerInterface
+ {
+     public function __construct(
+-        private readonly ShipmentRepository $repository,
++        private ShipmentRepository $repository,
++        private ShipmentMergerInterface $merger,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+-    /**
+-     * @param MergeProductsToShipment $command
+-     */
+-    public function handle(MergeProductsToShipment $command)
++    public function handle(MergeProductsToShipment $command): void
+     {
+         $sourceId = $command->getSourceShipmentId()->getValue();
+         $targetId = $command->getTargetShipmentId()->getValue();
+-        $products = $command->getOrderDetailQuantity()->getValue();
++
+         $sourceShipment = $this->repository->findById($sourceId);
+         $targetShipment = $this->repository->findById($targetId);
+-        $shipmentProducts = [];
+ 
+         if (!$sourceShipment) {
+-            throw new ShipmentNotFoundException(sprintf('Shipment with id "%s" was not found', $sourceId));
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Cannot find product with order detail id %id%.',
++                    ['%id%' => $sourceId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         if (!empty($sourceShipment->getTrackingNumber())) {
+-            throw new CannotEditShipmentShippedException(sprintf('Cannot merge shipment "%s" because it has already been shipped.', $sourceId));
++            throw new CannotEditShipmentShippedException(
++                $this->translator->trans(
++                    'Cannot merge shipment "%id%" because it has already been shipped.',
++                    ['%id%' => $sourceId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         if (!$targetShipment) {
+-            throw new ShipmentNotFoundException(sprintf('Shipment with id "%s" was not found', $targetId));
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Cannot find product with order detail id %id%.',
++                    ['%id%' => $targetId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         if (!empty($targetShipment->getTrackingNumber())) {
+-            throw new CannotEditShipmentShippedException(sprintf('Cannot merge into shipment "%s" because it has already been shipped.', $targetId));
++            throw new CannotEditShipmentShippedException(
++                $this->translator->trans(
++                    'Cannot merge into shipment "%id%" because it has already been shipped.',
++                    ['%id%' => $targetId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+-        $shipmentProducts = array_map(function ($product) {
+-            $shipmentProduct = new ShipmentProduct();
+-            $shipmentProduct->setOrderDetailId($product['id_order_detail']);
+-            $shipmentProduct->setQuantity($product['quantity']);
+-
+-            return $shipmentProduct;
+-        }, $products);
++        $productsToMove = array_map(function ($product) {
++            return (new ShipmentProduct())
++                ->setOrderDetailId($product['id_order_detail'])
++                ->setQuantity($product['quantity']);
++        }, $command->getOrderDetailQuantity()->getValue());
+ 
+         try {
+-            $this->repository->mergeProductsToShipment($sourceShipment, $targetShipment, $shipmentProducts);
++            $this->merger->merge($sourceShipment, $targetShipment, $productsToMove);
++
++            $this->repository->save($targetShipment);
++
++            if ($sourceShipment->getProducts()->isEmpty()) {
++                $this->repository->delete($sourceShipment);
++            } else {
++                $this->repository->save($sourceShipment);
++            }
+         } catch (Throwable $e) {
+-            throw new CannotMergeProductToShipmentException(sprintf('Cannot merge products to shipment with id "%s"', $targetId), 0, $e);
++            throw new CannotMergeProductToShipmentException(
++                $this->translator->trans(
++                    'Cannot merge products to shipment with id "%id%".',
++                    ['%id%' => $targetId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+     }
+ }
+diff --git a/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+index e4fd5556f65a1..bfe5cecffb032 100644
+--- a/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+@@ -31,48 +31,66 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\SplitShipmentHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\CannotEditShipmentShippedException;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentSplitterInterface;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\ShipmentProduct;
+-use Throwable;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+-#[AsCommandHandler()]
++#[AsCommandHandler]
+ class SplitShipmentHandler implements SplitShipmentHandlerInterface
+ {
+     public function __construct(
+-        private readonly ShipmentRepository $repository,
++        private ShipmentRepository $repository,
++        private ShipmentSplitterInterface $splitter,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+-    /**
+-     * @param SplitShipment $command
+-     */
+     public function handle(SplitShipment $command): void
+     {
++        $shipmentId = $command->getShipmentId()->getValue();
+         $carrierId = $command->getCarrierId()->getValue();
+-        $shipmentToRemoveProductId = $command->getShipmentId()->getValue();
+-        $products = $command->getOrderDetailQuantity()->getValue();
+-        $findShipment = $this->repository->findOneBy(['id' => $shipmentToRemoveProductId]);
+ 
+-        if (!$findShipment) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentToRemoveProductId));
++        $shipment = $this->repository->findById($shipmentId);
++
++        if (!$shipment) {
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+-        if (!empty($findShipment->getTrackingNumber())) {
+-            throw new CannotEditShipmentShippedException(sprintf('Cannot split the shipment "%s" because is already shipped', $shipmentToRemoveProductId));
++        if (!empty($shipment->getTrackingNumber())) {
++            throw new CannotEditShipmentShippedException(
++                $this->translator->trans(
++                    'Cannot split the shipment "%id%" because it has already been shipped.',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+-        $shipmentProducts = array_map(function ($product) {
+-            $shipmentProduct = new ShipmentProduct();
+-            $shipmentProduct->setOrderDetailId($product['id_order_detail']);
+-            $shipmentProduct->setQuantity($product['quantity']);
++        $productsToMove = array_map(function ($product) {
++            return (new ShipmentProduct())
++                ->setOrderDetailId($product['id_order_detail'])
++                ->setQuantity($product['quantity']);
++        }, $command->getOrderDetailQuantity()->getValue());
++
++        $newShipment = $this->splitter->split(
++            $shipment,
++            $carrierId,
++            $productsToMove
++        );
+ 
+-            return $shipmentProduct;
+-        }, $products);
++        $this->repository->save($newShipment);
+ 
+-        try {
+-            $this->repository->splitShipment($carrierId, $findShipment, $shipmentProducts);
+-        } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException();
++        if ($shipment->getProducts()->isEmpty()) {
++            $this->repository->delete($shipment);
++        } else {
++            $this->repository->save($shipment);
+         }
+     }
+ }
+diff --git a/src/Adapter/Shipment/CommandHandler/SwitchShipmentCarrierHandler.php b/src/Adapter/Shipment/CommandHandler/SwitchShipmentCarrierHandler.php
+index 7463f619f81c7..9c96ad757488f 100644
+--- a/src/Adapter/Shipment/CommandHandler/SwitchShipmentCarrierHandler.php
++++ b/src/Adapter/Shipment/CommandHandler/SwitchShipmentCarrierHandler.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\Shipment;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ /**
+@@ -44,7 +45,8 @@
+ class SwitchShipmentCarrierHandler implements SwitchShipmentCarrierHandlerInterface
+ {
+     public function __construct(
+-        private readonly ShipmentRepository $shipmentRepository
++        private readonly ShipmentRepository $shipmentRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -63,11 +65,25 @@ public function handle(SwitchShipmentCarrierCommand $command): void
+             /** @var Shipment|null $shipment */
+             $shipment = $this->shipmentRepository->findOneBy(['id' => $shipmentId]);
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+ 
+         if ($shipment === null) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
+ 
+         $shipment->setCarrierId($carrierId);
+@@ -75,7 +91,15 @@ public function handle(SwitchShipmentCarrierCommand $command): void
+         try {
+             $this->shipmentRepository->save($shipment);
+         } catch (Throwable $e) {
+-            throw new CannotSaveShipmentException(sprintf('Could not save shipment update with id "%s"', $shipmentId), 0, $e);
++            throw new CannotSaveShipmentException(
++                $this->translator->trans(
++                    'Could not save shipment update with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+     }
+ }
+diff --git a/src/Adapter/Shipment/OrderShipmentCreator.php b/src/Adapter/Shipment/OrderShipmentCreator.php
+index 8e78a6711f404..d62d4147e54ac 100644
+--- a/src/Adapter/Shipment/OrderShipmentCreator.php
++++ b/src/Adapter/Shipment/OrderShipmentCreator.php
+@@ -77,17 +77,51 @@ public function addShipmentOrder(Order $order, array $productsHandledByCarrier):
+             // match products with order details to get quantities & orderDetailId
+             foreach (OrderDetail::getList($order->id) as $orderDetailProduct) {
+                 foreach ($products['product_list'] as $product) {
+-                    if ($product['id_product'] === $orderDetailProduct['product_id']) {
+-                        $shipmentProduct = new ShipmentProduct();
+-                        $shipmentProduct->setShipment($shipment);
+-                        $shipmentProduct->setOrderDetailId($orderDetailProduct['id_order_detail']);
+-                        $shipmentProduct->setQuantity($orderDetailProduct['product_quantity']);
+-                        $shipment->addShipmentProduct($shipmentProduct);
++                    if (!$this->needShipmentProductCreation($product, $orderDetailProduct)) {
++                        continue;
+                     }
++
++                    $quantity = $orderDetailProduct['product_quantity'];
++                    $orderDetailId = $orderDetailProduct['id_order_detail'];
++
++                    $shipmentProduct = (new ShipmentProduct())
++                        ->setShipment($shipment)
++                        ->setOrderDetailId($orderDetailId)
++                        ->setQuantity($quantity);
++
++                    $shipment->addShipmentProduct($shipmentProduct);
+                 }
+             }
+ 
+             $this->shipmentRepository->save($shipment);
+         }
+     }
++
++    /**
++     * @param array{
++     *     id_customization: int,
++     *     id_product_attribute: int,
++     *     id_product: int
++     * } $product
++     * @param array{
++     *     id_customization: int,
++     *     id_order_detail: int,
++     *     product_id: int,
++     *     product_attribute_id: int,
++     *     product_quantity: int
++     * } $orderDetailProduct
++     *
++     * @return bool
++     */
++    private function needShipmentProductCreation(array $product, array $orderDetailProduct): bool
++    {
++        if (!empty($product['id_customization'])) {
++            return $product['id_customization'] === $orderDetailProduct['id_customization'];
++        }
++        if (!empty($product['id_product_attribute'])) {
++            return $product['id_product_attribute'] === $orderDetailProduct['product_attribute_id'];
++        }
++
++        return $product['id_product'] === $orderDetailProduct['product_id'];
++    }
+ }
+diff --git a/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php b/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php
+index 2a232d4274ee6..c3d4f8d326c87 100644
+--- a/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php
++++ b/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php
+@@ -36,6 +36,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\GetOrderShipmentsHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\OrderShipment;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ #[AsQueryHandler]
+@@ -44,6 +45,7 @@ class GetOrderShipmentsHandler implements GetOrderShipmentsHandlerInterface
+     public function __construct(
+         private readonly ShipmentRepository $shipmentRepository,
+         private readonly CarrierRepository $carrierRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -60,14 +62,30 @@ public function handle(GetOrderShipments $query)
+         try {
+             $result = $this->shipmentRepository->findByOrderId($orderId);
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment for order with id "%s"', $orderId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment for order with id "%id%".',
++                    ['%id%' => $orderId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+ 
+         foreach ($result as $shipment) {
+             try {
+                 $carrier = $this->carrierRepository->get(new CarrierId($shipment->getCarrierId()));
+             } catch (Throwable $e) {
+-                throw new ShipmentNotFoundException(sprintf('Could not find carrier with id "%s"', $shipment->getCarrierId()), 0, $e);
++                throw new ShipmentNotFoundException(
++                    $this->translator->trans(
++                        'Could not find carrier with id "%id%".',
++                        ['%id%' => $shipment->getCarrierId()],
++                        'Admin.Shipment.Error'
++                    ),
++                    0,
++                    $e
++                );
+             }
+ 
+             $carrierSummary = new CarrierSummary($carrier->id, $carrier->name);
+diff --git a/src/Adapter/Shipment/QueryHandler/GetShipmentForEditingHandler.php b/src/Adapter/Shipment/QueryHandler/GetShipmentForEditingHandler.php
+index e12484d69e2e3..453d304251d2e 100644
+--- a/src/Adapter/Shipment/QueryHandler/GetShipmentForEditingHandler.php
++++ b/src/Adapter/Shipment/QueryHandler/GetShipmentForEditingHandler.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\GetShipmentForEditingHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentForEditing;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ #[AsQueryHandler]
+@@ -40,6 +41,7 @@ class GetShipmentForEditingHandler implements GetShipmentForEditingHandlerInterf
+ {
+     public function __construct(
+         private readonly ShipmentRepository $shipmentRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -59,11 +61,22 @@ public function handle(GetShipmentForEditing $query)
+             $shipmentProducts = $result->getProducts()->toArray();
+             $shipmentDetails['tracking_number'] = $result->getTrackingNumber();
+             $shipmentDetails['carrier'] = $result->getCarrierId();
++
+             foreach ($shipmentProducts as $shipmentProduct) {
+-                $shipmentDetails['selectedProducts'][(new OrderDetail($shipmentProduct->getOrderDetailId()))->product_id] = 0;
++                $shipmentDetails['selectedProducts'][
++                    (new OrderDetail($shipmentProduct->getOrderDetailId()))->product_id
++                ] = 0;
+             }
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment for order with id "%s"', $orderId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment for order with id "%id%".',
++                    ['%id%' => $orderId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
+ 
+         return new ShipmentForEditing(
+diff --git a/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php b/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php
+index 7fa1479f859c6..1828c0a8d73c2 100644
+--- a/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php
++++ b/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php
+@@ -45,6 +45,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\StateId;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\Shipment;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ #[AsQueryHandler]
+ class GetShipmentForViewingHandler implements GetShipmentForViewingHandlerInterface
+@@ -55,7 +56,8 @@ public function __construct(
+         private readonly CarrierRepository $carrierRepository,
+         private readonly CountryRepository $countryRepository,
+         private readonly AddressRepository $addressRepository,
+-        private readonly StateRepository $stateRepository
++        private readonly StateRepository $stateRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -71,8 +73,15 @@ public function handle(GetShipmentForViewing $query)
+         $shipment = $this->shipmentRepository->find($id);
+ 
+         if ($shipment === null) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $id));
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $id],
++                    'Admin.Shipment.Error'
++                )
++            );
+         }
++
+         $order = $this->orderRepository->get(new OrderId($shipment->getOrderId()));
+         $carrier = $this->carrierRepository->get(new CarrierId($shipment->getCarrierId()));
+         $address = $this->addressRepository->get(new AddressId($shipment->getAddressId()));
+diff --git a/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php b/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php
+index cd50908457f71..940e5e02df504 100644
+--- a/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php
++++ b/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php
+@@ -41,6 +41,7 @@
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use Product;
+ use RuntimeException;
++use Symfony\Contracts\Translation\TranslatorInterface;
+ use Throwable;
+ 
+ #[AsQueryHandler]
+@@ -51,6 +52,7 @@ public function __construct(
+         private readonly LanguageContext $languageContext,
+         private readonly ProductImagePathFactory $productImageUrlFactory,
+         private readonly ProductRepository $productRepository,
++        private TranslatorInterface $translator,
+     ) {
+     }
+ 
+@@ -67,23 +69,33 @@ public function handle(GetShipmentProducts $query)
+         try {
+             $result = $this->repository->findOneBy(['id' => $shipmentId]);
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment with id "%id%".',
++                    ['%id%' => $shipmentId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
++
+         if (!empty($result)) {
+             foreach ($result->getProducts() as $product) {
+                 $orderDetail = new OrderDetail($product->getOrderDetailId());
+-                $productInstance = $this->productRepository->get(new ProductId($orderDetail->product_id), new ShopId($orderDetail->id_shop));
+-                $image = $productInstance->getCover($orderDetail->product_id);
+-                $imagePath = null;
++                $productInstance = $this->productRepository->get(
++                    new ProductId($orderDetail->product_id),
++                    new ShopId($orderDetail->id_shop)
++                );
+ 
+-                if ($image) {
+-                    $imagePath = $this->productImageUrlFactory->getPathByType(new ImageId($image['id_image']), ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT);
+-                } else {
+-                    $imagePath = $this->productImageUrlFactory->getNoImagePath(ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT);
+-                }
++                $image = $productInstance->getCover($orderDetail->product_id);
++                $imagePath = $image
++                    ? $this->productImageUrlFactory->getPathByType(new ImageId($image['id_image']), ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT)
++                    : $this->productImageUrlFactory->getNoImagePath(ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT);
+ 
+                 $productName = $this->getProductName($productInstance);
+                 $productReference = $productInstance->reference;
++
+                 $shipmentProducts[] = new OrderShipmentProduct(
+                     $product->getOrderDetailId(),
+                     $product->getQuantity(),
+@@ -108,7 +120,9 @@ private function getProductName(Product $product): string
+             $languageId = $this->languageContext->getId();
+ 
+             if (!isset($product->name[$languageId])) {
+-                throw new RuntimeException(sprintf('Product name not found for product ID %d and language ID %d.', $product->id, $languageId));
++                throw new RuntimeException(
++                    sprintf('Product name not found for product ID %d and language ID %d.', $product->id, $languageId)
++                );
+             }
+ 
+             return $product->name[$languageId];
+diff --git a/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php b/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php
+index 8bf531537d1cb..aa25f571e0583 100644
+--- a/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php
++++ b/src/Adapter/Shipment/QueryHandler/ListAvailableShipmentsHandler.php
+@@ -61,8 +61,17 @@ public function handle(ListAvailableShipments $query)
+         try {
+             $getShipmentsFromOrder = $this->repository->findByOrderId($orderId);
+         } catch (Throwable $e) {
+-            throw new ShipmentNotFoundException(sprintf('Could not find shipment for order id "%s"', $orderId), 0, $e);
++            throw new ShipmentNotFoundException(
++                $this->translator->trans(
++                    'Could not find shipment for order id "%id%".',
++                    ['%id%' => $orderId],
++                    'Admin.Shipment.Error'
++                ),
++                0,
++                $e
++            );
+         }
++
+         if (empty($getShipmentsFromOrder)) {
+             return $shipments;
+         }
+@@ -76,8 +85,16 @@ public function handle(ListAvailableShipments $query)
+ 
+                 if ($shipment->getDeliveredAt() === null) {
+                     $isCompatible = in_array($shipment->getCarrierId(), $carrierCompatibleWithProduct);
+-                    $shipmentName = $this->translator->trans('Shipment ', [], 'Shop.Forms.Labels') . $shipment->getId() . ' ' . (new Carrier($shipment->getCarrierId()))->name;
+-                    $shipments[] = new ShipmentsForMerge($shipment->getId(), $shipmentName, $isCompatible);
++                    $shipmentName = $this->translator->trans('Shipment ', [], 'Shop.Forms.Labels')
++                        . $shipment->getId()
++                        . ' '
++                        . (new Carrier($shipment->getCarrierId()))->name;
++
++                    $shipments[] = new ShipmentsForMerge(
++                        $shipment->getId(),
++                        $shipmentName,
++                        $isCompatible
++                    );
+                 }
+             }
+         }
+diff --git a/src/Adapter/Shipment/ShipmentMerger.php b/src/Adapter/Shipment/ShipmentMerger.php
+new file mode 100644
+index 0000000000000..45b007213f25d
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentMerger.php
+@@ -0,0 +1,101 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentMergerInterface;
++use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class ShipmentMerger implements ShipmentMergerInterface
++{
++    public function __construct(
++        private TranslatorInterface $translator,
++    ) {
++    }
++
++    /**
++     * @param ShipmentProduct[] $productsToMove
++     */
++    public function merge(
++        Shipment $source,
++        Shipment $target,
++        array $productsToMove
++    ): void {
++        $sourceProducts = $this->indexProducts($source);
++        $targetProducts = $this->indexProducts($target);
++
++        foreach ($productsToMove as $productToMove) {
++            $orderDetailId = $productToMove->getOrderDetailId();
++            $quantity = $productToMove->getQuantity();
++
++            if (!isset($sourceProducts[$orderDetailId])) {
++                throw new ShipmentException(
++                    $this->translator->trans(
++                        'Order detail with id %id% does not exist in source shipment.',
++                        ['%id%' => $orderDetailId],
++                        'Admin.Shipment.Error'
++                    )
++                );
++            }
++
++            if (!isset($targetProducts[$orderDetailId])) {
++                $target->addShipmentProduct(
++                    (new ShipmentProduct())
++                        ->setOrderDetailId($orderDetailId)
++                        ->setQuantity($quantity)
++                );
++            } else {
++                $targetProduct = $targetProducts[$orderDetailId];
++                $newQty = $targetProduct->getQuantity() + $quantity;
++                $targetProduct->setQuantity($newQty);
++            }
++
++            $sourceProduct = $sourceProducts[$orderDetailId];
++            $remainingQty = $sourceProduct->getQuantity() - $quantity;
++
++            if ($remainingQty <= 0) {
++                $source->removeProduct($sourceProduct);
++            } else {
++                $sourceProduct->setQuantity($remainingQty);
++            }
++        }
++    }
++
++    private function indexProducts(Shipment $shipment): array
++    {
++        $indexed = [];
++        foreach ($shipment->getProducts() as $product) {
++            $indexed[$product->getOrderDetailId()] = $product;
++        }
++
++        return $indexed;
++    }
++}
+diff --git a/src/Adapter/Shipment/ShipmentSplitter.php b/src/Adapter/Shipment/ShipmentSplitter.php
+new file mode 100644
+index 0000000000000..2dbe60713a340
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentSplitter.php
+@@ -0,0 +1,104 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentSplitterInterface;
++use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class ShipmentSplitter implements ShipmentSplitterInterface
++{
++    public function __construct(
++        private TranslatorInterface $translator,
++    ) {
++    }
++
++    /**
++     * @param ShipmentProduct[] $productsToMove
++     */
++    public function split(
++        Shipment $source,
++        int $carrierId,
++        array $productsToMove
++    ): Shipment {
++        $productsByOrderDetailId = $this->indexProducts($source);
++
++        $newShipment = new Shipment();
++        $newShipment->setCarrierId($carrierId);
++        $newShipment->setOrderId($source->getOrderId());
++        $newShipment->setTrackingNumber(null);
++        $newShipment->setAddressId($source->getAddressId());
++        $newShipment->setShippingCostTaxExcluded($source->getShippingCostTaxExcluded());
++        $newShipment->setShippingCostTaxIncluded($source->getShippingCostTaxIncluded());
++
++        foreach ($productsToMove as $productToMove) {
++            $orderDetailId = $productToMove->getOrderDetailId();
++            $quantity = $productToMove->getQuantity();
++
++            if (!isset($productsByOrderDetailId[$orderDetailId])) {
++                throw new ShipmentException(
++                    $this->translator->trans(
++                        'Cannot find product with order detail id %id%.',
++                        ['%id%' => $orderDetailId],
++                        'Admin.Shipment.Error'
++                    )
++                );
++            }
++
++            $sourceProduct = $productsByOrderDetailId[$orderDetailId];
++            $remainingQty = $sourceProduct->getQuantity() - $quantity;
++
++            if ($remainingQty <= 0) {
++                $source->removeProduct($sourceProduct);
++            } else {
++                $sourceProduct->setQuantity($remainingQty);
++            }
++
++            $newShipment->addShipmentProduct(
++                (new ShipmentProduct())
++                    ->setOrderDetailId($orderDetailId)
++                    ->setQuantity($quantity)
++            );
++        }
++
++        return $newShipment;
++    }
++
++    private function indexProducts(Shipment $shipment): array
++    {
++        $indexed = [];
++        foreach ($shipment->getProducts() as $product) {
++            $indexed[$product->getOrderDetailId()] = $product;
++        }
++
++        return $indexed;
++    }
++}
+diff --git a/src/Adapter/Shipment/ShipmentTotalsCalculator.php b/src/Adapter/Shipment/ShipmentTotalsCalculator.php
+new file mode 100644
+index 0000000000000..6db2be325feee
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentTotalsCalculator.php
+@@ -0,0 +1,88 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use Order;
++use PrestaShop\PrestaShop\Adapter\LegacyContext;
++use PrestaShop\PrestaShop\Adapter\Order\Repository\OrderDetailRepository;
++use PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\OrderDetailId;
++
++class ShipmentTotalsCalculator implements ShipmentTotalsCalculatorInterface
++{
++    public function __construct(
++        private OrderRepository $orderRepository,
++        private OrderDetailRepository $orderDetailRepository,
++        private LegacyContext $context,
++        private Tools $tools,
++    ) {
++    }
++
++    public function calculate(
++        int $orderDetailId,
++        int $quantity,
++        bool $isTaxIncl = true,
++    ): float {
++        $orderDetail = $this->orderDetailRepository->get(new OrderDetailId($orderDetailId));
++        $order = $this->orderRepository->get(new OrderId($orderDetail->id_order));
++
++        $unitPrice = $isTaxIncl
++            ? (float) $orderDetail->unit_price_tax_incl
++            : (float) $orderDetail->unit_price_tax_excl;
++
++        return $this->calculateTotal($order, $unitPrice, $quantity);
++    }
++
++    private function calculateTotal(Order $order, float $unitPrice, int $quantity): float
++    {
++        $precision = $this->context->getContext()->getComputingPrecision();
++
++        switch ($order->round_type) {
++            case Order::ROUND_TOTAL:
++                return $unitPrice * $quantity;
++
++            case Order::ROUND_LINE:
++                return $this->tools->round(
++                    $unitPrice * $quantity,
++                    $precision,
++                    $order->round_mode
++                );
++
++            case Order::ROUND_ITEM:
++            default:
++                return $this->tools->round(
++                    $unitPrice,
++                    $precision,
++                    $order->round_mode
++                ) * $quantity;
++        }
++    }
++}
+diff --git a/src/Adapter/Shipment/ShipmentTotalsCalculatorInterface.php b/src/Adapter/Shipment/ShipmentTotalsCalculatorInterface.php
+new file mode 100644
+index 0000000000000..d14efc3e62472
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentTotalsCalculatorInterface.php
+@@ -0,0 +1,34 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++interface ShipmentTotalsCalculatorInterface
++{
++    public function calculate(int $orderDetailId, int $quantity, bool $isTaxIncl): float;
++}
+diff --git a/src/Core/Domain/Shipment/Service/ShipmentMergerInterface.php b/src/Core/Domain/Shipment/Service/ShipmentMergerInterface.php
+new file mode 100644
+index 0000000000000..f3e62ad1c6fd7
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Service/ShipmentMergerInterface.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Service;
++
++use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
++
++interface ShipmentMergerInterface
++{
++    /**
++     * @param ShipmentProduct[] $productsToMove
++     */
++    public function merge(
++        Shipment $source,
++        Shipment $target,
++        array $productsToMove
++    ): void;
++}
+diff --git a/src/Core/Domain/Shipment/Service/ShipmentSplitterInterface.php b/src/Core/Domain/Shipment/Service/ShipmentSplitterInterface.php
+new file mode 100644
+index 0000000000000..154548dd55ddf
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Service/ShipmentSplitterInterface.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Service;
++
++use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
++
++interface ShipmentSplitterInterface
++{
++    /**
++     * @param ShipmentProduct[] $productsToMove
++     */
++    public function split(
++        Shipment $source,
++        int $carrierId,
++        array $productsToMove
++    ): Shipment;
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index 004e386129558..aa894431a4a2e 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -30,9 +30,7 @@
+ namespace PrestaShopBundle\Entity\Repository;
+ 
+ use Doctrine\ORM\EntityRepository;
+-use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
+ use PrestaShopBundle\Entity\Shipment;
+-use PrestaShopBundle\Entity\ShipmentProduct;
+ 
+ class ShipmentRepository extends EntityRepository
+ {
+@@ -85,42 +83,6 @@ public function delete(Shipment $shipment): void
+         $this->getEntityManager()->flush();
+     }
+ 
+-    /**
+-     * @param Shipment $source
+-     * @param Shipment $target
+-     * @param ShipmentProduct[] $shipmentProducts
+-     */
+-    public function mergeProductsToShipment(Shipment $source, Shipment $target, array $shipmentProducts): void
+-    {
+-        $sourceProductsByOrderDetailId = $this->getShipmentProductByOrderDetailId($source);
+-        $targetProductsByOrderDetailId = $this->getShipmentProductByOrderDetailId($target);
+-
+-        foreach ($shipmentProducts as $shipmentProduct) {
+-            if (empty($sourceProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()])) {
+-                throw new ShipmentException(sprintf('Order detail with id %d does not exist in source shipment', $shipmentProduct->getOrderDetailId()));
+-            }
+-            if (empty($targetProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()])) {
+-                $target->addShipmentProduct($shipmentProduct);
+-            } else {
+-                $targetProduct = $targetProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()];
+-                $newQuantity = $targetProduct->getQuantity() + $shipmentProduct->getQuantity();
+-                $targetProduct->setQuantity($newQuantity);
+-            }
+-            $sourceProduct = $sourceProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()];
+-            $newQuantity = $sourceProduct->getQuantity() - $shipmentProduct->getQuantity();
+-            if ($newQuantity <= 0) {
+-                $source->removeProduct($sourceProduct);
+-            } else {
+-                $sourceProduct->setQuantity($newQuantity);
+-            }
+-        }
+-        $this->getEntityManager()->flush();
+-
+-        if ($source->getProducts()->isEmpty()) {
+-            $this->delete($source);
+-        }
+-    }
+-
+     /**
+      * @return array<int, array{
+      *     id_shipment: int,
+@@ -155,66 +117,4 @@ public function getShipmentWithWeightByOrderId(int $orderId): array
+ 
+         return $qb->executeQuery()->fetchAllAssociative();
+     }
+-
+-    private function getShipmentProductByOrderDetailId(Shipment $shipment): array
+-    {
+-        return array_reduce($shipment->getProducts()->toArray(), function ($carry, ShipmentProduct $product) {
+-            $carry[$product->getOrderDetailId()] = $product;
+-
+-            return $carry;
+-        }, []);
+-    }
+-
+-    /**
+-     * @param int $carrierId
+-     * @param Shipment $shipmentToRemoveProduct
+-     * @param ShipmentProduct[] $shipmentProductsToMove
+-     */
+-    public function splitShipment(int $carrierId, Shipment $shipmentToRemoveProduct, array $shipmentProductsToMove): void
+-    {
+-        $shipmentProductsByOrderDetailId = array_reduce($shipmentToRemoveProduct->getProducts()->toArray(), function ($carry, ShipmentProduct $product) {
+-            $carry[$product->getOrderDetailId()] = $product;
+-
+-            return $carry;
+-        }, []);
+-
+-        $shipmentProducts = [];
+-
+-        $newShipment = new Shipment();
+-        $newShipment->setCarrierId($carrierId);
+-        $newShipment->setOrderId($shipmentToRemoveProduct->getOrderId());
+-        $newShipment->setTrackingNumber(null);
+-        $newShipment->setAddressId($shipmentToRemoveProduct->getAddressId());
+-        $newShipment->setShippingCostTaxExcluded($shipmentToRemoveProduct->getShippingCostTaxExcluded());
+-        $newShipment->setShippingCostTaxIncluded($shipmentToRemoveProduct->getShippingCostTaxIncluded());
+-
+-        foreach ($shipmentProductsToMove as $shipmentProductToMove) {
+-            $orderDetailId = $shipmentProductToMove->getOrderDetailId();
+-            $quantity = $shipmentProductToMove->getQuantity();
+-            $existingProduct = $shipmentProductsByOrderDetailId[$orderDetailId] ?? null;
+-            if ($existingProduct) {
+-                $remainingQty = $existingProduct->getQuantity() - $quantity;
+-                if ($remainingQty <= 0) {
+-                    $shipmentToRemoveProduct->removeProduct($existingProduct);
+-                } else {
+-                    $existingProduct->setQuantity($remainingQty);
+-                }
+-            } else {
+-                throw new ShipmentException(sprintf('Cannot find product with order detail id %s', $orderDetailId));
+-            }
+-            $shipmentProducts[] = (new ShipmentProduct())
+-                ->setOrderDetailId($orderDetailId)
+-                ->setQuantity($quantity)
+-                ->setShipment($newShipment);
+-        }
+-
+-        foreach ($shipmentProducts as $shipmentProduct) {
+-            $newShipment->addShipmentProduct($shipmentProduct);
+-        }
+-        $this->save($newShipment);
+-
+-        if ($shipmentToRemoveProduct->getProducts()->isEmpty()) {
+-            $this->delete($shipmentToRemoveProduct);
+-        }
+-    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+index 1ae89a3bfe027..fe9184f2880e1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+@@ -24,6 +24,14 @@ services:
+     arguments:
+       - '@PrestaShopBundle\Entity\Repository\ShipmentRepository'
+ 
++  PrestaShop\PrestaShop\Adapter\Shipment\ShipmentTotalsCalculatorInterface:
++    class: PrestaShop\PrestaShop\Adapter\Shipment\ShipmentTotalsCalculator
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository'
++      - '@PrestaShop\PrestaShop\Adapter\Order\Repository\OrderDetailRepository'
++      - '@PrestaShop\PrestaShop\Adapter\LegacyContext'
++      - '@PrestaShop\PrestaShop\Adapter\Tools'
++
+   prestashop.adapter.legacy.context:
+     alias: PrestaShop\PrestaShop\Adapter\LegacyContext
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index 1b0661f3312a9..0064726603246 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -231,16 +231,3 @@ services:
+   prestashop.adapter.order.command_handler.set_internal_order_note_handler:
+     class: PrestaShop\PrestaShop\Adapter\Order\CommandHandler\SetInternalOrderNoteHandler
+     autoconfigure: true
+-
+-  prestashop.adapter.order.repository.order_repository:
+-    alias: PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository
+-    deprecated:
+-      package: PrestaShop\PrestaShop
+-      version: 9.0
+-
+-  PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository:
+-    arguments:
+-      - '@doctrine.dbal.default_connection'
+-      - '%database_prefix%'
+-
+-  PrestaShop\PrestaShop\Adapter\Order\Repository\OrderDetailRepository:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+index e213b74036f2f..409dce0f8a024 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+@@ -23,3 +23,16 @@ services:
+     arguments:
+       - PrestaShopBundle\Entity\Tab
+     lazy: true
++
++  prestashop.adapter.order.repository.order_repository:
++    alias: PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository
++    deprecated:
++      package: PrestaShop\PrestaShop
++      version: 9.0
++
++  PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository:
++    arguments:
++      - '@doctrine.dbal.default_connection'
++      - '%database_prefix%'
++
++  PrestaShop\PrestaShop\Adapter\Order\Repository\OrderDetailRepository:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/shipment.yml b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+new file mode 100644
+index 0000000000000..099b0bfab6622
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+@@ -0,0 +1,10 @@
++services:
++  _defaults:
++    public: false
++    autowire: true
++
++  PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentSplitterInterface:
++    class: PrestaShop\PrestaShop\Adapter\Shipment\ShipmentSplitter
++
++  PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentMergerInterface:
++    class: PrestaShop\PrestaShop\Adapter\Shipment\ShipmentMerger

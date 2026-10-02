@@ -1,0 +1,245 @@
+diff --git a/install-dev/upgrade/php/add_new_status_stock.php b/install-dev/upgrade/php/add_new_status_stock.php
+index 1ec9ed58f7c68..e2a72e6ae7667 100644
+--- a/install-dev/upgrade/php/add_new_status_stock.php
++++ b/install-dev/upgrade/php/add_new_status_stock.php
+@@ -26,6 +26,7 @@
+ 
+ function add_new_status_stock()
+ {
++    Language::resetCache();
+     $translator = Context::getContext()->getTranslator();
+     $languages  = Language::getLanguages();
+ 
+diff --git a/install-dev/upgrade/php/migrate_tabs_17.php b/install-dev/upgrade/php/migrate_tabs_17.php
+index be22139af5f4c..3e6aec77845ae 100644
+--- a/install-dev/upgrade/php/migrate_tabs_17.php
++++ b/install-dev/upgrade/php/migrate_tabs_17.php
+@@ -24,8 +24,9 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
+-use PrestaShopBundle\Install\Install;
++use PrestaShop\PrestaShop\Adapter\Entity\Language;
+ use PrestaShopBundle\Install\LanguageList;
++use PrestaShopBundle\Install\XmlLoader;
+ 
+ /**
+  * Migrate BO tabs for 1.7 (new reorganization of BO)
+@@ -59,12 +60,48 @@ function migrate_tabs_17()
+     /* insert the new structure */
+     ProfileCore::resetCacheAccesses();
+     LanguageCore::resetCache();
+-    $install = new Install();
+-    $install->populateDatabase('tab');
++    if (!populateTab()) {
++        return false;
++    }
+ 
+     /* update remaining idParent */
+     foreach($moduleParents as $idParent => $className) {
+         $idTab = Db::getInstance()->getValue('SELECT id_tab FROM '._DB_PREFIX_.'tab WHERE class_name='.pSQL($className));
+         Db::getInstance()->execute('UPDATE '._DB_PREFIX_.'tab SET id_parent='.(int)$idTab.' WHERE id_parent='.(int)$idParent);
+     }
++
++    return true;
++}
++
++function populateTab()
++{
++    $languages = [];
++    foreach (Language::getLanguages() as $lang) {
++        $languages[$lang['id_lang']] = $lang['iso_code'];
++    }
++
++    // Because we use 1.7.7+ files but with a not-yet migrated Tab entity, we need to use
++    // a custom XmlLoader to remove the `enabled` key before inserting to the DB
++    $xml_loader = new \XmlLoader1700();
++    $xml_loader->setTranslator(Context::getContext()->getTranslator());
++    $xml_loader->setLanguages($languages);
++
++    try {
++        $xml_loader->populateEntity('tab');
++    } catch (PrestashopInstallerException $e) {
++        return false;
++    }
++
++    return true;
++}
++
++class XmlLoader1700 extends XmlLoader
++{
++    public function createEntityTab($identifier, array $data, array $data_lang): void
++    {
++        if (isset($data['enabled'])) {
++            unset($data['enabled']);
++        }
++        parent::createEntityTab($identifier, $data, $data_lang);
++    }
+ }
+diff --git a/install-dev/upgrade/php/ps_1770_update_charset.php b/install-dev/upgrade/php/ps_1770_update_charset.php
+new file mode 100644
+index 0000000000000..b71a14a565f71
+--- /dev/null
++++ b/install-dev/upgrade/php/ps_1770_update_charset.php
+@@ -0,0 +1,91 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++function ps_1770_update_charset()
++{
++    $adminFilterTableExists = $adminFilterFilterIdExists = $moduleHistoryTableExists = $translationTableExists = false;
++
++    try {
++        $adminFilterTableExists = (bool) Db::getInstance()->executeS(
++            'SELECT count(*) FROM ' . _DB_PREFIX_ . 'admin_filter'
++        );
++        if ($adminFilterTableExists) {
++            $adminFilterFilterIdExists = (bool) Db::getInstance()->executeS(
++                'SELECT count(filter_id) FROM ' . _DB_PREFIX_ . 'admin_filter'
++            );
++        }
++    } catch (Exception $e) {
++
++    }
++
++    try {
++        $moduleHistoryTableExists = (bool) Db::getInstance()->executeS(
++            'SELECT count(*) FROM ' . _DB_PREFIX_ . 'module_history'
++        );
++    } catch (Exception $e) {
++
++    }
++
++    try {
++        $translationTableExists = (bool) Db::getInstance()->executeS(
++            'SELECT count(*) FROM ' . _DB_PREFIX_ . 'translation'
++        );
++
++    } catch (Exception $e) {
++
++    }
++
++    $result = true;
++
++    if ($adminFilterTableExists) {
++        if ($adminFilterFilterIdExists) {
++            $result &= Db::getInstance()->execute(
++                'UPDATE ' . _DB_PREFIX_ . '`admin_filter` SET `filter_id` = SUBSTRING(`filter_id`, 1, 191)'
++            );
++            $result &= Db::getInstance()->execute(
++                'ALTER TABLE ' . _DB_PREFIX_ . '`admin_filter` CHANGE `filter_id` `filter_id` VARCHAR(191) NOT NULL'
++            );
++        }
++        $result &= Db::getInstance()->execute(
++            'ALTER TABLE `PREFIX_admin_filter` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
++        );
++    }
++
++    if ($moduleHistoryTableExists) {
++        $result &= Db::getInstance()->execute(
++            'ALTER TABLE `PREFIX_module_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
++        );
++    }
++
++
++    if ($translationTableExists) {
++        $result &= Db::getInstance()->execute(
++            'ALTER TABLE `PREFIX_translation` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
++        );
++    }
++
++    return (bool) $result;
++}
+diff --git a/install-dev/upgrade/sql/1.7.7.0.sql b/install-dev/upgrade/sql/1.7.7.0.sql
+index 3a2165fd703a5..7cbd6f91fdf29 100644
+--- a/install-dev/upgrade/sql/1.7.7.0.sql
++++ b/install-dev/upgrade/sql/1.7.7.0.sql
+@@ -30,8 +30,7 @@ UPDATE `PREFIX_hook_alias` SET `name` = SUBSTRING(`name`, 1, 191), `alias` = SUB
+ ALTER TABLE `PREFIX_hook_alias` CHANGE `name` `name` VARCHAR(191) NOT NULL;
+ ALTER TABLE `PREFIX_hook_alias` CHANGE `alias` `alias` VARCHAR(191) NOT NULL;
+ 
+-UPDATE `PREFIX_admin_filter` SET `filter_id` = SUBSTRING(`filter_id`, 1, 191);
+-ALTER TABLE `PREFIX_admin_filter` CHANGE `filter_id` `filter_id` VARCHAR(191) NOT NULL;
++/* php:ps_1770_update_charset */
+ 
+ UPDATE `PREFIX_alias` SET `alias` = SUBSTRING(`alias`, 1, 191);
+ ALTER TABLE `PREFIX_alias` CHANGE `alias` `alias` VARCHAR(191) NOT NULL;
+@@ -63,7 +62,6 @@ ALTER TABLE `PREFIX_access` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_gen
+ ALTER TABLE `PREFIX_accessory` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_address` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_address_format` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_admin_filter` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_alias` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_attachment` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_attachment_lang` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+@@ -162,9 +160,6 @@ ALTER TABLE `PREFIX_image_type` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4
+ ALTER TABLE `PREFIX_import_match` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_lang` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_lang_shop` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_link_block` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_link_block_lang` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_link_block_shop` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_log` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_mail` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_manufacturer` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+@@ -181,7 +176,6 @@ ALTER TABLE `PREFIX_module_carrier` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf
+ ALTER TABLE `PREFIX_module_country` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_module_currency` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_module_group` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_module_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_module_preference` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_module_shop` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_operating_system` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+@@ -283,7 +277,6 @@ ALTER TABLE `PREFIX_tax_rule` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_g
+ ALTER TABLE `PREFIX_tax_rules_group` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_tax_rules_group_shop` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_timezone` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+-ALTER TABLE `PREFIX_translation` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_warehouse` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_warehouse_carrier` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_warehouse_product_location` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+diff --git a/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php b/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
+index 37286b56f4907..685d3ef905b09 100644
+--- a/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
++++ b/src/PrestaShopBundle/Translation/Loader/SqlTranslationLoader.php
+@@ -78,7 +78,7 @@ public function load($resource, $locale, $domain = 'messages')
+             SELECT `key`, `translation`, `domain`
+             FROM `' . _DB_PREFIX_ . 'translation`
+             WHERE `id_lang` = ' . $localeResults[$locale]['id_lang'];
+-        $translations = Db::getInstance()->executeS($selectTranslationsQuery);
++        $translations = Db::getInstance()->executeS($selectTranslationsQuery) ?: [];
+ 
+         $catalogue = new MessageCatalogue($locale);
+         $this->addTranslationsToCatalogue($translations, $catalogue);
+@@ -87,7 +87,7 @@ public function load($resource, $locale, $domain = 'messages')
+             $selectThemeTranslationsQuery =
+                 $selectTranslationsQuery . "\n" .
+                 "AND theme = '" . $this->theme->getName() . "'";
+-            $themeTranslations = Db::getInstance()->executeS($selectThemeTranslationsQuery);
++            $themeTranslations = Db::getInstance()->executeS($selectThemeTranslationsQuery) ?: [];
+             $this->addTranslationsToCatalogue($themeTranslations, $catalogue);
+         }
+ 

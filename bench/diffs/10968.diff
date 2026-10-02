@@ -1,0 +1,145 @@
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+index 8608c44bbafae..03bb8ca837505 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+@@ -33,6 +33,7 @@
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Translation\TranslatorInterface;
+ 
+ /**
+  * Class returning the content of the form in the maintenance page.
+@@ -40,6 +41,42 @@
+  */
+ class PreferencesType extends TranslatorAwareType
+ {
++    /**
++     * @var bool
++     */
++    private $isMultistoreUsed;
++
++    /**
++     * @var bool
++     */
++    private $isSingleShopContext;
++
++    /**
++     * @var bool
++     */
++    private $isAllShopContext;
++
++    /**
++     * @param TranslatorInterface $translator
++     * @param array $locales
++     * @param bool $isMultistoreUsed
++     * @param bool $isSingleShopContext
++     * @param bool $isAllShopContext
++     */
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++        $isMultistoreUsed,
++        $isSingleShopContext,
++        $isAllShopContext
++    ) {
++        parent::__construct($translator, $locales);
++
++        $this->isMultistoreUsed = $isMultistoreUsed;
++        $this->isSingleShopContext = $isSingleShopContext;
++        $this->isAllShopContext = $isAllShopContext;
++    }
++
+     /**
+      * @var bool
+      */
+@@ -61,7 +98,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ->add('enable_ssl_everywhere', SwitchType::class, [
+                 'disabled' => !$isSslEnabled,
+             ])
+-            ->add('enable_token', SwitchType::class)
++            ->add('enable_token', SwitchType::class, [
++                'disabled' => !$this->isContextDependantOptionEnabled(),
++            ])
+             ->add('allow_html_iframes', SwitchType::class)
+             ->add('use_htmlpurifier', SwitchType::class)
+             ->add('price_round_mode', ChoiceType::class, [
+@@ -90,7 +129,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('display_suppliers', SwitchType::class)
+             ->add('display_best_sellers', SwitchType::class)
+-            ->add('multishop_feature_active', SwitchType::class)
++            ->add('multishop_feature_active', SwitchType::class, [
++                'disabled' => !$this->isContextDependantOptionEnabled(),
++            ])
+             ->add('shop_activity', ChoiceType::class, [
+                 'required' => false,
+                 'choices_as_values' => true,
+@@ -148,4 +189,18 @@ public function getBlockPrefix()
+     {
+         return 'preferences';
+     }
++
++    /**
++     * Check if option which depends on multistore context can be changed.
++     *
++     * @return bool
++     */
++    protected function isContextDependantOptionEnabled()
++    {
++        if (!$this->isMultistoreUsed && $this->isSingleShopContext) {
++            return true;
++        }
++
++        return $this->isAllShopContext;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 0d1c22746f2fc..abdfc9d131280 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -315,6 +315,10 @@ services:
+     form.type.shop_parameters.general:
+         class: 'PrestaShopBundle\Form\Admin\Configure\ShopParameters\General\PreferencesType'
+         parent: 'form.type.translatable.aware'
++        arguments:
++          - '@=service("prestashop.adapter.multistore_feature").isUsed()'
++          - '@=service("prestashop.adapter.shop.context").isShopContext()'
++          - '@=service("prestashop.adapter.shop.context").isAllContext()'
+         public: true
+         calls:
+             - ['setIsSecure', ["@=service('request_stack').getCurrentRequest().isSecure()"]]
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/preferences.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/preferences.html.twig
+index 55896e8982d16..6f19028c4f8e8 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/preferences.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/preferences.html.twig
+@@ -76,6 +76,14 @@
+                                     {{ form_errors(generalForm.enable_token) }}
+                                     {{ form_widget(generalForm.enable_token) }}
+                                     <small class="form-text">{{ 'Enable or disable token in the Front Office to improve PrestaShop\'s security.'|trans({}, 'Admin.Shopparameters.Help') }}</small>
++
++                                    {% if generalForm.enable_token.vars.disabled %}
++                                      <div class="alert alert-warning mt-2 mb-0" role="alert">
++                                        <p class="alert-text">
++                                          {{ 'You can\'t change the value of this configuration field in the context of this shop.'|trans({}, 'Admin.Notifications.Warning') }}
++                                        </p>
++                                      </div>
++                                    {% endif %}
+                                 </div>
+                             </div>
+                             <div class="form-group row">
+@@ -140,6 +148,14 @@
+                                     {{ form_errors(generalForm.multishop_feature_active) }}
+                                     {{ form_widget(generalForm.multishop_feature_active) }}
+                                     <small class="form-text">{{ 'The multistore feature allows you to manage several e-shops with one Back Office. If this feature is enabled, a "Multistore" page will be available in the "Advanced Parameters" menu.'|trans({}, 'Admin.Shopparameters.Help') }}</small>
++
++                                    {% if generalForm.multishop_feature_active.vars.disabled %}
++                                      <div class="alert alert-warning mt-2 mb-0" role="alert">
++                                        <p class="alert-text">
++                                          {{ 'You can\'t change the value of this configuration field in the context of this shop.'|trans({}, 'Admin.Notifications.Warning') }}
++                                        </p>
++                                      </div>
++                                    {% endif %}
+                                 </div>
+                             </div>
+                             <div class="form-group row">

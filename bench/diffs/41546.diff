@@ -1,0 +1,495 @@
+diff --git a/classes/Customization.php b/classes/Customization.php
+index dcda356027f3d..27d10978fb23b 100644
+--- a/classes/Customization.php
++++ b/classes/Customization.php
+@@ -107,7 +107,7 @@ public static function getReturnedCustomizations($idOrder)
+         if (($result = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS('
+ 			SELECT ore.`id_order_return`, ord.`id_order_detail`, ord.`id_customization`, ord.`product_quantity`
+ 			FROM `' . _DB_PREFIX_ . 'order_return` ore
+-			INNER JOIN `' . _DB_PREFIX_ . 'order_return_detail` ord ON (ord.`id_order_return` = ore.`id_order_return`)
++			INNER JOIN `' . _DB_PREFIX_ . 'order_return_detail` ord ON (ord.`id_order_return` = ore.`id_order_return` AND ord.`cancelled` = 0)
+ 			WHERE ore.`id_order` = ' . (int) $idOrder . ' AND ord.`id_customization` != 0')) === false) {
+             return false;
+         }
+diff --git a/classes/order/Order.php b/classes/order/Order.php
+index 13ddadcfc5d55..823642c347b52 100644
+--- a/classes/order/Order.php
++++ b/classes/order/Order.php
+@@ -931,9 +931,10 @@ public function hasProductReturned()
+             SELECT IFNULL(SUM(ord.product_quantity), SUM(product_quantity_return))
+             FROM `' . _DB_PREFIX_ . 'orders` o
+             INNER JOIN `' . _DB_PREFIX_ . 'order_detail` od
+-            ON od.id_order = o.id_order
++                ON od.id_order = o.id_order
+             LEFT JOIN `' . _DB_PREFIX_ . 'order_return_detail` ord
+-            ON ord.id_order_detail = od.id_order_detail
++                ON ord.id_order_detail = od.id_order_detail
++                    AND ord.cancelled = 0 
+             WHERE o.id_order = ' . (int) $this->id);
+     }
+ 
+diff --git a/classes/order/OrderReturn.php b/classes/order/OrderReturn.php
+index 46bc6cde03ad4..0d972712bcc85 100644
+--- a/classes/order/OrderReturn.php
++++ b/classes/order/OrderReturn.php
+@@ -59,7 +59,16 @@ public function addReturnDetail($order_detail_list, $product_qty_list)
+                 if ($qty = (int) $product_qty_list[$key]) {
+                     $orderdetail = new OrderDetail((int) $order_detail);
+                     $id_customization = $orderdetail->id_customization;
+-                    Db::getInstance()->insert('order_return_detail', ['id_order_return' => (int) $this->id, 'id_order_detail' => (int) $order_detail, 'product_quantity' => $qty, 'id_customization' => (int) $id_customization]);
++                    Db::getInstance()->insert(
++                        'order_return_detail',
++                        [
++                            'id_order_return' => (int) $this->id,
++                            'id_order_detail' => (int) $order_detail,
++                            'product_quantity' => $qty,
++                            'id_customization' => (int) $id_customization,
++                            'cancelled' => '0',
++                        ]
++                    );
+                 }
+             }
+         }
+@@ -108,7 +117,7 @@ public function countProduct()
+         if (!$data = Db::getInstance()->getRow('
+ 		SELECT COUNT(`id_order_return`) AS total
+ 		FROM `' . _DB_PREFIX_ . 'order_return_detail`
+-		WHERE `id_order_return` = ' . (int) $this->id)) {
++		WHERE `id_order_return` = ' . (int) $this->id . ' AND `cancelled` = 0')) {
+             return false;
+         }
+ 
+@@ -142,10 +151,11 @@ public static function getOrdersReturn($customer_id, $order_id = false, $no_deni
+ 
+     public static function getOrdersReturnDetail($id_order_return)
+     {
+-        return Db::getInstance()->executeS('
+-		SELECT *
+-		FROM `' . _DB_PREFIX_ . 'order_return_detail`
+-		WHERE `id_order_return` = ' . (int) $id_order_return);
++        return Db::getInstance()->executeS(
++            'SELECT *
++		    FROM `' . _DB_PREFIX_ . 'order_return_detail`
++		    WHERE `id_order_return` = ' . (int) $id_order_return
++        );
+     }
+ 
+     /**
+@@ -229,8 +239,7 @@ public static function addReturnedQuantity(&$products, $id_order)
+         $details = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS(
+             'SELECT od.id_order_detail, GREATEST(od.product_quantity_return, IFNULL(SUM(ord.product_quantity),0)) as qty_returned
+ 			FROM ' . _DB_PREFIX_ . 'order_detail od
+-			LEFT JOIN ' . _DB_PREFIX_ . 'order_return_detail ord
+-			ON ord.id_order_detail = od.id_order_detail
++			LEFT JOIN ' . _DB_PREFIX_ . 'order_return_detail ord ON ord.id_order_detail = od.id_order_detail AND ord.cancelled = 0
+ 			WHERE od.id_order = ' . (int) $id_order . '
+ 			GROUP BY od.id_order_detail'
+         );
+@@ -249,4 +258,13 @@ public static function addReturnedQuantity(&$products, $id_order)
+             }
+         }
+     }
++
++    public static function setCancelledStatus(int $idOrderReturn, bool $cancelled): void
++    {
++        Db::getInstance()->execute(
++            'UPDATE ' . _DB_PREFIX_ . 'order_return_detail ord '
++            . 'SET cancelled = ' . ($cancelled ? '1' : '0') . ' '
++            . 'WHERE id_order_return = ' . (string) $idOrderReturn
++        );
++    }
+ }
+diff --git a/classes/order/OrderReturnState.php b/classes/order/OrderReturnState.php
+index 33b462030261b..05b19724e2408 100644
+--- a/classes/order/OrderReturnState.php
++++ b/classes/order/OrderReturnState.php
+@@ -14,6 +14,9 @@ class OrderReturnStateCore extends ObjectModel
+     /** @var string Display state in the specified color */
+     public $color;
+ 
++    /** Cancel return products */
++    public bool $is_cancelling_return = false;
++
+     /**
+      * @see ObjectModel::$definition
+      */
+@@ -23,6 +26,7 @@ class OrderReturnStateCore extends ObjectModel
+         'multilang' => true,
+         'fields' => [
+             'color' => ['type' => self::TYPE_STRING, 'validate' => 'isColor', 'size' => 32],
++            'is_cancelling_return' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+ 
+             /* Lang fields */
+             'name' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'isGenericName', 'required' => true, 'size' => OrderReturnStateSettings::NAME_MAX_LENGTH],
+diff --git a/controllers/admin/AdminReturnController.php b/controllers/admin/AdminReturnController.php
+index c2d270f8a4546..41f7365a361bf 100644
+--- a/controllers/admin/AdminReturnController.php
++++ b/controllers/admin/AdminReturnController.php
+@@ -206,6 +206,7 @@ public function initToolbar()
+     public function postProcess()
+     {
+         $this->context = Context::getContext();
++        // Delete
+         if (Tools::isSubmit('deleteorder_return_detail')) {
+             if ($this->access('delete')) {
+                 if (($id_order_detail = (int) Tools::getValue('id_order_detail')) && Validate::isUnsignedId($id_order_detail)) {
+@@ -242,6 +243,12 @@ public function postProcess()
+                     $orderReturn->state = (int) Tools::getValue('state');
+                     if ($orderReturn->save()) {
+                         $orderReturnState = new OrderReturnState($orderReturn->state);
++                        // Cancel Returns if cancellable
++                        if ($orderReturnState->is_cancelling_return === true) {
++                            OrderReturn::setCancelledStatus((int) $id_order_return, true);
++                        }
++
++                        // Send email
+                         $vars = [
+                             '{lastname}' => $customer->lastname,
+                             '{firstname}' => $customer->firstname,
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 42c57904d86a2..9abcc3259b5b5 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -1460,6 +1460,7 @@ CREATE TABLE `PREFIX_order_return_detail` (
+   `id_order_detail` int(10) unsigned NOT NULL,
+   `id_customization` int(10) unsigned NOT NULL DEFAULT '0',
+   `product_quantity` int(10) unsigned NOT NULL DEFAULT '0',
++  `cancelled` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   PRIMARY KEY (
+     `id_order_return`, `id_order_detail`,
+     `id_customization`
+@@ -1470,6 +1471,7 @@ CREATE TABLE `PREFIX_order_return_detail` (
+ CREATE TABLE `PREFIX_order_return_state` (
+   `id_order_return_state` int(10) unsigned NOT NULL auto_increment,
+   `color` varchar(32) DEFAULT NULL,
++  `is_cancelling_return` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   PRIMARY KEY (`id_order_return_state`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
+ 
+diff --git a/install-dev/data/xml/order_return_state.xml b/install-dev/data/xml/order_return_state.xml
+index 3fc461918cca7..106c8da6d0373 100644
+--- a/install-dev/data/xml/order_return_state.xml
++++ b/install-dev/data/xml/order_return_state.xml
+@@ -4,10 +4,10 @@
+     <field name="color"/>
+   </fields>
+   <entities>
+-    <order_return_state id="Waiting_for_confirmation" color="#4169E1"/>
+-    <order_return_state id="Waiting_for_package" color="#8A2BE2"/>
+-    <order_return_state id="Package_received" color="#32CD32"/>
+-    <order_return_state id="Return_denied" color="#DC143C"/>
+-    <order_return_state id="Return_completed" color="#108510"/>
++    <order_return_state id="Waiting_for_confirmation" color="#4169E1" is_cancelling_return="0"/>
++    <order_return_state id="Waiting_for_package" color="#8A2BE2" is_cancelling_return="0"/>
++    <order_return_state id="Package_received" color="#32CD32" is_cancelling_return="0"/>
++    <order_return_state id="Return_denied" color="#DC143C" is_cancelling_return="1"/>
++    <order_return_state id="Return_completed" color="#108510" is_cancelling_return="0"/>
+   </entities>
+ </entity_order_return_state>
+diff --git a/src/Adapter/OrderReturnState/CommandHandler/AddOrderReturnStateHandler.php b/src/Adapter/OrderReturnState/CommandHandler/AddOrderReturnStateHandler.php
+index a0b024882464b..7af3f5ec2a9a9 100644
+--- a/src/Adapter/OrderReturnState/CommandHandler/AddOrderReturnStateHandler.php
++++ b/src/Adapter/OrderReturnState/CommandHandler/AddOrderReturnStateHandler.php
+@@ -45,5 +45,6 @@ private function fillOrderReturnStateWithCommandData(OrderReturnState $orderRetu
+     {
+         $orderReturnState->name = $command->getLocalizedNames();
+         $orderReturnState->color = $command->getColor();
++        $orderReturnState->is_cancelling_return = $command->isCancellingReturn();
+     }
+ }
+diff --git a/src/Adapter/OrderReturnState/CommandHandler/EditOrderReturnStateHandler.php b/src/Adapter/OrderReturnState/CommandHandler/EditOrderReturnStateHandler.php
+index 895529e817488..bb2a4adcf2e1b 100644
+--- a/src/Adapter/OrderReturnState/CommandHandler/EditOrderReturnStateHandler.php
++++ b/src/Adapter/OrderReturnState/CommandHandler/EditOrderReturnStateHandler.php
+@@ -53,5 +53,9 @@ private function updateOrderReturnStateWithCommandData(OrderReturnState $orderRe
+         if (null !== $command->getColor()) {
+             $orderReturnState->color = $command->getColor();
+         }
++
++        if (null !== $command->isCancellingReturn()) {
++            $orderReturnState->is_cancelling_return = $command->isCancellingReturn();
++        }
+     }
+ }
+diff --git a/src/Adapter/OrderReturnState/QueryHandler/GetOrderReturnStateForEditingHandler.php b/src/Adapter/OrderReturnState/QueryHandler/GetOrderReturnStateForEditingHandler.php
+index 4bc22841bd58b..85de1e849ea1f 100644
+--- a/src/Adapter/OrderReturnState/QueryHandler/GetOrderReturnStateForEditingHandler.php
++++ b/src/Adapter/OrderReturnState/QueryHandler/GetOrderReturnStateForEditingHandler.php
+@@ -37,7 +37,8 @@ public function handle(GetOrderReturnStateForEditing $query)
+         return new EditableOrderReturnState(
+             $orderReturnStateId,
+             $orderReturnState->name,
+-            $orderReturnState->color
++            $orderReturnState->color,
++            $orderReturnState->is_cancelling_return
+         );
+     }
+ }
+diff --git a/src/Core/Domain/OrderReturnState/Command/AddOrderReturnStateCommand.php b/src/Core/Domain/OrderReturnState/Command/AddOrderReturnStateCommand.php
+index d9f7a151b04ee..e1d1c82571ac6 100644
+--- a/src/Core/Domain/OrderReturnState/Command/AddOrderReturnStateCommand.php
++++ b/src/Core/Domain/OrderReturnState/Command/AddOrderReturnStateCommand.php
+@@ -18,17 +18,13 @@ class AddOrderReturnStateCommand
+      * @var string[]
+      */
+     private $localizedNames;
+-    /**
+-     * @var string
+-     */
+-    private $color;
+ 
+     public function __construct(
+         array $localizedNames,
+-        string $color
++        private string $color,
++        private bool $isCancellingReturn = false
+     ) {
+         $this->setLocalizedNames($localizedNames);
+-        $this->color = $color;
+     }
+ 
+     /**
+@@ -64,4 +60,16 @@ public function getColor()
+     {
+         return $this->color;
+     }
++
++    public function setCancellingReturn(bool $isCancellingReturn): self
++    {
++        $this->isCancellingReturn = $isCancellingReturn;
++
++        return $this;
++    }
++
++    public function isCancellingReturn(): bool
++    {
++        return $this->isCancellingReturn;
++    }
+ }
+diff --git a/src/Core/Domain/OrderReturnState/Command/EditOrderReturnStateCommand.php b/src/Core/Domain/OrderReturnState/Command/EditOrderReturnStateCommand.php
+index 9337ea6b2dffb..40017e51ecc38 100644
+--- a/src/Core/Domain/OrderReturnState/Command/EditOrderReturnStateCommand.php
++++ b/src/Core/Domain/OrderReturnState/Command/EditOrderReturnStateCommand.php
+@@ -35,6 +35,8 @@ class EditOrderReturnStateCommand
+      */
+     private $color;
+ 
++    private ?bool $isCancellingReturn = null;
++
+     /**
+      * @param int $orderReturnStateId
+      */
+@@ -88,4 +90,16 @@ public function setColor(?string $color)
+ 
+         return $this;
+     }
++
++    public function setCancellingReturn(?bool $isCancellingReturn): self
++    {
++        $this->isCancellingReturn = $isCancellingReturn;
++
++        return $this;
++    }
++
++    public function isCancellingReturn(): ?bool
++    {
++        return $this->isCancellingReturn;
++    }
+ }
+diff --git a/src/Core/Domain/OrderReturnState/QueryResult/EditableOrderReturnState.php b/src/Core/Domain/OrderReturnState/QueryResult/EditableOrderReturnState.php
+index 86a1d4cc19323..38c11c40bdccd 100644
+--- a/src/Core/Domain/OrderReturnState/QueryResult/EditableOrderReturnState.php
++++ b/src/Core/Domain/OrderReturnState/QueryResult/EditableOrderReturnState.php
+@@ -15,26 +15,20 @@
+ class EditableOrderReturnState
+ {
+     /**
+-     * @var OrderReturnStateId
+-     */
+-    private $orderReturnStateId;
+-    /**
+-     * @var array
++     * @var array<string, string>
+      */
+     private $localizedNames;
+-    /**
+-     * @var string
+-     */
+-    private $color;
++
++    private OrderReturnStateId $orderReturnStateId;
+ 
+     public function __construct(
+         OrderReturnStateId $orderStateId,
+         array $name,
+-        string $color
++        private string $color,
++        private bool $isCancellingReturn,
+     ) {
+         $this->orderReturnStateId = $orderStateId;
+         $this->localizedNames = $name;
+-        $this->color = $color;
+     }
+ 
+     /**
+@@ -60,4 +54,9 @@ public function getColor()
+     {
+         return $this->color;
+     }
++
++    public function isCancellingReturn(): bool
++    {
++        return $this->isCancellingReturn;
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/OrderReturnStateFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/OrderReturnStateFormDataHandler.php
+index d171203e1d0ae..52349a4082490 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/OrderReturnStateFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/OrderReturnStateFormDataHandler.php
+@@ -58,7 +58,8 @@ private function buildOrderReturnStateAddCommandFromFormData(array $data)
+     {
+         $command = new AddOrderReturnStateCommand(
+             $data['name'],
+-            $data['color']
++            $data['color'],
++            $data['is_cancelling_return']
+         );
+ 
+         return $command;
+@@ -74,6 +75,7 @@ private function buildOrderReturnStateEditCommand($orderReturnStateId, array $da
+         $command = (new EditOrderReturnStateCommand($orderReturnStateId))
+             ->setName($data['name'])
+             ->setColor($data['color'])
++            ->setCancellingReturn($data['is_cancelling_return'])
+         ;
+ 
+         return $command;
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/OrderReturnStateFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/OrderReturnStateFormDataProvider.php
+index 648b554ade65e..2dd7ed3315566 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/OrderReturnStateFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/OrderReturnStateFormDataProvider.php
+@@ -38,6 +38,7 @@ public function getData($orderStateId)
+         return [
+             'name' => $editableOrderReturnState->getLocalizedNames(),
+             'color' => $editableOrderReturnState->getColor(),
++            'is_cancelling_return' => $editableOrderReturnState->isCancellingReturn(),
+         ];
+     }
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderReturnStates/OrderReturnStateType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderReturnStates/OrderReturnStateType.php
+index 618160808af3d..81e5fa71f11e9 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderReturnStates/OrderReturnStateType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderReturnStates/OrderReturnStateType.php
+@@ -13,6 +13,7 @@
+ use PrestaShopBundle\Form\Admin\Type\ColorPickerType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -66,6 +67,13 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'help' => $this->trans('Status will be highlighted in this color. HTML colors only.', 'Admin.Shopparameters.Help'),
+                 'required' => false,
+             ])
++            ->add('is_cancelling_return', CheckboxType::class, [
++                'required' => false,
++                'label' => $this->trans('Cancelling order returns.', 'Admin.Shopparameters.Feature'),
++                'attr' => [
++                    'material_design' => true,
++                ],
++            ])
+         ;
+     }
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderReturnStateFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderReturnStateFeatureContext.php
+index a983c5c1269f1..3854d170ec2f3 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderReturnStateFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderReturnStateFeatureContext.php
+@@ -41,7 +41,8 @@ public function addNewOrderReturnState(string $orderReturnStateReference, TableN
+                 [
+                     $this->getDefaultLangId() => $data['name'],
+                 ],
+-                $data['color']
++                $data['color'],
++                $data['is_cancelling_return'] === '1' ? true : false
+             ));
+ 
+             SharedStorage::getStorage()->set($orderReturnStateReference, $orderReturnStateId->getValue());
+@@ -71,6 +72,9 @@ public function updateOrderReturnState(string $orderReturnStateReference, TableN
+         if (isset($data['color'])) {
+             $editableOrderReturnState->setColor($data['color']);
+         }
++        if (isset($data['is_cancelling_return'])) {
++            $editableOrderReturnState->setCancellingReturn($data['is_cancelling_return'] === '1' ? true : false);
++        }
+ 
+         try {
+             $this->getCommandBus()->handle($editableOrderReturnState);
+@@ -134,6 +138,10 @@ public function checkOrderReturnStateDetails(string $orderReturnStateReference,
+         Assert::assertArrayHasKey($this->getDefaultLangId(), $localizedNames);
+         Assert::assertEquals($data['name'], $localizedNames[$this->getDefaultLangId()]);
+         Assert::assertEquals($data['color'], $editableOrderReturnState->getColor());
++        Assert::assertEquals(
++            $data['is_cancelling_return'] === '1' ? true : false,
++            $editableOrderReturnState->isCancellingReturn()
++        );
+     }
+ 
+     /**
+diff --git a/tests/Integration/Behaviour/Features/Scenario/OrderReturnState/order_return_state.feature b/tests/Integration/Behaviour/Features/Scenario/OrderReturnState/order_return_state.feature
+index 6123c5c12db78..201c1f9a21347 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/OrderReturnState/order_return_state.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/OrderReturnState/order_return_state.feature
+@@ -4,21 +4,25 @@ Feature: OrderState
+   Background:
+     Given shop "shop1" with name "test_shop" exists
+     And I add a new order return state "order_return_state_1st" with the following details:
+-      | name            | The 1st Order Return State |
+-      | color           | #123456                    |
++      | name               | The 1st Order Return State |
++      | color              | #123456                  |
++      | is_cancelling_return | 0                          |
+     And the order return state "order_return_state_1st" should exist
+     And I add a new order return state "order_return_state_2nd" with the following details:
+-      | name            | The 2nd Order Return State |
+-      | color           | #7890AB                    |
++      | name               | The 2nd Order Return State |
++      | color              | #7890AB                  |
++      | is_cancelling_return | 1                          |
+     And the order return state "order_return_state_2nd" should exist
+ 
+   Scenario: Add new order return state
+     When I add a new order return state "order_return_state_3rd" with the following details:
+-      | name            | The 3rd Order Return State |
+-      | color           | #CDEF12                    |
++      | name               | The 3rd Order Return State |
++      | color              | #CDEF12                  |
++      | is_cancelling_return | 0                          |
+     And the order return state "order_return_state_3rd" should have the following details:
+-      | name            | The 3rd Order Return State |
+-      | color           | #CDEF12                    |
++      | name               | The 3rd Order Return State |
++      | color              | #CDEF12                  |
++      | is_cancelling_return | 0                          |
+     ## Reset
+     When I delete the order return state "order_return_state_3rd"
+ 
+@@ -26,8 +30,15 @@ Feature: OrderState
+     When I update the order return state "order_return_state_1st" with the following details:
+       | color           | #345678                    |
+     And the order return state "order_return_state_1st" should have the following details:
+-      | name            | The 1st Order Return State |
+-      | color           | #345678                    |
++      | name               | The 1st Order Return State |
++      | color              | #345678                  |
++      | is_cancelling_return | 0                          |
++    When I update the order return state "order_return_state_1st" with the following details:
++      | is_cancelling_return | 1                          |
++    And the order return state "order_return_state_1st" should have the following details:
++      | name               | The 1st Order Return State |
++      | color              | #345678                  |
++      | is_cancelling_return | 1                          |
+ 
+   Scenario: Delete order return state
+     When I delete the order return state "order_return_state_1st"

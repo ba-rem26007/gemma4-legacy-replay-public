@@ -1,0 +1,3043 @@
+diff --git a/src/Adapter/Category/Repository/CategoryRepository.php b/src/Adapter/Category/Repository/CategoryRepository.php
+index 2a1223029b3ab..49434db8abae0 100644
+--- a/src/Adapter/Category/Repository/CategoryRepository.php
++++ b/src/Adapter/Category/Repository/CategoryRepository.php
+@@ -29,6 +29,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Category\Repository;
+ 
+ use Category;
++use Doctrine\DBAL\ArrayParameterType;
+ use Doctrine\DBAL\Connection;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Exception\CategoryException;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Exception\CategoryNotFoundException;
+@@ -36,6 +37,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -280,6 +282,21 @@ public function getProductCategoryIds(ProductId $productId, ShopConstraint $shop
+                 ->andWhere('cs.id_shop = :shopId')
+                 ->setParameter('shopId', $shopConstraint->getShopId()->getValue())
+             ;
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $qb
++                ->innerJoin(
++                    'cp',
++                    $this->dbPrefix . 'category_shop',
++                    'cs',
++                    'cp.id_category = cs.id_category'
++                )
++                ->andWhere('cs.id_shop IN (:shopIds)')
++                ->setParameter(
++                    'shopIds',
++                    array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                    ArrayParameterType::INTEGER
++                )
++            ;
+         }
+ 
+         $results = $qb->executeQuery()->fetchAllAssociative();
+diff --git a/src/Adapter/Product/Combination/Create/CombinationCreator.php b/src/Adapter/Product/Combination/Create/CombinationCreator.php
+index 8844f643d1030..96e48f465914b 100644
+--- a/src/Adapter/Product/Combination/Create/CombinationCreator.php
++++ b/src/Adapter/Product/Combination/Create/CombinationCreator.php
+@@ -42,6 +42,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -166,7 +167,7 @@ private function syncOutOfStockType(
+         $productStockAvailable = $this->stockAvailableRepository->getForProduct($productId, new ShopId($product->getShopId()));
+         $outOfStockType = new OutOfStockType((int) $productStockAvailable->out_of_stock);
+ 
+-        if ($shopConstraint->forAllShops()) {
++        if ($shopConstraint->forAllShops() || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())) {
+             foreach ($shopIdsByConstraint as $shopId) {
+                 $this->combinationRepository->updateCombinationOutOfStockType($productId, $outOfStockType, ShopConstraint::shop($shopId->getValue()));
+             }
+diff --git a/src/Adapter/Product/Combination/Repository/CombinationRepository.php b/src/Adapter/Product/Combination/Repository/CombinationRepository.php
+index ea682962c2704..6e8a30865c68d 100644
+--- a/src/Adapter/Product/Combination/Repository/CombinationRepository.php
++++ b/src/Adapter/Product/Combination/Repository/CombinationRepository.php
+@@ -29,6 +29,7 @@
+ 
+ use Combination;
+ use Db;
++use Doctrine\DBAL\ArrayParameterType;
+ use Doctrine\DBAL\Connection;
+ use Doctrine\DBAL\Exception;
+ use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
+@@ -49,6 +50,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopGroupId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+@@ -276,27 +278,44 @@ public function copyToShop(CombinationId $combinationId, ShopId $sourceId, ShopI
+      */
+     public function getByShopConstraint(CombinationId $combinationId, ShopConstraint $shopConstraint): Combination
+     {
+-        if ($shopConstraint->getShopGroupId()) {
+-            throw new InvalidShopConstraintException('Combination has no features related with shop group use single shop and all shops constraints');
+-        }
+-
+-        if ($shopConstraint->forAllShops()) {
++        if ($shopConstraint->forAllShops() || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())) {
+             try {
+                 return $this->get($combinationId, $this->getDefaultShopIdForCombination($combinationId));
++            } catch (CombinationShopAssociationNotFoundException $e) {
+                 // We try to fetch combination for default shop first,
+                 // but in case it is not associated to default shop,
+                 // then we load first found associated combination
+-            } catch (CombinationShopAssociationNotFoundException $e) {
+                 $associatedShopIds = $this->getAssociatedShopIds($combinationId);
+                 if (empty($associatedShopIds)) {
+                     throw $e;
+                 }
+ 
+-                return $this->get($combinationId, reset($associatedShopIds));
++                if ($shopConstraint instanceof ShopCollection) {
++                    $defaultShopId = null;
++                    // Find first shop IDs that is both in the specified list and the valid associated shops
++                    $validShopIds = array_map(fn (ShopId $shopId) => $shopId->getValue(), $associatedShopIds);
++                    foreach ($shopConstraint->getShopIds() as $shopId) {
++                        if (in_array($shopId->getValue(), $validShopIds)) {
++                            $defaultShopId = $shopId;
++                            break;
++                        }
++                    }
++
++                    // If none is found, it means no provided shop IDs were associated so we trigger the exception
++                    if (empty($defaultShopId)) {
++                        throw $e;
++                    }
++                } else {
++                    $defaultShopId = reset($associatedShopIds);
++                }
++
++                return $this->get($combinationId, $defaultShopId);
+             }
+-        } else {
++        } elseif ($shopConstraint->getShopId()) {
+             return $this->get($combinationId, $shopConstraint->getShopId());
+         }
++
++        throw new InvalidShopConstraintException('Combination has no features related with shop group use single shop, shop collection and all shops constraints');
+     }
+ 
+     /**
+@@ -308,7 +327,7 @@ public function getByShopConstraint(CombinationId $combinationId, ShopConstraint
+     public function partialUpdate(Combination $combination, array $updatableProperties, ShopConstraint $shopConstraint, int $errorCode): void
+     {
+         if ($shopConstraint->getShopGroupId()) {
+-            throw new InvalidShopConstraintException('Product combination has no features related with shop group use single shop and all shops constraints');
++            throw new InvalidShopConstraintException('Product Combination has no features related with shop group use single shop, shop collection and all shops constraints');
+         }
+ 
+         $this->combinationValidator->validate($combination);
+@@ -459,11 +478,13 @@ function (array $combination) { return new CombinationId((int) $combination['id_
+     public function findFirstCombinationId(ProductId $productId, ShopConstraint $shopConstraint): ?CombinationId
+     {
+         if ($shopConstraint->getShopGroupId()) {
+-            throw new InvalidShopConstraintException('Combination has no features related with shop group use single shop and all shops constraints');
++            throw new InvalidShopConstraintException('Combination has no features related with shop group use single shop, shop collection and all shops constraints');
+         }
+ 
+         if ($shopConstraint->getShopId()) {
+             $shopId = $shopConstraint->getShopId();
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $shopId = $shopConstraint->getShopIds()[0];
+         } else {
+             $shopId = $this->productRepository->getProductDefaultShopId($productId);
+         }
+@@ -761,6 +782,10 @@ private function getShopIdsByConstraint(CombinationId $combinationId, ShopConstr
+             return $this->getAssociatedShopIds($combinationId);
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            return $shopConstraint->getShopIds();
++        }
++
+         return [$shopConstraint->getShopId()];
+     }
+ 
+@@ -801,13 +826,29 @@ private function searchCombinationIdsByAttributes(
+                 'pa',
+                 'pac.id_product_attribute = pa.id_product_attribute'
+             );
+-        } else {
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $qb
++                ->innerJoin(
++                    'pac',
++                    $this->dbPrefix . 'product_attribute_shop',
++                    'pa',
++                    'pac.id_product_attribute = pa.id_product_attribute AND pa.id_shop IN (:shopIds)'
++                )
++                ->setParameter(
++                    'shopIds',
++                    array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                    ArrayParameterType::INTEGER
++                )
++            ;
++        } elseif ($shopConstraint->getShopId()) {
+             $qb->innerJoin(
+                 'pac',
+                 $this->dbPrefix . 'product_attribute_shop',
+                 'pa',
+                 'pac.id_product_attribute = pa.id_product_attribute AND pa.id_shop = :shopId'
+             )->setParameter('shopId', $shopConstraint->getShopId()->getValue());
++        } else {
++            throw new InvalidShopConstraintException('Cannot handle this kind of ShopConstraint');
+         }
+ 
+         $qb
+@@ -870,12 +911,13 @@ private function searchAttributes(LanguageId $languageId, ShopConstraint $shopCo
+ 
+         if ($shopConstraint->getShopId()) {
+             // this makes sure we are searching only in certain shop, so it doesn't return irrelevant attribute ids
+-            $qb->innerJoin(
+-                'a',
+-                $this->dbPrefix . 'attribute_shop',
+-                'attrShop',
+-                'a.id_attribute = attrShop.id_attribute AND attrShop.id_shop = :shopId'
+-            )
++            $qb
++                ->innerJoin(
++                    'a',
++                    $this->dbPrefix . 'attribute_shop',
++                    'attrShop',
++                    'a.id_attribute = attrShop.id_attribute AND attrShop.id_shop = :shopId'
++                )
+                 ->innerJoin(
+                     'agl',
+                     $this->dbPrefix . 'attribute_group_shop', 'ags',
+@@ -885,6 +927,28 @@ private function searchAttributes(LanguageId $languageId, ShopConstraint $shopCo
+             ;
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            // this makes sure we are searching only in certain shop, so it doesn't return irrelevant attribute ids
++            $qb
++                ->innerJoin(
++                    'a',
++                    $this->dbPrefix . 'attribute_shop',
++                    'attrShop',
++                    'a.id_attribute = attrShop.id_attribute AND attrShop.id_shop IN (:shopIds)'
++                )
++                ->innerJoin(
++                    'agl',
++                    $this->dbPrefix . 'attribute_group_shop', 'ags',
++                    'agl.id_attribute_group = ags.id_attribute_group AND ags.id_shop IN (:shopIds)'
++                )
++                ->setParameter(
++                    'shopIds',
++                    array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                    ArrayParameterType::INTEGER
++                )
++            ;
++        }
++
+         $results = $qb->executeQuery()->fetchAllAssociative();
+ 
+         return array_map('intval', array_column($results, 'id_attribute'));
+diff --git a/src/Adapter/Product/Combination/Update/CombinationStockUpdater.php b/src/Adapter/Product/Combination/Update/CombinationStockUpdater.php
+index bdac005c3097a..e2bca881b1fe2 100644
+--- a/src/Adapter/Product/Combination/Update/CombinationStockUpdater.php
++++ b/src/Adapter/Product/Combination/Update/CombinationStockUpdater.php
+@@ -37,6 +37,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\ValueObject\StockId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\ValueObject\StockModification;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Hook\HookDispatcherInterface;
+@@ -189,11 +190,16 @@ private function updateStockByShopConstraint(
+         ShopConstraint $shopConstraint
+     ): void {
+         $combinationId = new CombinationId((int) $combination->id);
+-        if ($shopConstraint->forAllShops()) {
++        if ($shopConstraint->forAllShops() || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())) {
+             // Since each stock has a distinct ID we can't use the ObjectModel multi shop feature based on id_shop_list,
+             // so we manually loop to update each associated stocks
+-            $shops = $this->combinationRepository->getAssociatedShopIds($combinationId);
+-            foreach ($shops as $shopId) {
++            if ($shopConstraint instanceof ShopCollection) {
++                $shopIds = $shopConstraint->getShopIds();
++            } else {
++                $shopIds = $this->combinationRepository->getAssociatedShopIds($combinationId);
++            }
++
++            foreach ($shopIds as $shopId) {
+                 $this->updateStockAvailable(
+                     $this->stockAvailableRepository->getForCombination($combinationId, $shopId),
+                     $properties
+diff --git a/src/Adapter/Product/CommandHandler/BulkUpdateProductStatusHandler.php b/src/Adapter/Product/CommandHandler/BulkUpdateProductStatusHandler.php
+index 5bb3cd1fb1044..f7470dda0e33a 100644
+--- a/src/Adapter/Product/CommandHandler/BulkUpdateProductStatusHandler.php
++++ b/src/Adapter/Product/CommandHandler/BulkUpdateProductStatusHandler.php
+@@ -37,6 +37,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotBulkUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ 
+ /**
+  * Handles command which deletes addresses in bulk action
+@@ -91,14 +92,16 @@ protected function handleSingleAction(ProductId $productId, $command = null)
+         );
+ 
+         // Reindexing is costly operation, so we check if properties impacting indexation have changed and then reindex if needed.
++        $shopConstraint = $command->getShopConstraint();
+         if (
+             $wasVisibleOnSearch !== $this->productIndexationUpdater->isVisibleOnSearch($product)
+             || $wasActive !== (bool) $product->active
+             // If multiple shops are impacted it's safer to update indexation, it's more complicated to check if it's needed
+-            || $command->getShopConstraint()->forAllShops()
+-            || $command->getShopConstraint()->getShopGroupId()
++            || $shopConstraint->forAllShops()
++            || $shopConstraint->getShopGroupId()
++            || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())
+         ) {
+-            $this->productIndexationUpdater->updateIndexation($product, $command->getShopConstraint());
++            $this->productIndexationUpdater->updateIndexation($product, $shopConstraint);
+         }
+     }
+ 
+diff --git a/src/Adapter/Product/CommandHandler/UpdateProductHandler.php b/src/Adapter/Product/CommandHandler/UpdateProductHandler.php
+index c2afe19696546..94d3927a96c6b 100644
+--- a/src/Adapter/Product/CommandHandler/UpdateProductHandler.php
++++ b/src/Adapter/Product/CommandHandler/UpdateProductHandler.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\CommandHandler\UpdateProductHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ 
+ /**
+  * Handles the @see UpdateProductCommand using legacy object model
+@@ -109,6 +110,7 @@ public function handle(UpdateProductCommand $command): void
+             // If multiple shops are impacted it's safer to update indexation, it's more complicated to check if it's needed
+             || $shopConstraint->forAllShops()
+             || $shopConstraint->getShopGroupId()
++            || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())
+         ) {
+             $this->productIndexationUpdater->updateIndexation($product, $command->getShopConstraint());
+         }
+diff --git a/src/Adapter/Product/Customization/CommandHandler/SetProductCustomizationFieldsHandler.php b/src/Adapter/Product/Customization/CommandHandler/SetProductCustomizationFieldsHandler.php
+index 3338267821506..17fdd33545261 100644
+--- a/src/Adapter/Product/Customization/CommandHandler/SetProductCustomizationFieldsHandler.php
++++ b/src/Adapter/Product/Customization/CommandHandler/SetProductCustomizationFieldsHandler.php
+@@ -36,6 +36,8 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Customization\CommandHandler\SetProductCustomizationFieldsHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Customization\CustomizationField as CustomizationFieldDTO;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ 
+ /**
+@@ -73,14 +75,22 @@ public function __construct(
+      */
+     public function handle(SetProductCustomizationFieldsCommand $command): array
+     {
+-        $shopId = $command->getShopConstraint()->getShopId();
++        $shopConstraint = $command->getShopConstraint();
++        if ($shopConstraint->getShopId()) {
++            $shopId = $shopConstraint->getShopId();
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $shopId = $shopConstraint->getShopIds()[0];
++        } else {
++            throw new InvalidShopConstraintException('Cannot handle this kind of ShopConstraint');
++        }
++
+         $productId = $command->getProductId();
+ 
+         $customizationFields = [];
+         foreach ($command->getCustomizationFields() as $providedCustomizationField) {
+             $customizationFields[] = $this->buildEntityFromDTO($productId, $providedCustomizationField, $shopId);
+         }
+-        $this->productCustomizationFieldUpdater->setProductCustomizationFields($productId, $customizationFields, $command->getShopConstraint());
++        $this->productCustomizationFieldUpdater->setProductCustomizationFields($productId, $customizationFields, $shopConstraint);
+ 
+         return $this->customizationFieldRepository->getCustomizationFieldIds($productId);
+     }
+diff --git a/src/Adapter/Product/Customization/Update/ProductCustomizationFieldUpdater.php b/src/Adapter/Product/Customization/Update/ProductCustomizationFieldUpdater.php
+index ff11850d83fd5..a786f515ff17b 100644
+--- a/src/Adapter/Product/Customization/Update/ProductCustomizationFieldUpdater.php
++++ b/src/Adapter/Product/Customization/Update/ProductCustomizationFieldUpdater.php
+@@ -36,6 +36,8 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ProductCustomizabilitySettings;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ 
+ /**
+@@ -88,7 +90,15 @@ public function setProductCustomizationFields(
+ 
+         foreach ($customizationFields as $customizationField) {
+             if ($customizationField->id) {
+-                $this->customizationFieldRepository->update($customizationField, [$shopConstraint->getShopId()]);
++                if ($shopConstraint->getShopId()) {
++                    $shopIds = [$shopConstraint->getShopId()];
++                } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                    $shopIds = $shopConstraint->getShopIds();
++                } else {
++                    throw new InvalidShopConstraintException('Cannot handle this kind of ShopConstraint');
++                }
++
++                $this->customizationFieldRepository->update($customizationField, $shopIds);
+             } else {
+                 $this->customizationFieldRepository->add($customizationField, $productShops);
+             }
+diff --git a/src/Adapter/Product/Image/CommandHandler/UpdateProductImageHandler.php b/src/Adapter/Product/Image/CommandHandler/UpdateProductImageHandler.php
+index 3692389d88ec6..574bc8dc61e6e 100644
+--- a/src/Adapter/Product/Image/CommandHandler/UpdateProductImageHandler.php
++++ b/src/Adapter/Product/Image/CommandHandler/UpdateProductImageHandler.php
+@@ -38,6 +38,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Image\Exception\CannotUpdateProductImageException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ 
+ #[AsCommandHandler]
+ class UpdateProductImageHandler implements UpdateProductImageHandlerInterface
+@@ -98,20 +99,25 @@ public function handle(UpdateProductImageCommand $command): void
+             $this->imageValidator->assertIsValidImageType($command->getFilePath());
+         }
+ 
+-        // shop constraint assertion above already ensures that it is either shopId or allShops
+-        $shopId = $shopConstraint->getShopId() ?: null;
+-
+-        if (!$shopId) {
++        $shopId = null;
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $shopId = $shopConstraint->getShopIds()[0];
++        } elseif ($shopConstraint->forAllShops()) {
+             $associatedShopIds = $this->productImageRepository->getAssociatedShopIds($imageId);
+             // this we makes sure to load image from shop in which it exists,
+             // else legacy ObjectModel would try to load context shop and some required data would end up being empty
+             // only is_cover prop is multi-shop compatible now and is handled separately,
+             // so we don't really care from which shop other properties are loaded
+             $shopId = reset($associatedShopIds);
+-
+             if (!$shopId) {
+                 throw new ShopAssociationNotFound('Image is not associated to any shop');
+             }
++        } elseif ($shopConstraint->getShopId()) {
++            $shopId = $shopConstraint->getShopId();
++        }
++
++        if (!$shopId) {
++            throw new InvalidShopConstraintException('Could not deduce shopId from provided ShopConstraint');
+         }
+ 
+         $image = $this->productImageRepository->get(
+diff --git a/src/Adapter/Product/Image/Repository/ProductImageRepository.php b/src/Adapter/Product/Image/Repository/ProductImageRepository.php
+index c4e79a3666541..b3a03d81998ba 100644
+--- a/src/Adapter/Product/Image/Repository/ProductImageRepository.php
++++ b/src/Adapter/Product/Image/Repository/ProductImageRepository.php
+@@ -28,6 +28,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Product\Image\Repository;
+ 
++use Doctrine\DBAL\ArrayParameterType;
+ use Doctrine\DBAL\Connection;
+ use Image;
+ use ImageType;
+@@ -46,6 +47,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -120,6 +122,12 @@ public function getImages(ProductId $productId, ShopConstraint $shopConstraint):
+             $this->productRepository->assertProductIsAssociatedToShop($productId, $shopConstraint->getShopId());
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            foreach ($shopConstraint->getShopIds() as $shopId) {
++                $this->productRepository->assertProductIsAssociatedToShop($productId, $shopId);
++            }
++        }
++
+         return array_map(
+             function (ImageId $imageId) use ($shopConstraint): Image {
+                 return $this->getByShopConstraint($imageId, $shopConstraint);
+@@ -166,11 +174,22 @@ public function getImageIds(ProductId $productId, ShopConstraint $shopConstraint
+                     )
+                     ->setParameter('shopGroupId', $shopConstraint->getShopGroupId()->getValue())
+                 ;
+-            } else {
++            } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                $qb
++                    ->andWhere('img_shop.id_shop IN (:shopIds)')
++                    ->setParameter(
++                        'shopIds',
++                        array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                        ArrayParameterType::INTEGER
++                    )
++                ;
++            } elseif ($shopConstraint->getShopId()) {
+                 $this->productRepository->assertProductIsAssociatedToShop($productId, $shopConstraint->getShopId());
+                 $qb->andWhere('img_shop.id_shop = :shopId')
+                     ->setParameter('shopId', $shopConstraint->getShopId()->getValue())
+                 ;
++            } else {
++                throw new InvalidShopConstraintException('Cannot handle this kind of ShopConstraint');
+             }
+         }
+ 
+@@ -361,6 +380,15 @@ public function getAssociatedShopIdsByShopConstraint(ImageId $imageId, ShopConst
+                 ->andWhere('is.id_shop = :shopId')
+                 ->setParameter('shopId', $shopConstraint->getShopId()->getValue())
+             ;
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $qb
++                ->andWhere('is.id_shop IN (:shopIds)')
++                ->setParameter(
++                    'shopIds',
++                    array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                    ArrayParameterType::INTEGER
++                )
++            ;
+         }
+ 
+         return array_map(static function (array $shop): ShopId {
+diff --git a/src/Adapter/Product/Image/Update/ProductImageUpdater.php b/src/Adapter/Product/Image/Update/ProductImageUpdater.php
+index 670e628729f35..95dff714a091d 100644
+--- a/src/Adapter/Product/Image/Update/ProductImageUpdater.php
++++ b/src/Adapter/Product/Image/Update/ProductImageUpdater.php
+@@ -36,6 +36,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Image\ValueObject\ImageId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Grid\Position\Exception\PositionDataException;
+@@ -119,6 +120,8 @@ public function updateProductCover(Image $newCover, ShopConstraint $shopConstrai
+             throw new InvalidShopConstraintException('Image has no features related with shop group use single shop and all shops constraints');
+         } elseif ($shopConstraint->forAllShops()) {
+             $shopIds = $this->productImageRepository->getAssociatedShopIds(new ImageId((int) $newCover->id));
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $shopIds = $shopConstraint->getShopIds();
+         } else {
+             $shopIds = [$shopConstraint->getShopId()];
+         }
+diff --git a/src/Adapter/Product/Pack/Repository/ProductPackRepository.php b/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
+index f8672e4629ae8..b500209e33f91 100644
+--- a/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
++++ b/src/Adapter/Product/Pack/Repository/ProductPackRepository.php
+@@ -79,7 +79,7 @@ public function __construct(
+      */
+     public function getPackedProducts(PackId $productId, LanguageId $languageId, ShopConstraint $shopConstraint): array
+     {
+-        if ($shopConstraint->getShopGroupId() || $shopConstraint->forAllShops()) {
++        if (!$shopConstraint->isSingleShopContext()) {
+             throw new InvalidShopConstraintException('Product Pack has no features related with shop group or all shops, use single shop constraint');
+         }
+ 
+diff --git a/src/Adapter/Product/Repository/ProductRepository.php b/src/Adapter/Product/Repository/ProductRepository.php
+index 693ff587433e8..110650dc14452 100644
+--- a/src/Adapter/Product/Repository/ProductRepository.php
++++ b/src/Adapter/Product/Repository/ProductRepository.php
+@@ -59,6 +59,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopGroupAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopGroupId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+@@ -240,6 +241,10 @@ public function getByShopConstraint(ProductId $productId, ShopConstraint $shopCo
+             return $this->getProductByDefaultShop($productId);
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            return $this->getProductByShopId($productId, $shopConstraint->getShopIds()[0]);
++        }
++
+         return $this->getProductByShopId($productId, $shopConstraint->getShopId());
+     }
+ 
+@@ -977,6 +982,10 @@ public function getShopIdsByConstraint(ProductId $productId, ShopConstraint $sho
+             return $this->getAssociatedShopIds($productId);
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            return $shopConstraint->getShopIds();
++        }
++
+         return [$shopConstraint->getShopId()];
+     }
+ 
+diff --git a/src/Adapter/Product/Stock/CommandHandler/UpdateProductStockAvailableHandler.php b/src/Adapter/Product/Stock/CommandHandler/UpdateProductStockAvailableHandler.php
+index 1979d498ee4a1..6041d7ad92b90 100644
+--- a/src/Adapter/Product/Stock/CommandHandler/UpdateProductStockAvailableHandler.php
++++ b/src/Adapter/Product/Stock/CommandHandler/UpdateProductStockAvailableHandler.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\Command\UpdateProductStockAvailableCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\CommandHandler\UpdateProductStockHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\ValueObject\StockModification;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ 
+ /**
+@@ -103,10 +104,14 @@ public function handle(UpdateProductStockAvailableCommand $command): void
+         );
+ 
+         if (null !== $outOfStockType) {
+-            if ($shopConstraint->forAllShops()) {
+-                $associatedShopIds = $this->productRepository->getAssociatedShopIds($productId);
++            if ($shopConstraint->forAllShops() || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())) {
++                if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                    $updatedShopIds = $shopConstraint->getShopIds();
++                } else {
++                    $updatedShopIds = $this->productRepository->getAssociatedShopIds($productId);
++                }
+ 
+-                foreach ($associatedShopIds as $shopId) {
++                foreach ($updatedShopIds as $shopId) {
+                     $this->combinationRepository->updateCombinationOutOfStockType(
+                         $productId,
+                         $outOfStockType,
+diff --git a/src/Adapter/Product/Stock/Update/ProductStockUpdater.php b/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
+index b89250611b774..735f6e977f1a8 100644
+--- a/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
++++ b/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
+@@ -42,6 +42,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\ValueObject\StockModification;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -140,12 +141,14 @@ public function resetStock(ProductId $productId, ShopConstraint $shopConstraint)
+         }
+ 
+         if ($shopConstraint->forAllShops()) {
+-            $shops = $this->productRepository->getAssociatedShopIds($productId);
++            $shopIds = $this->productRepository->getAssociatedShopIds($productId);
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $shopIds = $shopConstraint->getShopIds();
+         } else {
+-            $shops = [$shopConstraint->getShopId()];
++            $shopIds = [$shopConstraint->getShopId()];
+         }
+ 
+-        foreach ($shops as $shopId) {
++        foreach ($shopIds as $shopId) {
+             $stockAvailable = $this->stockAvailableRepository->getForProduct($productId, $shopId);
+             if ((int) $stockAvailable->quantity === 0) {
+                 continue;
+@@ -230,6 +233,13 @@ private function updateStockByShopConstraint(StockAvailable $stockAvailable, Pro
+                 $shopStockAvailable = $this->stockAvailableRepository->get($stockId);
+                 $this->updateStockAvailable($shopStockAvailable, $properties);
+             }
++        } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            // For specific list of shops, we get the appropriate stock for each shop and update it
++            $productId = new ProductId((int) $stockAvailable->id_product);
++            foreach ($shopConstraint->getShopIds() as $shopId) {
++                $shopStockAvailable = $this->stockAvailableRepository->getForProduct($productId, $shopId);
++                $this->updateStockAvailable($shopStockAvailable, $properties);
++            }
+         } else {
+             $this->updateStockAvailable($stockAvailable, $properties);
+         }
+diff --git a/src/Adapter/Product/Update/ProductCategoryUpdater.php b/src/Adapter/Product/Update/ProductCategoryUpdater.php
+index e68fbcf272d14..e3c73a4e2a4b1 100644
+--- a/src/Adapter/Product/Update/ProductCategoryUpdater.php
++++ b/src/Adapter/Product/Update/ProductCategoryUpdater.php
+@@ -104,7 +104,7 @@ public function updateCategories(ProductId $productId, array $newCategoryIds, Ca
+         $newCategoryIds = $this->formatCategoryIdsList($newCategoryIds, $defaultCategoryId);
+         $this->assertCategoriesExists($newCategoryIds);
+ 
+-        // Get curren categories based on the provided shop constraint
++        // Get current categories based on the provided shop constraint
+         $this->deleteCategoriesAssociations($productId, $newCategoryIds, $shopConstraint);
+         $this->categoryRepository->addProductAssociations($productId, $newCategoryIds);
+         $this->updateDefaultCategory($productId, $defaultCategoryId, $shopConstraint);
+diff --git a/src/Adapter/Product/Update/ProductDuplicator.php b/src/Adapter/Product/Update/ProductDuplicator.php
+index 85d08dbfeaec3..6eb1c26ec06eb 100644
+--- a/src/Adapter/Product/Update/ProductDuplicator.php
++++ b/src/Adapter/Product/Update/ProductDuplicator.php
+@@ -42,6 +42,7 @@
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Repository\StockAvailableRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Update\ProductStockProperties;
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Update\ProductStockUpdater;
++use PrestaShop\PrestaShop\Adapter\Tools;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotDuplicateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
+@@ -54,6 +55,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+@@ -73,106 +75,23 @@
+  */
+ class ProductDuplicator extends AbstractMultiShopObjectModelRepository
+ {
+-    /**
+-     * @var ProductRepository
+-     */
+-    private $productRepository;
+-
+-    /**
+-     * @var HookDispatcherInterface
+-     */
+-    private $hookDispatcher;
+-
+-    /**
+-     * @var TranslatorInterface
+-     */
+-    private $translator;
+-
+-    /**
+-     * @var StringModifierInterface
+-     */
+-    private $stringModifier;
+-
+-    /**
+-     * @var Connection
+-     */
+-    private $connection;
+-
+-    /**
+-     * @var string
+-     */
+-    private $dbPrefix;
+-
+-    /**
+-     * @var CombinationRepository
+-     */
+-    private $combinationRepository;
+-
+-    /**
+-     * @var ProductSupplierRepository
+-     */
+-    private $productSupplierRepository;
+-
+-    /**
+-     * @var SpecificPriceRepository
+-     */
+-    private $specificPriceRepository;
+-
+-    /**
+-     * @var StockAvailableRepository
+-     */
+-    private $stockAvailableRepository;
+-
+-    /**
+-     * @var ProductStockUpdater
+-     */
+-    private $productStockUpdater;
+-
+-    /**
+-     * @var CombinationStockUpdater
+-     */
+-    private $combinationStockUpdater;
+-
+-    /**
+-     * @var ProductImageRepository
+-     */
+-    private $productImageRepository;
+-
+-    /**
+-     * @var ProductImagePathFactory
+-     */
+-    private $productImageSystemPathFactory;
+-
+     public function __construct(
+-        ProductRepository $productRepository,
+-        HookDispatcherInterface $hookDispatcher,
+-        TranslatorInterface $translator,
+-        StringModifierInterface $stringModifier,
+-        Connection $connection,
+-        string $dbPrefix,
+-        CombinationRepository $combinationRepository,
+-        ProductSupplierRepository $productSupplierRepository,
+-        SpecificPriceRepository $specificPriceRepository,
+-        StockAvailableRepository $stockAvailableRepository,
+-        ProductStockUpdater $productStockUpdater,
+-        CombinationStockUpdater $combinationStockUpdater,
+-        ProductImageRepository $productImageRepository,
+-        ProductImagePathFactory $productImageSystemPathFactory
++        protected readonly ProductRepository $productRepository,
++        protected readonly HookDispatcherInterface $hookDispatcher,
++        protected readonly TranslatorInterface $translator,
++        protected readonly StringModifierInterface $stringModifier,
++        protected readonly Connection $connection,
++        protected readonly string $dbPrefix,
++        protected readonly CombinationRepository $combinationRepository,
++        protected readonly ProductSupplierRepository $productSupplierRepository,
++        protected readonly SpecificPriceRepository $specificPriceRepository,
++        protected readonly StockAvailableRepository $stockAvailableRepository,
++        protected readonly ProductStockUpdater $productStockUpdater,
++        protected readonly CombinationStockUpdater $combinationStockUpdater,
++        protected readonly ProductImageRepository $productImageRepository,
++        protected readonly ProductImagePathFactory $productImageSystemPathFactory,
++        protected readonly Tools $tools,
+     ) {
+-        $this->productRepository = $productRepository;
+-        $this->hookDispatcher = $hookDispatcher;
+-        $this->translator = $translator;
+-        $this->stringModifier = $stringModifier;
+-        $this->connection = $connection;
+-        $this->dbPrefix = $dbPrefix;
+-        $this->combinationRepository = $combinationRepository;
+-        $this->productSupplierRepository = $productSupplierRepository;
+-        $this->specificPriceRepository = $specificPriceRepository;
+-        $this->stockAvailableRepository = $stockAvailableRepository;
+-        $this->productStockUpdater = $productStockUpdater;
+-        $this->combinationStockUpdater = $combinationStockUpdater;
+-        $this->productImageRepository = $productImageRepository;
+-        $this->productImageSystemPathFactory = $productImageSystemPathFactory;
+     }
+ 
+     /**
+@@ -241,7 +160,7 @@ private function duplicateProduct(ProductId $sourceProductId, ShopConstraint $sh
+ 
+         if ($shopConstraint->getShopId()) {
+             $targetDefaultShopId = $shopConstraint->getShopId();
+-        } elseif ($shopConstraint->getShopGroupId()) {
++        } elseif ($shopConstraint->getShopGroupId() || ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds())) {
+             // If source default shop is in the group use it as new default, if not use the first shop from group
+             $targetDefaultShopId = null;
+             foreach ($shopIds as $groupShopId) {
+@@ -270,6 +189,7 @@ private function duplicateProduct(ProductId $sourceProductId, ShopConstraint $sh
+             $shopProduct->date_add = date('Y-m-d H:i:s');
+             // Force a copy name to tell the two products apart (for each shop since name can be different on each shop)
+             $shopProduct->name = $this->getNewProductName($shopProduct->name);
++            $shopProduct->link_rewrite = $this->getNewProductLinkRewrite($shopProduct->link_rewrite);
+             // Force ID to update the new product
+             $shopProduct->id = $shopProduct->id_product = $newProductId->getValue();
+             // Force the desired default shop so that it doesn't switch back to the source one
+@@ -327,6 +247,26 @@ private function getNewProductName(array $oldProductLocalizedNames): array
+         return $newProductLocalizedNames;
+     }
+ 
++    /**
++     * Provides duplicated product name
++     *
++     * @param array<int, string> $oldProductLocalizedLinkRewrites
++     *
++     * @return array<int, string>
++     */
++    private function getNewProductLinkRewrite(array $oldProductLocalizedLinkRewrites): array
++    {
++        $newProductLocalizedLinkRewrites = [];
++        foreach ($oldProductLocalizedLinkRewrites as $langId => $oldName) {
++            $langId = (int) $langId;
++            $namePattern = $this->translator->trans('copy of %s', [], 'Admin.Catalog.Feature', Language::getLocaleById($langId));
++            $newName = sprintf($namePattern, $oldName);
++            $newProductLocalizedLinkRewrites[$langId] = $this->tools->linkRewrite($this->stringModifier->cutEnd($newName, ProductSettings::MAX_NAME_LENGTH));
++        }
++
++        return $newProductLocalizedLinkRewrites;
++    }
++
+     /**
+      * Duplicates related product entities & associations
+      *
+diff --git a/src/Adapter/Product/Update/ProductIndexationUpdater.php b/src/Adapter/Product/Update/ProductIndexationUpdater.php
+index 6481047afc938..36ceaadef1066 100644
+--- a/src/Adapter/Product/Update/ProductIndexationUpdater.php
++++ b/src/Adapter/Product/Update/ProductIndexationUpdater.php
+@@ -31,6 +31,7 @@
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductVisibility;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShopException;
+@@ -101,13 +102,16 @@ public function updateIndexation(Product $product, ShopConstraint $shopConstrain
+      */
+     private function updateProductIndexes(int $productId, ShopConstraint $shopConstraint): void
+     {
++        $this->contextStateManager->saveCurrentContext();
+         try {
+-            $this->adaptShopContext($shopConstraint);
+-            if (!Search::indexation(false, $productId)) {
+-                throw new CannotUpdateProductException(
+-                    sprintf('Cannot update search indexes for product %d', $productId),
+-                    CannotUpdateProductException::FAILED_UPDATE_SEARCH_INDEXATION
+-                );
++            // If a specific list is provided we update them one by one
++            if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                foreach ($shopConstraint->getShopIds() as $shopId) {
++                    $this->updateProductIndexesByShopConstraint($productId, ShopConstraint::shop($shopId->getValue()));
++                }
++            } else {
++                // If not the other types of ShopConstraint are handled by this method
++                $this->updateProductIndexesByShopConstraint($productId, $shopConstraint);
+             }
+         } catch (PrestaShopException $e) {
+             throw new CoreException(
+@@ -120,6 +124,17 @@ private function updateProductIndexes(int $productId, ShopConstraint $shopConstr
+         }
+     }
+ 
++    private function updateProductIndexesByShopConstraint(int $productId, ShopConstraint $shopConstraint): void
++    {
++        $this->adaptShopContext($shopConstraint);
++        if (!Search::indexation(false, $productId)) {
++            throw new CannotUpdateProductException(
++                sprintf('Cannot update search indexes for product %d', $productId),
++                CannotUpdateProductException::FAILED_UPDATE_SEARCH_INDEXATION
++            );
++        }
++    }
++
+     /**
+      * @param int $productId
+      * @param ShopConstraint $shopConstraint
+@@ -128,9 +143,17 @@ private function updateProductIndexes(int $productId, ShopConstraint $shopConstr
+      */
+     private function removeProductIndexes(int $productId, ShopConstraint $shopConstraint): void
+     {
++        $this->contextStateManager->saveCurrentContext();
+         try {
+-            $this->adaptShopContext($shopConstraint);
+-            Search::removeProductsSearchIndex([$productId]);
++            // If a specific list is provided we update them one by one
++            if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                foreach ($shopConstraint->getShopIds() as $shopId) {
++                    $this->removeProductIndexesByShopConstraint($productId, ShopConstraint::shop($shopId->getValue()));
++                }
++            } else {
++                // If not the other types of ShopConstraint are handled by this method
++                $this->removeProductIndexesByShopConstraint($productId, $shopConstraint);
++            }
+         } catch (PrestaShopException $e) {
+             throw new CoreException(
+                 sprintf('Error occurred while removing search indexes for product %d', $productId),
+@@ -142,9 +165,14 @@ private function removeProductIndexes(int $productId, ShopConstraint $shopConstr
+         }
+     }
+ 
++    private function removeProductIndexesByShopConstraint(int $productId, ShopConstraint $shopConstraint): void
++    {
++        $this->adaptShopContext($shopConstraint);
++        Search::removeProductsSearchIndex([$productId]);
++    }
++
+     private function adaptShopContext(ShopConstraint $shopConstraint): void
+     {
+-        $this->contextStateManager->saveCurrentContext();
+         if ($shopConstraint->getShopId()) {
+             $this->contextStateManager->setShop(new Shop($shopConstraint->getShopId()->getValue()));
+         } elseif ($shopConstraint->getShopGroupId()) {
+diff --git a/src/Core/Domain/Shop/ValueObject/ShopCollection.php b/src/Core/Domain/Shop/ValueObject/ShopCollection.php
+new file mode 100644
+index 0000000000000..342c09c861f10
+--- /dev/null
++++ b/src/Core/Domain/Shop/ValueObject/ShopCollection.php
+@@ -0,0 +1,115 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
++
++class ShopCollection extends ShopConstraint
++{
++    /**
++     * @var ShopId[]|null
++     */
++    protected ?array $shopIds = null;
++
++    /**
++     * Constraint to target a list of shops.
++     *
++     * @param int[] $shopIds
++     *
++     * @return static
++     *
++     * @throws ShopException
++     */
++    public static function shops(array $shopIds): self
++    {
++        return new static(null, null, false, $shopIds);
++    }
++
++    /**
++     * @param int|null $shopId
++     * @param int|null $shopGroupId
++     * @param bool $strict
++     *
++     * @throws ShopException
++     */
++    protected function __construct(?int $shopId, ?int $shopGroupId, bool $strict = false, ?array $shopIds = null)
++    {
++        parent::__construct($shopId, $shopGroupId, $strict);
++        $this->shopIds = null !== $shopIds ? array_map(fn (int $shopId) => new ShopId($shopId), $shopIds) : null;
++    }
++
++    /**
++     * @return ShopId[]|null
++     */
++    public function getShopIds(): ?array
++    {
++        return $this->shopIds;
++    }
++
++    public function hasShopIds(): bool
++    {
++        return null !== $this->shopIds;
++    }
++
++    /**
++     * @return bool
++     */
++    public function forAllShops(): bool
++    {
++        return null === $this->shopId && null === $this->shopGroupId && null === $this->shopIds;
++    }
++
++    /**
++     * Clone the constraint, you can specify a force $strict value, but it will always remain false.
++     *
++     * @param bool|null $strict
++     *
++     * @return static
++     *
++     * @throws ShopException
++     */
++    public function clone(?bool $strict = null): self
++    {
++        return new static($this->shopId?->getValue(), $this->shopGroupId?->getValue(), false, $this->shopIds);
++    }
++
++    public function isEqual(ShopConstraint $constraint): bool
++    {
++        if (parent::isEqual($constraint) || !($constraint instanceof ShopCollection)) {
++            return true;
++        }
++
++        if ($this->getShopIds() !== null && $constraint->getShopIds() !== null && count($this->getShopIds()) === count($constraint->getShopIds())) {
++            return empty(array_diff(
++                array_map(fn (ShopId $shopId) => $shopId->getValue(), $this->getShopIds()),
++                array_map(fn (ShopId $shopId) => $shopId->getValue(), $constraint->getShopIds()),
++            ));
++        }
++
++        return false;
++    }
++}
+diff --git a/src/Core/Domain/Shop/ValueObject/ShopConstraint.php b/src/Core/Domain/Shop/ValueObject/ShopConstraint.php
+index 6a8adbca1c671..28fcd06ede77c 100644
+--- a/src/Core/Domain/Shop/ValueObject/ShopConstraint.php
++++ b/src/Core/Domain/Shop/ValueObject/ShopConstraint.php
+@@ -39,15 +39,9 @@ class ShopConstraint
+     public const SHOP_GROUP = 2;
+     public const ALL_SHOPS = 4;
+ 
+-    /**
+-     * @var ShopId|null
+-     */
+-    protected $shopId;
++    protected ?ShopId $shopId = null;
+ 
+-    /**
+-     * @var ShopGroupId|null
+-     */
+-    protected $shopGroupId;
++    protected ?ShopGroupId $shopGroupId = null;
+ 
+     /**
+      * Indicate if the value returned matches the constraints strictly, else it fallbacks to Shop > Group > Global value
+@@ -57,7 +51,7 @@ class ShopConstraint
+     protected $strict;
+ 
+     /**
+-     * Constraint to get configuration for a specific shop
++     * Constraint to target a specific shop
+      *
+      * @param int $shopId
+      * @param bool $isStrict
+@@ -72,7 +66,7 @@ public static function shop(int $shopId, bool $isStrict = false): self
+     }
+ 
+     /**
+-     * Constraint to get configuration for a specific shop group
++     * Constraint to target a specific shop group
+      *
+      * @param int $shopGroupId
+      * @param bool $isStrict
+@@ -87,7 +81,7 @@ public static function shopGroup(int $shopGroupId, bool $isStrict = false): self
+     }
+ 
+     /**
+-     * Constraint to get configuration for all shops (the global value)
++     * Constraint to target all shops
+      *
+      * @param bool $isStrict
+      *
+diff --git a/src/Core/Repository/ShopConstraintTrait.php b/src/Core/Repository/ShopConstraintTrait.php
+index 02b61cd8c9c49..52a8f9ea09365 100644
+--- a/src/Core/Repository/ShopConstraintTrait.php
++++ b/src/Core/Repository/ShopConstraintTrait.php
+@@ -28,8 +28,11 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Repository;
+ 
++use Doctrine\DBAL\ArrayParameterType;
+ use Doctrine\DBAL\Query\QueryBuilder;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ 
+ trait ShopConstraintTrait
+ {
+@@ -55,6 +58,17 @@ protected function applyShopConstraint(
+             ;
+         }
+ 
++        if ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++            $queryBuilder
++                ->andWhere('id_shop IN (:shopIds)')
++                ->setParameter(
++                    'shopIds',
++                    array_map(fn (ShopId $shopId) => $shopId->getValue(), $shopConstraint->getShopIds()),
++                    ArrayParameterType::INTEGER
++                )
++            ;
++        }
++
+         return $queryBuilder;
+     }
+ }
+diff --git a/src/PrestaShopBundle/EventListener/API/Context/ShopContextListener.php b/src/PrestaShopBundle/EventListener/API/Context/ShopContextListener.php
+index 9e0db8399a9ca..029fa2654ee8d 100644
+--- a/src/PrestaShopBundle/EventListener/API/Context/ShopContextListener.php
++++ b/src/PrestaShopBundle/EventListener/API/Context/ShopContextListener.php
+@@ -31,6 +31,7 @@
+ use PrestaShop\PrestaShop\Adapter\Feature\MultistoreFeature;
+ use PrestaShop\PrestaShop\Core\Context\ShopContextBuilder;
+ use PrestaShop\PrestaShop\Core\Domain\Configuration\ShopConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShopBundle\Controller\Api\OAuth2\AccessTokenController;
+ use Symfony\Component\HttpFoundation\JsonResponse;
+@@ -73,6 +74,8 @@ public function onKernelRequest(RequestEvent $event): void
+             $this->shopContextBuilder->setShopConstraint($shopConstraint);
+             if ($shopConstraint->getShopId()) {
+                 $this->shopContextBuilder->setShopId($shopConstraint->getShopId()->getValue());
++            } elseif ($shopConstraint instanceof ShopCollection && $shopConstraint->hasShopIds()) {
++                $this->shopContextBuilder->setShopId($shopConstraint->getShopIds()[0]->getValue());
+             } else {
+                 $this->shopContextBuilder->setShopId($this->getConfiguredDefaultShopId());
+             }
+@@ -97,13 +100,22 @@ private function getShopConstraintFromRequest(Request $request): ?ShopConstraint
+             return ShopConstraint::shopGroup((int) $request->get('shopGroupId'));
+         }
+ 
++        if ($request->get('shopIds')) {
++            $shopIds = $request->get('shopIds');
++            if (is_string($shopIds)) {
++                $shopIds = explode(',', $shopIds);
++            }
++
++            return ShopCollection::shops(array_map(fn (string $shopId) => (int) $shopId, $shopIds));
++        }
++
+         // Parameter allShops indicate the all shops context regardless of its value, it can be empty it's enough
+         if ($request->query->has('allShops') || $request->request->has('allShops') || $request->attributes->has('allShops')) {
+             return ShopConstraint::allShops();
+         }
+ 
+         // Special use case when calling the access token controller, we don't want to block the endpoint even if no
+-        // context parameters as specified, so we use the default shop as a fallback
++        // context parameters was specified, so we use the default shop as a fallback
+         if ($request->attributes->get('_controller') === AccessTokenController::class) {
+             return ShopConstraint::shop($this->getConfiguredDefaultShopId());
+         }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/AbstractProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/AbstractProductFeatureContext.php
+index 26ad9cbe74661..1eb0805142a5f 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/AbstractProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/AbstractProductFeatureContext.php
+@@ -388,16 +388,4 @@ protected function getManufacturerId(string $manufacturerReference): int
+ 
+         return $this->getSharedStorage()->get($manufacturerReference);
+     }
+-
+-    /**
+-     * @param string $shopReferences
+-     *
+-     * @return int[]
+-     */
+-    protected function getShopIdsFromReferences(string $shopReferences): array
+-    {
+-        return array_map(function (string $shopReference) {
+-            return (int) $this->getSharedStorage()->get(trim($shopReference));
+-        }, explode(',', $shopReferences));
+-    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationListingFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationListingFeatureContext.php
+index 401ed36272710..0a2026396f182 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationListingFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/CombinationListingFeatureContext.php
+@@ -30,6 +30,7 @@
+ 
+ use Behat\Gherkin\Node\TableNode;
+ use PHPUnit\Framework\Assert;
++use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\CombinationAttributeInformation;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\QueryResult\EditableCombinationForListing;
+ use PrestaShop\PrestaShop\Core\Search\Filters\ProductCombinationFilters;
+@@ -287,9 +288,8 @@ private function assertListedCombinationsProperties(array $expectedDataRows, arr
+                 $editableCombinationForListing->isDefault(),
+                 'Unexpected default combination'
+             );
+-            Assert::assertEquals(
+-                $expectedCombination['impact on price'],
+-                (string) $editableCombinationForListing->getImpactOnPrice(),
++            Assert::assertTrue(
++                $editableCombinationForListing->getImpactOnPrice()->equals(new DecimalNumber($expectedCombination['impact on price'])),
+                 'Unexpected combination impact on price'
+             );
+             Assert::assertSame(
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/GenerateCombinationFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/GenerateCombinationFeatureContext.php
+index 463a8469e779e..5606bd9a32a5e 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/GenerateCombinationFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/GenerateCombinationFeatureContext.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Command\GenerateProductCombinationsCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Exception\CannotGenerateCombinationException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\InvalidProductTypeException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use Product;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+@@ -67,6 +68,22 @@ public function generateCombinationsForShop(string $shopReference, string $produ
+         );
+     }
+ 
++    /**
++     * @When I generate combinations for product :productReference in shops :shopReferences using following attributes:
++     *
++     * @param string $shopReferences
++     * @param string $productReference
++     * @param TableNode $table
++     */
++    public function generateCombinationsForShopCollection(string $shopReferences, string $productReference, TableNode $table): void
++    {
++        $this->generateCombinations(
++            $productReference,
++            $table,
++            ShopCollection::shops($this->referencesToIds($shopReferences))
++        );
++    }
++
+     /**
+      * @When I generate combinations for product :productReference in all shops using following attributes:
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureContext.php
+index 9c96b06d17338..a996d4499c41c 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationFeatureContext.php
+@@ -31,6 +31,7 @@
+ use Behat\Gherkin\Node\TableNode;
+ use DateTime;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Command\UpdateCombinationCommand;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+ 
+@@ -67,6 +68,22 @@ public function updateCombinationForShop(string $combinationReference, TableNode
+         );
+     }
+ 
++    /**
++     * @When I update combination ":combinationReference" with following values for shops ":shopReferences":
++     *
++     * @param string $combinationReference
++     * @param string $shopReferences
++     * @param TableNode $tableNode
++     */
++    public function updateCombinationForShopCollection(string $combinationReference, TableNode $tableNode, string $shopReferences): void
++    {
++        $this->updateCombination(
++            $combinationReference,
++            $tableNode,
++            ShopCollection::shops($this->referencesToIds($shopReferences))
++        );
++    }
++
+     /**
+      * @When I update combination ":combinationReference" with following values for all shops:
+      *
+@@ -106,6 +123,20 @@ public function setDefaultCombinationForShop(string $combinationReference, strin
+         );
+     }
+ 
++    /**
++     * @When I set combination ":combinationReference" as default for shops ":shopReference"
++     *
++     * @param string $combinationReference
++     * @param string $shopReferences
++     */
++    public function setDefaultCombinationForShopCollection(string $combinationReference, string $shopReferences): void
++    {
++        $this->setDefaultCombination(
++            $combinationReference,
++            ShopCollection::shops($this->referencesToIds($shopReferences))
++        );
++    }
++
+     /**
+      * @When I set combination ":combinationReference" as default for all shops
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationStockFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationStockFeatureContext.php
+index ecc17834e28ba..5c7719ce8dd52 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationStockFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/Combination/UpdateCombinationStockFeatureContext.php
+@@ -30,6 +30,7 @@
+ use Behat\Gherkin\Node\TableNode;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Command\UpdateCombinationStockAvailableCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\Exception\ProductStockConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ 
+ class UpdateCombinationStockFeatureContext extends AbstractCombinationFeatureContext
+@@ -63,6 +64,21 @@ public function updateStockForShop(
+         );
+     }
+ 
++    /**
++     * @When I update combination :combinationReference stock for shops :shopReferences with following details:
++     */
++    public function updateStockForShopCollection(
++        string $combinationReference,
++        string $shopReferences,
++        TableNode $tableNode
++    ): void {
++        $this->updateStockAvailable(
++            $combinationReference,
++            $tableNode->getRowsHash(),
++            ShopCollection::shops($this->referencesToIds($shopReferences))
++        );
++    }
++
+     /**
+      * @When I update combination ":combinationReference" stock for all shops with following details:
+      */
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/CommonProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/CommonProductFeatureContext.php
+index b552a547cfc92..85a8e700a2f11 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/CommonProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/CommonProductFeatureContext.php
+@@ -92,7 +92,7 @@ public function assertLocalizedPropertyForDefaultShop(string $productReference,
+     }
+ 
+     /**
+-     * @Then product :productReference localized :fieldName for shops :shopReferences should be:
++     * @Then product :productReference localized :fieldName for shop(s) :shopReferences should be:
+      *
+      * localizedValues transformation handled by @see LocalizedArrayTransformContext
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/DeleteProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/DeleteProductFeatureContext.php
+index c97de0a4d262d..b32bbdc2c9b0c 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/DeleteProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/DeleteProductFeatureContext.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\BulkDeleteProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\DeleteProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ 
+ class DeleteProductFeatureContext extends AbstractProductFeatureContext
+@@ -57,21 +58,38 @@ public function bulkDeleteProductsFromDefaultShop(TableNode $productsList): void
+     }
+ 
+     /**
+-     * @When I delete product :reference from shops :shopReferences
++     * @When I delete product :productReference from shops :shopReferences
+      *
+-     * @param string $reference
++     * @param string $productReference
++     * @param string $shopReferences
++     */
++    public function deleteProductFromShopCollection(string $productReference, string $shopReferences): void
++    {
++        try {
++            $this->getCommandBus()->handle(new DeleteProductCommand(
++                $this->getSharedStorage()->get($productReference),
++                ShopCollection::shops($this->referencesToIds($shopReferences))
++            ));
++        } catch (ProductException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I delete product :productReference from shop :shopReference
++     *
++     * @param string $productReference
++     * @param string $shopReference
+      */
+-    public function deleteProductFromShops(string $reference, string $shopReferences): void
++    public function deleteProductFromShop(string $productReference, string $shopReference): void
+     {
+-        foreach ($this->referencesToIds($shopReferences) as $shopId) {
+-            try {
+-                $this->getCommandBus()->handle(new DeleteProductCommand(
+-                    $this->getSharedStorage()->get($reference),
+-                    ShopConstraint::shop($shopId)
+-                ));
+-            } catch (ProductException $e) {
+-                $this->setLastException($e);
+-            }
++        try {
++            $this->getCommandBus()->handle(new DeleteProductCommand(
++                $this->getSharedStorage()->get($productReference),
++                ShopConstraint::shop($this->referenceToId($shopReference))
++            ));
++        } catch (ProductException $e) {
++            $this->setLastException($e);
+         }
+     }
+ 
+@@ -110,6 +128,17 @@ public function bulkDeleteProductsFromShop(TableNode $productsList, string $shop
+         $this->bulkDeleteProductsByShopConstraint($productsList, ShopConstraint::shop($this->referenceToId($shopReference)));
+     }
+ 
++    /**
++     * @When I bulk delete following products from shops :shopReferences:
++     *
++     * @param TableNode $productsList
++     * @param string $shopReferences
++     */
++    public function bulkDeleteProductsFromShopCollection(TableNode $productsList, string $shopReferences): void
++    {
++        $this->bulkDeleteProductsByShopConstraint($productsList, ShopCollection::shops($this->referencesToIds($shopReferences)));
++    }
++
+     /**
+      * @When I bulk delete following products from shop group :shopGroupReference:
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/DuplicateProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/DuplicateProductFeatureContext.php
+index 2356228512990..762367f1291e2 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/DuplicateProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/DuplicateProductFeatureContext.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\DuplicateProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ 
+ class DuplicateProductFeatureContext extends AbstractProductFeatureContext
+@@ -70,6 +71,23 @@ public function duplicateForShop(string $productReference, string $newProductRef
+         $this->getSharedStorage()->set($newProductReference, $newProductId->getValue());
+     }
+ 
++    /**
++     * @When I duplicate product :productReference to a :newProductReference for shops :shopReferences
++     *
++     * @param string $productReference
++     * @param string $newProductReference
++     * @param string $shopReferences
++     */
++    public function duplicateForShopCollection(string $productReference, string $newProductReference, string $shopReferences): void
++    {
++        $newProductId = $this->getCommandBus()->handle(new DuplicateProductCommand(
++            $this->getSharedStorage()->get($productReference),
++            ShopCollection::shops($this->referencesToIds($shopReferences))
++        ));
++
++        $this->getSharedStorage()->set($newProductReference, $newProductId->getValue());
++    }
++
+     /**
+      * @When I duplicate product :productReference to a :newProductReference for all shops
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/PricesAssertionFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/PricesAssertionFeatureContext.php
+index 0e17ae1efecd1..daa7432f0391f 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/PricesAssertionFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/PricesAssertionFeatureContext.php
+@@ -43,7 +43,7 @@
+ class PricesAssertionFeatureContext extends AbstractProductFeatureContext
+ {
+     /**
+-     * @Then product :productReference should have following prices information for shops :shopReference:
++     * @Then product :productReference should have following prices information for shop(s) :shopReference:
+      *
+      * @param string $productReference
+      * @param string $shopReferences
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/ProductImageFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/ProductImageFeatureContext.php
+index c0e9eb7f39aeb..6a49ea77a4b7d 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/ProductImageFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/ProductImageFeatureContext.php
+@@ -49,6 +49,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\InvalidShopConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+@@ -118,6 +119,24 @@ public function uploadImageForSpecificShop(string $imageReference, string $fileN
+         $this->uploadImageByShopConstraint($imageReference, $fileName, $productReference, $shopConstraint);
+     }
+ 
++    /**
++     * @When /^I add new image "([^"]*)" named "([^"]*)" to product "([^"]*)" for shops "([^"]*)"$/
++     *
++     * @param string $imageReference
++     * @param string $fileName
++     * @param string $productReference
++     * @param string $shopReferences
++     *
++     * @return void
++     *
++     * @throws ShopException
++     */
++    public function uploadImageForSpecificShopCollection(string $imageReference, string $fileName, string $productReference, string $shopReferences): void
++    {
++        $shopConstraint = ShopCollection::shops($this->referencesToIds($shopReferences));
++        $this->uploadImageByShopConstraint($imageReference, $fileName, $productReference, $shopConstraint);
++    }
++
+     /**
+      * @When /^I add new image "([^"]*)" named "([^"]*)" to product "([^"]*)" for all shops$/
+      *
+@@ -145,7 +164,7 @@ public function updateImageForDefaultShop(string $imageReference, TableNode $tab
+     }
+ 
+     /**
+-     * @When I update image :imageReference with following information for shop :shop:
++     * @When I update image :imageReference with following information for shop :shopReference:
+      */
+     public function updateImageByShopReference(string $imageReference, string $shopReference, TableNode $tableNode): void
+     {
+@@ -156,6 +175,18 @@ public function updateImageByShopReference(string $imageReference, string $shopR
+         );
+     }
+ 
++    /**
++     * @When I update image :imageReference with following information for shops :shopReferences:
++     */
++    public function updateImageByShopCollectionReferences(string $imageReference, string $shopReferences, TableNode $tableNode): void
++    {
++        $this->updateImageByShopConstraint(
++            $imageReference,
++            ShopCollection::shops($this->referencesToIds($shopReferences)),
++            $tableNode
++        );
++    }
++
+     /**
+      * @When I update image :imageReference with following information for all shops:
+      */
+@@ -311,6 +342,23 @@ public function assertProductHasNoImages(string $productReference): void
+         );
+     }
+ 
++    /**
++     * @Then product :productReference should have no images for shop(s) :shopReferences
++     *
++     * @param string $productReference
++     * @param string $shopReferences
++     */
++    public function assertProductHasNoImagesForShops(string $productReference, string $shopReferences): void
++    {
++        $shopReferencesList = array_map(fn (string $shopReference) => trim($shopReference), explode(',', $shopReferences));
++        foreach ($shopReferencesList as $shopReference) {
++            Assert::assertEmpty(
++                $this->getProductImages($productReference, ShopConstraint::shop($this->referenceToId($shopReference))),
++                sprintf('No images expected for product "%s" on shop "%s"', $productReference, $shopReference)
++            );
++        }
++    }
++
+     /**
+      * @Then product :productReference should have following cover :coverUrl
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/SeoAssertionFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/SeoAssertionFeatureContext.php
+index ec738a49f5274..a33db287a5c34 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/SeoAssertionFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/SeoAssertionFeatureContext.php
+@@ -116,7 +116,7 @@ private function assertSeoOptions(
+             unset($dataRows['redirect_type']);
+         }
+ 
+-        $expectedRedirectTarget = isset($dataRows['redirect_target']) ?
++        $expectedRedirectTarget = !empty($dataRows['redirect_target']) ?
+             $this->getSharedStorage()->get($dataRows['redirect_target']) :
+             RedirectTarget::NO_TARGET
+         ;
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
+index a50266b5f48e3..0514035c1fdd9 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/StockAssertionFeatureContext.php
+@@ -99,7 +99,7 @@ public function assertNoStockMovementForDefaultShop(string $productReference): v
+      */
+     public function assertNoStockMovementForSpecificShop(string $productReference, string $shopReferences): void
+     {
+-        foreach ($this->getShopIdsFromReferences($shopReferences) as $shopId) {
++        foreach ($this->referencesToIds($shopReferences) as $shopId) {
+             $this->assertNoStockMovementForProduct(
+                 $productReference,
+                 $shopId
+@@ -127,7 +127,7 @@ public function assertProductLastStockMovementsForSpecificShop(
+         string $shopReferences,
+         TableNode $table
+     ): void {
+-        foreach ($this->getShopIdsFromReferences($shopReferences) as $shopId) {
++        foreach ($this->referencesToIds($shopReferences) as $shopId) {
+             $this->assertLastStockMovementsForProduct(
+                 $productReference,
+                 $shopId,
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCategoriesFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCategoriesFeatureContext.php
+index 24a0a2ea3149c..5b1cf487861ef 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCategoriesFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCategoriesFeatureContext.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\SetAssociatedProductCategoriesCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+ 
+@@ -62,6 +63,18 @@ public function assignToCategoriesForSpecificShop(string $productReference, Tabl
+         $this->assignToCategories($productReference, $table, ShopConstraint::shop($this->referenceToId($shopReference)));
+     }
+ 
++    /**
++     * @When I assign product :productReference to following categories for shops :shopReferences:
++     *
++     * @param string $productReference
++     * @param TableNode $table
++     * @param string $shopReferences
++     */
++    public function assignToCategoriesForSpecificShopCollection(string $productReference, TableNode $table, string $shopReferences)
++    {
++        $this->assignToCategories($productReference, $table, ShopCollection::shops($this->referencesToIds($shopReferences)));
++    }
++
+     /**
+      * @When I assign product :productReference to following categories for all shops:
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCustomizationFieldsFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCustomizationFieldsFeatureContext.php
+index 8e9492192b482..de4146d7adc93 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCustomizationFieldsFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateCustomizationFieldsFeatureContext.php
+@@ -38,6 +38,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Customization\ValueObject\CustomizationFieldId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Customization\ValueObject\CustomizationFieldType;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+@@ -59,6 +60,7 @@ public function updateCustomizationFieldsForDefaultShop(string $productReference
+      * @When I update product :productReference with following customization fields for shop :shopReference:
+      *
+      * @param string $productReference
++     * @param string $shopReference
+      * @param TableNode $table
+      */
+     public function updateCustomizationFieldsForShop(string $productReference, TableNode $table, string $shopReference): void
+@@ -66,6 +68,18 @@ public function updateCustomizationFieldsForShop(string $productReference, Table
+         $this->updateCustomizationFields($productReference, $table, ShopConstraint::shop((int) $this->getSharedStorage()->get($shopReference)));
+     }
+ 
++    /**
++     * @When I update product :productReference with following customization fields for shops :shopReferences:
++     *
++     * @param string $productReference
++     * @param string $shopReferences
++     * @param TableNode $table
++     */
++    public function updateCustomizationFieldsForShopCollection(string $productReference, TableNode $table, string $shopReferences): void
++    {
++        $this->updateCustomizationFields($productReference, $table, ShopCollection::shops($this->referencesToIds($shopReferences)));
++    }
++
+     /**
+      * @When I update product :productReference customization field name with text containing :nameLength symbols
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateProductFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateProductFeatureContext.php
+index faa67cd891912..c7d3c3dc2dc65 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateProductFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateProductFeatureContext.php
+@@ -36,6 +36,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\UpdateProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\DeliveryTimeNoteType;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext;
+@@ -80,6 +81,17 @@ public function updateProductForShop(string $productReference, string $shopRefer
+         $this->updateProduct($productReference, $table, $shopConstraint);
+     }
+ 
++    /**
++     * @When I update product ":productReference" for shops :shopReferences with following values:
++     *
++     * @param string $productReference
++     * @param TableNode $table
++     */
++    public function updateProductForShopCollection(string $productReference, string $shopReferences, TableNode $table): void
++    {
++        $this->updateProduct($productReference, $table, ShopCollection::shops($this->referencesToIds($shopReferences)));
++    }
++
+     /**
+      * @When I update product :productReference prices and apply non-existing tax rules group
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStatusFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStatusFeatureContext.php
+index dec9fb76a87ad..87f9b067ee217 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStatusFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStatusFeatureContext.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotBulkUpdateProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext;
+@@ -64,6 +65,18 @@ public function bulkUpdateStatusForSpecificShop(bool $status, string $shopRefere
+         $this->bulkUpdateStatus($status, $productsList, ShopConstraint::shop($this->referenceToId($shopReference)));
+     }
+ 
++    /**
++     * @When /^I bulk change status to be (enabled|disabled) for following products for shops "([^"]+)":$/
++     *
++     * @param bool $status
++     * @param string $shopReferences
++     * @param TableNode $productsList
++     */
++    public function bulkUpdateStatusForSpecificShopCollection(bool $status, string $shopReferences, TableNode $productsList): void
++    {
++        $this->bulkUpdateStatus($status, $productsList, ShopCollection::shops($this->referencesToIds($shopReferences)));
++    }
++
+     /**
+      * @When /^I bulk change status to be (enabled|disabled) for following products for shop group "([^"]+)":$/
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStockFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStockFeatureContext.php
+index 6a76d0ee29c1d..76555a0cacc72 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStockFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Product/UpdateStockFeatureContext.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\Command\UpdateProductStockAvailableCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\Exception\ProductStockConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
+ 
+@@ -68,6 +69,23 @@ public function updateProductStockForShop(
+         );
+     }
+ 
++    /**
++     * @When I update product :productReference stock for shops :shopReferences with following information:
++     */
++    public function updateProductStockForShopCollection(
++        string $productReference,
++        string $shopReferences,
++        TableNode $table
++    ): void {
++        $shopConstraint = ShopCollection::shops($this->referencesToIds($shopReferences));
++
++        $this->updateProductStock(
++            $productReference,
++            $table,
++            $shopConstraint
++        );
++    }
++
+     /**
+      * @When I update product :productReference stock for all shops with following information:
+      */
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/bulk_delete_product_multishop.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/bulk_delete_product_multishop.feature
+index c0be7ed5b9a3f..20a0899bae851 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/bulk_delete_product_multishop.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/bulk_delete_product_multishop.feature
+@@ -179,6 +179,31 @@ Feature: Bulk delete products when multishop feature is enabled
+     And product productWithCombinations is not associated to shop shop3
+     And combinations "product1LWhite,product1LBlack,product1LBlue" are not associated to shop "shop3"
+ 
++  Scenario: I can bulk delete product from shop shop1 and shop3
++    When I bulk delete following products from shops "shop1,shop3":
++      | reference               |
++      | standardProduct         |
++      | productWithCombinations |
++    And product standardProduct is associated to shops "shop2,shop4"
++    And product standardProduct is not associated to shops "shop1,shop3"
++    And default shop for product standardProduct is shop2
++    And product "standardProduct" should have following stock information for shops "shop2,shop4":
++      | quantity | 51 |
++    And product "standardProduct" should have following images for shops "shop2,shop4":
++      | image reference | position | shops        |
++      | image1          | 1        | shop2, shop4 |
++      | image2          | 2        | shop2, shop4 |
++    # Default shop has been updated to first associated one (ordered by ID)
++    And default shop for product productWithCombinations is shop2
++    And product "productWithCombinations" should have the following combinations for shops "shop2,shop4":
++      | combination id | combination name        | reference | attributes           | impact on price | quantity | is default |
++      | product1LWhite | Size - L, Color - White |           | [Size:L,Color:White] | 0               | 10       | true       |
++      | product1LBlack | Size - L, Color - Black |           | [Size:L,Color:Black] | 0               | 20       | false      |
++      | product1LBlue  | Size - L, Color - Blue  |           | [Size:L,Color:Blue]  | 0               | 30       | false      |
++    And product productWithCombinations is associated to shops "shop2,shop4"
++    And product productWithCombinations is not associated to shop "shop1,shop3"
++    And combinations "product1LWhite,product1LBlack,product1LBlue" are not associated to shop "shop1,shop3"
++
+   Scenario: I can bulk delete product from all shops
+     When I bulk delete following products from all shops:
+       | reference               |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/combinations_shop_collection.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/combinations_shop_collection.feature
+new file mode 100644
+index 0000000000000..1c90804ecf10a
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/combinations_shop_collection.feature
+@@ -0,0 +1,166 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s product --tags combinations-shop-collection
++@restore-products-before-feature
++@clear-cache-before-feature
++@restore-shops-after-feature
++@restore-languages-after-feature
++@reset-img-after-feature
++@clear-cache-after-feature
++@product-multishop
++@combinations-shop-collection
++Feature: Edit combinations with specific list of shops.
++  As a BO user I want to be able to edit combinations for specific shops.
++
++  Background:
++    Given I enable multishop feature
++    And language with iso code "en" is the default one
++    And language "english" with locale "en-US" exists
++    And language "french" with locale "fr-FR" exists
++    And attribute group "Size" named "Size" in en language exists
++    And attribute group "Color" named "Color" in en language exists
++    And attribute "S" named "S" in en language exists
++    And attribute "M" named "M" in en language exists
++    And attribute "L" named "L" in en language exists
++    And attribute "White" named "White" in en language exists
++    And attribute "Black" named "Black" in en language exists
++    And attribute "Blue" named "Blue" in en language exists
++    And attribute "Yellow" named "Yellow" in en language exists
++    And manufacturer studioDesign named "Studio Design" exists
++    And manufacturer graphicCorner named "Graphic Corner" exists
++    And following image types should be applicable to products:
++      | reference     | name           | width | height |
++      | cartDefault   | cart_default   | 125   | 125    |
++      | homeDefault   | home_default   | 250   | 250    |
++      | largeDefault  | large_default  | 800   | 800    |
++      | mediumDefault | medium_default | 452   | 452    |
++      | smallDefault  | small_default  | 98    | 98     |
++    And shop "shop1" with name "test_shop" exists
++    And shop group "default_shop_group" with name "Default" exists
++    And I add a shop "shop2" with name "test_second_shop" and color "red" for the group "default_shop_group"
++    And I add a shop group "test_second_shop_group" with name "Test second shop group" and color "green"
++    And I add a shop "shop3" with name "test_third_shop" and color "blue" for the group "test_second_shop_group"
++    And I add a shop "shop4" with name "test_shop_without_url" and color "blue" for the group "test_second_shop_group"
++    And I associate attribute group "Size" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute group "Color" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "S" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "M" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "L" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "White" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "Black" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "Blue" with shops "shop1,shop2,shop3,shop4"
++    And I associate attribute "Yellow" with shops "shop1,shop2,shop3,shop4"
++    And single shop context is loaded
++    And language "french" with locale "fr-FR" exists
++    And I add product "product" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product is shop1
++    And I set following shops for product "product":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product is associated to shops "shop1,shop2,shop3,shop4"
++    And product "product" should have no images
++
++  Scenario: I can generate combinations for specific shops and edit them
++    Given I add product "product" with following information:
++      | name[en-US] | universal T-shirt |
++      | type        | combinations      |
++    And product product type should be combinations
++    And default shop for product product is shop1
++    And I set following shops for product "product":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product is associated to shops "shop1,shop2,shop3,shop4"
++    When I generate combinations for product product in shops "shop1,shop3" using following attributes:
++      | Size  | [L]                  |
++      | Color | [White,Black,Yellow] |
++    Then product "product" should have the following combinations for shops "shop1,shop3":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | true       |
++      | productLBlack  | Size - L, Color - Black  |           | [Size:L,Color:Black]  | 0               | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | false      |
++    And product "product" should have no combinations for shops "shop2,shop4"
++    When I generate combinations for product product in shops "shop2,shop3" using following attributes:
++      | Size  | [L,M]        |
++      | Color | [Black,Blue] |
++    Then product "product" should have the following combinations for shop "shop1":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | true       |
++      | productLBlack  | Size - L, Color - Black  |           | [Size:L,Color:Black]  | 0               | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | false      |
++    And product "product" should have the following combinations for shop "shop2":
++      | id reference  | combination name        | reference | attributes           | impact on price | quantity | is default |
++      | productLBlack | Size - L, Color - Black |           | [Size:L,Color:Black] | 0               | 0        | true       |
++      | productLBlue  | Size - L, Color - Blue  |           | [Size:L,Color:Blue]  | 0               | 0        | false      |
++      | productMBlack | Size - M, Color - Black |           | [Size:M,Color:Black] | 0               | 0        | false      |
++      | productMBlue  | Size - M, Color - Blue  |           | [Size:M,Color:Blue]  | 0               | 0        | false      |
++    And product "product" should have the following combinations for shop "shop3":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | true       |
++      | productLBlack  | Size - L, Color - Black  |           | [Size:L,Color:Black]  | 0               | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | false      |
++      | productLBlue   | Size - L, Color - Blue   |           | [Size:L,Color:Blue]   | 0               | 0        | false      |
++      | productMBlack  | Size - M, Color - Black  |           | [Size:M,Color:Black]  | 0               | 0        | false      |
++      | productMBlue   | Size - M, Color - Blue   |           | [Size:M,Color:Blue]   | 0               | 0        | false      |
++    And product "product" should have no combinations for shops "shop4"
++    # Update default combinations on two shops
++    When I set combination "productLYellow" as default for shops "shop1,shop3"
++    And I set combination "productLBlue" as default for shops "shop2"
++    Then product "product" should have the following combinations for shop "shop1":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | false      |
++      | productLBlack  | Size - L, Color - Black  |           | [Size:L,Color:Black]  | 0               | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | true       |
++    And product "product" should have the following combinations for shop "shop2":
++      | id reference  | combination name        | reference | attributes           | impact on price | quantity | is default |
++      | productLBlack | Size - L, Color - Black |           | [Size:L,Color:Black] | 0               | 0        | false      |
++      | productLBlue  | Size - L, Color - Blue  |           | [Size:L,Color:Blue]  | 0               | 0        | true       |
++      | productMBlack | Size - M, Color - Black |           | [Size:M,Color:Black] | 0               | 0        | false      |
++      | productMBlue  | Size - M, Color - Blue  |           | [Size:M,Color:Blue]  | 0               | 0        | false      |
++    And product "product" should have the following combinations for shop "shop3":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | false      |
++      | productLBlack  | Size - L, Color - Black  |           | [Size:L,Color:Black]  | 0               | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | true       |
++      | productLBlue   | Size - L, Color - Blue   |           | [Size:L,Color:Blue]   | 0               | 0        | false      |
++      | productMBlack  | Size - M, Color - Black  |           | [Size:M,Color:Black]  | 0               | 0        | false      |
++      | productMBlue   | Size - M, Color - Blue   |           | [Size:M,Color:Blue]   | 0               | 0        | false      |
++    And product "product" should have no combinations for shops "shop4"
++    # Update infos for shop2 and shop3
++    When I update combination "productLBlack" with following values for shops "shop2,shop3":
++      | reference                  | ABC               |
++      | ean13                      | 978020137962      |
++      | isbn                       | 978-3-16-148410-0 |
++      | mpn                        | mpn1              |
++      | upc                        | 72527273070       |
++      | impact on weight           | 17.25             |
++      | eco tax                    | 0.5               |
++      | impact on price            | 10.50             |
++      | impact on unit price       | 0.5               |
++      | wholesale price            | 20                |
++      | minimal quantity           | 10                |
++      | low stock threshold        | 10                |
++      | low stock alert is enabled | true              |
++      | available date             | 2021-10-10        |
++    # But update quantity for shop1 and shop2
++    When I update combination "productLBlack" stock for shops "shop1,shop2" with following details:
++      | fixed quantity | 10 |
++    Then product "product" should have the following combinations for shop "shop1":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | false      |
++      | productLBlack  | Size - L, Color - Black  | ABC       | [Size:L,Color:Black]  | 0               | 10       | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | true       |
++    And product "product" should have the following combinations for shop "shop2":
++      | id reference  | combination name        | reference | attributes           | impact on price | quantity | is default |
++      | productLBlack | Size - L, Color - Black | ABC       | [Size:L,Color:Black] | 10.5            | 10       | false      |
++      | productLBlue  | Size - L, Color - Blue  |           | [Size:L,Color:Blue]  | 0               | 0        | true       |
++      | productMBlack | Size - M, Color - Black |           | [Size:M,Color:Black] | 0               | 0        | false      |
++      | productMBlue  | Size - M, Color - Blue  |           | [Size:M,Color:Blue]  | 0               | 0        | false      |
++    And product "product" should have the following combinations for shop "shop3":
++      | id reference   | combination name         | reference | attributes            | impact on price | quantity | is default |
++      | productLWhite  | Size - L, Color - White  |           | [Size:L,Color:White]  | 0               | 0        | false      |
++      | productLBlack  | Size - L, Color - Black  | ABC       | [Size:L,Color:Black]  | 10.50           | 0        | false      |
++      | productLYellow | Size - L, Color - Yellow |           | [Size:L,Color:Yellow] | 0               | 0        | true       |
++      | productLBlue   | Size - L, Color - Blue   |           | [Size:L,Color:Blue]   | 0               | 0        | false      |
++      | productMBlack  | Size - M, Color - Black  |           | [Size:M,Color:Black]  | 0               | 0        | false      |
++      | productMBlue   | Size - M, Color - Blue   |           | [Size:M,Color:Blue]   | 0               | 0        | false      |
++    And product "product" should have no combinations for shops "shop4"
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/delete_product_multishop.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/delete_product_multishop.feature
+index 410c442674273..a490271aedb01 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/delete_product_multishop.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/delete_product_multishop.feature
+@@ -109,7 +109,7 @@ Feature: Delete product when multishop feature is enabled
+ 
+   Scenario: I can delete product from specific shop
+     # delete from shop2
+-    When I delete product "standardProduct" from shops "shop2"
++    When I delete product "standardProduct" from shop "shop2"
+     And product standardProduct is not associated to shop shop2
+     Then product standardProduct is associated to shops "shop1,shop3,shop4"
+     And default shop for product standardProduct is shop1
+@@ -120,7 +120,7 @@ Feature: Delete product when multishop feature is enabled
+       | image1          | 1        | shop1, shop3, shop4 |
+       | image2          | 2        | shop1, shop3, shop4 |
+     # delete from shop3
+-    When I delete product "productWithCombinations" from shops "shop3"
++    When I delete product "productWithCombinations" from shop "shop3"
+     Then product productWithCombinations is not associated to shop shop3
+     And product productWithCombinations is associated to shops "shop1,shop2,shop4"
+     And default shop for product productWithCombinations is shop1
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/duplicate_product_multishop.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/duplicate_product_multishop.feature
+index 5c4abac59ecc9..dbe27da181389 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/duplicate_product_multishop.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/duplicate_product_multishop.feature
+@@ -54,9 +54,9 @@ Feature: Copy product from shop to shop.
+     And single shop context is loaded
+     And manufacturer studioDesign named "Studio Design" exists
+     And I create carrier "carrier1" with specified properties:
+-      | name        | ecoCarrier |
++      | name | ecoCarrier |
+     And I create carrier "carrier2" with specified properties:
+-      | name        | Fast carry |
++      | name | Fast carry |
+     # Prepare a few data
+     And I add new tax "us-tax-state-1" with following properties:
+       | name       | US Tax (6%) |
+@@ -206,9 +206,9 @@ Feature: Copy product from shop to shop.
+       | en-US  | Its so smart |
+       | fr-FR  | lel joke     |
+     And product "productWithFieldsCopy" localized "link_rewrite" for shops shop1 should be:
+-      | locale | value              |
+-      | en-US  | smart-sunglasses   |
+-      | fr-FR  | lunettes-de-soleil |
++      | locale | value                       |
++      | en-US  | copy-of-smart-sunglasses    |
++      | fr-FR  | copie-de-lunettes-de-soleil |
+     And product productWithFieldsCopy should have following seo options for shops shop1:
+       | redirect_type   | 301-product           |
+       | redirect_target | productForRedirection |
+@@ -281,9 +281,9 @@ Feature: Copy product from shop to shop.
+       | en-US  | Its so smart3 |
+       | fr-FR  | lel joke3     |
+     And product "productWithFieldsCopy3" localized "link_rewrite" for shops shop3 should be:
+-      | locale | value               |
+-      | en-US  | smart-sunglasses3   |
+-      | fr-FR  | lunettes-de-soleil3 |
++      | locale | value                        |
++      | en-US  | copy-of-smart-sunglasses3    |
++      | fr-FR  | copie-de-lunettes-de-soleil3 |
+     And product productWithFieldsCopy3 should have following seo options for shops shop3:
+       | redirect_type   | 302-product            |
+       | redirect_target | productForRedirection2 |
+@@ -356,9 +356,9 @@ Feature: Copy product from shop to shop.
+       | en-US  | Its so smart |
+       | fr-FR  | lel joke     |
+     And product "productWithFieldsOnAllShops" localized "link_rewrite" for shops "shop1,shop2" should be:
+-      | locale | value              |
+-      | en-US  | smart-sunglasses   |
+-      | fr-FR  | lunettes-de-soleil |
++      | locale | value                       |
++      | en-US  | copy-of-smart-sunglasses    |
++      | fr-FR  | copie-de-lunettes-de-soleil |
+     And product productWithFieldsOnAllShops should have following seo options for shops "shop1,shop2":
+       | redirect_type   | 301-product           |
+       | redirect_target | productForRedirection |
+@@ -425,8 +425,8 @@ Feature: Copy product from shop to shop.
+       | fr-FR  | lel joke3     |
+     And product "productWithFieldsOnAllShops" localized "link_rewrite" for shops shop3 should be:
+       | locale | value               |
+-      | en-US  | smart-sunglasses3   |
+-      | fr-FR  | lunettes-de-soleil3 |
++      | en-US  | copy-of-smart-sunglasses3   |
++      | fr-FR  | copie-de-lunettes-de-soleil3 |
+     And product productWithFieldsOnAllShops should have following seo options for shops shop3:
+       | redirect_type   | 302-product            |
+       | redirect_target | productForRedirection2 |
+@@ -500,9 +500,9 @@ Feature: Copy product from shop to shop.
+       | en-US  | Its so smart |
+       | fr-FR  | lel joke     |
+     And product "productWithFieldsDefaultGroup" localized "link_rewrite" for shops "shop1,shop2" should be:
+-      | locale | value              |
+-      | en-US  | smart-sunglasses   |
+-      | fr-FR  | lunettes-de-soleil |
++      | locale | value                       |
++      | en-US  | copy-of-smart-sunglasses    |
++      | fr-FR  | copie-de-lunettes-de-soleil |
+     And product productWithFieldsDefaultGroup should have following seo options for shops "shop1,shop2":
+       | redirect_type   | 301-product           |
+       | redirect_target | productForRedirection |
+@@ -576,9 +576,9 @@ Feature: Copy product from shop to shop.
+       | en-US  | Its so smart3 |
+       | fr-FR  | lel joke3     |
+     And product "productWithFieldsSecondGroup" localized "link_rewrite" for shops shop3 should be:
+-      | locale | value               |
+-      | en-US  | smart-sunglasses3   |
+-      | fr-FR  | lunettes-de-soleil3 |
++      | locale | value                        |
++      | en-US  | copy-of-smart-sunglasses3    |
++      | fr-FR  | copie-de-lunettes-de-soleil3 |
+     And product productWithFieldsSecondGroup should have following seo options for shops shop3:
+       | redirect_type   | 302-product            |
+       | redirect_target | productForRedirection2 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/product_management_shop_collection.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/product_management_shop_collection.feature
+new file mode 100644
+index 0000000000000..6cee8a5900d29
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/product_management_shop_collection.feature
+@@ -0,0 +1,735 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s product --tags product-management-shop-collection
++@restore-products-before-feature
++@clear-cache-before-feature
++@restore-shops-after-feature
++@restore-languages-after-feature
++@reset-img-after-feature
++@clear-cache-after-feature
++@product-multishop
++@product-management-shop-collection
++Feature: Edit product with specific list of shops.
++  As a BO user I want to be able to edit a product for specific shops.
++
++  Background:
++    Given I enable multishop feature
++    And language with iso code "en" is the default one
++    And language "english" with locale "en-US" exists
++    And language "french" with locale "fr-FR" exists
++    And attribute group "Size" named "Size" in en language exists
++    And attribute group "Color" named "Color" in en language exists
++    And attribute "S" named "S" in en language exists
++    And attribute "M" named "M" in en language exists
++    And attribute "L" named "L" in en language exists
++    And attribute "White" named "White" in en language exists
++    And attribute "Black" named "Black" in en language exists
++    And attribute "Blue" named "Blue" in en language exists
++    And manufacturer studioDesign named "Studio Design" exists
++    And manufacturer graphicCorner named "Graphic Corner" exists
++    And following image types should be applicable to products:
++      | reference     | name           | width | height |
++      | cartDefault   | cart_default   | 125   | 125    |
++      | homeDefault   | home_default   | 250   | 250    |
++      | largeDefault  | large_default  | 800   | 800    |
++      | mediumDefault | medium_default | 452   | 452    |
++      | smallDefault  | small_default  | 98    | 98     |
++    And shop "shop1" with name "test_shop" exists
++    And shop group "default_shop_group" with name "Default" exists
++    And I add a shop "shop2" with name "test_second_shop" and color "red" for the group "default_shop_group"
++    And I add a shop group "test_second_shop_group" with name "Test second shop group" and color "green"
++    And I add a shop "shop3" with name "test_third_shop" and color "blue" for the group "test_second_shop_group"
++    And I add a shop "shop4" with name "test_shop_without_url" and color "blue" for the group "test_second_shop_group"
++    And single shop context is loaded
++    And language "french" with locale "fr-FR" exists
++    And I add product "product" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product is shop1
++    And I set following shops for product "product":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product is associated to shops "shop1,shop2,shop3,shop4"
++    And product "product" should have no images
++
++  Scenario: I can update product information for specific shops
++    #
++    ## First check that the content is the same for all shops and have the default values
++    #
++    Then product "product" should have following options for shops "shop1,shop2,shop3,shop4":
++      | product option      | value |
++      | visibility          | both  |
++      | available_for_order | true  |
++      | online_only         | false |
++      | show_price          | true  |
++      | condition           | new   |
++      | show_condition      | false |
++      | manufacturer        |       |
++    Then product product should have following prices information for shops "shop1,shop2,shop3,shop4":
++      | price           | 0               |
++      | ecotax          | 0               |
++      | tax rules group | US-FL Rate (6%) |
++      | on_sale         | false           |
++      | wholesale_price | 0               |
++      | unit_price      | 0               |
++      | unity           |                 |
++    And product "product" should have following seo options for shops "shop1,shop2,shop3,shop4":
++      | redirect_type   | default |
++      | redirect_target |         |
++    And product product should have following shipping information for shops "shop1,shop2,shop3,shop4":
++      | width                                   | 0       |
++      | height                                  | 0       |
++      | depth                                   | 0       |
++      | weight                                  | 0       |
++      | additional_shipping_cost                | 0       |
++      | delivery time notes type                | default |
++      | delivery time in stock notes[en-US]     |         |
++      | delivery time in stock notes[fr-FR]     |         |
++      | delivery time out of stock notes[en-US] |         |
++      | delivery time out of stock notes[fr-FR] |         |
++    And product "product" should have following stock information for shops "shop1,shop2,shop3,shop4":
++      | pack_stock_type     | default |
++      | minimal_quantity    | 1       |
++      | low_stock_threshold | 0       |
++      | low_stock_alert     | false   |
++      | available_date      |         |
++    And product "product" should have following details:
++      | product detail | value |
++      | isbn           |       |
++      | upc            |       |
++      | ean13          |       |
++      | mpn            |       |
++      | reference      |       |
++    # Product status
++    And product "product" should be disabled for shops "shop1,shop2,shop3,shop4"
++    And product "product" should not be indexed for shops "shop1,shop2,shop3,shop4"
++    ## Multilang fields
++    Then product "product" localized "name" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value       |
++      | en-US  | magic staff |
++      | fr-FR  |             |
++    And product "product" localized "description" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "description_short" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    Then product "product" localized "meta_title" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "meta_description" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "link_rewrite" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value       |
++      | en-US  | magic-staff |
++      | fr-FR  |             |
++    And product "product" localized "available_now_labels" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "available_later_labels" for shops "shop1,shop2,shop3,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    #
++    ## Now update fields for shop2 and shop3
++    #
++    When I update product "product" for shops "shop2,shop3" with following values:
++      # Basic information
++      | name[en-US]                             | cool magic staff                |
++      | name[fr-FR]                             | baton magique cool              |
++      | description[en-US]                      | such a cool magic staff         |
++      | description[fr-FR]                      | tellement cool ce baton magique |
++      | description_short[en-US]                | cool magic staff                |
++      | description_short[fr-FR]                | baton magique cool              |
++      # Options
++      | visibility                              | search                          |
++      | available_for_order                     | false                           |
++      | online_only                             | true                            |
++      | show_price                              | false                           |
++      | condition                               | used                            |
++      | show_condition                          | true                            |
++      | manufacturer                            | studioDesign                    |
++      # Prices
++      | price                                   | 100.99                          |
++      | ecotax                                  | 0                               |
++      | tax rules group                         | US-AL Rate (4%)                 |
++      | on_sale                                 | true                            |
++      | wholesale_price                         | 70                              |
++      | unit_price                              | 10                              |
++      | unity                                   | bag of ten                      |
++      # SEO
++      | meta_title[en-US]                       | magic staff meta title          |
++      | meta_description[en-US]                 | magic staff meta description    |
++      | link_rewrite[en-US]                     | magic-staff                     |
++      | meta_title[fr-FR]                       | titre baton magique cool        |
++      | meta_description[fr-FR]                 | description baton magique cool  |
++      | link_rewrite[fr-FR]                     | baton-magique-cool              |
++      | redirect_type                           | 404                             |
++      | redirect_target                         |                                 |
++      # Shipping
++      | width                                   | 10.5                            |
++      | height                                  | 6                               |
++      | depth                                   | 7                               |
++      | weight                                  | 0.5                             |
++      | additional_shipping_cost                | 12                              |
++      | delivery time notes type                | specific                        |
++      | delivery time in stock notes[en-US]     | product in stock                |
++      | delivery time in stock notes[fr-FR]     | produit en stock                |
++      | delivery time out of stock notes[en-US] | product out of stock            |
++      | delivery time out of stock notes[fr-FR] | produit en rupture de stock     |
++      # Stock
++      | pack_stock_type                         | products_only                   |
++      | minimal_quantity                        | 24                              |
++      | low_stock_threshold                     | 0                               |
++      | low_stock_alert                         | false                           |
++      | available_date                          | 1969-09-16                      |
++      | available_now_labels[en-US]             | get it now                      |
++      | available_now_labels[fr-FR]             | chope le maintenant             |
++      | available_later_labels[en-US]           | too late bro                    |
++      | available_later_labels[fr-FR]           | trop tard mec                   |
++      # Details common to all shops
++      | isbn                                    | 978-3-16-148410-0               |
++      | upc                                     | 72527273070                     |
++      | ean13                                   | 978020137962                    |
++      | mpn                                     | mpn1                            |
++      | reference                               | ref1                            |
++      # Status
++      | active                                  | true                            |
++    #
++    ## Now check the content for shop2 and shop3 match with the provided udpates
++    #
++    Then product "product" should have following options for shops "shop2,shop3":
++      | product option      | value        |
++      | visibility          | search       |
++      | available_for_order | false        |
++      | online_only         | true         |
++      | show_price          | false        |
++      | condition           | used         |
++      | show_condition      | true         |
++      | manufacturer        | studioDesign |
++    Then product product should have following prices information for shops "shop2,shop3":
++      | price           | 100.99          |
++      | ecotax          | 0               |
++      | tax rules group | US-AL Rate (4%) |
++      | on_sale         | true            |
++      | wholesale_price | 70              |
++      | unit_price      | 10              |
++      | unity           | bag of ten      |
++    And product "product" should have following seo options for shops "shop2,shop3":
++      | redirect_type   | 404 |
++      | redirect_target |     |
++    And product product should have following shipping information for shops "shop2,shop3":
++      | width                                   | 10.5                        |
++      | height                                  | 6                           |
++      | depth                                   | 7                           |
++      | weight                                  | 0.5                         |
++      | additional_shipping_cost                | 12                          |
++      | delivery time notes type                | specific                    |
++      | delivery time in stock notes[en-US]     | product in stock            |
++      | delivery time in stock notes[fr-FR]     | produit en stock            |
++      | delivery time out of stock notes[en-US] | product out of stock        |
++      | delivery time out of stock notes[fr-FR] | produit en rupture de stock |
++    And product "product" should have following stock information for shops "shop2,shop3":
++      | pack_stock_type     | products_only |
++      | minimal_quantity    | 24            |
++      | low_stock_threshold | 0             |
++      | low_stock_alert     | false         |
++      | available_date      | 1969-09-16    |
++    And product "product" should have following details:
++      | product detail | value             |
++      | isbn           | 978-3-16-148410-0 |
++      | upc            | 72527273070       |
++      | ean13          | 978020137962      |
++      | mpn            | mpn1              |
++      | reference      | ref1              |
++    # Product status
++    And product "product" should be enabled for shops "shop2,shop3"
++    And product "product" should be indexed for shops "shop2,shop3"
++    ## Multilang fields
++    Then product "product" localized "name" for shops "shop2,shop3" should be:
++      | locale | value              |
++      | en-US  | cool magic staff   |
++      | fr-FR  | baton magique cool |
++    And product "product" localized "description" for shops "shop2,shop3" should be:
++      | locale | value                           |
++      | en-US  | such a cool magic staff         |
++      | fr-FR  | tellement cool ce baton magique |
++    And product "product" localized "description_short" for shops "shop2,shop3" should be:
++      | locale | value              |
++      | en-US  | cool magic staff   |
++      | fr-FR  | baton magique cool |
++    Then product "product" localized "meta_title" for shops "shop2,shop3" should be:
++      | locale | value                    |
++      | en-US  | magic staff meta title   |
++      | fr-FR  | titre baton magique cool |
++    And product "product" localized "meta_description" for shops "shop2,shop3" should be:
++      | locale | value                          |
++      | en-US  | magic staff meta description   |
++      | fr-FR  | description baton magique cool |
++    And product "product" localized "link_rewrite" for shops "shop2,shop3" should be:
++      | locale | value              |
++      | en-US  | magic-staff        |
++      | fr-FR  | baton-magique-cool |
++    And product "product" localized "available_now_labels" for shops "shop2,shop3" should be:
++      | locale | value               |
++      | en-US  | get it now          |
++      | fr-FR  | chope le maintenant |
++    And product "product" localized "available_later_labels" for shops "shop2,shop3" should be:
++      | locale | value         |
++      | en-US  | too late bro  |
++      | fr-FR  | trop tard mec |
++    #
++    ## Now check the content for shop1 and shop4, it should still be the default values everywhere
++    ## except for the values that are common to all shops
++    #
++    Then product "product" should have following options for shops "shop1,shop4":
++      | product option      | value        |
++      | visibility          | both         |
++      | available_for_order | true         |
++      | online_only         | false        |
++      | show_price          | true         |
++      | condition           | new          |
++      | show_condition      | false        |
++      | manufacturer        | studioDesign |
++    Then product product should have following prices information for shops "shop1,shop4":
++      | price           | 0               |
++      | ecotax          | 0               |
++      | tax rules group | US-FL Rate (6%) |
++      | on_sale         | false           |
++      | wholesale_price | 0               |
++      | unit_price      | 0               |
++      | unity           |                 |
++    And product "product" should have following seo options for shops "shop1,shop4":
++      | redirect_type   | default |
++      | redirect_target |         |
++    And product product should have following shipping information for shops "shop1,shop4":
++      | width                                   | 10.5     |
++      | height                                  | 6        |
++      | depth                                   | 7        |
++      | weight                                  | 0.5      |
++      | additional_shipping_cost                | 0        |
++      | delivery time notes type                | specific |
++      | delivery time in stock notes[en-US]     |          |
++      | delivery time in stock notes[fr-FR]     |          |
++      | delivery time out of stock notes[en-US] |          |
++      | delivery time out of stock notes[fr-FR] |          |
++    And product "product" should have following stock information for shops "shop1,shop4":
++      | pack_stock_type     | default |
++      | minimal_quantity    | 1       |
++      | low_stock_threshold | 0       |
++      | low_stock_alert     | false   |
++      | available_date      |         |
++    And product "product" should have following details:
++      | product detail | value             |
++      | isbn           | 978-3-16-148410-0 |
++      | upc            | 72527273070       |
++      | ean13          | 978020137962      |
++      | mpn            | mpn1              |
++      | reference      | ref1              |
++    # Product status
++    And product "product" should be disabled for shops "shop1,shop4"
++    And product "product" should not be indexed for shops "shop1,shop4"
++    ## Multilang fields
++    Then product "product" localized "name" for shops "shop1,shop4" should be:
++      | locale | value       |
++      | en-US  | magic staff |
++      | fr-FR  |             |
++    And product "product" localized "description" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "description_short" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    Then product "product" localized "meta_title" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "meta_description" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "link_rewrite" for shops "shop1,shop4" should be:
++      | locale | value       |
++      | en-US  | magic-staff |
++      | fr-FR  |             |
++    And product "product" localized "available_now_labels" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "product" localized "available_later_labels" for shops "shop1,shop4" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++
++  Scenario: I can update product stock for specific shops
++    Given product "product" should have following stock information for shops "shop1,shop2,shop3,shop4":
++      | out_of_stock_type | default |
++      | quantity          | 0       |
++      | location          |         |
++    When I update product "product" stock for shops "shop2,shop3" with following information:
++      | out_of_stock_type | not_available |
++      | delta_quantity    | 69            |
++      | location          | upa           |
++    Then product "product" should have following stock information for shops "shop2,shop3":
++      | out_of_stock_type | not_available |
++      | location          | upa           |
++      | quantity          | 69            |
++    And product "product" last stock movements for shops "shop2,shop3" should be:
++      | employee   | delta_quantity |
++      | Puff Daddy | 69             |
++    And product "product" should have following stock information for shops "shop1,shop4":
++      | out_of_stock_type | default |
++      | quantity          | 0       |
++      | location          |         |
++    And product "product" should have no stock movements for shops "shop1,shop4"
++    # Update different shops and check the appropriate stock and movements for each one
++    When I update product "product" stock for shops "shop1,shop2" with following information:
++      | delta_quantity | 12      |
++      | location       | nowhere |
++    # Shop1
++    Then product "product" should have following stock information for shop shop1:
++      | location | nowhere |
++      | quantity | 12      |
++    And product "product" last stock movements for shop shop1 should be:
++      | employee   | delta_quantity |
++      | Puff Daddy | 12             |
++    # Shop2
++    And product "product" should have following stock information for shop shop2:
++      | location | nowhere |
++      | quantity | 81      |
++    And product "product" last stock movements for shop shop2 should be:
++      | employee   | delta_quantity |
++      | Puff Daddy | 12             |
++      | Puff Daddy | 69             |
++    # Shop3
++    And product "product" should have following stock information for shop shop3:
++      | location | upa |
++      | quantity | 69  |
++    And product "product" last stock movements for shop shop3 should be:
++      | employee   | delta_quantity |
++      | Puff Daddy | 69             |
++    # Shop4
++    And product "product" should have following stock information for shop shop4:
++      | location |   |
++      | quantity | 0 |
++    And product "product" should have no stock movements for shop shop4
++
++  Scenario: I can upload and edit images for specific shops
++    When I add new image "image1" named "app_icon.png" to product "product" for shops "shop2,shop3"
++    Then image "image1" should have same file as "app_icon.png"
++    When I add new image "image2" named "logo.jpg" to product "product" for shops "shop1,shop2"
++    Then image "image2" should have same file as "logo.jpg"
++    When I add new image "image3" named "logo.jpg" to product "product" for shops "shop3,shop4"
++    Then image "image3" should have same file as "logo.jpg"
++    And images "[image1, image2,image3]" should have following types generated:
++      | name           | width | height |
++      | cart_default   | 125   | 125    |
++      | home_default   | 250   | 250    |
++      | large_default  | 800   | 800    |
++      | medium_default | 452   | 452    |
++      | small_default  | 98    | 98     |
++    # This always step returns all the images but the cover may vary depending on associations
++    # Shop1 only has image2 associated so it is the cover
++    And product "product" should have following images for shop "shop1":
++      | image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | false    |               |               | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image2          | true     |               |               | 2        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++      | image3          | false    |               |               | 3        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++    # Shop2 and Shop3 both have image1 associated first so it is their cover
++    And product "product" should have following images for shop "shop2,shop3":
++      | image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | true     |               |               | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image2          | false    |               |               | 2        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++      | image3          | false    |               |               | 3        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++    # Shop4 has image1 has cover even if it is not associated because it is the global cover as the first uploaded image
++    And product "product" should have following images for shop "shop4":
++      | image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | false    |               |               | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image2          | false    |               |               | 2        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++      | image3          | true     |               |               | 3        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++    # Update an image content for two shops only
++    When I update image "image3" with following information for shops "shop3,shop4":
++      | file          | app_icon.png       |
++      | legend[en-US] | preston is alive   |
++      | legend[fr-FR] | preston est vivant |
++      | position      | 2                  |
++      | cover         | true               |
++    # All the data are common to all shops, the only multishop info for now (aside from association) is the cover
++    Then image "image3" should have same file as "app_icon.png"
++    And product "product" should have following images for shop "shop1":
++      | image reference | is cover | legend[en-US]    | legend[fr-FR]      | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | false    |                  |                    | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image3          | false    | preston is alive | preston est vivant | 2        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++      | image2          | true     |                  |                    | 3        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++    And product "product" should have following images for shop "shop2":
++      | image reference | is cover | legend[en-US]    | legend[fr-FR]      | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | true     |                  |                    | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image3          | false    | preston is alive | preston est vivant | 2        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++      | image2          | false    |                  |                    | 3        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++    And product "product" should have following images for shop "shop3":
++      | image reference | is cover | legend[en-US]    | legend[fr-FR]      | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | false    |                  |                    | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image3          | true     | preston is alive | preston est vivant | 2        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++      | image2          | false    |                  |                    | 3        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++    And product "product" should have following images for shop "shop4":
++      | image reference | is cover | legend[en-US]    | legend[fr-FR]      | position | image url                            | thumbnail url                                      | shops       |
++      | image1          | false    |                  |                    | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop2,shop3 |
++      | image3          | true     | preston is alive | preston est vivant | 2        | http://myshop.com/img/p/{image3}.jpg | http://myshop.com/img/p/{image3}-small_default.jpg | shop3,shop4 |
++      | image2          | false    |                  |                    | 3        | http://myshop.com/img/p/{image2}.jpg | http://myshop.com/img/p/{image2}-small_default.jpg | shop1,shop2 |
++
++  Scenario: I can duplicate a product for specific shops (we don't fully check all fields)
++    Given I update product "product" for shops "shop2,shop3" with following values:
++      # Basic information
++      | name[en-US]              | cool magic staff                |
++      | name[fr-FR]              | baton magique cool              |
++      | description[en-US]       | such a cool magic staff         |
++      | description[fr-FR]       | tellement cool ce baton magique |
++      | description_short[en-US] | cool magic staff                |
++      | description_short[fr-FR] | baton magique cool              |
++      # Prices
++      | price                    | 100.99                          |
++      | ecotax                   | 0                               |
++      | tax rules group          | US-AL Rate (4%)                 |
++      | on_sale                  | true                            |
++      | wholesale_price          | 70                              |
++      | unit_price               | 10                              |
++      | unity                    | bag of ten                      |
++      # SEO
++      | link_rewrite[en-US]      | cool-magic-staff                |
++      | link_rewrite[fr-FR]      | baton-magique-cool              |
++    # Add name in french because we cannot validate "copie de " the space is trimmed for comparison
++    And I update product "product" for shops "shop1,shop4" with following values:
++      | name[fr-FR] | baton magique |
++    Given I add new image "image1" named "app_icon.png" to product "product" for all shops
++    # Duplicate product for shop1 and shop3 only
++    When I duplicate product product to a productCopy for shops shop1,shop3
++    Then product productCopy is associated to shops "shop1,shop3"
++    And product productCopy is not associated to shops "shop2,shop4"
++    And default shop for product productCopy is shop1
++    And product "productCopy" should be disabled for shops "shop1,shop3"
++    # Shop1
++    And product productCopy should have following prices information for shop shop1:
++      | price           | 0               |
++      | ecotax          | 0               |
++      | tax rules group | US-FL Rate (6%) |
++      | on_sale         | false           |
++      | wholesale_price | 0               |
++      | unit_price      | 0               |
++      | unity           |                 |
++    And product "productCopy" localized "name" for shop "shop1" should be:
++      | locale | value                  |
++      | en-US  | copy of magic staff    |
++      | fr-FR  | copie de baton magique |
++    And product "productCopy" localized "description" for shop "shop1" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "productCopy" localized "description_short" for shop "shop1" should be:
++      | locale | value |
++      | en-US  |       |
++      | fr-FR  |       |
++    And product "productCopy" localized "link_rewrite" for shop "shop1" should be:
++      | locale | value                  |
++      | en-US  | copy-of-magic-staff    |
++      | fr-FR  | copie-de-baton-magique |
++    # Shop3
++    And product productCopy should have following prices information for shop shop3:
++      | price           | 100.99          |
++      | ecotax          | 0               |
++      | tax rules group | US-AL Rate (4%) |
++      | on_sale         | true            |
++      | wholesale_price | 70              |
++      | unit_price      | 10              |
++      | unity           | bag of ten      |
++    And product "productCopy" localized "name" for shop "shop3" should be:
++      | locale | value                       |
++      | en-US  | copy of cool magic staff    |
++      | fr-FR  | copie de baton magique cool |
++    And product "productCopy" localized "description" for shop "shop3" should be:
++      | locale | value                           |
++      | en-US  | such a cool magic staff         |
++      | fr-FR  | tellement cool ce baton magique |
++    And product "productCopy" localized "description_short" for shop "shop3" should be:
++      | locale | value              |
++      | en-US  | cool magic staff   |
++      | fr-FR  | baton magique cool |
++    And product "productCopy" localized "link_rewrite" for shop "shop3" should be:
++      | locale | value                       |
++      | en-US  | copy-of-cool-magic-staff    |
++      | fr-FR  | copie-de-baton-magique-cool |
++    # Images have been duplicated as well
++    And product "productCopy" should have following images for shops "shop1,shop3":
++      | new image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                                | thumbnail url                                          | shops       |
++      | image1Copy          | true     |               |               | 1        | http://myshop.com/img/p/{image1Copy}.jpg | http://myshop.com/img/p/{image1Copy}-small_default.jpg | shop1,shop3 |
++    And image1 and image1Copy have different values
++    # Duplicate without default shop and check that it is updated
++    When I duplicate product product to a otherProductCopy for shops shop2,shop3
++    Then product otherProductCopy is associated to shops "shop2,shop3"
++    And product otherProductCopy is not associated to shops "shop1,shop4"
++    And default shop for product otherProductCopy is shop2
++    And product "otherProductCopy" should be disabled for shops "shop2,shop3"
++
++  Scenario: I can edit categories for specific shops
++    Given category "home" in default language named "Home" exists
++    And category "home" is the default one
++    And category "men" in default language named "Men" exists
++    And category "clothes" in default language named "Clothes" exists
++    And category "women" in default language named "Women" exists
++    And category "accessories" in default language named "Accessories" exists
++    And I edit home category "home" with following details:
++      | associated shops | shop1,shop2,shop3,shop4 |
++    And I edit category "clothes" with following details:
++      | associated shops | shop1,shop2,shop3,shop4 |
++    And I edit category "accessories" with following details:
++      | associated shops | shop1,shop2,shop3,shop4 |
++    # Men is only associated in shop1
++    And I edit category "men" with following details:
++      | associated shops | shop1 |
++    # Women is only associated in shop2 and is the default category
++    And I edit category "women" with following details:
++      | associated shops | shop2 |
++    And I set "women" as default category for shop shop2
++    Given product "product" should be assigned to following categories for shops "shop1,shop2,shop3,shop4":
++      | id reference | name | is default |
++      | home         | Home | true       |
++    # Now we assign categories for specific shops
++    When I assign product product to following categories for shops shop1,shop3:
++      | categories       | [home, men, clothes] |
++      | default category | men                  |
++    # Category association is shared for all shops, the only thing that may vary is if the category is in the shop, the position and the default category
++    # Shop1 has the new update categories
++    Then product "product" should be assigned to following categories for shop shop1:
++      | id reference | name    | is default |
++      | home         | Home    | false      |
++      | men          | Men     | true       |
++      | clothes      | Clothes | false      |
++    # The other shops have a new category clothes but keeps home as default, they don't have men because it is only on shop1
++    And product "product" should be assigned to following categories for shops "shop2,shop3,shop4":
++      | id reference | name    | is default |
++      | home         | Home    | true       |
++      | clothes      | Clothes | false      |
++
++  Scenario: I can edit customization fields for specific shops
++      # New customization field creation is shared to all shops by default even if only one is selected
++    When I update product product with following customization fields for shop shop1:
++      | reference    | type | name[en-US] | name[fr-FR]    | is required |
++      | customField1 | text | front-text  | texte-devant   | true        |
++      | customField2 | text | back-text   | texte-derriere | false       |
++    Then product product should have 2 customizable text field for shops "shop1,shop2,shop3,shop4"
++    And product product should have 0 customizable file field for shops "shop1,shop2,shop3,shop4"
++    And product product should have following customization fields for shops "shop1,shop2,shop3,shop4":
++      | reference    | type | name[en-US] | name[fr-FR]    | is required |
++      | customField1 | text | front-text  | texte-devant   | true        |
++      | customField2 | text | back-text   | texte-derriere | false       |
++    # New customization field will have same wording for all shops, only selected shops have their wordings updated
++    When I update product product with following customization fields for shops shop2,shop3:
++      | reference    | type | name[en-US] | name[fr-FR]     | is required |
++      | customField1 | text | front-text2 | texte-devant2   | false       |
++      | customField2 | text | back-text2  | texte-derriere2 | false       |
++      | customField3 | file | back image  | image derriere  | false       |
++    And product product should have 2 customizable text field for shops "shop1,shop2,shop3,shop4"
++    And product product should have 1 customizable file field for shops "shop1,shop2,shop3,shop4"
++    And product product should have following customization fields for shops "shop2,shop3":
++      | reference    | type | name[en-US] | name[fr-FR]     | is required |
++      | customField1 | text | front-text2 | texte-devant2   | false       |
++      | customField2 | text | back-text2  | texte-derriere2 | false       |
++      | customField3 | file | back image  | image derriere  | false       |
++    And product product should have following customization fields for shops "shop1,shop4":
++      | reference    | type | name[en-US] | name[fr-FR]    | is required |
++      | customField1 | text | front-text  | texte-devant   | false       |
++      | customField2 | text | back-text   | texte-derriere | false       |
++      | customField3 | file | back image  | image derriere | false       |
++    # Remove all removes for all shops
++    When I remove all customization fields from product product
++    Then product "product" should not be customizable for shops "shop1,shop2,shop3,shop4"
++    Then product product should have 0 customizable text fields for shops "shop1,shop2,shop3,shop4"
++    And product product should have 0 customizable file fields for shops "shop1,shop2,shop3,shop4"
++
++  Scenario: Delete one product for specific shops
++    When I delete product "product" from shops "shop1,shop3"
++    Then product product is associated to shops "shop2,shop4"
++    And product product is not associated to shops "shop1,shop3"
++    When I delete product "product" from shops "shop2,shop4"
++    And product product should not exist anymore
++
++  Scenario: Bulk delete for specific shops
++    Given I add product "product2" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product2 is shop1
++    And I set following shops for product "product2":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product2 is associated to shops "shop1,shop2,shop3,shop4"
++    And I add product "product3" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product3 is shop1
++    And I set following shops for product "product3":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product3 is associated to shops "shop1,shop2,shop3,shop4"
++    # Now start bulk deleting
++    When I bulk delete following products from shops "shop1,shop3":
++      | reference |
++      | product   |
++      | product3  |
++    Then product product is associated to shops "shop2,shop4"
++    And product product is not associated to shops "shop1,shop3"
++    And product product2 is associated to shops "shop1,shop2,shop3,shop4"
++    And product product3 is associated to shops "shop2,shop4"
++    And product product3 is not associated to shops "shop1,shop3"
++    When I bulk delete following products from shops "shop2,shop4":
++      | reference |
++      | product2  |
++      | product3  |
++    Then product product is associated to shops "shop2,shop4"
++    And product product is not associated to shops "shop1,shop3"
++    And product product2 is associated to shops "shop1,shop3"
++    And product product2 is not associated to shops "shop2,shop4"
++    And product product3 should not exist anymore
++
++  Scenario: I update product statuses for specific shops
++    Given product "product" should be disabled for shops "shop1,shop2,shop3,shop4"
++    And product "product" should not be indexed for shops "shop1,shop2,shop3,shop4"
++    Given I add product "product2" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product2 is shop1
++    And I set following shops for product "product2":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product2 is associated to shops "shop1,shop2,shop3,shop4"
++    Given product "product2" should be disabled for shops "shop1,shop2,shop3,shop4"
++    And product "product2" should not be indexed for shops "shop1,shop2,shop3,shop4"
++    And I add product "product3" to shop "shop1" with following information:
++      | name[en-US] | magic staff |
++      | type        | standard    |
++    And default shop for product product3 is shop1
++    And I set following shops for product "product3":
++      | source shop | shop1                   |
++      | shops       | shop1,shop2,shop3,shop4 |
++    Then product product3 is associated to shops "shop1,shop2,shop3,shop4"
++    Given product "product3" should be disabled for shops "shop1,shop2,shop3,shop4"
++    And product "product3" should not be indexed for shops "shop1,shop2,shop3,shop4"
++    # Now update status and check indexes
++    When I bulk change status to be enabled for following products for shops "shop2,shop4":
++      | reference |
++      | product   |
++      | product3  |
++    Then product "product" should be enabled for shops "shop2,shop4"
++    And product "product" should be indexed for shops "shop2,shop4"
++    And product "product" should be disabled for shops "shop1,shop3"
++    And product "product" should not be indexed for shops "shop1,shop3"
++    And product "product2" should be disabled for shops "shop1,shop2,shop3,shop4"
++    And product "product2" should not be indexed for shops "shop1,shop2,shop3,shop4"
++    Then product "product3" should be enabled for shops "shop2,shop4"
++    And product "product3" should be indexed for shops "shop2,shop4"
++    And product "product3" should be disabled for shops "shop1,shop3"
++    And product "product3" should not be indexed for shops "shop1,shop3"
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/shop_management.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/shop_management.feature
+index 78d80bfe5fba8..1eec6cb7dab3d 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/shop_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/shop_management.feature
+@@ -481,7 +481,7 @@ Feature: Copy product from shop to shop.
+       | product1LBlue  | Size - L, Color - Blue  |           | [Size:L,Color:Blue]  | 0               | 0        | false      |
+     And product "product1" is associated to shop shop2
+     And combinations "product1LWhite,product1LBlack,product1LBlue" are associated to shop "shop2"
+-    When I delete product "product1" from shops "shop2"
++    When I delete product "product1" from shop "shop2"
+     Then product "product1" should have the following combinations for shops "shop1":
+       | id reference   | combination name        | reference | attributes           | impact on price | quantity | is default |
+       | product1LWhite | Size - L, Color - White |           | [Size:L,Color:White] | 0               | 0        | true       |
+@@ -507,7 +507,7 @@ Feature: Copy product from shop to shop.
+     Then product "product1" should have following images for shops "shop1, shop2":
+       | image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                            | thumbnail url                                      | shops        |
+       | image1          | true     |               |               | 1        | http://myshop.com/img/p/{image1}.jpg | http://myshop.com/img/p/{image1}-small_default.jpg | shop1, shop2 |
+-    When I delete product "product1" from shops "shop2"
++    When I delete product "product1" from shop "shop2"
+     Then product "product1" is not associated to shop "shop2"
+     And product "product1" should have following images for shops "shop1":
+       | image reference | is cover | legend[en-US] | legend[fr-FR] | position | image url                            | thumbnail url                                      | shops |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/update_pack_multishop.feature b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/update_pack_multishop.feature
+index 9b4bb76fc989a..8c039a229f76d 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/Shop/update_pack_multishop.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/Shop/update_pack_multishop.feature
+@@ -254,7 +254,7 @@ Feature: Add product to pack from Back Office (BO)
+       | productSkirt1 | regular skirt: Size - M, Color - White | productSkirt1MWhite | 11       | http://myshop.com/img/p/{skirtWhiteM}.jpg              | Ref: productSkirtRef       |
+       | productSkirt1 | regular skirt: Size - M, Color - Black | productSkirt1MBlack | 12       | http://myshop.com/img/p/{skirtBlackM}.jpg              | Ref: productSkirtRef       |
+       | product2      | shady sunglasses                       |                     | 2        | http://myshop.com/img/p/{no_picture}-small_default.jpg | Ref: ref1                  |
+-    When I delete product product2 from shops "shop2"
++    When I delete product product2 from shop "shop2"
+     # Product2 still exist in shop1
+     Then pack productPack4 should contain products with following details for shops shop1,shop2:
+       | product       | name                                   | combination         | quantity | image url                                              | reference                  |
+@@ -262,7 +262,7 @@ Feature: Add product to pack from Back Office (BO)
+       | productSkirt1 | regular skirt: Size - M, Color - White | productSkirt1MWhite | 11       | http://myshop.com/img/p/{skirtWhiteM}.jpg              | Ref: productSkirtRef       |
+       | productSkirt1 | regular skirt: Size - M, Color - Black | productSkirt1MBlack | 12       | http://myshop.com/img/p/{skirtBlackM}.jpg              | Ref: productSkirtRef       |
+       | product2      | shady sunglasses                       |                     | 2        | http://myshop.com/img/p/{no_picture}-small_default.jpg | Ref: ref1                  |
+-    When I delete product product2 from shops "shop1"
++    When I delete product product2 from shop "shop1"
+     # Product2 is fully removed
+     Then pack productPack4 should contain products with following details for shops shop1,shop2:
+       | product       | name                                   | combination         | quantity | image url                                 | reference                  |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/bulk_duplicate_product.feature b/tests/Integration/Behaviour/Features/Scenario/Product/bulk_duplicate_product.feature
+index 9ff61fbf78059..a435b269a79c1 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/bulk_duplicate_product.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/bulk_duplicate_product.feature
+@@ -21,9 +21,9 @@ Feature: Duplicate product from Back Office (BO).
+     And language with iso code "en" is the default one
+     And language "language2" with locale "fr-FR" exists
+     And I create carrier "carrier1" with specified properties:
+-      | name        | ecoCarrier |
++      | name | ecoCarrier |
+     And I create carrier "carrier2" with specified properties:
+-      | name        | Fast carry |
++      | name | Fast carry |
+     And I add new supplier supplier1 with the following properties:
+       | name                    | my supplier 1      |
+       | address                 | Donelaicio st. 1   |
+@@ -250,9 +250,9 @@ Feature: Duplicate product from Back Office (BO).
+       | en-US  | Its so smart |
+       | fr-FR  | lel joke     |
+     And product "copy_of_product1" localized "link_rewrite" should be:
+-      | locale | value              |
+-      | en-US  | smart-sunglasses   |
+-      | fr-FR  | lunettes-de-soleil |
++      | locale | value                       |
++      | en-US  | copy-of-smart-sunglasses    |
++      | fr-FR  | copie-de-lunettes-de-soleil |
+     And product copy_of_product1 should have following seo options:
+       | redirect_type   | 301-product |
+       | redirect_target | product2    |
+@@ -341,9 +341,9 @@ Feature: Duplicate product from Back Office (BO).
+       | en-US  | You can read now           |
+       | fr-FR  | You can read in french now |
+     And product "copy_of_product2" localized "link_rewrite" should be:
+-      | locale | value               |
+-      | en-US  | reading-glasses     |
+-      | fr-FR  | lunettes-de-lecture |
++      | locale | value                        |
++      | en-US  | copy-of-reading-glasses      |
++      | fr-FR  | copie-de-lunettes-de-lecture |
+     And product copy_of_product2 should have following seo options:
+       | redirect_type   | 301-product |
+       | redirect_target | product1    |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+index 48f93f9ea0380..efee0f4da3140 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+@@ -15,9 +15,9 @@ Feature: Duplicate product from Back Office (BO).
+     And language with iso code "en" is the default one
+     And language "language2" with locale "fr-FR" exists
+     And I create carrier "carrier1" with specified properties:
+-      | name        | ecoCarrier |
++      | name | ecoCarrier |
+     And I create carrier "carrier2" with specified properties:
+-      | name        | Fast carry |
++      | name | Fast carry |
+     And attribute group "Color" named "Color" in en language exists
+     And attribute "Red" named "Red" in en language exists
+     And attribute "Blue" named "Blue" in en language exists
+@@ -125,9 +125,9 @@ Feature: Duplicate product from Back Office (BO).
+       | en-US  | Its so smart |
+       | fr-FR  | lel joke     |
+     And product "productWithFieldsCopy" localized "link_rewrite" should be:
+-      | locale | value              |
+-      | en-US  | smart-sunglasses   |
+-      | fr-FR  | lunettes-de-soleil |
++      | locale | value                       |
++      | en-US  | copy-of-smart-sunglasses    |
++      | fr-FR  | copie-de-lunettes-de-soleil |
+     And product productWithFieldsCopy should have following seo options:
+       | redirect_type   | 301-product           |
+       | redirect_target | productForRedirection |
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/API/Context/ShopContextListenerTest.php b/tests/Unit/PrestaShopBundle/EventListener/API/Context/ShopContextListenerTest.php
+index 9ebab2c79e81a..c51a3388bf54f 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/API/Context/ShopContextListenerTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/API/Context/ShopContextListenerTest.php
+@@ -31,6 +31,7 @@
+ use PHPUnit\Framework\MockObject\MockObject;
+ use PrestaShop\PrestaShop\Adapter\Feature\MultistoreFeature;
+ use PrestaShop\PrestaShop\Core\Context\ShopContextBuilder;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopCollection;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use PrestaShopBundle\Controller\Api\OAuth2\AccessTokenController;
+ use PrestaShopBundle\EventListener\API\Context\ShopContextListener;
+@@ -42,6 +43,7 @@ class ShopContextListenerTest extends ContextEventListenerTestCase
+ {
+     private const DEFAULT_SHOP_ID = 42;
+     private const QUERY_SHOP_ID = 51;
++    private const QUERY_SECOND_SHOP_ID = 99;
+     private const QUERY_SHOP_GROUP_ID = 69;
+ 
+     public function testShopContextWhenMultishopDisabled(): void
+@@ -168,6 +170,42 @@ public function getMultishopRequests(): iterable
+             ShopConstraint::allShops(),
+             self::DEFAULT_SHOP_ID,
+         ];
++
++        yield 'shop collection query parameter string list' => [
++            new Request(['shopIds' => self::QUERY_SHOP_ID . ',' . self::QUERY_SECOND_SHOP_ID]),
++            ShopCollection::shops([self::QUERY_SHOP_ID, self::QUERY_SECOND_SHOP_ID]),
++            self::QUERY_SHOP_ID,
++        ];
++
++        yield 'shop collection request parameter string list' => [
++            new Request([], ['shopIds' => self::QUERY_SECOND_SHOP_ID . ',' . self::QUERY_SHOP_ID]),
++            ShopCollection::shops([self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]),
++            self::QUERY_SECOND_SHOP_ID,
++        ];
++
++        yield 'shop collection attribute parameter string list' => [
++            new Request([], [], ['shopIds' => self::QUERY_SECOND_SHOP_ID . ', ' . self::QUERY_SHOP_ID]),
++            ShopCollection::shops([self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]),
++            self::QUERY_SECOND_SHOP_ID,
++        ];
++
++        yield 'shop collection query parameter array' => [
++            new Request(['shopIds' => [self::QUERY_SHOP_ID, self::QUERY_SECOND_SHOP_ID]]),
++            ShopCollection::shops([self::QUERY_SHOP_ID, self::QUERY_SECOND_SHOP_ID]),
++            self::QUERY_SHOP_ID,
++        ];
++
++        yield 'shop collection request parameter array' => [
++            new Request([], ['shopIds' => [self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]]),
++            ShopCollection::shops([self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]),
++            self::QUERY_SECOND_SHOP_ID,
++        ];
++
++        yield 'shop collection attribute parameter array' => [
++            new Request([], [], ['shopIds' => [self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]]),
++            ShopCollection::shops([self::QUERY_SECOND_SHOP_ID, self::QUERY_SHOP_ID]),
++            self::QUERY_SECOND_SHOP_ID,
++        ];
+     }
+ 
+     public function testMissingRequestParametersWhenMultishopIsEnabled(): void

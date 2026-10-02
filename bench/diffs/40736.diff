@@ -1,0 +1,85 @@
+diff --git a/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php b/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
+index 26603b83a5be3..7f70c599518e1 100644
+--- a/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
++++ b/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
+@@ -27,6 +27,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\ChoiceProvider;
+ 
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceAttributeProviderInterface;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
+ use PrestaShopBundle\Entity\Repository\AttributeGroupRepository;
+@@ -53,13 +55,13 @@ final class AttributeGroupChoiceProvider implements FormChoiceProviderInterface,
+ 
+     /**
+      * @param AttributeGroupRepository $attributeGroupRepository
+-     * @param int $langId
+-     * @param int $shopId
++     * @param LanguageContext $languageContext
++     * @param ShopContext $shopContext
+      */
+     public function __construct(
+         private readonly AttributeGroupRepository $attributeGroupRepository,
+-        private readonly int $langId,
+-        private readonly int $shopId,
++        private readonly LanguageContext $languageContext,
++        private ShopContext $shopContext,
+     ) {
+     }
+ 
+@@ -96,7 +98,10 @@ private function setAttributeGroups(): void
+     {
+         if (null === $this->attributeGroupsChoicesAttributes || null === $this->attributeGroupsChoices) {
+             if (null === $this->attributeGroups) {
+-                $this->attributeGroups = $this->attributeGroupRepository->findByLangAndShop($this->langId, $this->shopId);
++                $this->attributeGroups = $this->attributeGroupRepository->findByLangForShops(
++                    $this->languageContext->getId(),
++                    $this->shopContext->getAssociatedShopIds()
++                );
+             }
+ 
+             $this->attributeGroupsChoices = [];
+diff --git a/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php b/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
+index 7c631edb1da62..c53a198a055e8 100644
+--- a/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
+@@ -57,4 +57,27 @@ public function findByLangAndShop(int $idLang, int $idShop): array
+                 'idLang' => $idLang,
+             ])->getQuery()->getResult();
+     }
++
++    /**
++     * Finds attribute groups by language and shops.
++     *
++     * @param int $idLang Language ID
++     * @param int[] $idShops Shop IDs
++     *
++     * @return \PrestaShopBundle\Entity\AttributeGroup[]
++     */
++    public function findByLangForShops(int $idLang, array $idShops): array
++    {
++        return $this->createQueryBuilder('ag')
++            ->addSelect('agl')
++            ->join('ag.shops', 'ags')
++            ->join('ag.attributeGroupLangs', 'agl')
++            ->andWhere('agl.lang = :idLang')
++            ->andWhere('ags.id IN (:idShops)')
++            ->orderBy('ag.position', 'ASC')
++            ->setParameters([
++                'idLang' => $idLang,
++                'idShops' => $idShops,
++            ])->getQuery()->getResult();
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+index bd549905b1646..eb9cc8073f533 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+@@ -141,5 +141,3 @@ services:
+ 
+   PrestaShop\PrestaShop\Core\Form\ChoiceProvider\AttributeGroupChoiceProvider:
+     autowire: true
+-    arguments:
+-      $shopId: '@=service("prestashop.adapter.shop.context").getContextShopID()'

@@ -1,0 +1,656 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/feature/feature-value/index.ts b/admin-dev/themes/new-theme/js/pages/feature/feature-value/index.ts
+index 9d2293c35605b..a5cec49aa7fe3 100644
+--- a/admin-dev/themes/new-theme/js/pages/feature/feature-value/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/feature/feature-value/index.ts
+@@ -35,4 +35,5 @@ $(() => {
+   grid.addExtension(new window.prestashop.component.GridExtensions.SubmitBulkActionExtension());
+   grid.addExtension(new window.prestashop.component.GridExtensions.LinkRowActionExtension());
+   grid.addExtension(new window.prestashop.component.GridExtensions.BulkActionCheckboxExtension());
++  grid.addExtension(new window.prestashop.component.GridExtensions.PositionExtension(grid));
+ });
+diff --git a/classes/FeatureValue.php b/classes/FeatureValue.php
+index 85ef0ddb080d4..e5f208887e43d 100644
+--- a/classes/FeatureValue.php
++++ b/classes/FeatureValue.php
+@@ -40,6 +40,9 @@ class FeatureValueCore extends ObjectModel
+     /** @var bool Custom */
+     public $custom = false;
+ 
++    /** @var int Position */
++    public $position;
++
+     /**
+      * @see ObjectModel::$definition
+      */
+@@ -50,6 +53,7 @@ class FeatureValueCore extends ObjectModel
+         'fields' => [
+             'id_feature' => ['type' => self::TYPE_INT, 'validate' => 'isUnsignedId', 'required' => true],
+             'custom' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
++            'position' => ['type' => self::TYPE_INT, 'validate' => 'isInt'],
+ 
+             /* Lang fields */
+             'value' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'isGenericName', 'required' => true, 'size' => FeatureValueSettings::VALUE_MAX_LENGTH],
+@@ -209,6 +213,10 @@ public static function addFeatureValueImport($idFeature, $value, $idProduct = nu
+      */
+     public function add($autoDate = true, $nullValues = false)
+     {
++        if ($this->position <= 0) {
++            $this->position = static::getHighestPosition($this->id_feature) + 1;
++        }
++
+         $return = parent::add($autoDate, $nullValues);
+         if ($return) {
+             Hook::exec('actionFeatureValueSave', ['id_feature_value' => $this->id]);
+@@ -252,6 +260,10 @@ public function delete()
+ 			DELETE FROM `' . _DB_PREFIX_ . 'feature_product`
+ 			WHERE `id_feature_value` = ' . (int) $this->id
+         );
++
++        /* Reinitializing position */
++        $this->cleanPositions((int) $this->id_feature);
++
+         $return = parent::delete();
+ 
+         if ($return) {
+@@ -260,4 +272,45 @@ public function delete()
+ 
+         return $return;
+     }
++
++    /**
++     * Get the highest feature value position of given feature.
++     *
++     * @param int $idFeature
++     *
++     * @return int
++     */
++    public static function getHighestPosition($idFeature)
++    {
++        $sql = 'SELECT MAX(`position`)
++                FROM `' . _DB_PREFIX_ . 'feature_value`
++                WHERE `id_feature` = ' . (int) $idFeature;
++
++        $position = Db::getInstance()->getValue($sql);
++
++        return is_numeric($position) ? $position : -1;
++    }
++
++    /**
++     * Reorder feature values within single feature.
++     * Use it after deleting a feature value.
++     *
++     * @param int $idFeature
++     * @param bool $includeCurrentFeatureValue
++     *
++     * @return bool Whether the result was successfully updated
++     */
++    public function cleanPositions($idFeature, $includeCurrentFeatureValue = false)
++    {
++        Db::getInstance()->execute('SET @i = -1', false);
++        $sql = 'UPDATE `' . _DB_PREFIX_ . 'feature_value` SET `position` = @i:=@i+1 WHERE';
++
++        if (!$includeCurrentFeatureValue) {
++            $sql .= ' `id_feature_value` != ' . (int) $this->id . ' AND';
++        }
++
++        $sql .= ' `id_feature` = ' . (int) $idFeature . ' ORDER BY `position` ASC';
++
++        return Db::getInstance()->execute($sql);
++    }
+ }
+diff --git a/classes/Product.php b/classes/Product.php
+index 22c39cabdf5ac..707dc862273d3 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -5712,16 +5712,23 @@ public static function getFrontFeaturesStatic($id_lang, $id_product)
+             return [];
+         }
+         if (!array_key_exists($id_product . '-' . $id_lang, self::$_frontFeaturesCache)) {
++            if (Configuration::get('PS_FEATURE_VALUES_ORDER') === 'name') {
++                $secondaryOrder = 'fvl.value';
++            } else {
++                $secondaryOrder = 'fv.position';
++            }
++
+             self::$_frontFeaturesCache[$id_product . '-' . $id_lang] = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS(
+                 '
+                 SELECT name, value, pf.id_feature, f.position, fvl.id_feature_value
+                 FROM ' . _DB_PREFIX_ . 'feature_product pf
+                 LEFT JOIN ' . _DB_PREFIX_ . 'feature_lang fl ON (fl.id_feature = pf.id_feature AND fl.id_lang = ' . (int) $id_lang . ')
++                LEFT JOIN ' . _DB_PREFIX_ . 'feature_value fv ON (fv.id_feature_value = pf.id_feature_value)
+                 LEFT JOIN ' . _DB_PREFIX_ . 'feature_value_lang fvl ON (fvl.id_feature_value = pf.id_feature_value AND fvl.id_lang = ' . (int) $id_lang . ')
+                 LEFT JOIN ' . _DB_PREFIX_ . 'feature f ON (f.id_feature = pf.id_feature AND fl.id_lang = ' . (int) $id_lang . ')
+                 ' . Shop::addSqlAssociation('feature', 'f') . '
+                 WHERE pf.id_product = ' . (int) $id_product . '
+-                ORDER BY f.position ASC'
++                ORDER BY f.position ASC, ' . $secondaryOrder . ' ASC'
+             );
+         }
+ 
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 821e6617ad91a..bfa7d685519bd 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -871,6 +871,7 @@ CREATE TABLE `PREFIX_feature_value` (
+   `id_feature_value` int(10) unsigned NOT NULL auto_increment,
+   `id_feature` int(10) unsigned NOT NULL,
+   `custom` tinyint(3) unsigned DEFAULT NULL,
++  `position` int(10) unsigned NOT NULL DEFAULT '0',
+   PRIMARY KEY (`id_feature_value`),
+   KEY `feature` (`id_feature`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 1d90879663d28..7fa02357a48ad 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -912,5 +912,8 @@ Country</value>
+     <configuration id="PS_SEPARATOR_FILE_MANAGER_SQL" name="PS_SEPARATOR_FILE_MANAGER_SQL">
+       <value>;</value>
+     </configuration>
++    <configuration id="PS_FEATURE_VALUES_ORDER" name="PS_FEATURE_VALUES_ORDER">
++      <value>name</value>
++    </configuration>
+   </entities>
+ </entity_configuration>
+diff --git a/src/Adapter/Presenter/Product/ProductLazyArray.php b/src/Adapter/Presenter/Product/ProductLazyArray.php
+index 62f3290e643ef..8609212912234 100644
+--- a/src/Adapter/Presenter/Product/ProductLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductLazyArray.php
+@@ -1361,7 +1361,6 @@ protected function buildGroupedFeatures(array $productFeatures)
+         // replace value from features that have multiple values with the ones we aggregated earlier
+         foreach ($valuesByFeatureName as $featureName => $values) {
+             if (count($values) > 1) {
+-                sort($values, SORT_NATURAL);
+                 $groupedFeatures[$featureName]['value'] = implode("\n", $values);
+             }
+         }
+diff --git a/src/Adapter/Product/PageConfiguration.php b/src/Adapter/Product/PageConfiguration.php
+index 729f1eb68bfa2..b4e8e5b02f2d7 100644
+--- a/src/Adapter/Product/PageConfiguration.php
++++ b/src/Adapter/Product/PageConfiguration.php
+@@ -57,6 +57,7 @@ public function getConfiguration()
+             'attribute_anchor_separator' => $this->configuration->get('PS_ATTRIBUTE_ANCHOR_SEPARATOR'),
+             'display_discount_price' => $this->configuration->getBoolean('PS_DISPLAY_DISCOUNT_PRICE'),
+             'display_amount_in_cart' => $this->configuration->getBoolean('PS_DISPLAY_AMOUNT_IN_CART'),
++            'feature_values_order' => $this->configuration->get('PS_FEATURE_VALUES_ORDER'),
+         ];
+     }
+ 
+@@ -74,6 +75,7 @@ public function updateConfiguration(array $config)
+             $this->configuration->set('PS_ATTRIBUTE_ANCHOR_SEPARATOR', $config['attribute_anchor_separator']);
+             $this->configuration->set('PS_DISPLAY_DISCOUNT_PRICE', (int) $config['display_discount_price']);
+             $this->configuration->set('PS_DISPLAY_AMOUNT_IN_CART', (int) $config['display_amount_in_cart']);
++            $this->configuration->set('PS_FEATURE_VALUES_ORDER', $config['feature_values_order']);
+         }
+ 
+         return $errors;
+@@ -92,6 +94,7 @@ public function validateConfiguration(array $config)
+             'attribute_anchor_separator',
+             'display_discount_price',
+             'display_amount_in_cart',
++            'feature_values_order',
+         ]);
+ 
+         $resolver->resolve($config);
+diff --git a/src/Core/Grid/Definition/Factory/FeatureValueGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/FeatureValueGridDefinitionFactory.php
+index 8cb838287a6a9..b276498e7f99f 100644
+--- a/src/Core/Grid/Definition/Factory/FeatureValueGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/FeatureValueGridDefinitionFactory.php
+@@ -38,12 +38,14 @@
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\BulkActionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\DataColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\PositionColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Definition\GridDefinition;
+ use PrestaShop\PrestaShop\Core\Grid\Definition\GridDefinitionInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Factory\FeatureValueGridFactory;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollectionInterface;
++use PrestaShopBundle\Form\Admin\Type\ReorderPositionsButtonType;
+ use Symfony\Component\Form\Extension\Core\Type\NumberType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\HttpFoundation\Request;
+@@ -110,6 +112,18 @@ protected function getColumns(): ColumnCollectionInterface
+                     'field' => 'value',
+                 ])
+             )
++            ->add((new PositionColumn('position'))
++                ->setName($this->trans('Position', [], 'Admin.Global'))
++                ->setOptions([
++                    'id_field' => 'id_feature_value',
++                    'position_field' => 'position',
++                    'update_method' => 'POST',
++                    'update_route' => 'admin_feature_values_update_position',
++                    'record_route_params' => [
++                        'id_feature' => 'featureId',
++                    ],
++                ])
++            )
+             ->add((new ActionColumn('actions'))
+                 ->setName($this->trans('Actions', [], 'Admin.Global'))
+                 ->setOptions([
+@@ -175,6 +189,9 @@ protected function getFilters(): FilterCollectionInterface
+                     ],
+                 ])
+                 ->setAssociatedColumn('value')
++            )
++            ->add((new Filter('position', ReorderPositionsButtonType::class))
++                ->setAssociatedColumn('position')
+             );
+     }
+ 
+diff --git a/src/Core/Grid/Presenter/GridPresenter.php b/src/Core/Grid/Presenter/GridPresenter.php
+index 81095b14500ba..d08411a166c4a 100644
+--- a/src/Core/Grid/Presenter/GridPresenter.php
++++ b/src/Core/Grid/Presenter/GridPresenter.php
+@@ -129,7 +129,10 @@ protected function getColumns(GridInterface $grid)
+                     'id' => $positionColumn->getId() . '_handle',
+                     'name' => $positionColumn->getName(),
+                     'type' => 'position_handle',
+-                    'options' => $positionColumn->getOptions(),
++                    'options' => [
++                        // We force the handle not to be clickable, or it would mess with the drag and drop behavior
++                        'clickable' => false,
++                    ] + $positionColumn->getOptions(),
+                 ]);
+             }
+         }
+diff --git a/src/Core/Grid/Query/FeatureQueryBuilder.php b/src/Core/Grid/Query/FeatureQueryBuilder.php
+index 7b1f3cef4bce4..bdc786b033f29 100644
+--- a/src/Core/Grid/Query/FeatureQueryBuilder.php
++++ b/src/Core/Grid/Query/FeatureQueryBuilder.php
+@@ -157,7 +157,7 @@ private function getQueryBuilder(SearchCriteriaInterface $searchCriteria): Query
+             }
+ 
+             if ('position' === $filterName) {
+-                $qb->andWhere('position LIKE :' . $filterName)
++                $qb->andWhere('f.position LIKE :' . $filterName)
+                     // position value starts from 0 in database, but in list view they are incremented by +1,
+                     // so if it is a position filter, then we decrement the value to return expected results
+                     ->setParameter($filterName, '%' . ((int) $value - 1) . '%');
+diff --git a/src/Core/Grid/Query/FeatureValueQueryBuilder.php b/src/Core/Grid/Query/FeatureValueQueryBuilder.php
+index aaa18a9fcb3dd..54cd6e5a1f33d 100644
+--- a/src/Core/Grid/Query/FeatureValueQueryBuilder.php
++++ b/src/Core/Grid/Query/FeatureValueQueryBuilder.php
+@@ -48,7 +48,7 @@ public function __construct(
+     public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
+     {
+         $qb = $this->getQueryBuilder($searchCriteria)
+-            ->select('fv.id_feature, fv.id_feature_value, fvl.value')
++            ->select('fv.id_feature, fv.id_feature_value, fvl.value, fv.position')
+             ->groupBy('fv.id_feature_value')
+         ;
+ 
+@@ -84,7 +84,7 @@ private function getQueryBuilder(SearchCriteriaInterface $searchCriteria): Query
+         }
+ 
+         $filters = $searchCriteria->getFilters();
+-        $allowedFilters = ['id_feature_value', 'value'];
++        $allowedFilters = ['id_feature_value', 'value', 'position'];
+ 
+         $qb = $this->connection
+             ->createQueryBuilder()
+@@ -111,6 +111,19 @@ private function getQueryBuilder(SearchCriteriaInterface $searchCriteria): Query
+                 continue;
+             }
+ 
++            if ('position' === $filterName) {
++                // Position in DB is 0-based, but in UI it is 1-based,
++                // so we need to decrement the value
++                if (is_numeric($value)) {
++                    --$value;
++                } else {
++                    $value = null;
++                }
++                $qb->andWhere('fv.`position` = :' . $filterName)
++                    ->setParameter($filterName, $value);
++                continue;
++            }
++
+             $qb->andWhere('fv.`' . $filterName . '` = :' . $filterName)
+                 ->setParameter($filterName, $value);
+         }
+diff --git a/src/Core/Search/Filters/FeatureValueFilters.php b/src/Core/Search/Filters/FeatureValueFilters.php
+index 84a9986d62297..d90eaeb6654bb 100644
+--- a/src/Core/Search/Filters/FeatureValueFilters.php
++++ b/src/Core/Search/Filters/FeatureValueFilters.php
+@@ -79,7 +79,7 @@ public static function getDefaults(): array
+         return [
+             'limit' => self::LIST_LIMIT,
+             'offset' => 0,
+-            'orderBy' => 'value',
++            'orderBy' => 'position',
+             'sortOrder' => 'asc',
+             'filters' => [],
+         ];
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/FeatureValueController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/FeatureValueController.php
+index 74b134d7060f5..88f8946b44fe3 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/FeatureValueController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/FeatureValueController.php
+@@ -42,6 +42,8 @@
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Factory\FeatureValueGridFactory;
+ use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
++use PrestaShop\PrestaShop\Core\Grid\Position\Exception\PositionUpdateException;
++use PrestaShop\PrestaShop\Core\Grid\Position\PositionDefinition;
+ use PrestaShop\PrestaShop\Core\Search\Filters\FeatureValueFilters;
+ use PrestaShopBundle\Component\CsvResponse;
+ use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+@@ -322,6 +324,36 @@ public function getFeatureValuesAction(
+         return new JsonResponse($data);
+     }
+ 
++    /**
++     * Changes feature value position
++     *
++     * @param Request $request
++     *
++     * @return Response
++     */
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))")]
++    public function updatePositionAction(
++        int $featureId,
++        Request $request,
++        #[Autowire(service: 'prestashop.core.grid.feature_value.position_definition')]
++        PositionDefinition $positionDefinition,
++    ): Response {
++        try {
++            $this->updateGridPosition($positionDefinition, [
++                'positions' => $request->request->all('positions'),
++                'parentId' => $featureId,
++            ]);
++            $this->addFlash('success', $this->trans('Successful update', [], 'Admin.Notifications.Success'));
++        } catch (PositionUpdateException $e) {
++            $errors = [$e->toArray()];
++            $this->addFlashErrors($errors);
++        }
++
++        return $this->redirectToRoute('admin_feature_values_index', [
++            'featureId' => $featureId,
++        ]);
++    }
++
+     /**
+      * @return array<string, string|array<int, string>>
+      */
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PageType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PageType.php
+index 037e9d8b4e1ee..201b67733ef38 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PageType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PageType.php
+@@ -114,6 +114,23 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Help'
+                 ),
+                 'required' => false,
++            ])
++            ->add('feature_values_order', ChoiceType::class, [
++                'label' => $this->trans(
++                    'Order of feature values',
++                    'Admin.Shopparameters.Feature'
++                ),
++                'help' => $this->trans(
++                    'In the product page, feature values can be sorted alphabetically by value or by position.',
++                    'Admin.Shopparameters.Help'
++                ),
++                'choices' => [
++                    'Alphabetical' => 'name',
++                    'Position' => 'position',
++                ],
++                'choice_translation_domain' => 'Admin.Shopparameters.Feature',
++                'placeholder' => false,
++                'required' => false,
+             ]);
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/features.yml b/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/features.yml
+index bab71cda76cac..ab2d3916a219a 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/features.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/features.yml
+@@ -157,6 +157,16 @@ admin_feature_values_bulk_delete:
+     featureId: \d+
+     featureValueId: \d+
+ 
++admin_feature_values_update_position:
++  path: /{featureId}/values/update-position
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\FeatureValueController::updatePositionAction
++    _legacy_controller: AdminFeatures
++    _legacy_link: AdminFeatures:updateFeatureValuesPositions
++  requirements:
++    featureId: \d+
++
+ admin_feature_get_feature_values:
+   path: /values/{featureId}
+   methods: [ GET ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_position_definition_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_position_definition_factory.yml
+index 9ae1262109e2c..e89b10a70d097 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_position_definition_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_position_definition_factory.yml
+@@ -71,3 +71,11 @@ services:
+       $table: 'feature'
+       $idField: 'id_feature'
+       $positionField: 'position'
++
++  prestashop.core.grid.feature_value.position_definition:
++    class: 'PrestaShop\PrestaShop\Core\Grid\Position\PositionDefinition'
++    arguments:
++      $table: 'feature_value'
++      $idField: 'id_feature_value'
++      $positionField: 'position'
++      $parentIdField: 'id_feature'
+diff --git a/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/02_sortPaginationAndBulkDelete.ts b/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/02_sortPaginationAndBulkDelete.ts
+index 8d6fec16ad8c0..ed153ad5f942a 100644
+--- a/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/02_sortPaginationAndBulkDelete.ts
++++ b/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/02_sortPaginationAndBulkDelete.ts
+@@ -194,6 +194,16 @@ describe('BO - Catalog - Catalog > Attributes & Features : Sort, pagination and
+           testIdentifier: 'sortByIdAsc', sortBy: 'id_feature_value', sortDirection: 'asc', isFloat: true,
+         },
+       },
++      {
++        args: {
++          testIdentifier: 'sortByPositionAsc', sortBy: 'position', sortDirection: 'asc', isFloat: true,
++        },
++      },
++      {
++        args: {
++          testIdentifier: 'sortByPositionDesc', sortBy: 'position', sortDirection: 'desc', isFloat: true,
++        },
++      },
+     ];
+ 
+     sortTests.forEach((test) => {
+diff --git a/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/03_changePosition.ts b/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/03_changePosition.ts
+new file mode 100644
+index 0000000000000..c166001a3ec62
+--- /dev/null
++++ b/tests/UI/campaigns/functional/BO/03_catalog/04_attributesAndFeatures/02_features/values/03_changePosition.ts
+@@ -0,0 +1,123 @@
++// Import utils
++import testContext from '@utils/testContext';
++
++// Import pages
++import featuresPage from '@pages/BO/catalog/features';
++import viewFeaturePage from '@pages/BO/catalog/features/view';
++
++import {expect} from 'chai';
++import {
++  boAttributesPage,
++  boDashboardPage,
++  boLoginPage,
++  type BrowserContext,
++  dataFeatures,
++  type Page,
++  utilsPlaywright,
++} from '@prestashop-core/ui-testing';
++
++const baseContext: string = 'functional_BO_catalog_attributesAndFeatures_features_values_changePosition';
++
++/*
++Scenario:
++- Go to features page
++- View feature
++- Change first value position to 3
++- Reset value position
++ */
++describe('BO - Catalog - Attributes & Features : Change features values position', async () => {
++  let browserContext: BrowserContext;
++  let page: Page;
++
++  // before and after functions
++  before(async function () {
++    browserContext = await utilsPlaywright.createBrowserContext(this.browser);
++    page = await utilsPlaywright.newTab(browserContext);
++  });
++
++  after(async () => {
++    await utilsPlaywright.closeBrowserContext(browserContext);
++  });
++
++  it('should login in BO', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'loginBO', baseContext);
++
++    await boLoginPage.goTo(page, global.BO.URL);
++    await boLoginPage.successLogin(page, global.BO.EMAIL, global.BO.PASSWD);
++
++    const pageTitle = await boDashboardPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boDashboardPage.pageTitle);
++  });
++
++  it('should go to \'Catalog > Attributes & Features\' page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'goToAttributesPage', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.catalogParentLink,
++      boDashboardPage.attributesAndFeaturesLink,
++    );
++
++    const pageTitle = await boAttributesPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boAttributesPage.pageTitle);
++  });
++
++  it('should go to \'Features\' page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'goToFeaturesPage', baseContext);
++
++    await boAttributesPage.goToFeaturesPage(page);
++
++    const pageTitle = await featuresPage.getPageTitle(page);
++    expect(pageTitle).to.contains(featuresPage.pageTitle);
++  });
++
++  it('should view feature', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'viewFeature', baseContext);
++
++    await featuresPage.viewFeature(page, 1);
++
++    const pageTitle = await viewFeaturePage.getPageTitle(page);
++    expect(pageTitle).to.contains(`${dataFeatures.composition.name} • ${global.INSTALL.SHOP_NAME}`);
++  });
++
++  it('should reset all filters and get number of feature values in BO', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'resetFilterFirst', baseContext);
++
++    const numberOfFeaturesValues = await viewFeaturePage.resetAndGetNumberOfLines(page);
++    expect(numberOfFeaturesValues).to.be.above(0);
++  });
++
++  it('should change first value position to 3', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'changeValuePosition', baseContext);
++
++    // Get first row attribute name
++    const firstRowValue = await viewFeaturePage.getTextColumn(page, 1, 'value');
++
++    // Change position and check successful message
++    const textResult = await viewFeaturePage.changePosition(page, 1, 3);
++    expect(textResult, 'Unable to change position').to.contains(viewFeaturePage.successfulUpdateMessage);
++
++    await viewFeaturePage.closeAlertBlock(page);
++
++    // Get third row attribute name and check if is equal the first row attribute name before changing position
++    const thirdRowValue = await viewFeaturePage.getTextColumn(page, 3, 'value');
++    expect(thirdRowValue, 'Changing position was done wrongly').to.equal(firstRowValue);
++  });
++
++  it('should reset third value position to 1', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'resetValuePosition', baseContext);
++
++    // Get third row feature value
++    const thirdRowValue = await viewFeaturePage.getTextColumn(page, 3, 'value');
++
++    // Change position and check successful message
++    const textResult = await viewFeaturePage.changePosition(page, 3, 1);
++    expect(textResult, 'Unable to change position').to.contains(viewFeaturePage.successfulUpdateMessage);
++
++    await viewFeaturePage.closeAlertBlock(page);
++
++    // Get first row feature value and check if is equal the first row feature value before changing position
++    const firstRowValue = await viewFeaturePage.getTextColumn(page, 1, 'value');
++    expect(firstRowValue, 'Changing position was done wrongly').to.equal(thirdRowValue);
++  });
++});
+diff --git a/tests/UI/pages/BO/catalog/features/view.ts b/tests/UI/pages/BO/catalog/features/view.ts
+index c7d18e32b4852..2f44ec258433e 100644
+--- a/tests/UI/pages/BO/catalog/features/view.ts
++++ b/tests/UI/pages/BO/catalog/features/view.ts
+@@ -42,10 +42,14 @@ class ViewFeature extends BOBasePage {
+ 
+   private readonly tableBodyColumn: (row: number) => string;
+ 
++  private readonly tableColumnHandle: (row: number) => string;
++
+   private readonly tableColumnId: (row: number) => string;
+ 
+   private readonly tableColumnValue: (row: number) => string;
+ 
++  private readonly tableColumnPosition: (row: number) => string;
++
+   private readonly tableColumnActions: (row: number) => string;
+ 
+   private readonly tableColumnActionsEditLink: (row: number) => string;
+@@ -115,8 +119,10 @@ class ViewFeature extends BOBasePage {
+     this.tableBodyColumn = (row: number) => `${this.tableBodyRow(row)} td`;
+ 
+     // Columns selectors
+-    this.tableColumnId = (row: number) => `${this.tableBodyColumn(row)}:nth-child(2)`;
+-    this.tableColumnValue = (row: number) => `${this.tableBodyColumn(row)}:nth-child(3)`;
++    this.tableColumnHandle = (row: number) => `${this.tableBodyColumn(row)}.column-position_handle .position-drag-handle`;
++    this.tableColumnId = (row: number) => `${this.tableBodyColumn(row)}.column-id_feature_value`;
++    this.tableColumnValue = (row: number) => `${this.tableBodyColumn(row)}.column-value`;
++    this.tableColumnPosition = (row: number) => `${this.tableBodyColumn(row)}.column-position`;
+ 
+     // Row actions selectors
+     this.tableColumnActions = (row: number) => `${this.tableBodyColumn(row)} .btn-group-action`;
+@@ -255,6 +261,10 @@ class ViewFeature extends BOBasePage {
+         columnSelector = this.tableColumnValue(row);
+         break;
+ 
++      case 'position':
++        columnSelector = this.tableColumnPosition(row);
++        break;
++
+       default:
+         throw new Error(`Column ${columnName} was not found`);
+     }
+@@ -392,6 +402,21 @@ class ViewFeature extends BOBasePage {
+ 
+     return allRowsContentTable;
+   }
++
++  /**
++   * Change position of a feature value
++   *
++   * @param page {Page} Browser tab
++   * @param actualPosition {number} Actual position of the feature value
++   * @param newPosition {number} New position of the feature value
++   *
++   * @return {Promise<string|null>}
++   */
++  async changePosition(page: Page, actualPosition: number, newPosition: number): Promise<string|null> {
++    await this.dragAndDropSlowly(page, this.tableColumnHandle(actualPosition), this.tableBodyRow(newPosition));
++
++    return this.getAlertSuccessBlockParagraphContent(page);
++  }
+ }
+ 
+ export default new ViewFeature();

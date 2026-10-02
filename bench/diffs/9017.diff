@@ -1,0 +1,188 @@
+diff --git a/classes/Tools.php b/classes/Tools.php
+index cf1efac209d13..082269a0a614e 100644
+--- a/classes/Tools.php
++++ b/classes/Tools.php
+@@ -416,19 +416,71 @@ public static function getCurrentUrlProtocolPrefix()
+     }
+ 
+     /**
+-    * Secure an URL referrer
+-    *
+-    * @param string $referrer URL referrer
+-    * @return string secured referrer
+-    */
++     * Returns a safe URL referrer
++     *
++     * @param string $referrer URL referrer
++     * @return string secured referrer
++     */
+     public static function secureReferrer($referrer)
+     {
+-        if (preg_match('/^http[s]?:\/\/'.Tools::getServerName().'(:'._PS_SSL_PORT_.')?\/.*$/Ui', $referrer)) {
++        if (static::urlBelongsToShop($referrer)) {
+             return $referrer;
+         }
+         return __PS_BASE_URI__;
+     }
+ 
++    /**
++     * Indicates if the provided URL belongs to this shop (relative urls count as belonging to the shop)
++     *
++     * @param string $url
++     *
++     * @return bool
++     */
++    public static function urlBelongsToShop($url)
++    {
++        $urlHost = Tools::extractHost($url);
++
++        return (empty($urlHost) || $urlHost === Tools::getServerName());
++    }
++
++    /**
++     * Safely extracts the host part from an URL
++     *
++     * @param string $url
++     *
++     * @return string
++     */
++    public static function extractHost($url)
++    {
++        if (PHP_VERSION_ID >= 50628) {
++            $parsed = parse_url($url);
++            if (!is_array($parsed)) {
++                return $url;
++            }
++            if (empty($parsed['host']) || empty($parsed['scheme'])) {
++                return '';
++            }
++            return $parsed['host'];
++        }
++
++        // big workaround needed
++        // @see: https://bugs.php.net/bug.php?id=73192
++        // @see: https://3v4l.org/nFYJh
++
++        $matches = [];
++        if (!preg_match('/^[\w]+:\/\/(?<authority>[^\/?#$]+)/ui', $url, $matches)) {
++            // relative url
++            return '';
++        }
++        $authority = $matches['authority'];
++
++        if (!preg_match('/(?:(?<user>.+):(?<pass>.+)@)?(?<domain>[\w.-]+)(?::(?<port>\d+))?/ui', $authority, $matches)) {
++            return '';
++        }
++
++        return $matches['domain'];
++    }
++
+     /**
+     * Get a value from $_POST / $_GET
+     * if unavailable, take a default value
+diff --git a/controllers/front/AddressController.php b/controllers/front/AddressController.php
+index 4299a7b38ed04..86d3dd30a136f 100644
+--- a/controllers/front/AddressController.php
++++ b/controllers/front/AddressController.php
+@@ -92,7 +92,7 @@ public function postProcess()
+     public function initContent()
+     {
+         if (!$this->ajax && $this->should_redirect) {
+-            if (($back = Tools::getValue('back')) && Tools::secureReferrer($back)) {
++            if (($back = Tools::getValue('back')) && Tools::urlBelongsToShop($back)) {
+                 $mod = Tools::getValue('mod');
+                 $this->redirectWithNotifications('index.php?controller='.$back.($mod ? '&back='.$mod : ''));
+             } else {
+diff --git a/controllers/front/AuthController.php b/controllers/front/AuthController.php
+index c96d19d2e0110..ca8fcd35b9e9e 100644
+--- a/controllers/front/AuthController.php
++++ b/controllers/front/AuthController.php
+@@ -91,23 +91,21 @@ function ($carry, $item) {
+         if ($should_redirect && !$this->ajax) {
+             $back = urldecode(Tools::getValue('back'));
+ 
+-            if (Tools::secureReferrer($back)) {
++            if (Tools::urlBelongsToShop($back)) {
+                 // Checks to see if "back" is a fully qualified
+                 // URL that is on OUR domain, with the right protocol
+-                $this->redirectWithNotifications($back);
+-            } else {
+-                // Well we're not redirecting to a URL,
+-                // so...
+-                if ($this->authRedirection) {
+-                    // We may need to go there if defined
+-                    $back = $this->authRedirection;
+-                } elseif (!preg_match('/^[\w\-]+$/', $back)) {
+-                    // Otherwise, check that "back" matches a controller name
+-                    // and set a default if not.
+-                    $back = 'my-account';
+-                }
+-                $this->redirectWithNotifications('index.php?controller='.urlencode($back));
++                return $this->redirectWithNotifications($back);
++            }
++
++            // Well we're not redirecting to a URL,
++            // so...
++            if ($this->authRedirection) {
++                // We may need to go there if defined
++                return $this->redirectWithNotifications($this->authRedirection);
+             }
++
++            // go home
++            return $this->redirectWithNotifications(__PS_BASE_URI__);
+         }
+     }
+ }
+diff --git a/tests/Unit/Classes/ToolsCoreTest.php b/tests/Unit/Classes/ToolsCoreTest.php
+index 42dc63c1d13e1..d04a540c5588b 100644
+--- a/tests/Unit/Classes/ToolsCoreTest.php
++++ b/tests/Unit/Classes/ToolsCoreTest.php
+@@ -339,6 +339,48 @@ public function testStrReplaceFirst($search, $replace, $subject, $cur, $expected
+         $this->assertEquals($expected, Tools::StrReplaceFirst($search, $replace, $subject, $cur));
+     }
+ 
++    /**
++     * @param string $url
++     * @param string $expectedDomain
++     *
++     * @dataProvider domainProvider
++     */
++    public function testExtractUrlDomain($url, $expectedDomain)
++    {
++        $this->assertSame($expectedDomain, Tools::extractHost($url));
++    }
++
++    public function domainProvider()
++    {
++        return [
++            ['http://example.com:80#@google.com/', 'example.com'],
++            ['http://example.com:80?@google.com/', 'example.com'],
++            ['http://example.com#@google.com/', 'example.com'],
++            ['http://example.com?@google.com/', 'example.com'],
++            ['https://example.com:80#@google.com/', 'example.com'],
++            ['https://example.com:80?@google.com/', 'example.com'],
++            ['http://example.com:80/', 'example.com'],
++            ['http://example.com/', 'example.com'],
++            ['https://example.com/', 'example.com'],
++            ['http://foo@bar.com:yolo@example.com:80/foo', 'example.com'],
++            ['https://example.com/', 'example.com'],
++            ['ttp://example.com:80#@google.com/', 'example.com'],
++            ['example.com:80#@google.com/', ''],
++            ['example.com:80?@google.com/', ''],
++            ['example.com#@google.com/', ''],
++            ['example.com?@google.com/', ''],
++            ['example.com:80#@google.com/', ''],
++            ['example.com:80?@google.com/', ''],
++            ['example.com:80/', ''],
++            ['example.com/', ''],
++            ['example.com/', ''],
++            ['foo@bar.com:yolo@example.com:80/foo', ''],
++            ['example.com/', ''],
++            ['/blah/bleh', ''],
++            ['/plop.html', ''],
++        ];
++    }
++
+     public function testStrReplaceFirstProvider() {
+         return [
+             ['s', 'f', 'seed', 0, 'feed'],

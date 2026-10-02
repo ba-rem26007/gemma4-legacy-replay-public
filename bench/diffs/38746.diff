@@ -1,0 +1,370 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+index 0d8f933bd859e..09fe3f1c59410 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+@@ -32,4 +32,5 @@ export default {
+   reductionTypeSelect: '#discount_value_reduction_type',
+   reductionValueSymbol: `${discountContainer} .price-reduction-value .input-group .input-group-append .input-group-text,
+    .price-reduction-value .input-group .input-group-prepend .input-group-text`,
++  freeGiftProductSearchContainer: '#discount_free_gift',
+ };
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/create-free-gift-discount.ts b/admin-dev/themes/new-theme/js/pages/discount/form/create-free-gift-discount.ts
+new file mode 100644
+index 0000000000000..c3193d7a908b9
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/create-free-gift-discount.ts
+@@ -0,0 +1,54 @@
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++*/
++
++import {EventEmitter} from 'events';
++import EntitySearchInput from '@components/entity-search-input';
++import DiscountMap from '@pages/discount/discount-map';
++
++const {$} = window;
++export default class CreateFreeGiftDiscount {
++  eventEmitter: EventEmitter;
++
++  $freeGiftSearchInput: JQuery;
++
++  entitySearchInput!: EntitySearchInput;
++
++  /**
++   * @param {EventEmitter} eventEmitter
++   */
++  constructor(eventEmitter: EventEmitter) {
++    this.$freeGiftSearchInput = $(DiscountMap.freeGiftProductSearchContainer);
++    this.eventEmitter = eventEmitter;
++
++    if (this.$freeGiftSearchInput.length) {
++      const autocompleteUrl = (document.querySelector(DiscountMap.freeGiftProductSearchContainer) as HTMLElement)
++        ?.dataset.remoteUrl;
++      this.entitySearchInput = new EntitySearchInput(
++        this.$freeGiftSearchInput,
++        {remoteUrl: autocompleteUrl},
++      );
++    }
++  }
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index 54c7782acc86b..92d64c38f44a9 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -25,13 +25,17 @@
+ 
+ import PriceReductionManager from '@components/form/price-reduction-manager';
+ import DiscountMap from '@pages/discount/discount-map';
++import CreateFreeGiftDiscount from '@pages/discount/form/create-free-gift-discount';
+ 
+ $(() => {
++  const {eventEmitter} = window.prestashop.instance;
++
+   window.prestashop.component.initComponents(
+     [
+       'TranslatableInput',
+     ],
+   );
++  new CreateFreeGiftDiscount(eventEmitter);
+ 
+   new PriceReductionManager(
+     DiscountMap.reductionTypeSelect,
+diff --git a/src/Adapter/Discount/Update/Filler/DiscountFiller.php b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+index b6043dac9e4b4..8104a18b54eb4 100644
+--- a/src/Adapter/Discount/Update/Filler/DiscountFiller.php
++++ b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+@@ -102,6 +102,14 @@ public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountComman
+             $updatableProperties[] = 'reduction_currency';
+             $updatableProperties[] = 'reduction_tax';
+         }
++        if (null !== $command->getProductId()) {
++            $cartRule->gift_product = $command->getProductId()->getValue();
++            $updatableProperties[] = 'gift_product';
++        }
++        if (null !== $command->getCombinationId()) {
++            $cartRule->gift_product_attribute = $command->getCombinationId()->getValue();
++            $updatableProperties[] = 'gift_product_attribute';
++        }
+ 
+         return $updatableProperties;
+     }
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index 8d687b3692f32..533b8ef8cde41 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -34,7 +34,7 @@ class DiscountForEditing
+ {
+     public function __construct(
+         private readonly int $id,
+-        private readonly array $localisedNames,
++        private readonly array $localizedNames,
+         private readonly int $priority,
+         private readonly bool $active,
+         private readonly ?DateTimeImmutable $validFrom,
+@@ -53,7 +53,7 @@ public function __construct(
+         private readonly ?bool $taxIncluded,
+         private readonly ?int $reductionProduct,
+         private readonly ?int $giftProductId,
+-        private readonly ?int $giftProductAttributeId,
++        private readonly ?int $giftCombinationId,
+     ) {
+     }
+ 
+@@ -152,13 +152,13 @@ public function getGiftProductId(): ?int
+         return $this->giftProductId;
+     }
+ 
+-    public function getGiftProductAttributeId(): ?int
++    public function getGiftCombinationId(): ?int
+     {
+-        return $this->giftProductAttributeId;
++        return $this->giftCombinationId;
+     }
+ 
+-    public function getLocalisedNames(): array
++    public function getLocalizedNames(): array
+     {
+-        return $this->localisedNames;
++        return $this->localizedNames;
+     }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 22b33c129d5ec..49924dcbde64f 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -43,9 +43,6 @@
+ 
+ class DiscountFormDataHandler implements FormDataHandlerInterface
+ {
+-    public const PRODUCT_ID = 1;
+-    public const COMBINATION_ID = 2;
+-
+     public function __construct(
+         protected readonly CommandBusInterface $commandBus,
+         #[Autowire(service: 'prestashop.default.language.context')]
+@@ -86,8 +83,8 @@ public function create(array $data)
+                 $command->setReductionProduct(1);
+                 break;
+             case DiscountType::FREE_GIFT:
+-                $command->setProductId(self::PRODUCT_ID);
+-                $command->setCombinationId(self::COMBINATION_ID);
++                $command->setProductId((int) ($data['free_gift'][0]['product_id'] ?? 0));
++                $command->setCombinationId((int) ($data['free_gift'][0]['combination_id'] ?? 0));
+                 break;
+             default:
+                 throw new RuntimeException('Unknown discount type ' . $discountType);
+@@ -131,7 +128,10 @@ public function update($id, array $data): void
+                 }
+                 break;
+             case DiscountType::PRODUCT_LEVEL:
++                break;
+             case DiscountType::FREE_GIFT:
++                $command->setProductId((int) ($data['free_gift'][0]['product_id'] ?? 0));
++                $command->setCombinationId((int) ($data['free_gift'][0]['combination_id'] ?? 0));
+                 break;
+             default:
+                 throw new RuntimeException('Unknown discount type ' . $discountType);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 8d6c1d1aba4e9..199f6e386ad32 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -26,15 +26,36 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
++use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\Exception\CombinationConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Image\Provider\ProductImageProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
++use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
++use PrestaShop\PrestaShop\Core\Product\Combination\NameBuilder\CombinationNameBuilder;
+ 
+ class DiscountFormDataProvider implements FormDataProviderInterface
+ {
+     public function __construct(
+-        private CommandBusInterface $queryBus,
++        private readonly CommandBusInterface $queryBus,
++        private readonly ProductRepository $productRepository,
++        private readonly CombinationNameBuilder $combinationNameBuilder,
++        private readonly ProductImageProviderInterface $productImageProvider,
++        private readonly LanguageContext $languageContext,
++        private readonly AttributeRepository $attributeRepository,
++        private readonly ShopContext $shopContext,
+     ) {
+     }
+ 
+@@ -43,17 +64,24 @@ public function getDefaultData()
+         return [];
+     }
+ 
++    /**
++     * @throws ShopException
++     * @throws ProductNotFoundException
++     * @throws ProductConstraintException
++     * @throws CombinationConstraintException
++     */
+     public function getData($id)
+     {
+         /** @var DiscountForEditing $discountForEditing */
+         $discountForEditing = $this->queryBus->handle(new GetDiscountForEditing($id));
+         $isAmountDiscount = $discountForEditing->getAmountDiscount() !== null;
++        $details = $this->getGiftDetails($discountForEditing);
+ 
+         return [
+             'id' => $id,
+             'information' => [
+                 'discount_type' => $discountForEditing->getType()->getValue(),
+-                'names' => $discountForEditing->getLocalisedNames(),
++                'names' => $discountForEditing->getLocalizedNames(),
+             ],
+             'value' => [
+                 'reduction' => [
+@@ -65,6 +93,57 @@ public function getData($id)
+                     'include_tax' => $discountForEditing->isTaxIncluded(),
+                 ],
+             ],
++            'free_gift' => [
++                [
++                    'product_id' => $discountForEditing->getGiftProductId(),
++                    'combination_id' => $discountForEditing->getGiftCombinationId(),
++                    'name' => $details['name'],
++                    'image' => $details['imageUrl'],
++                ],
++            ],
++        ];
++    }
++
++    /**
++     * @throws ShopAssociationNotFound
++     * @throws ShopException
++     * @throws ProductConstraintException
++     * @throws ProductNotFoundException
++     * @throws CombinationConstraintException
++     */
++    private function getGiftDetails(DiscountForEditing $discountForEditing): array
++    {
++        $name = '';
++        $imageUrl = '';
++        if (!empty($discountForEditing->getGiftProductId())) {
++            $product = $this->productRepository->getProductByDefaultShop(new ProductId($discountForEditing->getGiftProductId()));
++            $name = $product->name[$this->languageContext->getId()];
++
++            if (!empty($discountForEditing->getGiftCombinationId())) {
++                $attributesInformations = $this->attributeRepository->getAttributesInfoByCombinationIds(
++                    [new CombinationId($discountForEditing->getGiftCombinationId())],
++                    new LanguageId($this->languageContext->getId())
++                );
++
++                $name = $this->combinationNameBuilder->buildFullName(
++                    $name,
++                    $attributesInformations[$discountForEditing->getGiftCombinationId()]
++                );
++                $imageUrl = $this->productImageProvider->getCombinationCoverUrl(
++                    new CombinationId($discountForEditing->getGiftCombinationId()),
++                    new ShopId($this->shopContext->getId())
++                );
++            } else {
++                $imageUrl = $this->productImageProvider->getProductCoverUrl(
++                    new ProductId($discountForEditing->getGiftProductId()),
++                    new ShopId($this->shopContext->getId())
++                );
++            }
++        }
++
++        return [
++            'name' => $name,
++            'imageUrl' => $imageUrl,
+         ];
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
+index 8dc00dfc9177f..9eef9473afc5d 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
+@@ -27,12 +27,18 @@
+ namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+ 
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType as DiscountTypeVo;
++use PrestaShopBundle\Form\Admin\Type\EntitySearchInputType;
++use PrestaShopBundle\Form\Admin\Type\ProductSearchType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ 
+ class DiscountType extends TranslatorAwareType
+ {
++    /**
++     * @param FormBuilderInterface $builder
++     * @param array $options
++     */
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         parent::buildForm($builder, $options);
+@@ -54,6 +60,20 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ])
+             ;
+         }
++
++        if ($discountType === DiscountTypeVo::FREE_GIFT) {
++            $builder
++                ->add('free_gift', ProductSearchType::class, [
++                    'layout' => EntitySearchInputType::LIST_LAYOUT,
++                    'label' => $this->trans('Free gift', 'Admin.Catalog.Feature'),
++                    'label_help_box' => $this->trans('You can choose a free gift.', 'Admin.Catalog.Help'),
++                    'include_combinations' => true,
++                    'empty_state' => $this->trans('No product selected', 'Admin.Catalog.Feature'),
++                    'identifier_field' => 'gift_product',
++                    'required' => true,
++                ])
++            ;
++        }
+     }
+ 
+     public function configureOptions(OptionsResolver $resolver)
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index 22396f8d6697c..b58423a8303cb 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -350,7 +350,7 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+             }
+         }
+         if (isset($expectedData['name'])) {
+-            Assert::assertSame($expectedData['name'], $discountForEditing->getLocalisedNames());
++            Assert::assertSame($expectedData['name'], $discountForEditing->getLocalizedNames());
+         }
+     }
+ 

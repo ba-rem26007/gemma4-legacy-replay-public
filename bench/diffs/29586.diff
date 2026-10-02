@@ -1,0 +1,244 @@
+diff --git a/app/config/doctrine.yml b/app/config/doctrine.yml
+index 5295869963e4d..d6d496012f01e 100644
+--- a/app/config/doctrine.yml
++++ b/app/config/doctrine.yml
+@@ -16,7 +16,10 @@ doctrine:
+           enum: string
+ 
+         options:
++          # PDO::MYSQL_ATTR_INIT_COMMAND
+           1002: "SET sql_mode=(SELECT REPLACE(@@sql_mode,'ONLY_FULL_GROUP_BY',''))"
++          # PDO::MYSQL_ATTR_MULTI_STATEMENTS
++          1013: '%env(const:runtime:_PS_ALLOW_MULTI_STATEMENTS_QUERIES_)%'
+ 
+   orm:
+     auto_generate_proxy_classes: "%kernel.debug%"
+diff --git a/classes/db/DbPDO.php b/classes/db/DbPDO.php
+index 2a478086a954e..87b7a78a5739a 100644
+--- a/classes/db/DbPDO.php
++++ b/classes/db/DbPDO.php
+@@ -89,6 +89,7 @@ protected static function getPDO($host, $user, $password, $dbname, $timeout = 5)
+                 PDO::ATTR_TIMEOUT => $timeout,
+                 PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true,
+                 PDO::MYSQL_ATTR_INIT_COMMAND => 'SET NAMES utf8mb4',
++                PDO::MYSQL_ATTR_MULTI_STATEMENTS => _PS_ALLOW_MULTI_STATEMENTS_QUERIES_,
+             ]
+         );
+     }
+diff --git a/config/defines.inc.php b/config/defines.inc.php
+index 880dd432467f5..589de56bbe568 100755
+--- a/config/defines.inc.php
++++ b/config/defines.inc.php
+@@ -52,6 +52,9 @@
+ if (!defined('_PS_SMARTY_CACHING_TYPE_')) {
+     define('_PS_SMARTY_CACHING_TYPE_', 'filesystem');
+ }
++if (!defined('_PS_ALLOW_MULTI_STATEMENTS_QUERIES_')) {
++    define('_PS_ALLOW_MULTI_STATEMENTS_QUERIES_', false);
++}
+ 
+ $currentDir = dirname(__FILE__);
+ 
+diff --git a/config/services/common.yml b/config/services/common.yml
+index 7b78be22999b2..d79fd35e1ddbd 100644
+--- a/config/services/common.yml
++++ b/config/services/common.yml
+@@ -18,3 +18,7 @@ services:
+ 
+     annotation_reader:
+         class: Doctrine\Common\Annotations\AnnotationReader
++
++    PrestaShopBundle\DependencyInjection\RuntimeConstEnvVarProcessor:
++        public: false
++        tags: ['container.env_var_processor']
+diff --git a/phpstan.neon.dist b/phpstan.neon.dist
+index 4ae99af948131..b0b6aa73658d7 100644
+--- a/phpstan.neon.dist
++++ b/phpstan.neon.dist
+@@ -20,6 +20,8 @@ parameters:
+ 		- Order
+ 		- OrderInvoice
+ 		- Product
++	dynamicConstantNames:
++		- _PS_ALLOW_MULTI_STATEMENTS_QUERIES_
+ 
+ 
+ services:
+diff --git a/src/Core/SqlManager/Configuration/SqlRequestConfiguration.php b/src/Core/SqlManager/Configuration/SqlRequestConfiguration.php
+index 7f65ea36a9f5f..78594383275ee 100644
+--- a/src/Core/SqlManager/Configuration/SqlRequestConfiguration.php
++++ b/src/Core/SqlManager/Configuration/SqlRequestConfiguration.php
+@@ -38,6 +38,10 @@
+  */
+ final class SqlRequestConfiguration implements DataConfigurationInterface
+ {
++    private const DEFINES_FILE = _PS_ROOT_DIR_ . '/config/defines.inc.php';
++    private const CUSTOM_DEFINES_FILE = _PS_ROOT_DIR_ . '/config/defines_custom.inc.php';
++    private const PATTERN = '/(define\(\'_PS_ALLOW_MULTI_STATEMENTS_QUERIES_\', )([a-zA-Z]+)(\);)/Ui';
++
+     /**
+      * @var CommandBusInterface
+      */
+@@ -70,6 +74,7 @@ public function getConfiguration()
+ 
+         return [
+             'default_file_encoding' => $sqlRequestSettings->getFileEncoding(),
++            'enable_multi_statements' => $this->getMultiStatementsStatus(),
+         ];
+     }
+ 
+@@ -90,6 +95,16 @@ public function updateConfiguration(array $configuration)
+             } catch (SqlRequestSettingsConstraintException $e) {
+                 $errors = $this->handleUpdateException($e);
+             }
++
++            if ($configuration['enable_multi_statements'] !== $this->getMultiStatementsStatus()
++                && !$this->setMultiStatementsStatus($configuration['enable_multi_statements'])
++            ) {
++                $errors[] = [
++                    'key' => 'Error: Could not write to file. Make sure that the correct permissions are set on the file %s',
++                    'domain' => 'Admin.Advparameters.Notification',
++                    'parameters' => [self::DEFINES_FILE],
++                ];
++            }
+         }
+ 
+         return $errors;
+@@ -103,6 +118,40 @@ public function validateConfiguration(array $configuration)
+         return isset($configuration['default_file_encoding']);
+     }
+ 
++    private function getMultiStatementsStatus(): bool
++    {
++        return defined('_PS_ALLOW_MULTI_STATEMENTS_QUERIES_') && _PS_ALLOW_MULTI_STATEMENTS_QUERIES_;
++    }
++
++    private function setMultiStatementsStatus(bool $status): bool
++    {
++        $replacement = '$1' . ($status ? 'true' : 'false') . '$3';
++
++        $cleanedContent = false;
++        $file = self::CUSTOM_DEFINES_FILE;
++        if (is_readable(self::CUSTOM_DEFINES_FILE)) {
++            $content = file_get_contents(self::CUSTOM_DEFINES_FILE);
++            $cleanedContent = php_strip_whitespace(self::CUSTOM_DEFINES_FILE);
++        }
++
++        if (!$cleanedContent || !preg_match(self::PATTERN, $cleanedContent)) {
++            $content = file_get_contents(self::DEFINES_FILE);
++            $cleanedContent = php_strip_whitespace(self::DEFINES_FILE);
++            $file = self::DEFINES_FILE;
++            if (!$cleanedContent || !preg_match(self::PATTERN, $cleanedContent)) {
++                return false;
++            }
++        }
++
++        $status = file_put_contents($file, preg_replace(self::PATTERN, $replacement, $content));
++
++        if (function_exists('opcache_invalidate')) {
++            opcache_invalidate($file);
++        }
++
++        return $status !== false;
++    }
++
+     /**
+      * Handle exception when configuration update fails.
+      *
+diff --git a/src/PrestaShopBundle/DependencyInjection/RuntimeConstEnvVarProcessor.php b/src/PrestaShopBundle/DependencyInjection/RuntimeConstEnvVarProcessor.php
+new file mode 100644
+index 0000000000000..3079d2d599757
+--- /dev/null
++++ b/src/PrestaShopBundle/DependencyInjection/RuntimeConstEnvVarProcessor.php
+@@ -0,0 +1,51 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\DependencyInjection;
++
++use Closure;
++use Symfony\Component\DependencyInjection\EnvVarProcessorInterface;
++use Symfony\Component\DependencyInjection\Exception\EnvNotFoundException;
++
++final class RuntimeConstEnvVarProcessor implements EnvVarProcessorInterface
++{
++    public function getEnv($prefix, $name, Closure $getEnv)
++    {
++        $exploded = explode(':', $name);
++        if (count($exploded) !== 2 || $exploded[0] !== 'runtime' || !defined($exploded[1])) {
++            throw new EnvNotFoundException($name);
++        }
++
++        return constant($exploded[1]);
++    }
++
++    public static function getProvidedTypes()
++    {
++        return [
++            'const' => 'bool|int|float|string|array',
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestSettingsType.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestSettingsType.php
+index b9639ca00edb0..aa253e289a226 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestSettingsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestSettingsType.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\RequestSql;
+ 
+ use PrestaShop\PrestaShop\Core\Encoding\CharsetEncoding;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\FormBuilderInterface;
+@@ -46,6 +47,14 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     CharsetEncoding::ISO_8859_1 => CharsetEncoding::ISO_8859_1,
+                 ],
+                 'translation_domain' => false,
+-            ]);
++            ])
++            ->add('enable_multi_statements', SwitchType::class, [
++                'label' => $this->trans('Enable multi-statements queries', 'Admin.Advparameters.Feature'),
++                'help' => $this->trans(
++                    'Enabling multi-statements queries increases the risk of SQL injection vulnerability to be exploited',
++                    'Admin.Advparameters.Help'
++                ),
++            ])
++        ;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+index 3db34e5f42f9f..7aa20a4df8f5e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+@@ -110,3 +110,7 @@ services:
+         class: PrestaShopBundle\Service\Multistore\CustomizedConfigurationChecker
+         arguments:
+             - "@prestashop.adapter.legacy.configuration"
++
++    PrestaShopBundle\DependencyInjection\RuntimeConstEnvVarProcessor:
++        public: false
++        tags: ['container.env_var_processor']

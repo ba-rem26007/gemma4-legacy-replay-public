@@ -1,0 +1,113 @@
+diff --git a/classes/PaymentModule.php b/classes/PaymentModule.php
+index d5da3a5e242fd..7fc334735b76d 100644
+--- a/classes/PaymentModule.php
++++ b/classes/PaymentModule.php
+@@ -496,6 +496,13 @@ public function validateOrder(
+                     }
+                 }
+ 
++                Hook::exec('actionPaymentModuleProductVarTplAfter', [
++                    'product_var_tpl' => &$product_var_tpl,
++                    'product' => $product,
++                    'order' => $order,
++                    'context' => $this->context,
++                ]);
++
+                 $product_var_tpl_list[] = $product_var_tpl;
+                 // Check if is not a virtual product for the displaying of shipping
+                 if (!$product['is_virtual']) {
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index 4ce21dcd2078b..0c5e606313350 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -51,6 +51,11 @@
+       <title>Payment confirmation</title>
+       <description>This hook displays new elements after the payment is validated</description>
+     </hook>
++    <hook id="actionPaymentModuleProductVarTplAfter">
++      <name>actionPaymentModuleProductVarTplAfter</name>
++      <title>Triggers after product data is prepared for e-mail template</title>
++      <description>Allows to modify product data in e-mail template.</description>
++    </hook>
+     <hook id="displayPaymentReturn">
+       <name>displayPaymentReturn</name>
+       <title>Payment return</title>
+diff --git a/src/Core/Util/String/StringModifier.php b/src/Core/Util/String/StringModifier.php
+index 08ab50051c72a..89ee066b49b8c 100644
+--- a/src/Core/Util/String/StringModifier.php
++++ b/src/Core/Util/String/StringModifier.php
+@@ -78,11 +78,13 @@ public function str2url(string $string, bool $allow_accented_chars): string
+         $return_str = trim($string);
+         $return_str = mb_strtolower($return_str, 'UTF-8');
+ 
+-        if (!$allow_accented_chars) {
++        if ($allow_accented_chars) {
++            $return_str = preg_replace('/[^a-zA-Z0-9\s\'\:\/\[\]\-\p{L}]/u', '', $return_str);
++        } else {
+             $return_str = $this->replaceAccentedChars($return_str);
+             $return_str = preg_replace('/[^a-zA-Z0-9\s\'\:\/\[\]\-]/', '', $return_str);
+         }
+-        $return_str = preg_replace('/[^a-zA-Z0-9\s\'\:\/\[\]\-\p{L}]/u', '', $return_str);
++
+         $return_str = preg_replace('/[\s\'\:\/\[\]\-]+/', ' ', $return_str);
+ 
+         return str_replace([' ', '/'], '-', $return_str);
+diff --git a/src/PrestaShopBundle/DataCollector/HookDataCollector.php b/src/PrestaShopBundle/DataCollector/HookDataCollector.php
+index f799fb8aea68c..8b550ce01f0d5 100644
+--- a/src/PrestaShopBundle/DataCollector/HookDataCollector.php
++++ b/src/PrestaShopBundle/DataCollector/HookDataCollector.php
+@@ -26,10 +26,15 @@
+ 
+ namespace PrestaShopBundle\DataCollector;
+ 
++use DateTimeInterface;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+ use Symfony\Component\HttpKernel\DataCollector\DataCollector;
++use Symfony\Component\VarDumper\Caster\CutStub;
++use Symfony\Component\VarDumper\Caster\ReflectionCaster;
++use Symfony\Component\VarDumper\Cloner\Stub;
+ use Throwable;
++use TypeError;
+ 
+ /**
+  * Collect all information about Legacy hooks and make it available
+@@ -147,4 +152,38 @@ private function stringifyHookArguments(array &$hooksList)
+ 
+         return $hooksList;
+     }
++
++    /**
++     * @return callable[] The casters to add to the cloner
++     */
++    protected function getCasters()
++    {
++        $casters = [
++            '*' => function ($v, array $a, Stub $s, $isNested) {
++                if (!$v instanceof Stub) {
++                    $b = $a;
++                    foreach ($a as $k => $v) {
++                        if (!\is_object($v) || $v instanceof DateTimeInterface || $v instanceof Stub) {
++                            continue;
++                        }
++
++                        try {
++                            $a[$k] = $s = new CutStub($v);
++
++                            if ($b[$k] === $s) {
++                                // we've hit a non-typed reference
++                                $a[$k] = $v;
++                            }
++                        } catch (TypeError $e) {
++                            // we've hit a typed reference
++                        }
++                    }
++                }
++
++                return $a;
++            },
++        ] + ReflectionCaster::UNSET_CLOSURE_FILE_INFO;
++
++        return $casters;
++    }
+ }

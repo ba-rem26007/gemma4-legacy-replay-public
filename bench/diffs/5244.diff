@@ -1,0 +1,100 @@
+diff --git a/install-dev/controllers/http/process.php b/install-dev/controllers/http/process.php
+index 5b185cac9b01c..7d689f968afc3 100755
+--- a/install-dev/controllers/http/process.php
++++ b/install-dev/controllers/http/process.php
+@@ -283,7 +283,11 @@ public function installCldrDatas()
+ 
+         foreach ($langs as $lang) {
+             $language_code = explode('-', $lang['language_code']);
+-            $cldrUpdate->fetchLocale($language_code['0'].'-'.Tools::strtoupper($language_code[1]));
++            if (count($language_code) == 1) {
++                $cldrUpdate->fetchLocale($language_code['0']);
++            } else {
++                $cldrUpdate->fetchLocale($language_code['0'].'-'.Tools::strtoupper($language_code[1]));
++            }
+         }
+     }
+ 
+diff --git a/install-dev/models/install.php b/install-dev/models/install.php
+index 2999abab83595..51f4f8d38dcbe 100644
+--- a/install-dev/models/install.php
++++ b/install-dev/models/install.php
+@@ -417,7 +417,8 @@ public function installLanguages($languages_list = null)
+             $params_lang = array(
+                 'name' => (string)$xml->name,
+                 'iso_code' => substr((string)$xml->language_code, 0, 2),
+-                'allow_accented_chars_url' => (string)$xml->allow_accented_chars_url
++                'allow_accented_chars_url' => (string)$xml->allow_accented_chars_url,
++                'language_code' => (string)$xml->language_code,
+             );
+ 
+             if (InstallSession::getInstance()->safe_mode) {
+diff --git a/src/Adapter/Addons/AddonsDataProvider.php b/src/Adapter/Addons/AddonsDataProvider.php
+index 10d589f3703f8..9d1028dfb1309 100644
+--- a/src/Adapter/Addons/AddonsDataProvider.php
++++ b/src/Adapter/Addons/AddonsDataProvider.php
+@@ -230,6 +230,15 @@ public function getAddonsEmail()
+         ];
+     }
+ 
++    /**
++     * Check if a request has already failed
++     * @return bool 
++     */
++    public function isAddonsUp()
++    {
++        return self::$is_addons_up;
++    }
++
+     protected function unZip($filename)
+     {
+         $zip = new \ZipArchive();
+diff --git a/src/Adapter/Module/AdminModuleDataProvider.php b/src/Adapter/Module/AdminModuleDataProvider.php
+index c61ff2acaa5fc..adfd6bc526974 100644
+--- a/src/Adapter/Module/AdminModuleDataProvider.php
++++ b/src/Adapter/Module/AdminModuleDataProvider.php
+@@ -318,6 +318,9 @@ protected function loadCatalogData()
+                 $jsons = [];
+                 // We execute each addons request
+                 foreach ($requests as $action_filter_value => $action) {
++                    if (!$addons_provider->isAddonsUp()) {
++                        continue;
++                    }
+                     // We add the request name in each product returned by Addons,
+                     // so we know whether is bought
+                     $jsons = array_merge_recursive($jsons, array_map(function ($array) use ($action_filter_value, $action) {
+diff --git a/src/Core/Addon/Module/ModuleRepository.php b/src/Core/Addon/Module/ModuleRepository.php
+index 667be3fbcbfa0..a4dfa11ca2435 100644
+--- a/src/Core/Addon/Module/ModuleRepository.php
++++ b/src/Core/Addon/Module/ModuleRepository.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Addon\Module;
+ 
+ use Exception;
++use PrestaShop\PrestaShop\Adapter\LegacyLogger;
+ use PrestaShop\PrestaShop\Adapter\Module\AdminModuleDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Module\Module;
+ use PrestaShop\PrestaShop\Adapter\Module\ModuleDataProvider;
+@@ -229,12 +230,16 @@ public function getModule($name)
+         $current_filemtime = (int)@filemtime($php_file_path);
+ 
+         // We check that we have data from the marketplace
+-        $module_catalog_data = $this->adminModuleProvider->getCatalogModules(['name' => $name]);
+-        $attributes = array_merge(
+-            $attributes,
+-            (array)array_shift($module_catalog_data)
+-        );
+-
++        try {
++            $module_catalog_data = $this->adminModuleProvider->getCatalogModules(['name' => $name]);
++            $attributes = array_merge(
++                $attributes,
++                (array)array_shift($module_catalog_data)
++            );
++        } catch (Exception $e) {
++            $logger = new LegacyLogger();
++            $logger->alert(sprintf('Loading data from Addons failed. %s', $e->getMessage()));
++        }
+ 
+         // Now, we check that cache is up to date
+         if (isset($this->cache[$name]['disk']['filemtime']) && $this->cache[$name]['disk']['filemtime']

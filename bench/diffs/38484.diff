@@ -1,0 +1,484 @@
+diff --git a/classes/PaymentModule.php b/classes/PaymentModule.php
+index 9cdf75cb7c83f..9bf90c813a332 100644
+--- a/classes/PaymentModule.php
++++ b/classes/PaymentModule.php
+@@ -349,33 +349,66 @@ public function validateOrder(
+             $id_order_state = Configuration::get('PS_OS_ERROR');
+         }
+ 
+-        foreach ($package_list as $id_address => $packageByAddress) {
+-            foreach ($packageByAddress as $id_package => $package) {
+-                $orderData = $this->createOrderFromCart(
+-                    $this->context->cart,
+-                    $this->context->currency,
+-                    $package['product_list'],
+-                    $id_address,
+-                    $this->context,
+-                    $reference,
+-                    $secure_key,
+-                    $payment_method,
+-                    $this->name,
+-                    $dont_touch_amount,
+-                    $amount_paid,
+-                    0,
+-                    $cart_total_paid,
+-                    self::DEBUG_MODE,
+-                    $order_status,
+-                    $id_order_state,
+-                    isset($package['id_carrier']) ? $package['id_carrier'] : null
+-                );
+-                $order = $orderData['order'];
+-                $order_list[] = $order;
+-                $order_detail_list[] = $orderData['orderDetail'];
++        if (!$this->isFeatureFlagIsEnabledForMultiShipment()) {
++            foreach ($package_list as $id_address => $packageByAddress) {
++                foreach ($packageByAddress as $id_package => $package) {
++                    $orderData = $this->createOrderFromCart(
++                        $this->context->cart,
++                        $this->context->currency,
++                        $package['product_list'],
++                        $id_address,
++                        $this->context,
++                        $reference,
++                        $secure_key,
++                        $payment_method,
++                        $this->name,
++                        $dont_touch_amount,
++                        $amount_paid,
++                        0,
++                        $cart_total_paid,
++                        self::DEBUG_MODE,
++                        $order_status,
++                        $id_order_state,
++                        isset($package['id_carrier']) ? $package['id_carrier'] : null
++                    );
++                    $order = $orderData['order'];
++                    $order_list[] = $order;
++                    $order_detail_list[] = $orderData['orderDetail'];
++                }
+             }
+-        }
++        } else {
++            $productsByCarriers = [];
++            $idAddress = null;
+ 
++            foreach ($package_list as $id_address => $packageByAddress) {
++                $idAddress = $id_address;
++                foreach ($packageByAddress as $id_package => $package) {
++                    $productsByCarriers[$package['id_carrier']]['product_list'] = $package['product_list'];
++                }
++            }
++            $orderData = $this->createOrderFromCart(
++                $this->context->cart,
++                $this->context->currency,
++                $productsByCarriers,
++                $idAddress,
++                $this->context,
++                $reference,
++                $secure_key,
++                $payment_method,
++                $this->name,
++                $dont_touch_amount,
++                $amount_paid,
++                0,
++                $cart_total_paid,
++                self::DEBUG_MODE,
++                $order_status,
++                $id_order_state,
++                null
++            );
++            $order = $orderData['order'];
++            $order_list[] = $order;
++            $order_detail_list[] = $orderData['orderDetail'];
++        }
+         // The country can only change if the address used for the calculation is the delivery address, and if multi-shipping is activated
+         if (Configuration::get('PS_TAX_ADDRESS_TYPE') == 'id_address_delivery' && isset($context_country)) {
+             $this->context->country = $context_country;
+@@ -575,8 +608,6 @@ public function validateOrder(
+                 'orderStatus' => $order_status,
+             ]);
+ 
+-            $this->addShipmentToOrder($order);
+-
+             if ($order_status->logable) {
+                 foreach ($this->context->cart->getProducts() as $product) {
+                     ProductSale::addProductSale((int) $product['id_product'], (int) $product['cart_quantity']);
+@@ -970,10 +1001,18 @@ protected function createOrderFromCart(
+         $debug,
+         $order_status,
+         $id_order_state,
+-        $carrierId = null
++        $carrierId = null,
+     ) {
+         $order = new Order();
+-        $order->product_list = $productList;
++        if (!$this->isFeatureFlagIsEnabledForMultiShipment()) {
++            $order->product_list = $productList;
++        } else {
++            foreach ($productList as $products) {
++                foreach ($products['product_list'] as $product) {
++                    $order->product_list[] = $product;
++                }
++            }
++        }
+ 
+         $computingPrecision = Context::getContext()->getComputingPrecision();
+ 
+@@ -1035,14 +1074,33 @@ protected function createOrderFromCart(
+         );
+         $order->total_discounts = $order->total_discounts_tax_incl;
+ 
+-        $order->total_shipping_tax_excl = Tools::ps_round(
+-            (float) $cart->getPackageShippingCost($carrierId, false, null, $order->product_list),
++        $order->total_shipping_tax_incl = Tools::ps_round(
++            (float) abs($cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $order->product_list, null)),
+             $computingPrecision
+         );
+-        $order->total_shipping_tax_incl = Tools::ps_round(
+-            (float) $cart->getPackageShippingCost($carrierId, true, null, $order->product_list),
++
++        $order->total_shipping_tax_excl = Tools::ps_round(
++            (float) abs($cart->getOrderTotal(false, Cart::ONLY_SHIPPING, $order->product_list, null)),
+             $computingPrecision
+         );
++
++        // loop for each carrier to store the shipping cost
++        if ($this->isFeatureFlagIsEnabledForMultiShipment()) {
++            foreach ($productList as $carrierId => $product) {
++                $totalShippingTaxExcl = Tools::ps_round(
++                    (float) abs($cart->getOrderTotal(false, Cart::ONLY_SHIPPING, $order->product_list, $carrierId)),
++                    $computingPrecision
++                );
++                $totalShippingTaxIncl = Tools::ps_round(
++                    (float) abs($cart->getOrderTotal(true, Cart::ONLY_SHIPPING, $order->product_list, $carrierId)),
++                    $computingPrecision
++                );
++
++                $productList[$carrierId]['total_shipping_tax_excl'] = $totalShippingTaxExcl;
++                $productList[$carrierId]['total_shipping_tax_incl'] = $totalShippingTaxIncl;
++            }
++        }
++
+         $order->total_shipping = $order->total_shipping_tax_incl;
+ 
+         if (null !== $carrier && Validate::isLoadedObject($carrier)) {
+@@ -1125,6 +1183,10 @@ protected function createOrderFromCart(
+             $order_carrier->add();
+         }
+ 
++        if ($this->isFeatureFlagIsEnabledForMultiShipment()) {
++            $this->addShipmentToOrder($order, $productList);
++        }
++
+         return ['order' => $order, 'orderDetail' => $order_detail];
+     }
+ 
+@@ -1274,18 +1336,23 @@ protected function createOrderCartRules(
+         return $cart_rules_list;
+     }
+ 
+-    private function addShipmentToOrder(Order $order)
++    private function addShipmentToOrder(Order $order, array $productsByCarrier)
+     {
+-        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
+-        $featureFlagManager = $this->get(FeatureFlagStateCheckerInterface::class);
+-
+-        if (!$featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
++        if (!$this->isFeatureFlagIsEnabledForMultiShipment()) {
+             return;
+         }
+ 
+         /** @var OrderShipmentCreator $orderShipmentCreator */
+         $orderShipmentCreator = $this->get('PrestaShop\PrestaShop\Adapter\Shipment\OrderShipmentCreator');
+ 
+-        $orderShipmentCreator->addShipmentOrder($order);
++        $orderShipmentCreator->addShipmentOrder($order, $productsByCarrier);
++    }
++
++    private function isFeatureFlagIsEnabledForMultiShipment()
++    {
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $this->get(FeatureFlagStateCheckerInterface::class);
++
++        return $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT);
+     }
+ }
+diff --git a/src/Adapter/Shipment/OrderShipmentCreator.php b/src/Adapter/Shipment/OrderShipmentCreator.php
+index 885ffbed89f35..8e78a6711f404 100644
+--- a/src/Adapter/Shipment/OrderShipmentCreator.php
++++ b/src/Adapter/Shipment/OrderShipmentCreator.php
+@@ -29,6 +29,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Shipment;
+ 
+ use Order;
++use OrderCarrier;
+ use OrderDetail;
+ use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Entity\Shipment;
+@@ -46,27 +47,47 @@ public function __construct(ShipmentRepository $shipmentRepository)
+         $this->shipmentRepository = $shipmentRepository;
+     }
+ 
+-    public function addShipmentOrder(Order $order): void
++    public function addShipmentOrder(Order $order, array $productsHandledByCarrier): void
+     {
+-        $shipment = new Shipment();
+-        $shipment->setOrderId((int) $order->id);
+-        $shipment->setCarrierId((int) $order->id_carrier);
+-        $shipment->setAddressId((int) $order->id_address_delivery);
+-        $shipment->setTrackingNumber(null);
+-        $shipment->setShippingCostTaxExcluded((float) $order->total_shipping_tax_excl);
+-        $shipment->setShippingCostTaxIncluded((float) $order->total_shipping_tax_incl);
+-        $shipment->setDeliveredAt(null);
+-        $shipment->setShippedAt(null);
+-        $shipment->setCancelledAt(null);
++        foreach ($productsHandledByCarrier as $carrierId => $products) {
++            $shipment = new Shipment();
++            $shipment->setOrderId((int) $order->id);
++            $shipment->setCarrierId((int) $carrierId);
++            $shipment->setAddressId((int) $order->id_address_delivery);
++            $shipment->setTrackingNumber(null);
++            $shipment->setShippingCostTaxExcluded((float) $products['total_shipping_tax_excl']);
++            $shipment->setShippingCostTaxIncluded((float) $products['total_shipping_tax_incl']);
++            $shipment->setDeliveredAt(null);
++            $shipment->setShippedAt(null);
++            $shipment->setCancelledAt(null);
+ 
+-        foreach (OrderDetail::getList($order->id) as $product) {
+-            $shipmentProduct = new ShipmentProduct();
+-            $shipmentProduct->setShipment($shipment);
+-            $shipmentProduct->setOrderDetailId((int) $product['id_order_detail']);
+-            $shipmentProduct->setQuantity($product['product_quantity']);
+-            $shipment->addShipmentProduct($shipmentProduct);
+-        }
++            $productWeight = array_map(function ($product) {
++                return $product['weight'] * $product['quantity'];
++            }, $products['product_list']);
++
++            // add OrderCarrier here for keep the compatibility for legacy
++            $orderCarrier = new OrderCarrier();
++            $orderCarrier->id_order = (int) $order->id;
++            $orderCarrier->id_carrier = $carrierId;
++            $orderCarrier->weight = (float) $productWeight[0];
++            $orderCarrier->shipping_cost_tax_excl = (float) $products['total_shipping_tax_excl'];
++            $orderCarrier->shipping_cost_tax_incl = (float) $products['total_shipping_tax_incl'];
++            $orderCarrier->add();
+ 
+-        $this->shipmentRepository->save($shipment);
++            // match products with order details to get quantities & orderDetailId
++            foreach (OrderDetail::getList($order->id) as $orderDetailProduct) {
++                foreach ($products['product_list'] as $product) {
++                    if ($product['id_product'] === $orderDetailProduct['product_id']) {
++                        $shipmentProduct = new ShipmentProduct();
++                        $shipmentProduct->setShipment($shipment);
++                        $shipmentProduct->setOrderDetailId($orderDetailProduct['id_order_detail']);
++                        $shipmentProduct->setQuantity($orderDetailProduct['product_quantity']);
++                        $shipment->addShipmentProduct($shipmentProduct);
++                    }
++                }
++            }
++
++            $this->shipmentRepository->save($shipment);
++        }
+     }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index d1faeed18b8a7..ed6128bbe6235 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -62,18 +62,19 @@ public function verifyOrderShipment(string $orderReference, TableNode $table)
+         for ($i = 0; $i < count($data); ++$i) {
+             $shipmentData = $data[$i];
+             $shipment = $shipments[$i];
+-            $carrierId = $this->referenceToId($data[$i]['carrier']);
++            $carrierReference = $data[$i]['carrier'];
++            $carrierId = $this->referenceToId($carrierReference);
+             $addressId = $this->referenceToId($data[$i]['address']);
+ 
+             if ($shipment->getOrderId() !== $orderId) {
+                 throw new RuntimeException('Shipment [' . $shipment->getId() . '] does not belong to order [' . $orderId . ']');
+             }
+ 
+-            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number']);
+-            Assert::assertEquals($shipment->getCarrierId(), $carrierId);
+-            Assert::assertEquals($shipment->getAddressId(), $addressId);
+-            Assert::assertEquals($shipment->getShippingCostTaxExcluded(), $shipmentData['shipping_cost_tax_excl']);
+-            Assert::assertEquals($shipment->getShippingCostTaxIncluded(), $shipmentData['shipping_cost_tax_incl']);
++            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number'], 'Wrong tracking number for ' . $carrierReference);
++            Assert::assertEquals($shipment->getCarrierId(), $carrierId, 'Wrong carrier ID for ' . $carrierReference);
++            Assert::assertEquals($shipment->getAddressId(), $addressId, 'Wrong address ID for ' . $carrierReference);
++            Assert::assertEquals($shipment->getShippingCostTaxExcluded(), $shipmentData['shipping_cost_tax_excl'], 'Wrong shipping cast tax excluded for ' . $carrierReference);
++            Assert::assertEquals($shipment->getShippingCostTaxIncluded(), $shipmentData['shipping_cost_tax_incl'], 'Wrong shipping cast tax included for ' . $carrierReference);
+             SharedStorage::getStorage()->set($shipmentData['shipment'], $shipment->getId());
+         }
+     }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ZoneFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ZoneFeatureContext.php
+index 3a378e75319f9..be9331fcf0074 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ZoneFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ZoneFeatureContext.php
+@@ -176,6 +176,22 @@ public function assertZoneName(string $zoneReference, string $name): void
+         }
+     }
+ 
++    /**
++     * @Given there is a zone :reference named :name
++     *
++     * @param string $zoneReference
++     * @param string $name
++     */
++    public function assignZoneReference(string $zoneReference, string $name): void
++    {
++        $zoneId = Zone::getIdByName($name);
++        if (empty($zoneId)) {
++            throw new RuntimeException(sprintf('Zone name %s not found', $name));
++        }
++
++        SharedStorage::getStorage()->set($zoneReference, new Zone($zoneId));
++    }
++
+     /**
+      * @Given /^zone "(.*)" is (enabled|disabled)?$/
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+new file mode 100644
+index 0000000000000..b8dab560f99d7
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+@@ -0,0 +1,96 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment --tags products-with-different-carriers
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@products-with-different-carriers
++Feature: Product associated with different carriers
++  As a BO users
++  I want to order products associated with different carriers
++  I order them multiple order shipments are created
++
++  Background:
++    Given I enable feature flag "improved_shipment"
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And there is a zone "north_america" named "North America"
++    # Create two carriers different with prices
++    And I identify tax rules group named "US-FL Rate (6%)" as "us-fl-tax-rate"
++    When I create carrier "beer_carrier" with specified properties:
++      | name           | Beer carrier  |
++      | active         | true          |
++      | shippingMethod | price         |
++      | zones          | north_america |
++      | shippingHandling          | false |
++    Then I set ranges for carrier "beer_carrier" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 1000     | 5           |
++    When I set tax rule "us-fl-tax-rate" for carrier "beer_carrier"
++    Then carrier "beer_carrier" should have the following properties:
++      | name         | Beer carrier    |
++      | taxRuleGroup | US-FL Rate (6%) |
++    When I create carrier "saucisson_carrier" with specified properties:
++      | name           | Saucisson carrier  |
++      | active         | true          |
++      | shippingMethod | price         |
++      | zones          | north_america |
++      | shippingHandling          | false |
++    Then I set ranges for carrier "saucisson_carrier" with specified properties for all shops:
++      | id_zone       | range_from | range_to | range_price |
++      | north_america | 0          | 1000     | 10           |
++    When I set tax rule "us-fl-tax-rate" for carrier "saucisson_carrier"
++    Then carrier "saucisson_carrier" should have the following properties:
++      | name         | Saucisson carrier    |
++      | taxRuleGroup | US-FL Rate (6%) |
++    When I add product "bottle_of_beer" with following information:
++      | name[en-US] | bottle of beer |
++      | type        | standard       |
++    When I update product "bottle_of_beer" stock with following information:
++      | delta_quantity | 51  |
++      | location       | dtc |
++    And product "bottle_of_beer" should have following stock information:
++      | quantity | 51  |
++      | location | dtc |
++    And I assign product bottle_of_beer with following carriers:
++      | beer_carrier |
++    Then product bottle_of_beer should have following shipping information:
++      | carriers | [beer_carrier] |
++    And I enable product "bottle_of_beer"
++    When I add product "saucisson" with following information:
++      | name[en-US] | saucisson |
++      | type        | standard  |
++    When I update product "saucisson" stock with following information:
++      | delta_quantity | 42  |
++      | location       | dtc |
++    And product "saucisson" should have following stock information:
++      | quantity | 42  |
++      | location | dtc |
++    And I assign product saucisson with following carriers:
++      | saucisson_carrier |
++    Then product saucisson should have following shipping information:
++      | carriers | [saucisson_carrier] |
++    And I enable product "saucisson"
++
++  Scenario: Retrieve shipments for existing order
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "bottle of beer" to the cart "dummy_cart"
++    And I add 2 products "saucisson" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order1" delivery address as "US"
++    Given the order "bo_order1" should have the following shipments:
++      | shipment  | carrier           | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | beer_carrier      |                 | US      | 5.0                    | 5.3                   |
++      | shipment2 | saucisson_carrier |                 | US      | 10.0                   | 10.6                  |
++    Then the shipment "shipment1" should have the following products:
++      | product_name   | quantity |
++      | bottle of beer | 1        |
++    Then the shipment "shipment2" should have the following products:
++      | product_name | quantity |
++      | saucisson    | 2        |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+index 386ac31fab3f7..444a5ee0d1564 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+@@ -1,5 +1,6 @@
+-# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment --tags shipment
+ @restore-all-tables-before-feature
++@shipment
+ Feature: Retrieving shipment for orders
+   As a BO users
+   I want to retrieve the list of shipments associated with a specific order
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index af690302ae3d6..d9317f6d794dc 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -690,7 +690,6 @@ default:
+         - "%paths.base%/Features/Scenario/Shipment"
+       contexts:
+         - Tests\Integration\Behaviour\Features\Context\Domain\ShipmentFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+@@ -729,12 +728,16 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\ShippingAssertionFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateShippingFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext

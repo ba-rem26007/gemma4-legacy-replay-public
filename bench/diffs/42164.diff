@@ -1,0 +1,75 @@
+diff --git a/src/PrestaShopBundle/Twig/RawPurifiedExtension.php b/src/PrestaShopBundle/Twig/RawPurifiedExtension.php
+index 79de648803888..54664498be152 100644
+--- a/src/PrestaShopBundle/Twig/RawPurifiedExtension.php
++++ b/src/PrestaShopBundle/Twig/RawPurifiedExtension.php
+@@ -29,11 +29,15 @@ public function getFilters(): array
+         ];
+     }
+ 
+-    public function rawPurifier(string $toPurify): string
++    public function rawPurifier(?string $toPurify): string
+     {
+-        $pureHtml = $this->htmlPurifier->purify($toPurify);
++        // Twig resolves an undefined or null variable to null, and a filter that renders markup has
++        // no reason to fail on that - it has nothing to purify and nothing to print.
++        if (null === $toPurify) {
++            return '';
++        }
+ 
+-        return $pureHtml;
++        return $this->htmlPurifier->purify($toPurify);
+     }
+ 
+     public function getName(): string
+diff --git a/tests/Unit/PrestaShopBundle/Twig/RawPurifiedExtensionTest.php b/tests/Unit/PrestaShopBundle/Twig/RawPurifiedExtensionTest.php
+new file mode 100644
+index 0000000000000..529153326608a
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Twig/RawPurifiedExtensionTest.php
+@@ -0,0 +1,46 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Twig;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShopBundle\Twig\RawPurifiedExtension;
++use PrestaShopBundle\Utils\HTMLPurifier;
++
++class RawPurifiedExtensionTest extends TestCase
++{
++    /**
++     * Twig resolves an undefined or null variable to null, and the filter is applied to values that
++     * are legitimately absent - a flash message that was not set, a hook that rendered nothing. A
++     * non-nullable parameter turned that into a TypeError and took the page down with it.
++     */
++    public function testNullRendersAsAnEmptyStringWithoutPurifying(): void
++    {
++        $purifier = $this->createMock(HTMLPurifier::class);
++        $purifier->expects($this->never())->method('purify');
++
++        $extension = new RawPurifiedExtension($purifier);
++
++        $this->assertSame('', $extension->rawPurifier(null));
++    }
++
++    public function testAStringIsStillHandedToThePurifier(): void
++    {
++        $purifier = $this->createMock(HTMLPurifier::class);
++        $purifier
++            ->expects($this->once())
++            ->method('purify')
++            ->with('<b>kept</b><script>dropped</script>')
++            ->willReturn('<b>kept</b>')
++        ;
++
++        $extension = new RawPurifiedExtension($purifier);
++
++        $this->assertSame('<b>kept</b>', $extension->rawPurifier('<b>kept</b><script>dropped</script>'));
++    }
++}

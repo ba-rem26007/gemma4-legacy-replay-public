@@ -1,0 +1,1349 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index 9a4cb8c7e5d19..46fd0a7b58c29 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -76,6 +76,7 @@ class CartRuleCore extends ObjectModel
+     public $minimum_amount_currency;
+     /** @var bool */
+     public $minimum_amount_shipping;
++    public $minimum_product_quantity;
+     /** @var bool */
+     public $country_restriction;
+     /** @var bool */
+@@ -134,6 +135,7 @@ class CartRuleCore extends ObjectModel
+             'minimum_amount_tax' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'minimum_amount_currency' => ['type' => self::TYPE_INT, 'validate' => 'isInt'],
+             'minimum_amount_shipping' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
++            'minimum_product_quantity' => ['type' => self::TYPE_INT, 'validate' => 'isInt'],
+             'country_restriction' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'carrier_restriction' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'group_restriction' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+@@ -886,6 +888,13 @@ public function checkValidity(Context $context, $alreadyInCart = false, $display
+             }
+         }
+ 
++        // Check if the minimal product quantity is met (if defined)
++        if ($this->minimum_product_quantity) {
++            if ($cart->nbProducts() < $this->minimum_product_quantity) {
++                return (!$display_error) ? false : $this->trans('You cannot use this voucher with these products', [], 'Shop.Notifications.Error');
++            }
++        }
++
+         // Check if the cart rule is only usable by a specific customer, and if the current customer is the right one
+         if ($this->id_customer && $cart->id_customer != $this->id_customer) {
+             if (!Context::getContext()->customer->isLogged()) {
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 10e780f172d22..23cf56922db33 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -178,6 +178,7 @@ CREATE TABLE `PREFIX_cart_rule` (
+   `minimum_amount_tax` tinyint(1) NOT NULL DEFAULT '0',
+   `minimum_amount_currency` int unsigned NOT NULL DEFAULT '0',
+   `minimum_amount_shipping` tinyint(1) NOT NULL DEFAULT '0',
++  `minimum_product_quantity` int(10) unsigned NOT NULL DEFAULT 0,
+   `country_restriction` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `carrier_restriction` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `group_restriction` tinyint(1) unsigned NOT NULL DEFAULT '0',
+diff --git a/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php b/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php
+new file mode 100644
+index 0000000000000..7057fe6e03226
+--- /dev/null
++++ b/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\Discount\Update\DiscountConditionsUpdater;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\UpdateDiscountConditionsCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\UpdateDiscountConditionsHandlerInterface;
++
++#[AsCommandHandler]
++class UpdateDiscountConditionsHandler implements UpdateDiscountConditionsHandlerInterface
++{
++    public function __construct(
++        private readonly DiscountConditionsUpdater $updater,
++    ) {
++    }
++
++    public function handle(UpdateDiscountConditionsCommand $command): void
++    {
++        $this->updater->update(
++            $command->getDiscountId(),
++            $command->getMinimumProductsQuantity(),
++            $command->getProductConditions(),
++        );
++    }
++}
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index dee9d9b61eb42..fc376b7f37b59 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -48,10 +48,11 @@ public function __construct(
+      */
+     public function handle(GetDiscountForEditing $query): DiscountForEditing
+     {
+-        $cartRule = $this->discountRepository->get($query->discountId);
++        $cartRule = $this->discountRepository->get($query->getDiscountId());
++        $discountConditions = $this->discountRepository->getProductRulesGroup($query->getDiscountId());
+ 
+         return new DiscountForEditing(
+-            $query->discountId->getValue(),
++            $query->getDiscountId()->getValue(),
+             $cartRule->name,
+             $cartRule->priority,
+             $cartRule->active,
+@@ -72,6 +73,8 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+             $cartRule->reduction_product,
+             $cartRule->gift_product,
+             $cartRule->gift_product_attribute,
++            $cartRule->minimum_product_quantity,
++            $discountConditions,
+         );
+     }
+ }
+diff --git a/src/Adapter/Discount/Repository/DiscountRepository.php b/src/Adapter/Discount/Repository/DiscountRepository.php
+index 123c8b55510b4..87c817e4f4480 100644
+--- a/src/Adapter/Discount/Repository/DiscountRepository.php
++++ b/src/Adapter/Discount/Repository/DiscountRepository.php
+@@ -33,7 +33,11 @@
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\CannotDeleteDiscountException;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\CannotUpdateDiscountException;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRule;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleType;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
+ 
+ /**
+@@ -68,6 +72,72 @@ public function get(DiscountId $discountId): CartRule
+         return $cartRule;
+     }
+ 
++    /**
++     * @param DiscountId $discountId
++     *
++     * @return ProductRuleGroup[]
++     *
++     * @throws InvalidArgumentException
++     */
++    public function getProductRulesGroup(DiscountId $discountId): array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('*')
++            ->from($this->dbPrefix . 'cart_rule_product_rule_group', 'prg')
++            ->where('prg.id_cart_rule = :discountId')
++            ->setparameter('discountId', $discountId->getValue())
++        ;
++
++        $groupsResult = $qb->executeQuery()->fetchAllAssociative();
++        if (empty($groupsResult)) {
++            return [];
++        }
++
++        $productRulesGroups = [];
++        foreach ($groupsResult as $groupData) {
++            $qb = $this->connection->createQueryBuilder();
++            $qb
++                ->select('*')
++                ->from($this->dbPrefix . 'cart_rule_product_rule', 'pr')
++                ->where('pr.id_product_rule_group = :productRuleGroupId')
++                ->setparameter('productRuleGroupId', (int) $groupData['id_product_rule_group'])
++            ;
++            $productRulesResult = $qb->executeQuery()->fetchAllAssociative();
++
++            $productRules = [];
++            if (!empty($productRulesResult)) {
++                foreach ($productRulesResult as $productRuleData) {
++                    $qb = $this->connection->createQueryBuilder();
++                    $qb
++                        ->select('*')
++                        ->from($this->dbPrefix . 'cart_rule_product_rule_value', 'prv')
++                        ->where('prv.id_product_rule = :productRuleId')
++                        ->setparameter('productRuleId', $productRuleData['id_product_rule'])
++                    ;
++                    $productRuleValuesResult = $qb->executeQuery()->fetchAllAssociative();
++                    $itemIds = [];
++                    if (!empty($productRuleValuesResult)) {
++                        foreach ($productRuleValuesResult as $productRuleValueData) {
++                            $itemIds[] = (int) $productRuleValueData['id_item'];
++                        }
++                    }
++
++                    $productType = ProductRuleType::tryFrom((string) $productRuleData['type']);
++                    if (empty($productType)) {
++                        throw new InvalidArgumentException(sprintf('Unknow product rule type %s', (string) $productRuleData['type']));
++                    }
++
++                    $productRules[] = new ProductRule($productType, $itemIds);
++                }
++            }
++
++            $productRulesGroups[] = new ProductRuleGroup((int) $groupData['quantity'], $productRules);
++        }
++
++        return $productRulesGroups;
++    }
++
+     public function partialUpdate(CartRule $cartRule, array $updatableProperties, int $errorCode): void
+     {
+         $this->cartRuleValidator->validate($cartRule);
+diff --git a/src/Adapter/Discount/Update/DiscountConditionsUpdater.php b/src/Adapter/Discount/Update/DiscountConditionsUpdater.php
+new file mode 100644
+index 0000000000000..ab7dc22542c67
+--- /dev/null
++++ b/src/Adapter/Discount/Update/DiscountConditionsUpdater.php
+@@ -0,0 +1,185 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\Update;
++
++use CartRule;
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\CannotUpdateDiscountException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++class DiscountConditionsUpdater
++{
++    public function __construct(
++        private readonly DiscountRepository $discountRepository,
++        private readonly Connection $connection,
++        private readonly string $dbPrefix,
++    ) {
++    }
++
++    public function update(
++        DiscountId $discountId,
++        ?int $minimumProductsQuantity = null,
++        ?array $productConditions = null,
++    ): void {
++        // todo: when other conditions are added we check that only one is provided
++        $discount = $this->discountRepository->get($discountId);
++        $updatableProperties = $this->cleanAllConditions($discount);
++        if (null !== $minimumProductsQuantity) {
++            $updatableProperties = array_merge($updatableProperties, $this->updateMinimalProductQuantity($discount, $minimumProductsQuantity));
++        }
++
++        // Product conditions can define product segments or a list of products (which is equivalent to a segment based on a product criteria)
++        if (null !== $productConditions) {
++            $updatableProperties = array_merge($updatableProperties, $this->applyProductConditions($discount, $productConditions));
++        }
++
++        $updatableProperties = array_unique($updatableProperties);
++        if (!empty($updatableProperties)) {
++            $this->discountRepository->partialUpdate($discount, $updatableProperties, CannotUpdateDiscountException::FAILED_UPDATE_CONDITIONS);
++        }
++    }
++
++    /**
++     * There is no field in the DB that handles a condition directly on the number of products in the cart
++     * so we trick this condition by adding a product selection based on the root category (that contains
++     * all the products).
++     *
++     * @param CartRule $discount
++     * @param int $minimumProductsQuantity
++     *
++     * @return array
++     */
++    private function updateMinimalProductQuantity(CartRule $discount, int $minimumProductsQuantity): array
++    {
++        $discount->minimum_product_quantity = $minimumProductsQuantity;
++
++        return ['minimum_product_quantity'];
++    }
++
++    /**
++     * @param CartRule $discount
++     * @param ProductRuleGroup[] $productRuleGroups
++     *
++     * @return array
++     */
++    private function applyProductConditions(
++        CartRule $discount,
++        array $productRuleGroups,
++    ): array {
++        $this->cleanDiscountProductRules($discount);
++
++        foreach ($productRuleGroups as $productRuleGroup) {
++            // First create group
++            $this->connection->createQueryBuilder()
++                ->insert($this->dbPrefix . 'cart_rule_product_rule_group')
++                ->values([
++                    'id_cart_rule' => (int) $discount->id,
++                    'quantity' => $productRuleGroup->getQuantity(),
++                ])
++                ->executeStatement()
++            ;
++            $productRuleGroupId = $this->connection->lastInsertId();
++
++            // Then create all product rules associated to the group
++            foreach ($productRuleGroup->getRules() as $productRule) {
++                $this->connection->createQueryBuilder()
++                    ->insert($this->dbPrefix . 'cart_rule_product_rule')
++                    ->values([
++                        'id_product_rule_group' => ':productRuleGroupId',
++                        'type' => ':type',
++                    ])
++                    ->setParameter('productRuleGroupId', $productRuleGroupId)
++                    ->setParameter('type', $productRule->getType()->value)
++                    ->executeStatement()
++                ;
++                $productRuleId = $this->connection->lastInsertId();
++
++                // Finally assign all item values to the product rule via a multi insert statement
++                $productRuleValues = [];
++                $checkedIds = [];
++                foreach ($productRule->getItemIds() as $itemId) {
++                    if (in_array($itemId, $checkedIds, true)) {
++                        // Skip in case there are duplicates
++                        continue;
++                    }
++
++                    $productRuleValues[] = sprintf('(%d, %d)', $productRuleId, $itemId);
++                    $checkedIds[] = $itemId;
++                }
++                $this->connection->prepare(sprintf(
++                    'INSERT INTO %s (id_product_rule, id_item) VALUES %s',
++                    $this->dbPrefix . 'cart_rule_product_rule_value',
++                    implode(',', $productRuleValues)
++                )
++                )->executeStatement();
++            }
++        }
++        $discount->product_restriction = !empty($productRuleGroups);
++
++        return ['product_restriction'];
++    }
++
++    private function cleanAllConditions(CartRule $cartRule): array
++    {
++        $cartRule->minimum_product_quantity = 0;
++
++        return $this->cleanDiscountProductRules($cartRule) + [
++            'minimum_product_quantity',
++        ];
++    }
++
++    private function cleanDiscountProductRules(CartRule $discount): array
++    {
++        // Disable product restriction
++        $discount->product_restriction = false;
++
++        // First delete all associated product rule groups
++        $this->connection->createQueryBuilder()
++            ->delete($this->dbPrefix . 'cart_rule_product_rule_group', 'prg')
++            ->where('prg.id_cart_rule = :discountId')
++            ->setParameter('discountId', (int) $discount->id)
++            ->executeStatement()
++        ;
++
++        // Then clean orphan rows in the related tables
++        $this->connection->prepare('
++            DELETE prv FROM ' . $this->dbPrefix . 'cart_rule_product_rule AS pr
++            LEFT JOIN ' . $this->dbPrefix . 'cart_rule_product_group AS prg ON prg.id_product_rule_group = pr.id_product_rule_group
++            WHERE prg.id_product_rule_group = NULL
++        ');
++
++        $this->connection->prepare('
++            DELETE prv FROM ' . $this->dbPrefix . 'cart_rule_product_rule_value AS prv
++            LEFT JOIN ' . $this->dbPrefix . 'cart_rule_product_rule AS pr ON prv.id_product_rule = pr.id_product_rule
++            WHERE pr.id_product_rule = NULL
++        ');
++
++        return ['product_restriction'];
++    }
++}
+diff --git a/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+new file mode 100644
+index 0000000000000..7582e0e58af1b
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+@@ -0,0 +1,98 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++class UpdateDiscountConditionsCommand
++{
++    private DiscountId $discountId;
++
++    private ?int $minimumProductsQuantity = null;
++
++    private ?array $productConditions = null;
++
++    public function __construct(int $discountId)
++    {
++        $this->discountId = new DiscountId($discountId);
++    }
++
++    public function getDiscountId(): DiscountId
++    {
++        return $this->discountId;
++    }
++
++    public function getMinimumProductsQuantity(): ?int
++    {
++        return $this->minimumProductsQuantity;
++    }
++
++    public function setMinimumProductsQuantity(int $minimumProductsQuantity): self
++    {
++        if ($minimumProductsQuantity < 0) {
++            throw new DiscountConstraintException('Minimum products quantity must be greater than 0', DiscountConstraintException::INVALID_MINIMUM_PRODUCT_QUANTITY);
++        }
++
++        $this->minimumProductsQuantity = $minimumProductsQuantity;
++
++        return $this;
++    }
++
++    public function getProductConditions(): ?array
++    {
++        return $this->productConditions;
++    }
++
++    /**
++     * So far the form UX only allows ONE condition group, the legacy allowed for more conditions.
++     * We prefer to leave this possibility open in case some business logic are changed. If we are
++     * sure of the new behaviour after the testing phase this cas be refactored.
++     *
++     * Note: it also allows for more possibilities on the API side, however in this case maybe the
++     * form should be able to display multiple groups even if it doesn't allow creating them.
++     *
++     * @param ProductRuleGroup[] $productConditions
++     *
++     * @return self
++     *
++     * @throws DiscountConstraintException
++     */
++    public function setProductConditions(array $productConditions): self
++    {
++        foreach ($productConditions as $productCondition) {
++            if (!$productCondition instanceof ProductRuleGroup) {
++                throw new DiscountConstraintException(sprintf('Product conditions must be an array of %s', ProductRuleGroup::class), DiscountConstraintException::INVALID_PRODUCTS_CONDITIONS);
++            }
++        }
++
++        $this->productConditions = $productConditions;
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/Discount/CommandHandler/UpdateDiscountConditionsHandlerInterface.php b/src/Core/Domain/Discount/CommandHandler/UpdateDiscountConditionsHandlerInterface.php
+new file mode 100644
+index 0000000000000..2a03fe00338a5
+--- /dev/null
++++ b/src/Core/Domain/Discount/CommandHandler/UpdateDiscountConditionsHandlerInterface.php
+@@ -0,0 +1,34 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\UpdateDiscountConditionsCommand;
++
++interface UpdateDiscountConditionsHandlerInterface
++{
++    public function handle(UpdateDiscountConditionsCommand $command): void;
++}
+diff --git a/src/Core/Domain/Discount/Exception/CannotUpdateDiscountException.php b/src/Core/Domain/Discount/Exception/CannotUpdateDiscountException.php
+index 08fb2a6cb0d0c..75040f97cb269 100644
+--- a/src/Core/Domain/Discount/Exception/CannotUpdateDiscountException.php
++++ b/src/Core/Domain/Discount/Exception/CannotUpdateDiscountException.php
+@@ -29,4 +29,6 @@
+ class CannotUpdateDiscountException extends DiscountException
+ {
+     public const FAILED_UPDATE_DISCOUNT = 1;
++
++    public const FAILED_UPDATE_CONDITIONS = 2;
+ }
+diff --git a/src/Core/Domain/Discount/Exception/DiscountConstraintException.php b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+index 0925d15e70d6c..5be98ab8bc803 100644
+--- a/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
++++ b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+@@ -72,4 +72,6 @@ class DiscountConstraintException extends DiscountException
+ 
+     public const INVALID_PERCENT_DISCOUNT_ALREADY_SET = 42;
+     public const INVALID_DATE_FROM_OR_DATE_TO = 43;
++    public const INVALID_MINIMUM_PRODUCT_QUANTITY = 44;
++    public const INVALID_PRODUCTS_CONDITIONS = 45;
+ }
+diff --git a/src/Core/Domain/Discount/ProductRule.php b/src/Core/Domain/Discount/ProductRule.php
+new file mode 100644
+index 0000000000000..c60ebfe6c7f3b
+--- /dev/null
++++ b/src/Core/Domain/Discount/ProductRule.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount;
++
++/**
++ * The product rules have an OR/|| condition between them so the minimum quantity of products (defined on the
++ * parent group) must match one or several rules defined.
++ *
++ * A product rule is defined by the type of entity it matches (products, categories, ...) and a list of item IDs
++ * for this specific entity.
++ */
++class ProductRule
++{
++    public function __construct(
++        private readonly ProductRuleType $type,
++        private readonly array $itemIds,
++    ) {
++    }
++
++    public function getType(): ProductRuleType
++    {
++        return $this->type;
++    }
++
++    public function getItemIds(): array
++    {
++        return $this->itemIds;
++    }
++}
+diff --git a/src/Core/Domain/Discount/ProductRuleGroup.php b/src/Core/Domain/Discount/ProductRuleGroup.php
+new file mode 100644
+index 0000000000000..9d7852c1cf03d
+--- /dev/null
++++ b/src/Core/Domain/Discount/ProductRuleGroup.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount;
++
++/**
++ * Product rule groups have an AND/&& condition between them, meaning if multiple groups are set
++ * on a discount they all must be satisfied for the discount to be valid.
++ *
++ * Each group is associated with a specific minimum quantity of products that must respect the specified
++ * rules. However, the product rules have an OR/|| condition between them so the minimum quantity must
++ * match one or several rules defined.
++ */
++class ProductRuleGroup
++{
++    /**
++     * @param int $quantity
++     * @param ProductRule[] $rules
++     */
++    public function __construct(
++        private readonly int $quantity,
++        private readonly array $rules,
++    ) {
++    }
++
++    public function getQuantity(): int
++    {
++        return $this->quantity;
++    }
++
++    /**
++     * @return ProductRule[]
++     */
++    public function getRules(): array
++    {
++        return $this->rules;
++    }
++}
+diff --git a/src/Core/Domain/Discount/ProductRuleType.php b/src/Core/Domain/Discount/ProductRuleType.php
+new file mode 100644
+index 0000000000000..26cc9d1167c9e
+--- /dev/null
++++ b/src/Core/Domain/Discount/ProductRuleType.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount;
++
++/**
++ * Product rules target a type of entities, which are identified via this enum.
++ */
++enum ProductRuleType: string
++{
++    case CATEGORIES = 'categories';
++    case PRODUCTS = 'products';
++}
+diff --git a/src/Core/Domain/Discount/Query/GetDiscountForEditing.php b/src/Core/Domain/Discount/Query/GetDiscountForEditing.php
+index e004a3f0ed7a2..ff909b574a8da 100644
+--- a/src/Core/Domain/Discount/Query/GetDiscountForEditing.php
++++ b/src/Core/Domain/Discount/Query/GetDiscountForEditing.php
+@@ -30,10 +30,15 @@
+ 
+ class GetDiscountForEditing
+ {
+-    public readonly DiscountId $discountId;
++    private readonly DiscountId $discountId;
+ 
+     public function __construct(int $discountId)
+     {
+         $this->discountId = new DiscountId($discountId);
+     }
++
++    public function getDiscountId(): DiscountId
++    {
++        return $this->discountId;
++    }
+ }
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index 533b8ef8cde41..74a3786ad0f9b 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -28,6 +28,7 @@
+ 
+ use DateTimeImmutable;
+ use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+ 
+ class DiscountForEditing
+@@ -54,6 +55,8 @@ public function __construct(
+         private readonly ?int $reductionProduct,
+         private readonly ?int $giftProductId,
+         private readonly ?int $giftCombinationId,
++        private readonly int $minimumProductQuantity,
++        private readonly array $productConditions,
+     ) {
+     }
+ 
+@@ -161,4 +164,17 @@ public function getLocalizedNames(): array
+     {
+         return $this->localizedNames;
+     }
++
++    public function getMinimumProductQuantity(): int
++    {
++        return $this->minimumProductQuantity;
++    }
++
++    /**
++     * @return ProductRuleGroup[]
++     */
++    public function getProductConditions(): array
++    {
++        return $this->productConditions;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index cbbcce99cf695..6b86df7f0341e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -12,9 +12,17 @@ services:
+   PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\UpdateDiscountHandler:
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\UpdateDiscountConditionsHandler:
++    autoconfigure: true
++
+   PrestaShop\PrestaShop\Adapter\Discount\Update\Filler\DiscountFiller:
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Discount\Update\DiscountConditionsUpdater:
++    autoconfigure: true
++    arguments:
++      $dbPrefix: '%database_prefix%'
++
+   PrestaShop\PrestaShop\Adapter\Discount\QueryHandler\GetDiscountForEditingHandler:
+     autoconfigure: true
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+index 46eebfe8c3e63..0421bcbda9050 100644
+--- a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+@@ -238,6 +238,16 @@ public function assertCartRuleValidationError(string $expectedMessage): void
+         );
+     }
+ 
++    /**
++     * @Then I should get cart rule validation error
++     *
++     * @return void
++     */
++    public function assertGenericCartRuleValidationError(): void
++    {
++        $this->assertLastErrorIs(CartRuleValidityException::class);
++    }
++
+     /**
+      * @Given discount code :cartRuleReference is not applied to my cart
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php
+new file mode 100644
+index 0000000000000..b2e0467dbd65c
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php
+@@ -0,0 +1,141 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain\Discount;
++
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\UpdateDiscountConditionsCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRule;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleType;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
++use Tests\Integration\Behaviour\Features\Context\Domain\AbstractDomainFeatureContext;
++
++class DiscountConditionsFeatureContext extends AbstractDomainFeatureContext
++{
++    /**
++     * @When I update discount :discountReference with the condition it requires at least :quantity products
++     *
++     * @param string $discountReference
++     * @param int $quantity
++     *
++     * @return void
++     */
++    public function updateDiscountConditionMinimalProductQuantity(string $discountReference, int $quantity): void
++    {
++        $command = new UpdateDiscountConditionsCommand($this->referenceToId($discountReference));
++        $command->setMinimumProductsQuantity($quantity);
++        $this->getCommandBus()->handle($command);
++    }
++
++    /**
++     * @When I update discount :discountReference with following conditions matching at least :quantity products:
++     *
++     * @param string $discountReference
++     * @param int $quantity
++     * @param TableNode $tableNode
++     *
++     * @return void
++     */
++    public function updateDiscountProductConditions(string $discountReference, int $quantity, TableNode $tableNode): void
++    {
++        $command = new UpdateDiscountConditionsCommand($this->referenceToId($discountReference));
++
++        $conditions = $tableNode->getColumnsHash();
++        $productRules = [];
++        foreach ($conditions as $condition) {
++            $productRules[] = new ProductRule(
++                ProductRuleType::tryFrom($condition['condition_type']),
++                $this->referencesToIds($condition['items'])
++            );
++        }
++
++        // This matches the current business rule for the new form, a discount can only have ONE product rule group
++        // (which represent an AND condition), however they can have multiple product rules (which represent and
++        // OR condition)
++        // If we decide to increase the number of groups later this behat step will need to be refactored but so far
++        // it matches our needs.
++        $command->setProductConditions([
++            new ProductRuleGroup(
++                $quantity,
++                $productRules,
++            ),
++        ]);
++        $this->getCommandBus()->handle($command);
++    }
++
++    /**
++     * @Then discount :discountReference should have the following product conditions matching at least :quantity products:
++     *
++     * @param string $discountReference
++     * @param TableNode $tableNode
++     *
++     * @return void
++     */
++    public function assertProductConditions(string $discountReference, int $quantity, TableNode $tableNode): void
++    {
++        /** @var DiscountForEditing $discountForEditing */
++        $discountForEditing = $this->getQueryBus()->handle(
++            new GetDiscountForEditing($this->getSharedStorage()->get($discountReference))
++        );
++
++        $conditionsData = $tableNode->getColumnsHash();
++        $productConditions = $discountForEditing->getProductConditions();
++        Assert::assertEquals(1, count($productConditions), sprintf('We only handle ONE condition group for now, %d groups were found', count($productConditions)));
++
++        $productRuleGroup = $productConditions[0];
++        Assert::assertEquals($quantity, $productRuleGroup->getQuantity(), sprintf('Expected at least %d product quantity but got %d instead', $quantity, $productRuleGroup->getQuantity()));
++
++        $productRules = $productRuleGroup->getRules();
++        Assert::assertEquals(count($conditionsData), count($productRules), sprintf('Expected %d rules but got %d instead', count($conditionsData), count($productRules)));
++
++        foreach ($conditionsData as $index => $conditionData) {
++            $productRule = $productRules[$index];
++            Assert::assertEquals($conditionData['condition_type'], $productRule->getType()->value);
++            $expectedItemIds = $this->referencesToIds($conditionData['items']);
++            Assert::assertEquals($expectedItemIds, $productRule->getItemIds(), 'The expected items do not match');
++        }
++    }
++
++    /**
++     * @Then discount :discountReference should have no product conditions
++     *
++     * @param string $discountReference
++     *
++     * @return void
++     */
++    public function assertNoProductConditions(string $discountReference): void
++    {
++        /** @var DiscountForEditing $discountForEditing */
++        $discountForEditing = $this->getQueryBus()->handle(
++            new GetDiscountForEditing($this->getSharedStorage()->get($discountReference))
++        );
++
++        Assert::assertEmpty($discountForEditing->getProductConditions(), 'Product conditions were found when none is expected');
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index b58423a8303cb..60d32d9860c1f 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -352,6 +352,9 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+         if (isset($expectedData['name'])) {
+             Assert::assertSame($expectedData['name'], $discountForEditing->getLocalizedNames());
+         }
++        if (isset($expectedData['minimum_product_quantity'])) {
++            Assert::assertEquals($expectedData['minimum_product_quantity'], $discountForEditing->getMinimumProductQuantity());
++        }
+     }
+ 
+     protected function getDiscountForEditing(string $discountReference): DiscountForEditing
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature
+new file mode 100644
+index 0000000000000..ac3a0175b0c33
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_conditions.feature
+@@ -0,0 +1,47 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags update-discount-conditions
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@update-discount-conditions
++Feature: Update discount condition
++  PrestaShop allows BO users to update discounts conditions
++  As a BO user
++  I must be able to update conditions on discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++
++  Scenario: Create discount with minimum products quantity
++    When I create a "free_shipping" discount "discount_with_min_products" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_min_products" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_min_products" with the condition it requires at least 23 products
++    Then discount "discount_with_min_products" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 23            |
++    And discount "discount_with_min_products" should have no product conditions
++
++  Scenario: Create discount with restricted list of products
++    Given I add product "beer_product" with following information:
++      | name[en-US] | bottle of beer |
++      | type        | standard       |
++    And I add product "potato_chips_product" with following information:
++      | name[en-US] | potato chips |
++      | type        | standard     |
++    When I create a "free_shipping" discount "discount_with_restricted_products" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_restricted_products" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_restricted_products" with following conditions matching at least 42 products:
++      | condition_type | items                              |
++      | products       | beer_product, potato_chips_product |
++    Then discount "discount_with_restricted_products" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_restricted_products" should have the following product conditions matching at least 42 products:
++      | condition_type | items                              |
++      | products       | beer_product, potato_chips_product |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_condition_minimal_quantity.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_condition_minimal_quantity.feature
+new file mode 100644
+index 0000000000000..f1e65810b7b02
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_condition_minimal_quantity.feature
+@@ -0,0 +1,65 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-condition-minimal-quantity
++@restore-all-tables-before-feature
++@discount-condition-minimal-quantity
++Feature: Full UX discount test
++  PrestaShop allows discounts with minimal quantity as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  Scenario: Create a complete discount with free shipping using new CQRS
++    And there is a product in the catalog named "product1" with a price of 10.00 and 1000 items in stock
++    When I create a "free_shipping" discount "free_shipping_discount_with_minimal_quantity" with following properties:
++      | name[en-US] | Four products equal free shipping  |
++      | name[fr-FR] | Quatre produit donne envoi gratuit |
++      | active      | true                               |
++      | valid_from  | 2025-01-01 11:05:00                |
++      | valid_to    | 2025-12-01 00:00:00                |
++      | code        | FREE_SHIPPING_4                    |
++    When I update discount "free_shipping_discount_with_minimal_quantity" with the condition it requires at least 4 products
++    And discount "free_shipping_discount_with_minimal_quantity" should have the following properties:
++      | name[en-US]              | Four products equal free shipping  |
++      | name[fr-FR]              | Quatre produit donne envoi gratuit |
++      | active                   | true                               |
++      | valid_from               | 2025-01-01 11:05:00                |
++      | valid_to                 | 2025-12-01 00:00:00                |
++      | code                     | FREE_SHIPPING_4                    |
++      | minimum_product_quantity | 4                                  |
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 3 product "product1" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$37.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $30.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $37.00 |
++    When I use a voucher "free_shipping_discount_with_minimal_quantity" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    # First try the condition is not met so the cart remains unchanged
++    And cart "dummy_cart" total with tax included should be '$37.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $30.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $37.00 |
++    # Now we add the missing fourth product
++    When I add 1 product "product1" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$47.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $40.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $47.00 |
++    When I use a voucher "free_shipping_discount_with_minimal_quantity" on the cart "dummy_cart"
++    # Now the condition is met so the cart shipping is offered
++    And cart "dummy_cart" total with tax included should be '$40.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $40.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $40.00 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature
+new file mode 100644
+index 0000000000000..15a830ea85ce0
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_restricted_products.feature
+@@ -0,0 +1,148 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-condition-restricted-products
++@restore-all-tables-before-feature
++@discount-condition-restricted-products
++Feature: Full UX discount test
++  PrestaShop allows discounts with minimal quantity as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  # Note: in this feature file scenarios are related because this initialisation must be done only once
++  Scenario: First create products and the discount that will be used in following scenarios
++    Given I add product "beer_product" with following information:
++      | name[en-US] | bottle of beer     |
++      | name[fr-FR] | bouteille de bière |
++      | type        | standard           |
++    And I update product "beer_product" stock with following information:
++      | delta_quantity | 51 |
++    And I enable product "beer_product"
++    And I update product "beer_product" with following values:
++      | price | 20.00 |
++    And I add product "potato_chips_product" with following information:
++      | name[en-US] | potato chips |
++      | name[fr-FR] | chips        |
++      | type        | standard     |
++    And I update product "potato_chips_product" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "potato_chips_product"
++    And I update product "potato_chips_product" with following values:
++      | price | 5.00 |
++    # This one is not part of the condition it is used to ensure the condition only works with matching products
++    And I add product "nuggets_bucket_product" with following information:
++      | name[en-US] | nuggets bucket |
++      | name[fr-FR] | sot de nuggets |
++      | type        | standard       |
++    And I update product "nuggets_bucket_product" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "nuggets_bucket_product"
++    And I update product "nuggets_bucket_product" with following values:
++      | price | 12.00 |
++    # Now create the discount
++    When I create a "free_shipping" discount "free_shipping_discount_with_restricted_products" with following properties:
++      | name[en-US] | Trois bières et/ou chips equal free shipping |
++      | name[fr-FR] | Trois bière et/ou chips donne envoi gratuit  |
++      | active      | true                                         |
++      | valid_from  | 2025-01-01 11:05:00                          |
++      | valid_to    | 2025-12-01 00:00:00                          |
++      | code        | FREE_SHIPPING_THREE_PRODUCTS                 |
++    And I update discount "free_shipping_discount_with_restricted_products" with following conditions matching at least 3 products:
++      | condition_type | items                              |
++      | products       | beer_product, potato_chips_product |
++    Then discount "free_shipping_discount_with_restricted_products" should have the following properties:
++      | name[en-US]              | Trois bières et/ou chips equal free shipping |
++      | name[fr-FR]              | Trois bière et/ou chips donne envoi gratuit  |
++      | active                   | true                                         |
++      | valid_from               | 2025-01-01 11:05:00                          |
++      | valid_to                 | 2025-12-01 00:00:00                          |
++      | code                     | FREE_SHIPPING_THREE_PRODUCTS                 |
++      | minimum_product_quantity | 0                                            |
++    And discount "free_shipping_discount_with_restricted_products" should have the following product conditions matching at least 3 products:
++      | condition_type | items                              |
++      | products       | beer_product, potato_chips_product |
++
++  Scenario: Free shipping with three bottle of beers
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 2 product "bottle of beer" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$47.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $40.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $47.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_products" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    # First try the condition is not met so the cart remains unchanged
++    And cart "dummy_cart" total with tax included should be '$47.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $40.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $47.00 |
++    # Now we add the missing third product
++    When I add 1 product "bottle of beer" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$67.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $60.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $67.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_products" on the cart "dummy_cart"
++    # Now the condition is met so the cart shipping is offered
++    Then cart "dummy_cart" total with tax included should be '$60.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $60.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $60.00 |
++
++  Scenario: Free shipping with 1 bottle of beer and 2 chips (apply on first try)
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 product "bottle of beer" to the cart "dummy_cart"
++    And I add 2 products "potato chips" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$37.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $30.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $37.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_products" on the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$30.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $30.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $30.00 |
++
++  Scenario: Three products but only two matching the rule
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 product "bottle of beer" to the cart "dummy_cart"
++    And I add 1 product "potato chips" to the cart "dummy_cart"
++    And I add 1 product "nuggets bucket" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$44.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $37.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $44.00 |
++    When I use a voucher "free_shipping_discount_with_restricted_products" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$44.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $37.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $44.00 |
++    # With one more product it matches the condition
++    When I add 1 product "potato chips" to the cart "dummy_cart"
++    And I use a voucher "free_shipping_discount_with_restricted_products" on the cart "dummy_cart"
++    Then cart "dummy_cart" total with tax included should be '$42.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $42.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $42.00 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index d9317f6d794dc..df3db22c9024b 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -291,35 +291,38 @@ default:
+       paths:
+         - "%paths.base%/Features/Scenario/Discount"
+       contexts:
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ContextFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountConditionsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GetCombinationIdsFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
+ 
+     catalog_price_rule:
+       paths:

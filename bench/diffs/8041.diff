@@ -1,0 +1,191 @@
+diff --git a/src/Adapter/Shop/Context.php b/src/Adapter/Shop/Context.php
+index 81f01166b19b4..a34acd372543d 100644
+--- a/src/Adapter/Shop/Context.php
++++ b/src/Adapter/Shop/Context.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Shop;
+ 
+ use Shop;
++use ShopGroup;
+ 
+ /**
+  * This class will provide legacy shop context
+@@ -125,4 +126,31 @@ public function setAllContext($id)
+     {
+         Shop::setContext(Shop::CONTEXT_ALL, $id);
+     }
++
++    public function getContextShopGroup()
++    {
++        return Shop::getContextShopGroup();
++    }
++
++    /**
++     * Retrieve group ID of a shop
++     *
++     * @param $shopId
++     * @param bool $asId
++     * @return int
++     */
++    public function getGroupFromShop($shopId, $asId = true)
++    {
++        return Shop::getGroupFromShop($shopId, $asId);
++
++    }
++
++    /**
++     * @param $shopGroupId
++     * @return ShopGroup
++     */
++    public function ShopGroup($shopGroupId)
++    {
++        return new ShopGroup($shopGroupId);
++    }
+ }
+diff --git a/src/Adapter/StockManager.php b/src/Adapter/StockManager.php
+index 0f56a234978d1..089befc0409a5 100644
+--- a/src/Adapter/StockManager.php
++++ b/src/Adapter/StockManager.php
+@@ -26,6 +26,7 @@
+ namespace PrestaShop\PrestaShop\Adapter;
+ 
+ use PrestaShopBundle\Service\DataProvider\StockInterface;
++use PrestaShop\PrestaShop\Adapter\Shop\Context as ShopAdapter;
+ use PrestaShop\PrestaShop\Adapter\Configuration as ConfigurationAdapter;
+ use StockAvailable;
+ use Db;
+@@ -47,7 +48,34 @@ class StockManager implements StockInterface
+      */
+     public function getStockAvailableByProduct($product, $id_product_attribute = null, $id_shop = null)
+     {
+-        return $this->newStockAvailable($this->getStockAvailableIdByProductId($product->id, $id_product_attribute, $id_shop));
++        $stockAvailable = $this->newStockAvailable($this->getStockAvailableIdByProductId($product->id, $id_product_attribute, $id_shop));
++
++        if (!$stockAvailable->id) {
++            $shopAdapter = new ShopAdapter();
++            $stockAvailable->id_product = (int)$product->id;
++            $stockAvailable->id_product_attribute = (int)$id_product_attribute;
++
++            $outOfStock = $this->outOfStock((int)$product->id, $id_shop);
++            $stockAvailable->out_of_stock = (int)$outOfStock;
++
++            if ($id_shop === null) {
++                $shop_group = $shopAdapter->getContextShopGroup();
++            } else {
++                $shop_group = $shopAdapter->ShopGroup((int)$shopAdapter->getGroupFromShop((int)$id_shop));
++            }
++
++            // if quantities are shared between shops of the group
++            if ($shop_group->share_stock) {
++                $stockAvailable->id_shop = 0;
++                $stockAvailable->id_shop_group = (int)$shop_group->id;
++            } else {
++                $stockAvailable->id_shop = (int)$id_shop;
++                $stockAvailable->id_shop_group = 0;
++            }
++            $stockAvailable->add();
++        }
++
++        return $stockAvailable;
+     }
+ 
+     /**
+@@ -159,4 +187,16 @@ public function getStockAvailableIdByProductId($productId, $productAttributeId =
+     {
+         return StockAvailable::getStockAvailableIdByProductId($productId, $productAttributeId, $shopId);
+     }
++
++    /**
++     * For a given product, get its "out of stock" flag
++     *
++     * @param int $productId
++     * @param int $shopId Optional : gets context if null @see Context::getContext()
++     * @return bool : depends on stock @see $depends_on_stock
++     */
++    public function outOfStock($productId, $shopId = null)
++    {
++        return StockAvailable::outOfStock($productId, $shopId);
++    }
+ }
+diff --git a/src/Core/Stock/StockManager.php b/src/Core/Stock/StockManager.php
+index 6dd124449aea6..9d5adbfbc0bea 100644
+--- a/src/Core/Stock/StockManager.php
++++ b/src/Core/Stock/StockManager.php
+@@ -133,7 +133,7 @@ public function updatePacksQuantityContainingProduct($product, $id_product_attri
+      */
+     public function updateQuantity($product, $id_product_attribute, $delta_quantity, $id_shop = null, $add_movement = false, $params = array())
+     {
+-        /// @TODO We should call the needed classes with the Symfony dependency injection instead of the Homemade Service Locator
++        // @TODO We should call the needed classes with the Symfony dependency injection instead of the Homemade Service Locator
+         $serviceLocator = new ServiceLocator();
+         $stockManager = $serviceLocator::get('\\PrestaShop\\PrestaShop\\Adapter\\StockManager');
+         $packItemsManager = $serviceLocator::get('\\PrestaShop\\PrestaShop\\Adapter\\Product\\PackItemsManager');
+@@ -149,8 +149,6 @@ public function updateQuantity($product, $id_product_attribute, $delta_quantity,
+         } else {
+             // The product is not a pack
+             $stockAvailable->quantity = $stockAvailable->quantity + $delta_quantity;
+-            $stockAvailable->id_product = (int)$product->id;
+-            $stockAvailable->id_product_attribute = (int)$id_product_attribute;
+             $stockAvailable->update();
+ 
+             // Decrease case only: the stock of linked packs should be decreased too.
+@@ -167,8 +165,6 @@ public function updateQuantity($product, $id_product_attribute, $delta_quantity,
+             $this->saveMovement($product->id, $id_product_attribute, $delta_quantity, $params);
+         }
+ 
+-        $cacheManager->clean('StockAvailable::getQuantityAvailableByProduct_'.(int)$product->id.'*');
+-
+         $hookManager->exec('actionUpdateQuantity',
+             array(
+                 'id_product' => $product->id,
+@@ -176,6 +172,8 @@ public function updateQuantity($product, $id_product_attribute, $delta_quantity,
+                 'quantity' => $stockAvailable->quantity
+             )
+         );
++
++        $cacheManager->clean('StockAvailable::getQuantityAvailableByProduct_'.(int)$product->id.'*');
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Entity/StockMvt.php b/src/PrestaShopBundle/Entity/StockMvt.php
+index 8544832b0795b..3c1be199ad0d1 100644
+--- a/src/PrestaShopBundle/Entity/StockMvt.php
++++ b/src/PrestaShopBundle/Entity/StockMvt.php
+@@ -122,7 +122,11 @@ class StockMvt
+     private $referer;
+ 
+ 
+-
++    public function __construct()
++    {
++        $configuration = new Configuration();
++        $this->setIdStockMvtReason($this->getSign() >= 1 ? $configuration->get('PS_STOCK_MVT_INC_EMPLOYEE_EDITION') : $configuration->get('PS_STOCK_MVT_DEC_EMPLOYEE_EDITION'));
++    }
+ 
+     /**
+      * Get idStockMvt
+@@ -227,11 +231,6 @@ public function setIdStockMvtReason($idStockMvtReason)
+      */
+     public function getIdStockMvtReason()
+     {
+-        if (0 === $this->idStockMvtReason) {
+-            $configuration = new Configuration();
+-            $this->setIdStockMvtReason($this->getSign() >= 1 ? $configuration->get('PS_STOCK_MVT_INC_EMPLOYEE_EDITION') : $configuration->get('PS_STOCK_MVT_DEC_EMPLOYEE_EDITION'));
+-        }
+-
+         return $this->idStockMvtReason;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Stock/overview.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Stock/overview.html.twig
+index 6188533876809..c9ec972df1e48 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Stock/overview.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Stock/overview.html.twig
+@@ -32,7 +32,7 @@
+     {% else %}
+         <div class="col-md-12">
+             <div class="alert alert-danger" role="alert">
+-                <i class="material-icons">info_outline</i><p class="alert-text">{{ 'You can\'t manager your stock in this shop context: select a shop instead of a group of shops.'|trans({}, 'Admin.Catalog.Notification') }}</p>
++                <i class="material-icons">info_outline</i><p class="alert-text">{{ 'You can\'t manage your stock in this shop context: select a shop instead of a group of shops.'|trans({}, 'Admin.Catalog.Notification') }}</p>
+             </div>
+         </div>
+     {% endif %}

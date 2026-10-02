@@ -1,0 +1,79 @@
+diff --git a/src/Adapter/Alias/Repository/AliasRepository.php b/src/Adapter/Alias/Repository/AliasRepository.php
+index 370ec80331c4f..43dec64c3ba3d 100644
+--- a/src/Adapter/Alias/Repository/AliasRepository.php
++++ b/src/Adapter/Alias/Repository/AliasRepository.php
+@@ -90,7 +90,11 @@ public function addAliases(string $searchTerm, array $aliases): array
+ 
+         foreach ($aliases as $searchAlias) {
+             // As search term is not a primary key, we need make sure that alias and search combination does not exist
+-            if ($this->aliasExists($searchAlias['alias'], $searchTerm)) {
++            // if alias exists for search term, we need to apply new active if needed
++            $aliasIfExists = $this->getAliasIfExists($searchAlias['alias'], $searchTerm);
++            if ($aliasIfExists) {
++                $aliasIfExists->active = $searchAlias['active'];
++                $this->partialUpdate($aliasIfExists, ['active'], CannotAddAliasException::class);
+                 continue;
+             }
+ 
+@@ -129,9 +133,9 @@ public function get(AliasId $aliasId): Alias
+      * @param string $alias
+      * @param string $searchTerm
+      *
+-     * @return bool
++     * @return Alias|null
+      */
+-    public function aliasExists(string $alias, string $searchTerm): bool
++    public function getAliasIfExists(string $alias, string $searchTerm): ?Alias
+     {
+         $qb = $this->connection->createQueryBuilder()
+             ->select('a.id_alias')
+@@ -141,8 +145,13 @@ public function aliasExists(string $alias, string $searchTerm): bool
+             ->setParameter('search', $searchTerm)
+             ->setParameter('alias', $alias)
+         ;
++        $alias = $qb->executeQuery()->fetchOne();
+ 
+-        return (bool) $qb->executeQuery()->fetchOne();
++        if ($alias) {
++            return $this->get(new AliasId((int) $alias));
++        }
++
++        return null;
+     }
+ 
+     /**
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Search/add_alias.feature b/tests/Integration/Behaviour/Features/Scenario/Search/add_alias.feature
+index 31fecc235a3c1..4c3386e3285dd 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Search/add_alias.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Search/add_alias.feature
+@@ -27,7 +27,7 @@ Feature: Add basic alias from Back Office (BO)
+       | large | true   |
+       | small | false  |
+ 
+-  Scenario: I add alises for one search term for the second time
++  Scenario: I add aliases for one search term for the second time
+     Given following aliases should exist:
+       | search | alias  | active |
+       | big    | large  | true   |
+@@ -46,6 +46,21 @@ Feature: Add basic alias from Back Office (BO)
+       | small   | false  |
+       | so biig | true   |
+ 
++  Scenario: I add aliases for one search term for the second time with different active status
++    Given following aliases should exist:
++      | search | alias   | active |
++      | big    | large   | true   |
++      | big    | small   | false  |
++      | big    | so biig | true   |
++    When I add a search term "big" with following aliases:
++      | alias     | active |
++      | so biig   | false  |
++    Then I should have the following aliases for search term "big":
++      | alias   | active |
++      | large   | true   |
++      | small   | false  |
++      | so biig | false  |
++
+   Scenario: I add alias already used by another search term
+     Given following aliases should exist:
+       | search | alias  | active |

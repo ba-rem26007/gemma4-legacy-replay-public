@@ -1,0 +1,95 @@
+diff --git a/src/Core/Module/EventSubscriber.php b/src/Core/Module/EventSubscriber.php
+index 4eefe26ec2eb6..17beef235b161 100644
+--- a/src/Core/Module/EventSubscriber.php
++++ b/src/Core/Module/EventSubscriber.php
+@@ -75,7 +75,7 @@ public function onModuleStateChanged(ModuleManagementEvent $event): void
+     public function onModuleInstalledOrUninstalled(ModuleManagementEvent $event): void
+     {
+         $this->onModuleStateChanged($event);
+-        if (!$this->cleared) {
++        if (!$this->cleared && $event->getSystemClearCache()) {
+             $this->cacheClearer->clear();
+             $this->cleared = true;
+         }
+diff --git a/src/Core/Module/ModuleManager.php b/src/Core/Module/ModuleManager.php
+index 96291a3b5ed5f..da43cb2e250e5 100644
+--- a/src/Core/Module/ModuleManager.php
++++ b/src/Core/Module/ModuleManager.php
+@@ -65,6 +65,9 @@ class ModuleManager implements ModuleManagerInterface
+     /** @var Filesystem */
+     private $filesystem;
+ 
++    /** @var bool */
++    private $systemClearCache = true;
++
+     public function __construct(
+         ModuleRepository $moduleRepository,
+         ModuleDataProvider $moduleDataProvider,
+@@ -369,6 +372,11 @@ private function assertIsInstalled(string $name): void
+ 
+     private function dispatch(string $event, ModuleInterface $module): void
+     {
+-        $this->eventDispatcher->dispatch(new ModuleManagementEvent($module), $event);
++        $this->eventDispatcher->dispatch(new ModuleManagementEvent($module, $this->systemClearCache), $event);
++    }
++
++    public function disableSystemClearCache(): void
++    {
++        $this->systemClearCache = false;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+index 411484f67661f..22eff844570a6 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+@@ -209,10 +209,17 @@ public function moduleAction(Request $request)
+ 
+         try {
+             $args = [$module];
+-            if ($action === 'uninstall') {
++            if ($action === ModuleAdapter::ACTION_UNINSTALL) {
+                 $args[] = (bool) ($request->request->get('actionParams', [])['deletion'] ?? false);
+                 $response[$module]['refresh_needed'] = $this->moduleNeedsReload($moduleRepository->getModule($module));
+             }
++            $systemCacheClearEnabled = filter_var(
++                $request->request->get('actionParams', [])['cacheClearEnabled'] ?? true,
++                FILTER_VALIDATE_BOOLEAN
++            );
++            if (!$systemCacheClearEnabled) {
++                $moduleManager->disableSystemClearCache();
++            }
+             $response[$module]['status'] = call_user_func([$moduleManager, $action], ...$args);
+         } catch (Exception $e) {
+             $response[$module]['status'] = false;
+diff --git a/src/PrestaShopBundle/Event/ModuleManagementEvent.php b/src/PrestaShopBundle/Event/ModuleManagementEvent.php
+index f6305e0a65573..1c6b037d76daf 100644
+--- a/src/PrestaShopBundle/Event/ModuleManagementEvent.php
++++ b/src/PrestaShopBundle/Event/ModuleManagementEvent.php
+@@ -41,15 +41,25 @@ class ModuleManagementEvent extends Event
+     public const UPGRADE = 'module.upgrade';
+     public const RESET = 'module.reset';
+ 
++    /** @var ModuleInterface */
+     private $module;
+ 
+-    public function __construct(ModuleInterface $module)
++    /** @var bool */
++    private $systemClearCache;
++
++    public function __construct(ModuleInterface $module, bool $systemClearCache = true)
+     {
+         $this->module = $module;
++        $this->systemClearCache = $systemClearCache;
+     }
+ 
+-    public function getModule()
++    public function getModule(): ModuleInterface
+     {
+         return $this->module;
+     }
++
++    public function getSystemClearCache(): bool
++    {
++        return $this->systemClearCache;
++    }
+ }

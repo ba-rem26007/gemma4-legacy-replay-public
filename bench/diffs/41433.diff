@@ -1,0 +1,2106 @@
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index 2e2a92d77287c..b8ae739c900e9 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -86,6 +86,8 @@ module.exports = {
+     discount: './js/pages/discount',
+     discount_form: './js/pages/discount/form',
+     email: './js/pages/email',
++    email_body_translation: './js/pages/email-body-translation',
++    email_body_translation_form: './js/pages/email-body-translation/form',
+     employee: './js/pages/employee/index',
+     employee_form: './js/pages/employee/form',
+     error: './js/pages/error',
+diff --git a/admin-dev/themes/new-theme/js/pages/email-body-translation/form.ts b/admin-dev/themes/new-theme/js/pages/email-body-translation/form.ts
+new file mode 100644
+index 0000000000000..bb5ad73bb9c02
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/email-body-translation/form.ts
+@@ -0,0 +1,22 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++$(() => {
++  // Prevent TinyMCE from wrapping content in <p> tags,
++  // which corrupts email template HTML structure.
++  window.prestashop.component.EventEmitter.on(
++    'initTinyMCE',
++    ({config}: {config: Record<string, unknown>}) => {
++      Object.assign(config, {
++        forced_root_block: false,
++        verify_html: false,
++      });
++    },
++  );
++
++  window.prestashop.component.initComponents([
++    'TinyMCEEditor',
++  ]);
++});
+diff --git a/admin-dev/themes/new-theme/js/pages/email-body-translation/index.ts b/admin-dev/themes/new-theme/js/pages/email-body-translation/index.ts
+new file mode 100644
+index 0000000000000..2549cd5a7f2f8
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/email-body-translation/index.ts
+@@ -0,0 +1,13 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++$(() => {
++  const grid = new window.prestashop.component.Grid('email_body_template');
++
++  grid.addExtension(new window.prestashop.component.GridExtensions.SortingExtension());
++  grid.addExtension(new window.prestashop.component.GridExtensions.FiltersResetExtension());
++  grid.addExtension(new window.prestashop.component.GridExtensions.ColumnTogglingExtension());
++  grid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
++});
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index c64858243af79..bde39e2075375 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -30,5 +30,6 @@
+     <feature_flag id="improved_b2b" name="improved_b2b" type="env,dotenv,db" label_wording="Improved B2B" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the improved B2B mode. To use the feature activate the B2B mode in General Settings." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="one_page_checkout" name="one_page_checkout" type="env,dotenv,db" label_wording="One-page checkout" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable one-page checkout flow. All checkout steps (address, delivery, payment) are grouped on a single page to reduce friction and improve conversion rate." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="new_pricing" name="new_pricing" type="env,query,dotenv,db" label_wording="New pricing" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the new pricing system. This feature introduces an improved pricing engine." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
++    <feature_flag id="email_body_translation" name="email_body_translation" type="env,dotenv,db" label_wording="Email body translations" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated email body translations page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+   </entities>
+ </entity_feature_flag>
+diff --git a/src/Adapter/MailTemplate/CommandHandler/EditEmailBodyTemplateHandler.php b/src/Adapter/MailTemplate/CommandHandler/EditEmailBodyTemplateHandler.php
+new file mode 100644
+index 0000000000000..142ee5c4cf237
+--- /dev/null
++++ b/src/Adapter/MailTemplate/CommandHandler/EditEmailBodyTemplateHandler.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\MailTemplate\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Command\EditEmailBodyTemplateCommand;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\CommandHandler\EditEmailBodyTemplateHandlerInterface;
++
++/**
++ * @internal
++ */
++#[AsCommandHandler]
++class EditEmailBodyTemplateHandler implements EditEmailBodyTemplateHandlerInterface
++{
++    public function __construct(
++        private readonly EmailBodyTemplateRepository $repository,
++    ) {
++    }
++
++    public function handle(EditEmailBodyTemplateCommand $command): void
++    {
++        $this->repository->save(
++            $command->getTemplateName()->getValue(),
++            $command->getLocale(),
++            $command->getSource(),
++            $command->getHtmlContent(),
++            $command->getTxtContent(),
++        );
++    }
++}
+diff --git a/src/Adapter/MailTemplate/EmailBodyTemplateRepository.php b/src/Adapter/MailTemplate/EmailBodyTemplateRepository.php
+new file mode 100644
+index 0000000000000..c46b941696755
+--- /dev/null
++++ b/src/Adapter/MailTemplate/EmailBodyTemplateRepository.php
+@@ -0,0 +1,179 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\MailTemplate;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateSource;
++use Symfony\Component\Filesystem\Filesystem;
++use Symfony\Component\Finder\Finder;
++use Validate;
++
++class EmailBodyTemplateRepository
++{
++    private readonly Filesystem $filesystem;
++
++    public function __construct(
++        private readonly string $coreMailsDir,
++        private readonly string $modulesDir,
++    ) {
++        $this->filesystem = new Filesystem();
++    }
++
++    /**
++     * @return array<int, array{template_name: string, source: string, module_name: string, has_html: bool, has_txt: bool}>
++     */
++    public function findAllForLocale(string $locale): array
++    {
++        $templates = [];
++
++        $templates = array_merge($templates, $this->scanCoreTemplates($locale));
++        $templates = array_merge($templates, $this->scanModuleTemplates($locale));
++
++        usort($templates, static fn (array $a, array $b) => strcmp($a['template_name'], $b['template_name']));
++
++        return $templates;
++    }
++
++    /**
++     * @return array{html_content: string|null, txt_content: string|null}
++     */
++    public function findOne(string $name, string $locale, EmailTemplateSource $source): array
++    {
++        $dir = $this->getTemplateDir($locale, $source);
++
++        $htmlPath = $dir . '/' . $name . '.html';
++        $txtPath = $dir . '/' . $name . '.txt';
++
++        if (!file_exists($htmlPath) && !file_exists($txtPath)) {
++            throw new EmailTemplateNotFoundException(
++                sprintf('Email template "%s" not found for locale "%s" in source "%s".', $name, $locale, $source->getSource())
++            );
++        }
++
++        return [
++            'html_content' => file_exists($htmlPath) ? file_get_contents($htmlPath) : null,
++            'txt_content' => file_exists($txtPath) ? file_get_contents($txtPath) : null,
++        ];
++    }
++
++    public function save(string $name, string $locale, EmailTemplateSource $source, string $htmlContent, string $txtContent): void
++    {
++        if (!Validate::isCleanHtml($htmlContent)) {
++            throw new EmailTemplateConstraintException(
++                sprintf('HTML content for email template "%s" contains invalid or unsafe content.', $name)
++            );
++        }
++
++        $dir = $this->getTemplateDir($locale, $source);
++
++        if (!is_dir($dir)) {
++            throw new EmailTemplateNotFoundException(
++                sprintf('Mail directory "%s" does not exist.', $dir)
++            );
++        }
++
++        $htmlPath = $dir . '/' . $name . '.html';
++        $txtPath = $dir . '/' . $name . '.txt';
++
++        $htmlContent = str_replace("\r\n", PHP_EOL, $htmlContent);
++        $txtContent = str_replace("\r\n", PHP_EOL, $txtContent);
++
++        $this->filesystem->dumpFile($htmlPath, $htmlContent);
++        $this->filesystem->dumpFile($txtPath, $txtContent);
++    }
++
++    private function getTemplateDir(string $locale, EmailTemplateSource $source): string
++    {
++        if ($source->isCore()) {
++            return $this->coreMailsDir . '/' . $locale;
++        }
++
++        return $this->modulesDir . '/' . $source->getModuleName() . '/mails/' . $locale;
++    }
++
++    /**
++     * @return array<int, array{template_name: string, source: string, module_name: string, has_html: bool, has_txt: bool}>
++     */
++    private function scanCoreTemplates(string $locale): array
++    {
++        $dir = $this->coreMailsDir . '/' . $locale;
++
++        if (!is_dir($dir)) {
++            return [];
++        }
++
++        return $this->scanDirectory($dir, EmailTemplateSource::SOURCE_CORE, '');
++    }
++
++    /**
++     * @return array<int, array{template_name: string, source: string, module_name: string, has_html: bool, has_txt: bool}>
++     */
++    private function scanModuleTemplates(string $locale): array
++    {
++        $templates = [];
++
++        if (!is_dir($this->modulesDir)) {
++            return [];
++        }
++
++        $finder = new Finder();
++        $finder->directories()->in($this->modulesDir)->depth(0);
++
++        foreach ($finder as $moduleDir) {
++            $mailDir = $moduleDir->getRealPath() . '/mails/' . $locale;
++
++            if (!is_dir($mailDir)) {
++                continue;
++            }
++
++            $moduleName = $moduleDir->getFilename();
++            $templates = array_merge(
++                $templates,
++                $this->scanDirectory($mailDir, EmailTemplateSource::SOURCE_MODULE, $moduleName)
++            );
++        }
++
++        return $templates;
++    }
++
++    /**
++     * @return array<int, array{template_name: string, source: string, module_name: string, has_html: bool, has_txt: bool}>
++     */
++    private function scanDirectory(string $dir, string $source, string $moduleName): array
++    {
++        $templateMap = [];
++
++        $finder = new Finder();
++        $finder->files()->in($dir)->depth(0)->name(['*.html', '*.txt']);
++
++        foreach ($finder as $file) {
++            $extension = $file->getExtension();
++            $name = $file->getBasename('.' . $extension);
++
++            if (!isset($templateMap[$name])) {
++                $templateMap[$name] = [
++                    'template_name' => $name,
++                    'source' => $source,
++                    'module_name' => $moduleName,
++                    'has_html' => false,
++                    'has_txt' => false,
++                ];
++            }
++
++            if ($extension === 'html') {
++                $templateMap[$name]['has_html'] = true;
++            } elseif ($extension === 'txt') {
++                $templateMap[$name]['has_txt'] = true;
++            }
++        }
++
++        return array_values($templateMap);
++    }
++}
+diff --git a/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandler.php b/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandler.php
+new file mode 100644
+index 0000000000000..c17b612b1b01d
+--- /dev/null
++++ b/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandler.php
+@@ -0,0 +1,45 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\MailTemplate\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplateForEditing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryHandler\GetEmailBodyTemplateForEditingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryResult\EditableEmailBodyTemplate;
++
++/**
++ * @internal
++ */
++#[AsQueryHandler]
++class GetEmailBodyTemplateForEditingHandler implements GetEmailBodyTemplateForEditingHandlerInterface
++{
++    public function __construct(
++        private readonly EmailBodyTemplateRepository $repository,
++    ) {
++    }
++
++    public function handle(GetEmailBodyTemplateForEditing $query): EditableEmailBodyTemplate
++    {
++        $data = $this->repository->findOne(
++            $query->getTemplateName()->getValue(),
++            $query->getLocale(),
++            $query->getSource()
++        );
++
++        return new EditableEmailBodyTemplate(
++            $query->getTemplateName()->getValue(),
++            $query->getLocale(),
++            $query->getSource()->getSource(),
++            $query->getSource()->getModuleName(),
++            $data['html_content'],
++            $data['txt_content'],
++        );
++    }
++}
+diff --git a/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandler.php b/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandler.php
+new file mode 100644
+index 0000000000000..4e09ca3430cf6
+--- /dev/null
++++ b/src/Adapter/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandler.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\MailTemplate\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplatesForListing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryHandler\GetEmailBodyTemplatesForListingHandlerInterface;
++
++/**
++ * @internal
++ */
++#[AsQueryHandler]
++class GetEmailBodyTemplatesForListingHandler implements GetEmailBodyTemplatesForListingHandlerInterface
++{
++    public function __construct(
++        private readonly EmailBodyTemplateRepository $repository,
++    ) {
++    }
++
++    public function handle(GetEmailBodyTemplatesForListing $query): array
++    {
++        return $this->repository->findAllForLocale($query->getLocale());
++    }
++}
+diff --git a/src/Adapter/Translations/TranslationRouteFinder.php b/src/Adapter/Translations/TranslationRouteFinder.php
+index 1e77c295583df..d3c9ccf888f3e 100644
+--- a/src/Adapter/Translations/TranslationRouteFinder.php
++++ b/src/Adapter/Translations/TranslationRouteFinder.php
+@@ -8,6 +8,8 @@
+ 
+ use Link;
+ use Module;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Module\ModuleRepositoryInterface;
+ use PrestaShopBundle\Exception\InvalidModuleException;
+ use PrestaShopBundle\Service\TranslationService;
+@@ -54,19 +56,27 @@ class TranslationRouteFinder
+      */
+     private $moduleRepository;
+ 
++    /**
++     * @var FeatureFlagStateCheckerInterface
++     */
++    private $featureFlagStateChecker;
++
+     /**
+      * @param TranslationService $translationService
+      * @param Link $link
+      * @param ModuleRepositoryInterface $moduleRepository
++     * @param FeatureFlagStateCheckerInterface $featureFlagStateChecker
+      */
+     public function __construct(
+         TranslationService $translationService,
+         Link $link,
+-        ModuleRepositoryInterface $moduleRepository
++        ModuleRepositoryInterface $moduleRepository,
++        FeatureFlagStateCheckerInterface $featureFlagStateChecker
+     ) {
+         $this->translationService = $translationService;
+         $this->link = $link;
+         $this->moduleRepository = $moduleRepository;
++        $this->featureFlagStateChecker = $featureFlagStateChecker;
+     }
+ 
+     /**
+@@ -84,18 +94,22 @@ public function findRoute(Request $request)
+             case self::MAILS:
+                 if (self::BODY === $propertyAccessor->getValue($routeProperties, '[email_content_type]')) {
+                     $language = $propertyAccessor->getValue($routeProperties, '[language]');
+-                    $route = $this->link->getAdminLink(
+-                        'AdminTranslations',
+-                        true,
+-                        [],
+-                        [
+-                            'lang' => $language,
+-                            'type' => self::MAILS,
+-                            'selected-emails' => self::BODY,
+-                            'selected-theme' => $propertyAccessor->getValue($routeProperties, '[theme]'),
+-                            'locale' => $this->translationService->langToLocale($language),
+-                        ]
+-                    );
++                    if ($this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_EMAIL_BODY_TRANSLATION)) {
++                        $route = 'admin_email_body_translation_index';
++                    } else {
++                        $route = $this->link->getAdminLink(
++                            'AdminTranslations',
++                            true,
++                            [],
++                            [
++                                'lang' => $language,
++                                'type' => self::MAILS,
++                                'selected-emails' => self::BODY,
++                                'selected-theme' => $propertyAccessor->getValue($routeProperties, '[theme]'),
++                                'locale' => $this->translationService->langToLocale($language),
++                            ]
++                        );
++                    }
+                 }
+ 
+                 break;
+@@ -152,7 +166,13 @@ public function findRouteParameters(Request $request): array
+                 $emailContentType = $propertyAccessor->getValue($routeProperties, '[email_content_type]');
+ 
+                 if (self::BODY === $emailContentType) {
+-                    $parameters = [];
++                    if ($this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_EMAIL_BODY_TRANSLATION)) {
++                        $parameters = [
++                            'locale' => $language,
++                        ];
++                    } else {
++                        $parameters = [];
++                    }
+                 }
+ 
+                 break;
+diff --git a/src/Core/Domain/MailTemplate/Command/EditEmailBodyTemplateCommand.php b/src/Core/Domain/MailTemplate/Command/EditEmailBodyTemplateCommand.php
+new file mode 100644
+index 0000000000000..6c953e73a3bf5
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Command/EditEmailBodyTemplateCommand.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateName;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateSource;
++
++class EditEmailBodyTemplateCommand
++{
++    private readonly EmailTemplateName $templateName;
++    private readonly EmailTemplateSource $source;
++
++    public function __construct(
++        string $templateName,
++        private readonly string $locale,
++        string $source,
++        string $moduleName,
++        private readonly string $htmlContent,
++        private readonly string $txtContent,
++    ) {
++        $this->templateName = new EmailTemplateName($templateName);
++        $this->source = new EmailTemplateSource($source, $moduleName);
++    }
++
++    public function getTemplateName(): EmailTemplateName
++    {
++        return $this->templateName;
++    }
++
++    public function getLocale(): string
++    {
++        return $this->locale;
++    }
++
++    public function getSource(): EmailTemplateSource
++    {
++        return $this->source;
++    }
++
++    public function getHtmlContent(): string
++    {
++        return $this->htmlContent;
++    }
++
++    public function getTxtContent(): string
++    {
++        return $this->txtContent;
++    }
++}
+diff --git a/src/Core/Domain/MailTemplate/CommandHandler/EditEmailBodyTemplateHandlerInterface.php b/src/Core/Domain/MailTemplate/CommandHandler/EditEmailBodyTemplateHandlerInterface.php
+new file mode 100644
+index 0000000000000..d986d31be475e
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/CommandHandler/EditEmailBodyTemplateHandlerInterface.php
+@@ -0,0 +1,14 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Command\EditEmailBodyTemplateCommand;
++
++interface EditEmailBodyTemplateHandlerInterface
++{
++    public function handle(EditEmailBodyTemplateCommand $command): void;
++}
+diff --git a/src/Core/Domain/MailTemplate/Exception/EmailTemplateConstraintException.php b/src/Core/Domain/MailTemplate/Exception/EmailTemplateConstraintException.php
+new file mode 100644
+index 0000000000000..be1f277ea2c94
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Exception/EmailTemplateConstraintException.php
+@@ -0,0 +1,11 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception;
++
++class EmailTemplateConstraintException extends EmailTemplateException
++{
++}
+diff --git a/src/Core/Domain/MailTemplate/Exception/EmailTemplateException.php b/src/Core/Domain/MailTemplate/Exception/EmailTemplateException.php
+new file mode 100644
+index 0000000000000..ad870eda6a094
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Exception/EmailTemplateException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainException;
++
++class EmailTemplateException extends DomainException
++{
++}
+diff --git a/src/Core/Domain/MailTemplate/Exception/EmailTemplateNotFoundException.php b/src/Core/Domain/MailTemplate/Exception/EmailTemplateNotFoundException.php
+new file mode 100644
+index 0000000000000..445aea512e3fc
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Exception/EmailTemplateNotFoundException.php
+@@ -0,0 +1,11 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception;
++
++class EmailTemplateNotFoundException extends EmailTemplateException
++{
++}
+diff --git a/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplateForEditing.php b/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplateForEditing.php
+new file mode 100644
+index 0000000000000..0120bdd1296ac
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplateForEditing.php
+@@ -0,0 +1,41 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateName;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateSource;
++
++class GetEmailBodyTemplateForEditing
++{
++    private readonly EmailTemplateName $templateName;
++    private readonly EmailTemplateSource $source;
++
++    public function __construct(
++        string $templateName,
++        private readonly string $locale,
++        string $source,
++        string $moduleName = '',
++    ) {
++        $this->templateName = new EmailTemplateName($templateName);
++        $this->source = new EmailTemplateSource($source, $moduleName);
++    }
++
++    public function getTemplateName(): EmailTemplateName
++    {
++        return $this->templateName;
++    }
++
++    public function getLocale(): string
++    {
++        return $this->locale;
++    }
++
++    public function getSource(): EmailTemplateSource
++    {
++        return $this->source;
++    }
++}
+diff --git a/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplatesForListing.php b/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplatesForListing.php
+new file mode 100644
+index 0000000000000..b96921ac36b4f
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/Query/GetEmailBodyTemplatesForListing.php
+@@ -0,0 +1,22 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query;
++
++class GetEmailBodyTemplatesForListing
++{
++    private readonly string $locale;
++
++    public function __construct(string $locale)
++    {
++        $this->locale = $locale;
++    }
++
++    public function getLocale(): string
++    {
++        return $this->locale;
++    }
++}
+diff --git a/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandlerInterface.php b/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandlerInterface.php
+new file mode 100644
+index 0000000000000..61ed92bf48ced
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplateForEditingHandlerInterface.php
+@@ -0,0 +1,15 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplateForEditing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryResult\EditableEmailBodyTemplate;
++
++interface GetEmailBodyTemplateForEditingHandlerInterface
++{
++    public function handle(GetEmailBodyTemplateForEditing $query): EditableEmailBodyTemplate;
++}
+diff --git a/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandlerInterface.php b/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandlerInterface.php
+new file mode 100644
+index 0000000000000..09ba6e5b851c5
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/QueryHandler/GetEmailBodyTemplatesForListingHandlerInterface.php
+@@ -0,0 +1,19 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplatesForListing;
++
++interface GetEmailBodyTemplatesForListingHandlerInterface
++{
++    /**
++     * Returns an array of email body templates for the given locale.
++     *
++     * @return array<int, array{template_name: string, source: string, module_name: string, has_html: bool, has_txt: bool}>
++     */
++    public function handle(GetEmailBodyTemplatesForListing $query): array;
++}
+diff --git a/src/Core/Domain/MailTemplate/QueryResult/EditableEmailBodyTemplate.php b/src/Core/Domain/MailTemplate/QueryResult/EditableEmailBodyTemplate.php
+new file mode 100644
+index 0000000000000..8e97640f4ce9e
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/QueryResult/EditableEmailBodyTemplate.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryResult;
++
++class EditableEmailBodyTemplate
++{
++    public function __construct(
++        private readonly string $templateName,
++        private readonly string $locale,
++        private readonly string $source,
++        private readonly string $moduleName,
++        private readonly ?string $htmlContent,
++        private readonly ?string $txtContent,
++    ) {
++    }
++
++    public function getTemplateName(): string
++    {
++        return $this->templateName;
++    }
++
++    public function getLocale(): string
++    {
++        return $this->locale;
++    }
++
++    public function getSource(): string
++    {
++        return $this->source;
++    }
++
++    public function getModuleName(): string
++    {
++        return $this->moduleName;
++    }
++
++    public function getHtmlContent(): ?string
++    {
++        return $this->htmlContent;
++    }
++
++    public function getTxtContent(): ?string
++    {
++        return $this->txtContent;
++    }
++}
+diff --git a/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateName.php b/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateName.php
+new file mode 100644
+index 0000000000000..02ed32dacdda5
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateName.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateConstraintException;
++
++class EmailTemplateName
++{
++    private readonly string $name;
++
++    public function __construct(string $name)
++    {
++        $this->assertIsValid($name);
++        $this->name = $name;
++    }
++
++    public function getValue(): string
++    {
++        return $this->name;
++    }
++
++    private function assertIsValid(string $name): void
++    {
++        if (empty($name)) {
++            throw new EmailTemplateConstraintException('Email template name cannot be empty.');
++        }
++
++        if (!preg_match('/^[a-zA-Z0-9_-]+$/', $name)) {
++            throw new EmailTemplateConstraintException(
++                sprintf('Email template name "%s" contains invalid characters. Only alphanumeric characters, hyphens, and underscores are allowed.', $name)
++            );
++        }
++    }
++}
+diff --git a/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateSource.php b/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateSource.php
+new file mode 100644
+index 0000000000000..03c30b325cd5f
+--- /dev/null
++++ b/src/Core/Domain/MailTemplate/ValueObject/EmailTemplateSource.php
+@@ -0,0 +1,68 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateConstraintException;
++
++class EmailTemplateSource
++{
++    public const SOURCE_CORE = 'core';
++    public const SOURCE_MODULE = 'module';
++
++    private readonly string $source;
++    private readonly string $moduleName;
++
++    public function __construct(string $source, string $moduleName = '')
++    {
++        $this->assertIsValid($source, $moduleName);
++        $this->source = $source;
++        $this->moduleName = $moduleName;
++    }
++
++    public static function buildCoreSource(): self
++    {
++        return new self(self::SOURCE_CORE);
++    }
++
++    public static function buildModuleSource(string $moduleName): self
++    {
++        return new self(self::SOURCE_MODULE, $moduleName);
++    }
++
++    public function getSource(): string
++    {
++        return $this->source;
++    }
++
++    public function getModuleName(): string
++    {
++        return $this->moduleName;
++    }
++
++    public function isCore(): bool
++    {
++        return $this->source === self::SOURCE_CORE;
++    }
++
++    public function isModule(): bool
++    {
++        return $this->source === self::SOURCE_MODULE;
++    }
++
++    private function assertIsValid(string $source, string $moduleName): void
++    {
++        if (!in_array($source, [self::SOURCE_CORE, self::SOURCE_MODULE], true)) {
++            throw new EmailTemplateConstraintException(
++                sprintf('Invalid email template source "%s". Allowed values: %s, %s.', $source, self::SOURCE_CORE, self::SOURCE_MODULE)
++            );
++        }
++
++        if ($source === self::SOURCE_MODULE && empty($moduleName)) {
++            throw new EmailTemplateConstraintException('Module name is required for module email template source.');
++        }
++    }
++}
+diff --git a/src/Core/FeatureFlag/FeatureFlagSettings.php b/src/Core/FeatureFlag/FeatureFlagSettings.php
+index 2d8a1140daa8c..be4bc0926035c 100644
+--- a/src/Core/FeatureFlag/FeatureFlagSettings.php
++++ b/src/Core/FeatureFlag/FeatureFlagSettings.php
+@@ -38,4 +38,5 @@ class FeatureFlagSettings
+     public const FEATURE_FLAG_IMPROVED_B2B = 'improved_b2b';
+     public const FEATURE_FLAG_ONE_PAGE_CHECKOUT = 'one_page_checkout';
+     public const FEATURE_FLAG_NEW_PRICING = 'new_pricing';
++    public const FEATURE_FLAG_EMAIL_BODY_TRANSLATION = 'email_body_translation';
+ }
+diff --git a/src/Core/Grid/Data/Factory/EmailBodyTemplateGridDataFactory.php b/src/Core/Grid/Data/Factory/EmailBodyTemplateGridDataFactory.php
+new file mode 100644
+index 0000000000000..d11f3b34add49
+--- /dev/null
++++ b/src/Core/Grid/Data/Factory/EmailBodyTemplateGridDataFactory.php
+@@ -0,0 +1,123 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Grid\Data\Factory;
++
++use PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository;
++use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
++use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
++use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
++
++final class EmailBodyTemplateGridDataFactory implements GridDataFactoryInterface
++{
++    public function __construct(
++        private readonly EmailBodyTemplateRepository $repository,
++        private readonly string $defaultLocale,
++    ) {
++    }
++
++    public function getData(SearchCriteriaInterface $searchCriteria): GridData
++    {
++        $locale = $this->resolveLocale($searchCriteria);
++        $templates = $this->repository->findAllForLocale($locale);
++
++        $templates = $this->applyFilters($templates, $searchCriteria);
++        $totalCount = count($templates);
++        $templates = $this->applySorting($templates, $searchCriteria);
++        $templates = $this->applyPagination($templates, $searchCriteria);
++
++        $records = array_map(
++            static fn (array $template) => array_merge($template, [
++                'has_html_label' => $template['has_html'] ? '✓' : '✗',
++                'has_txt_label' => $template['has_txt'] ? '✓' : '✗',
++                'source_with_module' => $template['source'] === 'module'
++                    ? $template['source'] . ':' . $template['module_name']
++                    : $template['source'],
++                'locale' => $locale,
++            ]),
++            $templates,
++        );
++
++        return new GridData(
++            new RecordCollection($records),
++            $totalCount,
++        );
++    }
++
++    private function resolveLocale(SearchCriteriaInterface $searchCriteria): string
++    {
++        $filters = $searchCriteria->getFilters();
++
++        if (isset($filters['locale']) && !empty($filters['locale'])) {
++            return $filters['locale'];
++        }
++
++        return $this->defaultLocale;
++    }
++
++    private function applyFilters(array $templates, SearchCriteriaInterface $searchCriteria): array
++    {
++        $filters = $searchCriteria->getFilters();
++
++        if (isset($filters['template_name']) && !empty($filters['template_name'])) {
++            $search = strtolower($filters['template_name']);
++            $templates = array_filter(
++                $templates,
++                static fn (array $t) => str_contains(strtolower($t['template_name']), $search),
++            );
++        }
++
++        if (isset($filters['source']) && !empty($filters['source'])) {
++            $source = $filters['source'];
++            $templates = array_filter(
++                $templates,
++                static fn (array $t) => $t['source'] === $source,
++            );
++        }
++
++        if (isset($filters['module_name']) && !empty($filters['module_name'])) {
++            $search = strtolower($filters['module_name']);
++            $templates = array_filter(
++                $templates,
++                static fn (array $t) => str_contains(strtolower($t['module_name']), $search),
++            );
++        }
++
++        return array_values($templates);
++    }
++
++    private function applySorting(array $templates, SearchCriteriaInterface $searchCriteria): array
++    {
++        $orderBy = $searchCriteria->getOrderBy();
++        $orderWay = $searchCriteria->getOrderWay();
++
++        if (null === $orderBy) {
++            return $templates;
++        }
++
++        usort($templates, static function (array $a, array $b) use ($orderBy, $orderWay) {
++            $result = strcmp((string) ($a[$orderBy] ?? ''), (string) ($b[$orderBy] ?? ''));
++
++            return strtolower($orderWay ?? 'asc') === 'desc' ? -$result : $result;
++        });
++
++        return $templates;
++    }
++
++    private function applyPagination(array $templates, SearchCriteriaInterface $searchCriteria): array
++    {
++        $offset = $searchCriteria->getOffset() ?? 0;
++        $limit = $searchCriteria->getLimit();
++
++        if (null !== $limit) {
++            return array_slice($templates, $offset, $limit);
++        }
++
++        return $templates;
++    }
++}
+diff --git a/src/Core/Grid/Definition/Factory/EmailBodyTemplateDefinitionFactory.php b/src/Core/Grid/Definition/Factory/EmailBodyTemplateDefinitionFactory.php
+new file mode 100644
+index 0000000000000..e99916e9df16f
+--- /dev/null
++++ b/src/Core/Grid/Definition/Factory/EmailBodyTemplateDefinitionFactory.php
+@@ -0,0 +1,152 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Grid\Definition\Factory;
++
++use PrestaShop\PrestaShop\Core\Grid\Action\Row\RowActionCollection;
++use PrestaShop\PrestaShop\Core\Grid\Action\Row\Type\LinkRowAction;
++use PrestaShop\PrestaShop\Core\Grid\Column\ColumnCollection;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ActionColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\DataColumn;
++use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
++use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
++use PrestaShopBundle\Form\Admin\Type\SearchAndResetType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++
++final class EmailBodyTemplateDefinitionFactory extends AbstractGridDefinitionFactory
++{
++    public const GRID_ID = 'email_body_template';
++
++    protected function getId()
++    {
++        return self::GRID_ID;
++    }
++
++    protected function getName()
++    {
++        return $this->trans('Email body templates', [], 'Admin.Navigation.Menu');
++    }
++
++    protected function getColumns()
++    {
++        return (new ColumnCollection())
++            ->add(
++                (new DataColumn('template_name'))
++                    ->setName($this->trans('Template name', [], 'Admin.International.Feature'))
++                    ->setOptions([
++                        'field' => 'template_name',
++                        'sortable' => true,
++                    ])
++            )
++            ->add(
++                (new DataColumn('source'))
++                    ->setName($this->trans('Source', [], 'Admin.International.Feature'))
++                    ->setOptions([
++                        'field' => 'source',
++                        'sortable' => true,
++                    ])
++            )
++            ->add(
++                (new DataColumn('module_name'))
++                    ->setName($this->trans('Module', [], 'Admin.Global'))
++                    ->setOptions([
++                        'field' => 'module_name',
++                        'sortable' => true,
++                    ])
++            )
++            ->add(
++                (new DataColumn('has_html'))
++                    ->setName($this->trans('HTML', [], 'Admin.International.Feature'))
++                    ->setOptions([
++                        'field' => 'has_html_label',
++                        'sortable' => false,
++                    ])
++            )
++            ->add(
++                (new DataColumn('has_txt'))
++                    ->setName($this->trans('TXT', [], 'Admin.International.Feature'))
++                    ->setOptions([
++                        'field' => 'has_txt_label',
++                        'sortable' => false,
++                    ])
++            )
++            ->add(
++                (new ActionColumn('actions'))
++                    ->setName($this->trans('Actions', [], 'Admin.Global'))
++                    ->setOptions([
++                        'actions' => (new RowActionCollection())
++                            ->add(
++                                (new LinkRowAction('edit'))
++                                    ->setName($this->trans('Edit', [], 'Admin.Actions'))
++                                    ->setIcon('edit')
++                                    ->setOptions([
++                                        'route' => 'admin_email_body_translation_edit',
++                                        'route_param_name' => 'templateName',
++                                        'route_param_field' => 'template_name',
++                                        'extra_route_params' => [
++                                            'source' => 'source_with_module',
++                                            'locale' => 'locale',
++                                        ],
++                                        'clickable_row' => true,
++                                    ])
++                            ),
++                    ])
++            );
++    }
++
++    protected function getFilters()
++    {
++        return (new FilterCollection())
++            ->add(
++                (new Filter('template_name', TextType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search template name', [], 'Admin.Actions'),
++                        ],
++                    ])
++                    ->setAssociatedColumn('template_name')
++            )
++            ->add(
++                (new Filter('source', ChoiceType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'placeholder' => $this->trans('All', [], 'Admin.Global'),
++                        'choices' => [
++                            $this->trans('Core', [], 'Admin.International.Feature') => 'core',
++                            $this->trans('Module', [], 'Admin.Global') => 'module',
++                        ],
++                    ])
++                    ->setAssociatedColumn('source')
++            )
++            ->add(
++                (new Filter('module_name', TextType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => [
++                            'placeholder' => $this->trans('Search module', [], 'Admin.Actions'),
++                        ],
++                    ])
++                    ->setAssociatedColumn('module_name')
++            )
++            ->add(
++                (new Filter('actions', SearchAndResetType::class))
++                    ->setTypeOptions([
++                        'reset_route' => 'admin_common_reset_search_by_filter_id',
++                        'reset_route_params' => [
++                            'filterId' => self::GRID_ID,
++                        ],
++                        'redirect_route' => 'admin_email_body_translation_index',
++                        'redirect_route_params' => [
++                            'locale' => 'en',
++                        ],
++                    ])
++                    ->setAssociatedColumn('actions')
++            )
++        ;
++    }
++}
+diff --git a/src/Core/Search/Filters/EmailBodyTemplateFilters.php b/src/Core/Search/Filters/EmailBodyTemplateFilters.php
+new file mode 100644
+index 0000000000000..9daae9fa41183
+--- /dev/null
++++ b/src/Core/Search/Filters/EmailBodyTemplateFilters.php
+@@ -0,0 +1,26 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShop\PrestaShop\Core\Search\Filters;
++
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\EmailBodyTemplateDefinitionFactory;
++use PrestaShop\PrestaShop\Core\Search\Filters;
++
++final class EmailBodyTemplateFilters extends Filters
++{
++    protected $filterId = EmailBodyTemplateDefinitionFactory::GRID_ID;
++
++    public static function getDefaults()
++    {
++        return [
++            'limit' => 50,
++            'offset' => 0,
++            'orderBy' => 'template_name',
++            'sortOrder' => 'asc',
++            'filters' => [],
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/Design/MailThemeController.php b/src/PrestaShopBundle/Controller/Admin/Improve/Design/MailThemeController.php
+index 4c2429a85a641..9e4d72c37a240 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/Design/MailThemeController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/Design/MailThemeController.php
+@@ -14,6 +14,8 @@
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShop\PrestaShop\Core\Exception\FileNotFoundException;
+ use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Form\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Language\LanguageRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\MailTemplate\FolderThemeCatalog;
+@@ -344,7 +346,8 @@ public function sendTestMailAction(string $theme, string $layout, string $locale
+     public function translateBodyAction(
+         Request $request,
+         #[Autowire(service: 'prestashop.service.translation')]
+-        TranslationService $translationService
++        TranslationService $translationService,
++        FeatureFlagStateCheckerInterface $featureFlagStateChecker
+     ): RedirectResponse {
+         $translateMailsBodyForm = $this->createForm(TranslateMailsBodyType::class);
+         $translateMailsBodyForm->handleRequest($request);
+@@ -366,6 +369,12 @@ public function translateBodyAction(
+         $language = $translateData['language'];
+         $locale = $translationService->langToLocale($language);
+ 
++        if ($featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_EMAIL_BODY_TRANSLATION)) {
++            return $this->redirectToRoute('admin_email_body_translation_index', [
++                'locale' => $language,
++            ]);
++        }
++
+         return $this->redirectToRoute('admin_international_translation_overview', [
+             'lang' => $language,
+             'locale' => $locale,
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/EmailBodyTranslationController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/EmailBodyTranslationController.php
+new file mode 100644
+index 0000000000000..53d9d792135be
+--- /dev/null
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/EmailBodyTranslationController.php
+@@ -0,0 +1,173 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Controller\Admin\Improve\International;
++
++use Exception;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Command\EditEmailBodyTemplateCommand;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplateForEditing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryResult\EditableEmailBodyTemplate;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateSource;
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\EmailBodyTemplateDefinitionFactory;
++use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
++use PrestaShop\PrestaShop\Core\Search\Filters\EmailBodyTemplateFilters;
++use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
++use PrestaShopBundle\Form\Admin\Improve\Design\MailTheme\EmailBodyTemplateEditType;
++use PrestaShopBundle\Security\Attribute\AdminSecurity;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\HttpFoundation\RedirectResponse;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++class EmailBodyTranslationController extends PrestaShopAdminController
++{
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function indexAction(
++        Request $request,
++        string $locale,
++        #[Autowire(service: 'prestashop.core.grid.factory.email_body_template')]
++        GridFactoryInterface $gridFactory,
++        EmailBodyTemplateFilters $filters,
++    ): Response {
++        $currentFilters = $filters->getFilters() ?? [];
++        $currentFilters['locale'] = $locale;
++        $filters->set('filters', $currentFilters);
++
++        $grid = $gridFactory->getGrid($filters);
++
++        return $this->render('@PrestaShop/Admin/Improve/International/EmailBodyTranslation/index.html.twig', [
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'layoutTitle' => $this->trans('Email body templates — %locale%', ['%locale%' => $locale], 'Admin.Navigation.Menu'),
++            'emailBodyTemplateGrid' => $this->presentGrid($grid),
++            'locale' => $locale,
++        ]);
++    }
++
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_international_translations_show_settings')]
++    public function editAction(
++        Request $request,
++        string $locale,
++        string $source,
++        string $templateName,
++    ): Response {
++        $sourceObject = $this->parseSource($source);
++
++        try {
++            /** @var EditableEmailBodyTemplate $editableTemplate */
++            $editableTemplate = $this->dispatchQuery(new GetEmailBodyTemplateForEditing(
++                $templateName,
++                $locale,
++                $sourceObject->getSource(),
++                $sourceObject->getModuleName(),
++            ));
++        } catch (EmailTemplateNotFoundException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++
++            return $this->redirectToRoute('admin_email_body_translation_index', ['locale' => $locale]);
++        }
++
++        $form = $this->createForm(EmailBodyTemplateEditType::class, [
++            'html_content' => $editableTemplate->getHtmlContent(),
++            'txt_content' => $editableTemplate->getTxtContent(),
++        ]);
++        $form->handleRequest($request);
++
++        if ($form->isSubmitted() && $form->isValid()) {
++            $data = $form->getData();
++
++            try {
++                $this->dispatchCommand(new EditEmailBodyTemplateCommand(
++                    $templateName,
++                    $locale,
++                    $sourceObject->getSource(),
++                    $sourceObject->getModuleName(),
++                    $data['html_content'] ?? '',
++                    $data['txt_content'] ?? '',
++                ));
++
++                $this->addFlash(
++                    'success',
++                    $this->trans('Email template "%template%" has been successfully updated.', ['%template%' => $templateName], 'Admin.International.Notification')
++                );
++
++                return $this->redirectToRoute('admin_email_body_translation_index', ['locale' => $locale]);
++            } catch (Exception $e) {
++                $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++            }
++        }
++
++        return $this->render('@PrestaShop/Admin/Improve/International/EmailBodyTranslation/edit.html.twig', [
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'layoutTitle' => $this->trans(
++                'Edit email template: %template% (%locale%)',
++                ['%template%' => $templateName, '%locale%' => $locale],
++                'Admin.Navigation.Menu'
++            ),
++            'emailBodyTemplateEditForm' => $form->createView(),
++            'templateName' => $templateName,
++            'locale' => $locale,
++            'source' => $source,
++        ]);
++    }
++
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function searchAction(
++        Request $request,
++        string $locale,
++        #[Autowire(service: 'prestashop.core.grid.definition.factory.email_body_template')]
++        EmailBodyTemplateDefinitionFactory $definitionFactory,
++    ): RedirectResponse {
++        return $this->buildSearchResponse(
++            $definitionFactory,
++            $request,
++            EmailBodyTemplateDefinitionFactory::GRID_ID,
++            'admin_email_body_translation_index',
++            ['locale'],
++        );
++    }
++
++    private function parseSource(string $source): EmailTemplateSource
++    {
++        if (str_contains($source, ':')) {
++            [$type, $moduleName] = explode(':', $source, 2);
++
++            return new EmailTemplateSource($type, $moduleName);
++        }
++
++        return new EmailTemplateSource($source);
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    private function getErrorMessages(): array
++    {
++        return [
++            EmailTemplateNotFoundException::class => $this->trans(
++                'The email template was not found.',
++                [],
++                'Admin.International.Notification'
++            ),
++            EmailTemplateConstraintException::class => $this->trans(
++                'The email template content is invalid. JavaScript is not allowed in HTML email templates.',
++                [],
++                'Admin.International.Notification'
++            ),
++            EmailTemplateException::class => $this->trans(
++                'An error occurred while processing the email template.',
++                [],
++                'Admin.International.Notification'
++            ),
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/Design/MailTheme/EmailBodyTemplateEditType.php b/src/PrestaShopBundle/Form/Admin/Improve/Design/MailTheme/EmailBodyTemplateEditType.php
+new file mode 100644
+index 0000000000000..05eb0b639066c
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/Design/MailTheme/EmailBodyTemplateEditType.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\Design\MailTheme;
++
++use PrestaShopBundle\Form\Admin\Type\FormattedTextareaType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\TextareaType;
++use Symfony\Component\Form\FormBuilderInterface;
++
++class EmailBodyTemplateEditType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder
++            ->add('html_content', FormattedTextareaType::class, [
++                'label' => $this->trans('HTML content', 'Admin.International.Feature'),
++                'required' => false,
++                'limit' => FormattedTextareaType::LIMIT_MEDIUMTEXT_UTF8,
++                'attr' => [
++                    'rows' => 20,
++                ],
++            ])
++            ->add('txt_content', TextareaType::class, [
++                'label' => $this->trans('Text content', 'Admin.International.Feature'),
++                'required' => false,
++                'attr' => [
++                    'rows' => 20,
++                ],
++            ])
++        ;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/_international.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/_international.yml
+index dd51a1a5ea416..740764bcb91fd 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/_international.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/_international.yml
+@@ -2,6 +2,10 @@ _translations:
+   resource: "translations.yml"
+   prefix: /translations/
+ 
++_email_body_translation:
++  resource: "email_body_translation.yml"
++  prefix: /translations/email-body
++
+ _localization:
+   resource: "localization.yml"
+   prefix: /localization/
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/email_body_translation.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/email_body_translation.yml
+new file mode 100644
+index 0000000000000..5ea904023629f
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/email_body_translation.yml
+@@ -0,0 +1,26 @@
++admin_email_body_translation_index:
++  path: /{locale}
++  methods: [ GET ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\EmailBodyTranslationController::indexAction
++    _legacy_controller: AdminTranslations
++    _legacy_link: AdminTranslations
++    _legacy_feature_flag: email_body_translation
++
++admin_email_body_translation_search:
++  path: /{locale}/search
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\EmailBodyTranslationController::searchAction
++    _legacy_controller: AdminTranslations
++    _legacy_link: AdminTranslations
++    _legacy_feature_flag: email_body_translation
++
++admin_email_body_translation_edit:
++  path: /{locale}/{source}/{templateName}/edit
++  methods: [ GET, POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\EmailBodyTranslationController::editAction
++    _legacy_controller: AdminTranslations
++    _legacy_link: AdminTranslations
++    _legacy_feature_flag: email_body_translation
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml b/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
+index c5a6e7a78cb8f..f7313cd48fcbb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
+@@ -42,3 +42,21 @@ services:
+     deprecated:
+       package: PrestaShop\PrestaShop
+       version: 9.0
++
++  prestashop.adapter.mail_template.query_handler.get_email_body_templates_for_listing:
++    class: 'PrestaShop\PrestaShop\Adapter\MailTemplate\QueryHandler\GetEmailBodyTemplatesForListingHandler'
++    autoconfigure: true
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository'
++
++  prestashop.adapter.mail_template.query_handler.get_email_body_template_for_editing:
++    class: 'PrestaShop\PrestaShop\Adapter\MailTemplate\QueryHandler\GetEmailBodyTemplateForEditingHandler'
++    autoconfigure: true
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository'
++
++  prestashop.adapter.mail_template.command_handler.edit_email_body_template:
++    class: 'PrestaShop\PrestaShop\Adapter\MailTemplate\CommandHandler\EditEmailBodyTemplateHandler'
++    autoconfigure: true
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository'
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/services.yml b/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
+index c85ac20efb600..b114773431d0e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
+@@ -125,6 +125,7 @@ services:
+       - '@prestashop.service.translation'
+       - '@=service("PrestaShop\\PrestaShop\\Adapter\\LegacyContext").getContext().link'
+       - '@PrestaShop\PrestaShop\Core\Module\ModuleRepository'
++      - '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
+ 
+   PrestaShop\PrestaShop\Adapter\Shop\ShopUrlDataProvider:
+     public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 6c54170a29d74..b5e87c6142ee4 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -373,6 +373,7 @@ services:
+       $currencyChoiceProvider: '@PrestaShop\PrestaShop\Core\Form\ChoiceProvider\CurrencyByIdChoiceProvider'
+ 
+   PrestaShopBundle\Form\Admin\Improve\Design\MailTheme\TranslateMailsBodyType:
++  PrestaShopBundle\Form\Admin\Improve\Design\MailTheme\EmailBodyTemplateEditType:
+   PrestaShopBundle\Form\Admin\Sell\Order\UpdateOrderShippingType:
+     arguments:
+       $carrierForOrderChoiceProvider: '@prestashop.adapter.form.choice.provider.carrier_for_order_choice_provider'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
+index 3cef67a005d87..59a7937e355a6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
+@@ -40,6 +40,11 @@ services:
+     parent: PrestaShop\PrestaShop\Core\Grid\Definition\Factory\AbstractGridDefinitionFactory
+     public: true
+ 
++  prestashop.core.grid.definition.factory.email_body_template:
++    class: 'PrestaShop\PrestaShop\Core\Grid\Definition\Factory\EmailBodyTemplateDefinitionFactory'
++    parent: PrestaShop\PrestaShop\Core\Grid\Definition\Factory\AbstractGridDefinitionFactory
++    public: true
++
+   prestashop.core.grid.definition.factory.webservice_key:
+     class: 'PrestaShop\PrestaShop\Core\Grid\Definition\Factory\WebserviceKeyDefinitionFactory'
+     parent: PrestaShop\PrestaShop\Core\Grid\Definition\Factory\AbstractGridDefinitionFactory
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+index c4d48c1fa9c54..2e2a1489833eb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+@@ -34,6 +34,14 @@ services:
+       - '@prestashop.core.grid.filter.form_factory'
+       - '@prestashop.core.hook.dispatcher'
+ 
++  prestashop.core.grid.factory.email_body_template:
++    class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
++    arguments:
++      - '@prestashop.core.grid.definition.factory.email_body_template'
++      - '@prestashop.core.grid.data_factory.email_body_template'
++      - '@prestashop.core.grid.filter.form_factory'
++      - '@prestashop.core.hook.dispatcher'
++
+   prestashop.core.grid.factory.webservice_key:
+     class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/mail_template.yml b/src/PrestaShopBundle/Resources/config/services/core/mail_template.yml
+index 2d6e8696d5264..c3c9a337c8fb5 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/mail_template.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/mail_template.yml
+@@ -57,3 +57,15 @@ services:
+       - "@=service('prestashop.adapter.legacy.configuration').get('_PS_MODULE_DIR_')"
+     public: true
+     autoconfigure: true
++
++  # Email body template translation services
++  PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository:
++    arguments:
++      $coreMailsDir: '%kernel.project_dir%/mails'
++      $modulesDir: '%modules_dir%'
++
++  prestashop.core.grid.data_factory.email_body_template:
++    class: 'PrestaShop\PrestaShop\Core\Grid\Data\Factory\EmailBodyTemplateGridDataFactory'
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\MailTemplate\EmailBodyTemplateRepository'
++      - '@=service("PrestaShop\\PrestaShop\\Core\\Context\\LanguageContext").getIsoCode()'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/edit.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/edit.html.twig
+new file mode 100644
+index 0000000000000..274d2833edaba
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/edit.html.twig
+@@ -0,0 +1,65 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  {% form_theme emailBodyTemplateEditForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
++
++  <div class="alert alert-warning" role="alert">
++    <p>
++      {{ 'Some of these expressions use this special syntax: %s.'|trans({'%s': '%d'}, 'Admin.International.Help') }}
++      <br>
++      {{ 'You must use this syntax in your translations. Here are several examples:'|trans({}, 'Admin.International.Help') }}
++    </p>
++    <ul>
++      <li>"{{ 'There are [1]%replace%[/1] products'|trans({'%replace%': '%d', '[1]': '<strong>', '[/1]': '</strong>'}, 'Admin.International.Help')|raw }}": {{ '"%s" will be replaced by a number.'|trans({'%s': '%d'}, 'Admin.International.Help') }}</li>
++      <li>"{{ 'List of pages in [1]%replace%[/1]'|trans({'%replace%': '%s', '[1]': '<strong>', '[/1]': '</strong>'}, 'Admin.International.Help')|raw }}": {{ '"%s" will be replaced by a string.'|trans({'%s': '%s'}, 'Admin.International.Help') }}</li>
++      <li>"{{ 'Feature: [1]%1%[/1] ([1]%2%[/1] values)'|trans({'%1%': '%1$s', '%2%': '%2$d', '[1]': '<strong>', '[/1]': '</strong>'}, 'Admin.International.Help')|raw }}": {{ 'The numbers enable you to reorder the variables when necessary.'|trans({}, 'Admin.International.Help') }}</li>
++    </ul>
++  </div>
++
++  {{ form_start(emailBodyTemplateEditForm) }}
++    <div class="card">
++      <h3 class="card-header">
++        <i class="material-icons">email</i>
++        {{ 'HTML content'|trans({}, 'Admin.International.Feature') }}
++      </h3>
++      <div class="card-body">
++        <div class="form-wrapper">
++          {{ form_row(emailBodyTemplateEditForm.html_content) }}
++        </div>
++      </div>
++    </div>
++
++    <div class="card">
++      <h3 class="card-header">
++        <i class="material-icons">text_fields</i>
++        {{ 'Text content'|trans({}, 'Admin.International.Feature') }}
++      </h3>
++      <div class="card-body">
++        <div class="form-wrapper">
++          {{ form_row(emailBodyTemplateEditForm.txt_content) }}
++        </div>
++      </div>
++    </div>
++
++    <div class="card">
++      <div class="card-footer">
++        <a href="{{ path('admin_email_body_translation_index', {locale: locale}) }}" class="btn btn-outline-secondary">
++          {{ 'Cancel'|trans({}, 'Admin.Actions') }}
++        </a>
++        <button class="btn btn-primary float-right" id="save-button">
++          {{ 'Save'|trans({}, 'Admin.Actions') }}
++        </button>
++      </div>
++    </div>
++  {{ form_end(emailBodyTemplateEditForm) }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++
++  <script src="{{ asset('themes/new-theme/public/email_body_translation_form.bundle.js') }}"></script>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/index.html.twig
+new file mode 100644
+index 0000000000000..bd8432e5fed5f
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/EmailBodyTranslation/index.html.twig
+@@ -0,0 +1,38 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  <div class="row">
++    <div class="col-12 mb-3">
++      <a href="{{ path('admin_international_translations_show_settings') }}" class="btn btn-outline-secondary">
++        <i class="material-icons">arrow_back</i>
++        {{ 'Back to translations'|trans({}, 'Admin.International.Feature') }}
++      </a>
++    </div>
++  </div>
++
++  {% block email_body_template_grid %}
++    {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {grid: emailBodyTemplateGrid}) }}
++  {% endblock %}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++
++  <script src="{{ asset('themes/default/js/bundle/pagination.js') }}"></script>
++  <script src="{{ asset('themes/new-theme/public/email_body_translation.bundle.js') }}"></script>
++  <script>
++    $(function () {
++      var searchFormUrl = '{{ path('admin_email_body_translation_search', {locale: locale}) }}';
++      var indexUrl = '{{ path('admin_email_body_translation_index', {locale: locale}) }}';
++      var $filterForm = $('#email_body_template_filter_form');
++      if ($filterForm.length) {
++        $filterForm.attr('action', searchFormUrl);
++      }
++      $('[data-redirect]').attr('data-redirect', indexUrl);
++    });
++  </script>
++{% endblock %}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/EmailBodyTranslationFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/EmailBodyTranslationFeatureContext.php
+new file mode 100644
+index 0000000000000..3b020fef69438
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/EmailBodyTranslationFeatureContext.php
+@@ -0,0 +1,257 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain;
++
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Command\EditEmailBodyTemplateCommand;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Exception\EmailTemplateNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplateForEditing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\Query\GetEmailBodyTemplatesForListing;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\QueryResult\EditableEmailBodyTemplate;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateName;
++use PrestaShop\PrestaShop\Core\Domain\MailTemplate\ValueObject\EmailTemplateSource;
++
++class EmailBodyTranslationFeatureContext extends AbstractDomainFeatureContext
++{
++    private ?array $listedTemplates = null;
++    private ?EditableEmailBodyTemplate $editableTemplate = null;
++
++    /**
++     * @When I list email body templates for locale :locale
++     */
++    public function listEmailBodyTemplatesForLocale(string $locale): void
++    {
++        $this->listedTemplates = $this->getQueryBus()->handle(
++            new GetEmailBodyTemplatesForListing($locale)
++        );
++    }
++
++    /**
++     * @Then I should see email body template :templateName with source :source
++     */
++    public function shouldSeeEmailBodyTemplateWithSource(string $templateName, string $source): void
++    {
++        Assert::assertNotNull($this->listedTemplates, 'Templates list is empty. Call listing step first.');
++
++        $found = false;
++        foreach ($this->listedTemplates as $template) {
++            if ($template['template_name'] === $templateName && $template['source'] === $source) {
++                $found = true;
++                break;
++            }
++        }
++
++        Assert::assertTrue($found, sprintf(
++            'Email body template "%s" with source "%s" was not found in the listing.',
++            $templateName,
++            $source
++        ));
++    }
++
++    /**
++     * @Then I should see email body template :templateName with source :source and module :moduleName
++     */
++    public function shouldSeeEmailBodyTemplateWithSourceAndModule(string $templateName, string $source, string $moduleName): void
++    {
++        Assert::assertNotNull($this->listedTemplates, 'Templates list is empty. Call listing step first.');
++
++        $found = false;
++        foreach ($this->listedTemplates as $template) {
++            if ($template['template_name'] === $templateName
++                && $template['source'] === $source
++                && $template['module_name'] === $moduleName
++            ) {
++                $found = true;
++                break;
++            }
++        }
++
++        Assert::assertTrue($found, sprintf(
++            'Email body template "%s" with source "%s" and module "%s" was not found in the listing.',
++            $templateName,
++            $source,
++            $moduleName
++        ));
++    }
++
++    /**
++     * @Then email body template :templateName should have HTML version
++     */
++    public function emailBodyTemplateShouldHaveHtmlVersion(string $templateName): void
++    {
++        Assert::assertNotNull($this->listedTemplates);
++
++        foreach ($this->listedTemplates as $template) {
++            if ($template['template_name'] === $templateName) {
++                Assert::assertTrue($template['has_html'], sprintf(
++                    'Email body template "%s" should have an HTML version.',
++                    $templateName
++                ));
++
++                return;
++            }
++        }
++
++        Assert::fail(sprintf('Email body template "%s" was not found.', $templateName));
++    }
++
++    /**
++     * @Then email body template :templateName should have TXT version
++     */
++    public function emailBodyTemplateShouldHaveTxtVersion(string $templateName): void
++    {
++        Assert::assertNotNull($this->listedTemplates);
++
++        foreach ($this->listedTemplates as $template) {
++            if ($template['template_name'] === $templateName) {
++                Assert::assertTrue($template['has_txt'], sprintf(
++                    'Email body template "%s" should have a TXT version.',
++                    $templateName
++                ));
++
++                return;
++            }
++        }
++
++        Assert::fail(sprintf('Email body template "%s" was not found.', $templateName));
++    }
++
++    /**
++     * @When I get email body template :templateName for locale :locale with source :source
++     */
++    public function getEmailBodyTemplateForEditing(string $templateName, string $locale, string $source): void
++    {
++        try {
++            $this->editableTemplate = $this->getQueryBus()->handle(
++                new GetEmailBodyTemplateForEditing($templateName, $locale, $source)
++            );
++        } catch (EmailTemplateNotFoundException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then I should get an editable email body template with non-empty HTML content
++     */
++    public function shouldGetEditableEmailBodyTemplateWithHtmlContent(): void
++    {
++        Assert::assertNotNull($this->editableTemplate);
++        Assert::assertNotEmpty($this->editableTemplate->getHtmlContent());
++    }
++
++    /**
++     * @Then I should get an editable email body template with non-empty TXT content
++     */
++    public function shouldGetEditableEmailBodyTemplateWithTxtContent(): void
++    {
++        Assert::assertNotNull($this->editableTemplate);
++        Assert::assertNotEmpty($this->editableTemplate->getTxtContent());
++    }
++
++    /**
++     * @When I edit email body template :templateName for locale :locale with source :source with:
++     */
++    public function editEmailBodyTemplate(string $templateName, string $locale, string $source, TableNode $table): void
++    {
++        $data = $table->getRowsHash();
++
++        try {
++            $this->getCommandBus()->handle(new EditEmailBodyTemplateCommand(
++                $templateName,
++                $locale,
++                $source,
++                '',
++                $data['html_content'] ?? '',
++                $data['txt_content'] ?? '',
++            ));
++        } catch (EmailTemplateConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then email body template :templateName for locale :locale with source :source HTML content should contain :expectedContent
++     */
++    public function emailBodyTemplateHtmlContentShouldContain(string $templateName, string $locale, string $source, string $expectedContent): void
++    {
++        /** @var EditableEmailBodyTemplate $template */
++        $template = $this->getQueryBus()->handle(
++            new GetEmailBodyTemplateForEditing($templateName, $locale, $source)
++        );
++
++        Assert::assertStringContainsString($expectedContent, $template->getHtmlContent());
++    }
++
++    /**
++     * @Then email body template :templateName for locale :locale with source :source TXT content should contain :expectedContent
++     */
++    public function emailBodyTemplateTxtContentShouldContain(string $templateName, string $locale, string $source, string $expectedContent): void
++    {
++        /** @var EditableEmailBodyTemplate $template */
++        $template = $this->getQueryBus()->handle(
++            new GetEmailBodyTemplateForEditing($templateName, $locale, $source)
++        );
++
++        Assert::assertStringContainsString($expectedContent, $template->getTxtContent());
++    }
++
++    /**
++     * @Then I should get an email template constraint error
++     */
++    public function shouldGetEmailTemplateConstraintError(): void
++    {
++        $this->assertLastErrorIs(EmailTemplateConstraintException::class);
++    }
++
++    /**
++     * @Then I should get an email template not found error
++     */
++    public function shouldGetEmailTemplateNotFoundError(): void
++    {
++        $this->assertLastErrorIs(EmailTemplateNotFoundException::class);
++    }
++
++    /**
++     * @When I create email template name with value :value
++     */
++    public function createEmailTemplateNameWithValue(string $value): void
++    {
++        try {
++            new EmailTemplateName($value);
++        } catch (EmailTemplateConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I create email template source with value :value
++     */
++    public function createEmailTemplateSourceWithValue(string $value): void
++    {
++        try {
++            new EmailTemplateSource($value);
++        } catch (EmailTemplateConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I create module email template source without module name
++     */
++    public function createModuleEmailTemplateSourceWithoutModuleName(): void
++    {
++        try {
++            new EmailTemplateSource(EmailTemplateSource::SOURCE_MODULE, '');
++        } catch (EmailTemplateConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/MailTemplate/email_body_translation.feature b/tests/Integration/Behaviour/Features/Scenario/MailTemplate/email_body_translation.feature
+new file mode 100644
+index 0000000000000..ca87147051494
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/MailTemplate/email_body_translation.feature
+@@ -0,0 +1,59 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s email_body_translation
++@restore-all-tables-before-feature
++Feature: Email body template management
++  In order to customize transactional email content
++  As a BO user
++  I should be able to list and edit email body templates
++
++  Scenario: List core email templates for English locale
++    When I list email body templates for locale "en"
++    Then I should see email body template "account" with source "core"
++    And I should see email body template "order_conf" with source "core"
++    And I should see email body template "contact" with source "core"
++
++  Scenario: List includes module email templates
++    When I list email body templates for locale "en"
++    Then I should see email body template "new_order" with source "module" and module "ps_emailalerts"
++
++  Scenario: Core email templates have both HTML and TXT versions
++    When I list email body templates for locale "en"
++    Then email body template "account" should have HTML version
++    And email body template "account" should have TXT version
++
++  Scenario: Get email template for editing
++    When I get email body template "account" for locale "en" with source "core"
++    Then I should get an editable email body template with non-empty HTML content
++    And I should get an editable email body template with non-empty TXT content
++
++  Scenario: Edit email template content
++    When I edit email body template "account" for locale "en" with source "core" with:
++      | html_content | <p>Updated HTML content for testing</p> |
++      | txt_content  | Updated TXT content for testing         |
++    Then email body template "account" for locale "en" with source "core" HTML content should contain "Updated HTML content for testing"
++    And email body template "account" for locale "en" with source "core" TXT content should contain "Updated TXT content for testing"
++
++  Scenario: Edit with HTML containing JavaScript should fail
++    When I edit email body template "account" for locale "en" with source "core" with:
++      | html_content | <script>alert('xss')</script> |
++      | txt_content  | Valid text content             |
++    Then I should get an email template constraint error
++
++  Scenario: Get non-existing template should fail
++    When I get email body template "non_existing_template_xyz" for locale "en" with source "core"
++    Then I should get an email template not found error
++
++  Scenario: Create EmailTemplateName with empty name should fail
++    When I create email template name with value ""
++    Then I should get an email template constraint error
++
++  Scenario: Create EmailTemplateName with invalid characters should fail
++    When I create email template name with value "template with spaces"
++    Then I should get an email template constraint error
++
++  Scenario: Create EmailTemplateSource with invalid source should fail
++    When I create email template source with value "invalid_source"
++    Then I should get an email template constraint error
++
++  Scenario: Create module EmailTemplateSource without module name should fail
++    When I create module email template source without module name
++    Then I should get an email template constraint error
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index f815ee992233f..41bca4664e9dc 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -44,6 +44,12 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\StoreFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\StoreFeatureContext
++    email_body_translation:
++      paths:
++        - "%paths.base%/Features/Scenario/MailTemplate"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\EmailBodyTranslationFeatureContext
+     customer:
+       paths:
+         - "%paths.base%/Features/Scenario/Customer"

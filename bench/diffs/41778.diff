@@ -1,0 +1,188 @@
+diff --git a/admin-dev/themes/default/js/admin-theme.js b/admin-dev/themes/default/js/admin-theme.js
+index 3a539bbc7ef6d..4d3eece041b3e 100644
+--- a/admin-dev/themes/default/js/admin-theme.js
++++ b/admin-dev/themes/default/js/admin-theme.js
+@@ -309,13 +309,28 @@ $(() => {
+ 
+       const resetErrors = () => {
+         $nameGroup.removeClass('has-error');
+-        $nameError.addClass('hidden').text('');
+-        $modalError.removeClass('alert alert-danger').addClass('hidden').text('');
++        $nameError.addClass('hidden').find('.js-error-text').text('');
++        $modalError.removeClass('alert alert-danger').addClass('hidden').find('.alert-text').text('');
+       };
+ 
+       $modal.one('hidden.bs.modal', resetErrors);
+       $nameInput.off('input').on('input', resetErrors);
+ 
++      // Only dismiss on backdrop click when the press also started on the backdrop.
++      // Without this, a mousedown inside the modal released outside (e.g. text selection)
++      // bubbles a click whose target is the modal itself, which Bootstrap 3.1 treats as a
++      // backdrop click and closes the modal. These guards run before Bootstrap's own
++      // click.dismiss handler (bound during .modal('show') below) so they can stop it.
++      let mouseDownOnBackdrop = false;
++      $modal.off('mousedown.qaBackdrop').on('mousedown.qaBackdrop', (downEvent) => {
++        mouseDownOnBackdrop = downEvent.target === downEvent.currentTarget;
++      });
++      $modal.off('click.qaBackdrop').on('click.qaBackdrop', (clickEvent) => {
++        if (clickEvent.target === clickEvent.currentTarget && !mouseDownOnBackdrop) {
++          clickEvent.stopImmediatePropagation();
++        }
++      });
++
+       $modal.find('#quick-access-save-btn').off('click').on('click', () => {
+         resetErrors();
+ 
+@@ -323,7 +338,7 @@ $(() => {
+ 
+         if (!name) {
+           $nameGroup.addClass('has-error');
+-          $nameError.text($nameInput.data('required-message')).removeClass('hidden');
++          $nameError.removeClass('hidden').find('.js-error-text').text($nameInput.data('required-message'));
+           $nameInput.trigger('focus');
+           return;
+         }
+@@ -332,7 +347,8 @@ $(() => {
+         doQuickLinkAjax($link, method, name, newWindow, {
+           onSuccess: () => $modal.modal('hide'),
+           onError: (messages) => {
+-            $modalError.addClass('alert alert-danger').text(messages.join(' ')).removeClass('hidden');
++            $modalError.addClass('alert alert-danger').removeClass('hidden')
++              .find('.alert-text').text(messages.join(' '));
+           },
+         });
+       });
+diff --git a/admin-dev/themes/default/template/header.tpl b/admin-dev/themes/default/template/header.tpl
+index b61d8bedc1b18..8408122656235 100644
+--- a/admin-dev/themes/default/template/header.tpl
++++ b/admin-dev/themes/default/template/header.tpl
+@@ -179,14 +179,14 @@
+               </h4>
+             </div>
+             <div class="modal-body">
+-              <div class="hidden" role="alert" id="quick-access-add-error"></div>
++              <div class="hidden" role="alert" id="quick-access-add-error"><div class="alert-text"></div></div>
+               <div class="form-group" id="quick-access-name-group">
+                 <label for="quick-access-name">
+                   {l s='Shortcut name' d='Admin.Navigation.Header'}
+                 </label>
+                 <input type="text" id="quick-access-name" class="form-control" required aria-required="true" maxlength="32"
+                        data-required-message="{l s='Shortcut name is required' d='Admin.Navigation.Header'}">
+-                <span class="help-block hidden" id="quick-access-name-error"></span>
++                <span class="help-block hidden" id="quick-access-name-error"><span class="js-error-text"></span></span>
+               </div>
+               <div class="form-group">
+                 <label class="d-block">
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Component/quick_access_add_modal.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Component/quick_access_add_modal.html.twig
+index c652a9b5eba8c..b87afe73f24f8 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Component/quick_access_add_modal.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Component/quick_access_add_modal.html.twig
+@@ -3,7 +3,35 @@
+  # docs/licenses/LICENSE.txt file that was distributed with this source code.
+  #}
+ {% set legacyLayout = legacyLayout|default(false) %}
+-<div class="modal fade" id="quick-access-add-modal" tabindex="-1" role="dialog"
++{% if legacyLayout %}
++  {# Legacy (BS3) pages don't load the UI Kit. Center the modal vertically and
++     reuse the new theme's slide-in (top:50% + translateY(-50%)) instead of BS3's
++     top-anchored drop, and space the inline error from the input. BS3 toggles
++     `.in` (not `.show`), so the transforms are keyed on `.fade`/`.in`. Also drop
++     BS3's header/footer separator borders to match the borderless UI Kit modal. #}
++  <style>
++    #quick-access-add-modal .modal-dialog {
++      top: 50%;
++      margin: 10px auto;
++    }
++    #quick-access-add-modal.fade .modal-dialog {
++      transform: translate(0, -50px);
++    }
++    #quick-access-add-modal.in .modal-dialog {
++      transform: translateY(-50%);
++    }
++    #quick-access-add-modal .modal-header {
++      border-bottom: 0;
++    }
++    #quick-access-add-modal .modal-footer {
++      border-top: 0;
++    }
++    #quick-access-add-modal #quick-access-name-error {
++      margin-top: 0.25rem;
++    }
++  </style>
++{% endif %}
++<div class="modal fade{% if legacyLayout %} bootstrap{% endif %}" id="quick-access-add-modal" tabindex="-1" role="dialog"
+      aria-labelledby="quick-access-add-modal-title" aria-modal="true">
+   <div class="modal-dialog" role="document">
+     <div class="modal-content">
+@@ -28,7 +56,7 @@
+         {% endif %}
+       </div>
+       <div class="modal-body">
+-        <div class="d-print-none d-none" role="alert" id="quick-access-add-error">
++        <div class="d-print-none {{ legacyLayout ? 'hidden' : 'd-none' }}" role="alert" id="quick-access-add-error">
+           <div class="alert-text"></div>
+         </div>
+         <div class="form-group" id="quick-access-name-group">
+@@ -37,8 +65,8 @@
+           </label>
+           <input type="text" id="quick-access-name" class="form-control" required aria-required="true" maxlength="32"
+                  data-required-message="{{ 'Shortcut name is required'|trans({}, 'Admin.Navigation.Header') }}">
+-          <div class="align-baseline text-danger mt-1 d-none" role="alert" id="quick-access-name-error">
+-            <i class="material-icons form-error-icon">error_outline</i>
++          <div class="align-baseline text-danger mt-1 {{ legacyLayout ? 'hidden' : 'd-none' }}" role="alert" id="quick-access-name-error">
++            <i class="material-icons form-error-icon" style="vertical-align: middle">error_outline</i>
+             <span class="js-error-text"></span>
+           </div>
+         </div>
+@@ -46,13 +74,23 @@
+           <label class="form-control-label d-block">
+             {{ 'Open in new window'|trans({}, 'Admin.Navigation.Header') }}
+           </label>
+-          <span class="ps-switch">
+-            <input id="quick-access-new-window-off" name="quick_access_new_window" value="0" checked type="radio">
+-            <label for="quick-access-new-window-off">{{ 'No'|trans({}, 'Admin.Global') }}</label>
+-            <input id="quick-access-new-window-on" name="quick_access_new_window" value="1" type="radio">
+-            <label for="quick-access-new-window-on">{{ 'Yes'|trans({}, 'Admin.Global') }}</label>
+-            <span class="slide-button"></span>
+-          </span>
++          {% if legacyLayout %}
++            <span class="switch prestashop-switch fixed-width-lg">
++              <input id="quick-access-new-window-on" name="quick_access_new_window" value="1" type="radio">
++              <label for="quick-access-new-window-on">{{ 'Yes'|trans({}, 'Admin.Global') }}</label>
++              <input id="quick-access-new-window-off" name="quick_access_new_window" value="0" checked type="radio">
++              <label for="quick-access-new-window-off">{{ 'No'|trans({}, 'Admin.Global') }}</label>
++              <a class="slide-button btn"></a>
++            </span>
++          {% else %}
++            <span class="ps-switch">
++              <input id="quick-access-new-window-off" name="quick_access_new_window" value="0" checked type="radio">
++              <label for="quick-access-new-window-off">{{ 'No'|trans({}, 'Admin.Global') }}</label>
++              <input id="quick-access-new-window-on" name="quick_access_new_window" value="1" type="radio">
++              <label for="quick-access-new-window-on">{{ 'Yes'|trans({}, 'Admin.Global') }}</label>
++              <span class="slide-button"></span>
++            </span>
++          {% endif %}
+         </div>
+       </div>
+       <div class="modal-footer">
+diff --git a/tests/UI/campaigns/functional/BO/15_header/02_quickAccess.ts b/tests/UI/campaigns/functional/BO/15_header/02_quickAccess.ts
+index 9a5b07f29f7e7..33cc06a21b0c8 100644
+--- a/tests/UI/campaigns/functional/BO/15_header/02_quickAccess.ts
++++ b/tests/UI/campaigns/functional/BO/15_header/02_quickAccess.ts
+@@ -86,6 +86,16 @@ describe('BO - Header : Quick access links', async () => {
+       expect(validationMessage).to.contains(boCartRulesCreatePage.successfulUpdateMessage);
+     });
+ 
++    it('should reload, try to add the current page with an empty name and check the inline error', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'addCurrentPageWithEmptyName', baseContext);
++
++      await boCartRulesCreatePage.reloadPage(page);
++
++      const inlineError = await boCartRulesCreatePage.addCurrentPageToQuickAccessWithEmptyName(page);
++
++      expect(inlineError).to.contains('Shortcut name is required');
++    });
++
+     it('should refresh the page and add current page to Quick access', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'addCurrentPageToQuickAccess', baseContext);
+ 

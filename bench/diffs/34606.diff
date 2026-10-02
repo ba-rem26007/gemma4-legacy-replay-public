@@ -1,0 +1,431 @@
+diff --git a/src/Adapter/Feature/Repository/FeatureRepository.php b/src/Adapter/Feature/Repository/FeatureRepository.php
+index f5123e2d611ec..55fce7c56c935 100644
+--- a/src/Adapter/Feature/Repository/FeatureRepository.php
++++ b/src/Adapter/Feature/Repository/FeatureRepository.php
+@@ -77,6 +77,23 @@ public function assertExists(FeatureId $featureId): void
+         );
+     }
+ 
++    /**
++     * @param int $langId
++     *
++     * @return array<int, array<string, mixed>>
++     */
++    public function getFeaturesByLang(int $langId): array
++    {
++        $qb = $this->getFeaturesQueryBuilder(['id_lang' => $langId])
++            ->leftJoin('f', $this->dbPrefix . 'feature_lang', 'fl', 'fl.id_feature = f.id_feature AND fl.id_lang = :languageId')
++            ->setParameter('languageId', $langId)
++            ->select('f.*, fl.*')
++            ->addOrderBy('fl.name', 'ASC')
++        ;
++
++        return $this->formatResult($qb->execute()->fetchAllAssociative());
++    }
++
+     /**
+      * @param int|null $limit
+      * @param int|null $offset
+@@ -88,11 +105,31 @@ public function getFeatures(?int $limit = null, ?int $offset = null, ?array $fil
+     {
+         $qb = $this->getFeaturesQueryBuilder($filters)
+             ->select('f.*, fl.*')
++            ->addOrderBy('f.position', 'ASC')
+             ->setFirstResult($offset)
+             ->setMaxResults($limit)
+         ;
+ 
+-        $results = $qb->execute()->fetchAll();
++        return $this->formatResult($qb->execute()->fetchAllAssociative());
++    }
++
++    /**
++     * @param array|null $filters
++     *
++     * @return int
++     */
++    public function getFeaturesCount(?array $filters = []): int
++    {
++        $qb = $this->getFeaturesQueryBuilder($filters)
++            ->select('COUNT(f.id_feature_value) AS total_feature_values')
++            ->addGroupBy('f.id_feature_value')
++        ;
++
++        return (int) $qb->execute()->fetch()['total_feature_values'];
++    }
++
++    private function formatResult(array $results): array
++    {
+         $localizedNames = [];
+         $featuresById = [];
+         foreach ($results as $result) {
+@@ -116,21 +153,6 @@ public function getFeatures(?int $limit = null, ?int $offset = null, ?array $fil
+         return $features;
+     }
+ 
+-    /**
+-     * @param array|null $filters
+-     *
+-     * @return int
+-     */
+-    public function getFeaturesCount(?array $filters = []): int
+-    {
+-        $qb = $this->getFeaturesQueryBuilder($filters)
+-            ->select('COUNT(f.id_feature_value) AS total_feature_values')
+-            ->addGroupBy('f.id_feature_value')
+-        ;
+-
+-        return (int) $qb->execute()->fetch()['total_feature_values'];
+-    }
+-
+     /**
+      * @param array|null $filters
+      *
+@@ -138,12 +160,9 @@ public function getFeaturesCount(?array $filters = []): int
+      */
+     private function getFeaturesQueryBuilder(?array $filters): QueryBuilder
+     {
+-        //@todo: filters are not handled.
++        // Filters not handled yet
+         $qb = $this->connection->createQueryBuilder();
+-        $qb->from($this->dbPrefix . 'feature', 'f')
+-            ->leftJoin('f', $this->dbPrefix . 'feature_lang', 'fl', 'fl.id_feature = f.id_feature')
+-            ->addOrderBy('f.position', 'ASC')
+-        ;
++        $qb->from($this->dbPrefix . 'feature', 'f');
+ 
+         return $qb;
+     }
+diff --git a/src/Adapter/Feature/Repository/FeatureValueRepository.php b/src/Adapter/Feature/Repository/FeatureValueRepository.php
+index 60c4817d60ee3..4483e83562be2 100644
+--- a/src/Adapter/Feature/Repository/FeatureValueRepository.php
++++ b/src/Adapter/Feature/Repository/FeatureValueRepository.php
+@@ -153,7 +153,54 @@ public function assertExists(FeatureValueId $featureValueId): void
+      */
+     public function getProductFeatureValues(ProductId $productId, ?int $limit = null, ?int $offset = null, ?array $filters = []): array
+     {
+-        return $this->getFeatureValues($limit, $offset, array_merge($filters, ['id_product' => $productId->getValue()]));
++        return $this->getFeatureValues($limit, $offset, array_merge($filters ?? [], ['id_product' => $productId->getValue()]));
++    }
++
++    public function getAllProductFeatureValues(ProductId $productId): array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->from($this->dbPrefix . 'feature_value', 'fv')
++            ->innerJoin('fv', $this->dbPrefix . 'feature_product', 'fp', 'fp.id_feature_value = fv.id_feature_value AND fp.id_product = :productId')
++            ->leftJoin('fv', $this->dbPrefix . 'feature_value_lang', 'fvl', 'fvl.id_feature_value = fv.id_feature_value')
++            ->select('fv.*, fvl.*')
++            ->setParameter('productId', $productId->getValue())
++        ;
++
++        $result = $qb->execute()->fetchAllAssociative();
++        $featureValues = [];
++        foreach ($result as $featureValue) {
++            $featureValueId = (int) $featureValue['id_feature_value'];
++            if (!isset($featureValues[$featureValueId])) {
++                $featureValues[$featureValueId] = [
++                    'id_feature_value' => $featureValueId,
++                    'id_feature' => (int) $featureValue['id_feature'],
++                    'custom' => (int) $featureValue['custom'],
++                ];
++            }
++            $featureValues[$featureValueId]['localized_values'][(int) $featureValue['id_lang']] = $featureValue['value'];
++        }
++
++        return array_values($featureValues);
++    }
++
++    /**
++     * @param int $langId
++     * @param array $filters
++     *
++     * @return array
++     */
++    public function getFeatureValuesByLang(int $langId, array $filters): array
++    {
++        $qb = $this->getFeatureValuesQueryBuilder(array_merge($filters, ['id_lang' => $langId]))
++            ->leftJoin('f', $this->dbPrefix . 'feature_value_lang', 'fvl', 'fvl.id_feature_value = fv.id_feature_value AND fvl.id_lang = :langId')
++            ->setParameter('langId', $langId)
++            ->select('fv.*, fvl.value')
++            // Override the default order by feature position and ID
++            ->orderBy('fvl.value')
++        ;
++
++        return $qb->execute()->fetchAllAssociative();
+     }
+ 
+     /**
+@@ -171,12 +218,20 @@ public function getFeatureValues(?int $limit = null, ?int $offset = null, ?array
+             ->setMaxResults($limit)
+         ;
+ 
+-        $featureValues = $qb->execute()->fetchAll();
+-        foreach ($featureValues as $index => $featureValue) {
+-            $featureValues[$index]['localized_values'] = $this->getFeatureValueLocalizedValues((int) $featureValue['id_feature_value']);
++        $featureValues = $qb->execute()->fetchAllAssociative();
++
++        $indexedFeatureValues = [];
++        foreach ($featureValues as $featureValue) {
++            $indexedFeatureValues[$featureValue['id_feature_value']] = $featureValue;
++        }
++        $featureValueIds = array_keys($indexedFeatureValues);
++
++        $localizedFeatureValues = $this->getFeatureValueLocalizedValues($featureValueIds, $filters);
++        foreach ($localizedFeatureValues as $localizedFeatureValue) {
++            $indexedFeatureValues[$localizedFeatureValue['id_feature_value']]['localized_values'][$localizedFeatureValue['id_lang']] = $localizedFeatureValue['value'];
+         }
+ 
+-        return $featureValues;
++        return array_values($indexedFeatureValues);
+     }
+ 
+     /**
+@@ -205,26 +260,29 @@ public function getFeatureValuesCount(?array $filters = []): int
+     }
+ 
+     /**
+-     * @param int $featureValueId
++     * @param array $featureValuesIds
++     * @param array $filters
+      *
+      * @return array
+      */
+-    private function getFeatureValueLocalizedValues(int $featureValueId): array
++    private function getFeatureValueLocalizedValues(array $featureValuesIds, array $filters): array
+     {
+         $qb = $this->connection->createQueryBuilder();
+         $qb->from($this->dbPrefix . 'feature_value_lang', 'fvl')
+             ->select('fvl.*')
+-            ->where('fvl.id_feature_value= :featureValueId')
+-            ->setParameter('featureValueId', $featureValueId)
++            ->where('fvl.id_feature_value IN(:featureValueIds)')
++            ->setParameter('featureValueIds', $featureValuesIds, Connection::PARAM_INT_ARRAY)
+         ;
+ 
+-        $values = $qb->execute()->fetchAll();
+-        $localizedValues = [];
+-        foreach ($values as $value) {
+-            $localizedValues[(int) $value['id_lang']] = $value['value'];
++        if (!empty($filters['id_lang'])) {
++            $languageIds = is_array($filters['id_lang']) ? $filters['id_lang'] : [$filters['id_lang']];
++            $qb
++                ->andWhere('fvl.id_lang IN (:languageIds)')
++                ->setParameter('languageIds', $languageIds, Connection::PARAM_INT_ARRAY)
++            ;
+         }
+ 
+-        return $localizedValues;
++        return $qb->execute()->fetchAllAssociative();
+     }
+ 
+     /**
+@@ -235,15 +293,34 @@ private function getFeatureValueLocalizedValues(int $featureValueId): array
+     private function getFeatureValuesQueryBuilder(?array $filters): QueryBuilder
+     {
+         $qb = $this->connection->createQueryBuilder();
+-        $qb->from($this->dbPrefix . 'feature_value', 'fv')
+-            ->leftJoin('fv', $this->dbPrefix . 'feature_product', 'fp', 'fp.id_feature_value = fv.id_feature_value')
+-            ->leftJoin('fv', $this->dbPrefix . 'feature', 'f', 'f.id_feature = fv.id_feature')
+-            ->orderBy('f.position,fv.id_feature_value', 'ASC')
++        $qb
++            ->from($this->dbPrefix . 'feature_value', 'fv')
++        ;
++
++        // Join only on specified feature if requested
++        if (!empty($filters['id_feature'])) {
++            $qb
++                ->innerJoin('fv', $this->dbPrefix . 'feature', 'f', 'f.id_feature = fv.id_feature AND f.id_feature = :featureId')
++                ->setParameter('featureId', (int) $filters['id_feature'])
++            ;
++        } else {
++            $qb->leftJoin('fv', $this->dbPrefix . 'feature', 'f', 'f.id_feature = fv.id_feature');
++        }
++
++        // Join only on specified product if requested
++        if (!empty($filters['id_product'])) {
++            $qb
++                ->innerJoin('fv', $this->dbPrefix . 'feature_product', 'fp', 'fp.id_feature_value = fv.id_feature_value AND fp.id_product = :productId')
++                ->setParameter('productId', (int) $filters['id_product'])
++            ;
++        }
++
++        $qb
++            ->addGroupBy('fv.id_feature_value')
++            ->orderBy('f.position, fv.id_feature_value', 'ASC')
+         ;
+ 
+         $availableFilters = [
+-            'id_product',
+-            'id_feature',
+             'id_feature_value',
+             'custom',
+         ];
+@@ -253,20 +330,10 @@ private function getFeatureValuesQueryBuilder(?array $filters): QueryBuilder
+                 continue;
+             }
+ 
+-            switch ($key) {
+-                case 'id_product':
+-                    $qb
+-                        ->andWhere('fp.id_product = :productId')
+-                        ->setParameter('productId', (int) $value)
+-                    ;
+-                break;
+-                default:
+-                    $qb
+-                        ->andWhere(sprintf('fv.%s = :%s', $key, $key))
+-                        ->setParameter($key, $value)
+-                    ;
+-                break;
+-            }
++            $qb
++                ->andWhere(sprintf('fv.%s = :%s', $key, $key))
++                ->setParameter($key, $value)
++            ;
+         }
+ 
+         return $qb;
+diff --git a/src/Adapter/Form/ChoiceProvider/FeatureValuesChoiceProvider.php b/src/Adapter/Form/ChoiceProvider/FeatureValuesChoiceProvider.php
+index 03a6cf91b3b8d..d4a5a5a9e4a41 100644
+--- a/src/Adapter/Form/ChoiceProvider/FeatureValuesChoiceProvider.php
++++ b/src/Adapter/Form/ChoiceProvider/FeatureValuesChoiceProvider.php
+@@ -45,18 +45,18 @@ class FeatureValuesChoiceProvider implements ConfigurableFormChoiceProviderInter
+     private $contextLanguageId;
+ 
+     /**
+-     * @var int
++     * Cache value to avoid performing the same request multiple times as the value should remain the same inside a request.
++     *
++     * @var array
+      */
+-    private $defaultLanguageId;
++    private $cacheFeatureValueChoices;
+ 
+     public function __construct(
+         FeatureValueRepository $featureValueRepository,
+-        LegacyContext $legacyContext,
+-        int $defaultLanguageId
++        LegacyContext $legacyContext
+     ) {
+         $this->featureValueRepository = $featureValueRepository;
+         $this->contextLanguageId = (int) $legacyContext->getLanguage()->getId();
+-        $this->defaultLanguageId = $defaultLanguageId;
+     }
+ 
+     /**
+@@ -74,20 +74,17 @@ public function getChoices(array $options)
+         if (isset($options['custom'])) {
+             $filters['custom'] = $options['custom'];
+         }
++        $cacheKey = md5(serialize($filters));
++        if (!empty($this->cacheFeatureValueChoices[$cacheKey])) {
++            return $this->cacheFeatureValueChoices[$cacheKey];
++        }
+ 
+-        $featureValues = $this->featureValueRepository->getFeatureValues(null, null, $filters);
+-        $choices = [];
++        $featureValues = $this->featureValueRepository->getFeatureValuesByLang($this->contextLanguageId, $filters);
++        $this->cacheFeatureValueChoices[$cacheKey] = [];
+         foreach ($featureValues as $feature) {
+-            if (!empty($feature['localized_values'][$this->contextLanguageId])) {
+-                $featureValueName = $feature['localized_values'][$this->contextLanguageId];
+-            } elseif (!empty($feature['localized_values'][$this->defaultLanguageId])) {
+-                $featureValueName = $feature['localized_values'][$this->defaultLanguageId];
+-            } else {
+-                $featureValueName = reset($feature['localized_values']);
+-            }
+-            $choices[$featureValueName] = (int) $feature['id_feature_value'];
++            $this->cacheFeatureValueChoices[$cacheKey][$feature['value']] = (int) $feature['id_feature_value'];
+         }
+ 
+-        return $choices;
++        return $this->cacheFeatureValueChoices[$cacheKey];
+     }
+ }
+diff --git a/src/Adapter/Form/ChoiceProvider/FeaturesChoiceProvider.php b/src/Adapter/Form/ChoiceProvider/FeaturesChoiceProvider.php
+index 4e2d3057077af..081d890991e24 100644
+--- a/src/Adapter/Form/ChoiceProvider/FeaturesChoiceProvider.php
++++ b/src/Adapter/Form/ChoiceProvider/FeaturesChoiceProvider.php
+@@ -45,18 +45,18 @@ class FeaturesChoiceProvider implements FormChoiceProviderInterface
+     private $contextLanguageId;
+ 
+     /**
+-     * @var int
++     * Cache value to avoid performing the same request multiple times as the value should remain the same inside a request.
++     *
++     * @var array
+      */
+-    private $defaultLanguageId;
++    private $cacheFeatureChoices;
+ 
+     public function __construct(
+         FeatureRepository $featureRepository,
+-        LegacyContext $legacyContext,
+-        int $defaultLanguageId
++        LegacyContext $legacyContext
+     ) {
+         $this->featureRepository = $featureRepository;
+         $this->contextLanguageId = (int) $legacyContext->getLanguage()->getId();
+-        $this->defaultLanguageId = $defaultLanguageId;
+     }
+ 
+     /**
+@@ -64,17 +64,16 @@ public function __construct(
+      */
+     public function getChoices()
+     {
+-        $features = $this->featureRepository->getFeatures();
+-        $choices = [];
++        if (!empty($this->cacheFeatureChoices)) {
++            return $this->cacheFeatureChoices;
++        }
++
++        $features = $this->featureRepository->getFeaturesByLang($this->contextLanguageId);
++        $this->cacheFeatureChoices = [];
+         foreach ($features as $feature) {
+-            if (!empty($feature['localized_names'][$this->contextLanguageId])) {
+-                $featureName = $feature['localized_names'][$this->contextLanguageId];
+-            } else {
+-                $featureName = $feature['localized_names'][$this->defaultLanguageId];
+-            }
+-            $choices[$featureName] = $feature['id_feature'];
++            $this->cacheFeatureChoices[$feature['localized_names'][$this->contextLanguageId]] = $feature['id_feature'];
+         }
+ 
+-        return $choices;
++        return $this->cacheFeatureChoices;
+     }
+ }
+diff --git a/src/Adapter/Product/FeatureValue/QueryHandler/GetProductFeatureValuesHandler.php b/src/Adapter/Product/FeatureValue/QueryHandler/GetProductFeatureValuesHandler.php
+index 36e834a881076..81b58f750dc84 100644
+--- a/src/Adapter/Product/FeatureValue/QueryHandler/GetProductFeatureValuesHandler.php
++++ b/src/Adapter/Product/FeatureValue/QueryHandler/GetProductFeatureValuesHandler.php
+@@ -53,7 +53,7 @@ public function __construct(FeatureValueRepository $featureValueRepository)
+      */
+     public function handle(GetProductFeatureValues $query): array
+     {
+-        $featureValuesData = $this->featureValueRepository->getProductFeatureValues($query->getProductId());
++        $featureValuesData = $this->featureValueRepository->getAllProductFeatureValues($query->getProductId());
+         $productFeatureValues = [];
+         foreach ($featureValuesData as $featureValuesDatum) {
+             $productFeatureValues[] = new ProductFeatureValue(
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/form.yml b/src/PrestaShopBundle/Resources/config/services/adapter/form.yml
+index 658755813866d..06b0a48b3d6d6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/form.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/form.yml
+@@ -73,14 +73,12 @@ services:
+     arguments:
+       - '@PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureRepository'
+       - '@prestashop.adapter.legacy.context'
+-      - "@=service('prestashop.adapter.legacy.configuration').getInt('PS_LANG_DEFAULT')"
+ 
+   prestashop.adapter.form.choice_provider.feature_values_choice_provider:
+     class: 'PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\FeatureValuesChoiceProvider'
+     arguments:
+       - '@PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureValueRepository'
+       - '@prestashop.adapter.legacy.context'
+-      - "@=service('prestashop.adapter.legacy.configuration').getInt('PS_LANG_DEFAULT')"
+ 
+   prestashop.adapter.form.choice_provider.supplier_name_by_id_choice_provider:
+     class: 'PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\SupplierNameByIdChoiceProvider'

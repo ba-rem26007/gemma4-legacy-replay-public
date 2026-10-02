@@ -1,0 +1,143 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/product/edit/manager/virtual-product-manager.ts b/admin-dev/themes/new-theme/js/pages/product/edit/manager/virtual-product-manager.ts
+index c4cff3f584501..5329655452409 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/edit/manager/virtual-product-manager.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/edit/manager/virtual-product-manager.ts
+@@ -25,19 +25,13 @@
+ 
+ import ProductMap from '@pages/product/product-map';
+ 
+-const {$} = window;
++const VirtualProductMap = ProductMap.virtualProduct;
+ 
+ export default class VirtualProductManager {
+   productFormModel: Record<string, any>;
+ 
+-  $virtualProductContainer: JQuery;
+-
+-  $fileContentContainer: JQuery;
+-
+   constructor(productFormModel: Record<string, any>) {
+     this.productFormModel = productFormModel;
+-    this.$virtualProductContainer = $(ProductMap.virtualProduct.container);
+-    this.$fileContentContainer = $(ProductMap.virtualProduct.fileContentContainer);
+ 
+     this.init();
+   }
+@@ -48,32 +42,32 @@ export default class VirtualProductManager {
+   private init(): void {
+     this.productFormModel.watch('stock.hasVirtualProductFile', () => this.toggleContentVisibility());
+     this.toggleContentVisibility();
+-  }
+-
+-  private toggleContentVisibility(): void {
+-    const hasVirtualFile = Number(this.productFormModel.getProduct().stock.hasVirtualProductFile) === 1;
+-    const hasErrors = this.$virtualProductContainer
+-      .find(ProductMap.invalidField)
+-      .length !== 0;
+-
+-    if (hasVirtualFile || hasErrors) {
+-      this.showContent();
+-    } else {
+-      this.hideContent();
+-    }
++    this.listenFileUpload();
+   }
+ 
+   /**
+-   * @private
++   * Shows/hides file form content depending if "Has file" switch is on or off.
+    */
+-  private hideContent(): void {
+-    this.$fileContentContainer.addClass('d-none');
++  private toggleContentVisibility(): void {
++    document.querySelector(VirtualProductMap.fileContentContainer)?.classList.toggle(
++      'd-none',
++      Number(this.productFormModel.getProduct().stock.hasVirtualProductFile) !== 1,
++    );
+   }
+ 
+   /**
+-   * @private
++   * Prefills file display name input with filename value on upload
+    */
+-  private showContent(): void {
+-    this.$fileContentContainer.removeClass('d-none');
++  private listenFileUpload(): void {
++    const fileUploadInput = <HTMLInputElement> document.querySelector(VirtualProductMap.fileUploadInput);
++    fileUploadInput.addEventListener('change', (e: Event) => {
++      const fileInput = <HTMLInputElement> e.currentTarget;
++      const selectedFile = <File|null> fileInput?.files?.[0];
++
++      if (selectedFile) {
++        const filenameInput = <HTMLInputElement> document.querySelector(VirtualProductMap.filenameInput);
++        filenameInput.value = selectedFile.name;
++      }
++    });
+   }
+ }
+diff --git a/admin-dev/themes/new-theme/js/pages/product/product-map.ts b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+index 9f7f38557f1ff..c732aaf27ac90 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/product-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+@@ -205,8 +205,9 @@ export default {
+     bulkFixedQuantitySwitchName: 'bulk_combination[stock][disabling_switch_fixed_quantity]',
+   },
+   virtualProduct: {
+-    container: '.virtual-product-file-container',
+-    fileContentContainer: '.virtual-product-file-content',
++    fileContentContainer: '.virtual-product-file-container .virtual-product-file-content',
++    fileUploadInput: '#product_stock_virtual_product_file_file',
++    filenameInput: '#product_stock_virtual_product_file_name',
+   },
+   dropzone: {
+     configuration: {
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/VirtualProductFileType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/VirtualProductFileType.php
+index 6f3efb135ed70..53ea204fd7b16 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/VirtualProductFileType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/VirtualProductFileType.php
+@@ -90,7 +90,6 @@ public function __construct(
+     public static function getSubscribedEvents(): array
+     {
+         return [
+-            FormEvents::PRE_SET_DATA => 'adaptSelf',
+             FormEvents::PRE_SUBMIT => 'adaptSelf',
+         ];
+     }
+@@ -123,6 +122,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ),
+                 'constraints' => [
+                     new File(['maxSize' => $maxUploadSize]),
++                    new NotBlank(),
+                 ],
+                 'download_url' => $virtualProductFileDownloadUrl,
+                 'column_breaker' => true,
+@@ -199,11 +199,15 @@ public function adaptSelf(FormEvent $event): void
+         $form = $event->getForm();
+         $data = $event->getData();
+ 
+-        // Remove filename constraint if there is no virtual product to avoid invalidating the form for nothing
++        // Remove file & name constraints if there is no virtual file added, to avoid invalidating the form for nothing
+         if (empty($data['has_file'])) {
++            $newFileField = $this->formCloner->cloneForm($form->get('file'), [
++                'constraints' => [],
++            ]);
+             $newNameField = $this->formCloner->cloneForm($form->get('name'), [
+                 'constraints' => [],
+             ]);
++            $form->add($newFileField);
+             $form->add($newNameField);
+         }
+     }
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/virtual_product_file.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/virtual_product_file.html.twig
+index 7e3ad0942a605..746864df92e1d 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/virtual_product_file.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/virtual_product_file.html.twig
+@@ -24,7 +24,7 @@
+  *#}
+ 
+ {%- block virtual_product_file_widget -%}
+-  {# The switch button is displayed outside of the div that contains evry other fields to allow toggling the content #}
++  {# The switch button is displayed outside of the div that contains every other fields to allow toggling the content #}
+   {{ form_row(form.has_file) }}
+ 
+   {{ form_widget(form) }}

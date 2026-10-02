@@ -1,0 +1,2706 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/extra-property-definition/form/constraint-builder.ts b/admin-dev/themes/new-theme/js/pages/extra-property-definition/form/constraint-builder.ts
+index 82296cae66f0b..83234e9b22063 100644
+--- a/admin-dev/themes/new-theme/js/pages/extra-property-definition/form/constraint-builder.ts
++++ b/admin-dev/themes/new-theme/js/pages/extra-property-definition/form/constraint-builder.ts
+@@ -160,7 +160,31 @@ export default class ConstraintBuilder {
+     };
+ 
+     if (entry.composite) {
+-      this.rawTailInput(editor, optionsInput, 'option-nested');
++      // A composite carries two tails: its own options ("Collection(allowExtraFields: true)[…]")
++      // and its nested constraints. They live in separate inputs, so they get separate editors.
++      const compositeOptionsInput = row.querySelector<HTMLInputElement>(
++        ExtraPropertyFormMap.rowField('composite_options'),
++      );
++
++      if (compositeOptionsInput) {
++        const ownOptionsEditor = document.createElement('span');
++        editor.appendChild(ownOptionsEditor);
++
++        const lexedOwnOptions = parseTail(compositeOptionsInput.value);
++
++        if (lexedOwnOptions === null) {
++          this.rawTailInput(ownOptionsEditor, compositeOptionsInput, 'option-raw');
++        } else {
++          this.renderOptionFields(ownOptionsEditor, entry, [...lexedOwnOptions], (tailOptions) => {
++            compositeOptionsInput.value = serializeTail(tailOptions);
++            compositeOptionsInput.dispatchEvent(new Event('input', {bubbles: true}));
++          });
++        }
++      }
++
++      const nestedEditor = document.createElement('span');
++      editor.appendChild(nestedEditor);
++      this.rawTailInput(nestedEditor, optionsInput, 'option-nested');
+ 
+       return;
+     }
+diff --git a/classes/ObjectModel.php b/classes/ObjectModel.php
+index 4ae398c816f8f..0a7e9a423c3f7 100644
+--- a/classes/ObjectModel.php
++++ b/classes/ObjectModel.php
+@@ -1095,6 +1095,14 @@ public function validateFieldsLang($die = true, $errorReturn = false)
+      */
+     public function validateExtraProperties(bool $die = true, bool $errorReturn = false)
+     {
++        // Nothing was ever set on this instance: nothing to validate, so the definitions are not
++        // loaded at all. Saving an entity that carries no extra property values (a log row, for
++        // instance) must not depend on the definitions repository, which may itself be in the
++        // middle of hydrating definitions and logging about them.
++        if (null === $this->extra_properties_bag) {
++            return true;
++        }
++
+         // B6: check definitions first (avoids loading bag when entity has no extra fields).
+         $collection = $this->getDefinitionCollection();
+         if ($collection->isEmpty()) {
+@@ -2312,6 +2320,11 @@ protected function persistExtraProperties(): bool
+             return true;
+         }
+ 
++        // Same short-circuit as validateExtraProperties(): no bag, nothing was set, nothing to persist.
++        if (null === $this->extra_properties_bag) {
++            return true;
++        }
++
+         // B6: check definitions before bag to avoid a container lookup + DB read when no extras are registered.
+         $collection = $this->getDefinitionCollection();
+         if ($collection->isEmpty()) {
+diff --git a/config/services/common.yml b/config/services/common.yml
+index d37b41ce42119..971a085fd5336 100644
+--- a/config/services/common.yml
++++ b/config/services/common.yml
+@@ -15,6 +15,13 @@ services:
+     _defaults:
+         public: true
+ 
++    # This file is loaded by the hand-built legacy containers only (front, webservice), which have no
++    # Monolog: services taking Psr\Log\LoggerInterface (the extra property definition repository, for
++    # instance) get the legacy logger there, writing ps_log. The Symfony kernels never import this file
++    # and keep Monolog behind the interface.
++    Psr\Log\LoggerInterface:
++        alias: prestashop.adapter.legacy.logger
++
+     PrestaShop\PrestaShop\Core\Crypto\Hashing: ~
+     hashing:
+         alias: PrestaShop\PrestaShop\Core\Crypto\Hashing
+diff --git a/src/Core/Domain/ExtraProperty/Exception/ExtraPropertyRegistrationFailureException.php b/src/Core/Domain/ExtraProperty/Exception/ExtraPropertyRegistrationFailureException.php
+index cc89ada80980c..afa28c0b1ae11 100644
+--- a/src/Core/Domain/ExtraProperty/Exception/ExtraPropertyRegistrationFailureException.php
++++ b/src/Core/Domain/ExtraProperty/Exception/ExtraPropertyRegistrationFailureException.php
+@@ -70,6 +70,12 @@ class ExtraPropertyRegistrationFailureException extends ExtraPropertyException
+      */
+     public const INVALID_DEFAULT_VALUE = 9;
+ 
++    /**
++     * The declared constraints contain a class, an option or a value the extra property
++     * constraint format cannot carry safely.
++     */
++    public const INVALID_CONSTRAINTS = 10;
++
+     /**
+      * Builds the domain exception from the core exception thrown by the registry,
+      * mapping the core reason code to the matching domain code and keeping the
+@@ -84,6 +90,7 @@ public static function fromCoreException(CoreExtraPropertyException $coreExcepti
+             ExtraPropertyRegistryException::PERSISTENCE_FAILURE => self::PERSISTENCE_FAILURE,
+             ExtraPropertyRegistryException::SCHEMA_FAILURE => self::SCHEMA_FAILURE,
+             ExtraPropertyRegistryException::INVALID_FORM_OPTIONS => self::INVALID_FORM_OPTIONS,
++            ExtraPropertyRegistryException::INVALID_CONSTRAINTS => self::INVALID_CONSTRAINTS,
+             ExtraPropertyRegistryException::UNKNOWN_SHOP => self::UNKNOWN_SHOP,
+             ExtraPropertyRegistryException::STORAGE_CONFLICT => self::STORAGE_CONFLICT,
+             ExtraPropertyRegistryException::INVALID_DEFAULT_VALUE => self::INVALID_DEFAULT_VALUE,
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+index 9516563e65997..a22c907fa8e47 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+@@ -422,6 +422,11 @@ public function __construct(
+     /**
+      * Builds an instance from a raw registry DB row.
+      *
++     * The 'constraints' cell must already hold decoded Constraint objects, not the string stored in
++     * the registry: decoding belongs to the repository, which owns the normalizer and can report a
++     * rejected constraint with the row it came from. This value object stays free of that
++     * responsibility (see ExtraPropertyDefinitionRepository::enrichRowsWithDecodedConstraints()).
++     *
+      * Resolves the entity's ObjectModel definition ('table' + 'primary') from the
+      * canonical entity name: classify() gives the class name ('combination' →
+      * 'Combination', 'cart' → 'Cart'), which must exist and be an ObjectModel. The
+@@ -523,7 +528,9 @@ enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !=
+             associatedApis: is_array($associatedApis) ? $associatedApis : null,
+             formType: isset($row['form_type']) && '' !== $row['form_type'] ? (string) $row['form_type'] : null,
+             formOptions: is_array($formOptions) ? $formOptions : null,
+-            constraints: self::decodeConstraints($row['constraints'] ?? null),
++            constraints: is_array($row['constraints'] ?? null) && [] !== $row['constraints']
++                ? array_values($row['constraints'])
++                : null,
+             labelWording: isset($row['label_wording']) && '' !== $row['label_wording'] ? (string) $row['label_wording'] : null,
+             labelDomain: isset($row['label_domain']) && '' !== $row['label_domain'] ? (string) $row['label_domain'] : null,
+             descriptionWording: isset($row['description_wording']) && '' !== $row['description_wording'] ? (string) $row['description_wording'] : null,
+@@ -543,49 +550,6 @@ enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !=
+         );
+     }
+ 
+-    /**
+-     * Normalizes the registry "constraints" cell into a list of Constraint objects.
+-     *
+-     * Accepts both shapes so fromRow() works for an in-memory row (constraints already given as
+-     * Constraint objects) and a DB row (constraints serialized to a string):
+-     *  - array  → already-decoded constraints; filtered and returned as-is (no unserialize).
+-     *  - string → a serialized blob written by trusted module install code (registerExtraProperty);
+-     *             unserialized then filtered.
+-     * Anything that is not a Symfony Constraint is discarded. Returns null when nothing usable
+-     * remains, mirroring the "no validation" default.
+-     *
+-     * @return list<Constraint>|null
+-     */
+-    private static function decodeConstraints(mixed $raw): ?array
+-    {
+-        if (is_array($raw)) {
+-            return self::filterConstraints($raw);
+-        }
+-
+-        if (!is_string($raw) || '' === $raw) {
+-            return null;
+-        }
+-
+-        $decoded = @unserialize($raw, ['allowed_classes' => true]);
+-
+-        return is_array($decoded) ? self::filterConstraints($decoded) : null;
+-    }
+-
+-    /**
+-     * @param array<mixed> $candidates
+-     *
+-     * @return list<Constraint>|null
+-     */
+-    private static function filterConstraints(array $candidates): ?array
+-    {
+-        $constraints = array_values(array_filter(
+-            $candidates,
+-            static fn (mixed $constraint): bool => $constraint instanceof Constraint
+-        ));
+-
+-        return [] !== $constraints ? $constraints : null;
+-    }
+-
+     // -------------------------------------------------------------------------
+     // Copy-with methods
+     // -------------------------------------------------------------------------
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+index 10ab41a5997ce..a6f5f00d8a9b4 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+@@ -14,7 +14,10 @@
+ use PrestaShop\PrestaShop\Core\Domain\ExtraProperty\Exception\ExtraPropertyDefinitionNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\ExtraProperty\Exception\ProtectedModuleExtraPropertyDefinitionException;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Schema\ColumnDefinitionMapper;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\DecodedConstraints;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyValueCaster;
++use Psr\Log\LoggerInterface;
+ use Throwable;
+ 
+ /**
+@@ -39,9 +42,23 @@ class ExtraPropertyDefinitionRepository implements ExtraPropertyDefinitionReposi
+     /** SHOW COLUMNS "Key" flag marking a primary key column. */
+     private const PRIMARY_KEY_COLUMN_FLAG = 'PRI';
+ 
++    /**
++     * Rejections already reported by this instance, keyed by definition id and raw stored value.
++     *
++     * A row is hydrated many times per request (full list, by id, cache rebuild) and would otherwise
++     * produce one log entry each time. The key is marked BEFORE the logger is called: a logger that
++     * persists through an ObjectModel (the legacy logger writes ps_log) may hydrate the definitions
++     * itself, which decodes this very row again. Finding it already marked ends that recursion.
++     *
++     * @var array<string, true>
++     */
++    private array $reportedRejections = [];
++
+     public function __construct(
+         protected readonly Connection $connection,
+         protected readonly string $prefix,
++        protected readonly ExtraPropertyConstraintNormalizer $constraintNormalizer,
++        protected readonly LoggerInterface $logger,
+     ) {
+     }
+ 
+@@ -57,9 +74,9 @@ public function getAllDefinitions(): ExtraPropertyDefinitionCollection
+             ->from($table, 'eef')
+             ->orderBy('eef.id_extra_property_definition', 'ASC');
+ 
+-        $rows = $this->enrichRowsWithShopAssociations(
++        $rows = $this->enrichRowsWithDecodedConstraints($this->enrichRowsWithShopAssociations(
+             $this->enrichRowsWithColumnMetadata($qb->executeQuery()->fetchAllAssociative() ?: [])
+-        );
++        ));
+ 
+         return new ExtraPropertyDefinitionCollection(array_values(array_map(
+             static fn (array $row): ExtraPropertyDefinition => ExtraPropertyDefinition::fromRow($row),
+@@ -89,7 +106,9 @@ public function findDefinitionByModuleAndField(string $entityName, ?string $modu
+             return null;
+         }
+ 
+-        return ExtraPropertyDefinition::fromRow($this->enrichRowsWithShopAssociations($this->enrichRowsWithColumnMetadata([$row]))[0]);
++        return ExtraPropertyDefinition::fromRow(
++            $this->enrichRowsWithDecodedConstraints($this->enrichRowsWithShopAssociations($this->enrichRowsWithColumnMetadata([$row])))[0]
++        );
+     }
+ 
+     /**
+@@ -110,7 +129,9 @@ public function getDefinitionById(int $id): ?ExtraPropertyDefinition
+             return null;
+         }
+ 
+-        return ExtraPropertyDefinition::fromRow($this->enrichRowsWithShopAssociations($this->enrichRowsWithColumnMetadata([$row]))[0]);
++        return ExtraPropertyDefinition::fromRow(
++            $this->enrichRowsWithDecodedConstraints($this->enrichRowsWithShopAssociations($this->enrichRowsWithColumnMetadata([$row])))[0]
++        );
+     }
+ 
+     /**
+@@ -165,7 +186,7 @@ public function save(ExtraPropertyDefinition $definition): int|false
+             'form_type' => $definition->getFormType(),
+             'form_options' => null !== $definition->getFormOptions() ? json_encode($definition->getFormOptions()) : null,
+             'sql_index' => $definition->getSqlIndex()->value,
+-            'constraints' => !empty($definition->getConstraints()) ? serialize($definition->getConstraints()) : null,
++            'constraints' => $this->constraintNormalizer->normalize($definition->getConstraints()),
+             'associated_forms' => !empty($definition->getAssociatedForms()) ? json_encode(array_values($definition->getAssociatedForms())) : null,
+             'associated_grids' => !empty($definition->getAssociatedGrids()) ? json_encode(array_values($definition->getAssociatedGrids())) : null,
+             'associated_apis' => !empty($definition->getAssociatedApis()) ? json_encode(array_values($definition->getAssociatedApis())) : null,
+@@ -323,6 +344,68 @@ protected function applyModuleNameFilter(QueryBuilder $qb, ?string $moduleName,
+         }
+     }
+ 
++    /**
++     * Replaces the raw 'constraints' cell of each row by the decoded constraint objects.
++     *
++     * Reading stays fail-safe: an unreadable constraint is dropped and logged, never thrown, because
++     * definitions are hydrated on front-office requests too — a corrupt or tampered row must not take
++     * a page down. Writing is the opposite: save() refuses to persist what it cannot encode.
++     *
++     * @param array<int, array<string, mixed>> $rows
++     *
++     * @return array<int, array<string, mixed>>
++     */
++    protected function enrichRowsWithDecodedConstraints(array $rows): array
++    {
++        foreach ($rows as $index => $row) {
++            $decoded = $this->constraintNormalizer->denormalize($row['constraints'] ?? null);
++            $rows[$index]['constraints'] = $decoded->getConstraints();
++
++            if ($decoded->hasRejections()) {
++                $this->logRejectedConstraints($row, $decoded);
++            }
++        }
++
++        return $rows;
++    }
++
++    /**
++     * @param array<string, mixed> $row
++     */
++    private function logRejectedConstraints(array $row, DecodedConstraints $decoded): void
++    {
++        $definitionId = isset($row['id_extra_property_definition'])
++            ? (int) $row['id_extra_property_definition']
++            : null;
++
++        // Once per row content and per instance (see $reportedRejections): a re-saved definition
++        // changes the raw value, hence the key, and is reported again.
++        $reportKey = ($definitionId ?? 'unknown') . ':' . sha1((string) ($row['constraints'] ?? ''));
++        if (isset($this->reportedRejections[$reportKey])) {
++            return;
++        }
++        $this->reportedRejections[$reportKey] = true;
++
++        foreach ($decoded->getRejections() as $rejection) {
++            try {
++                $this->logger->error(sprintf(
++                    'Rejected extra property constraint %s for definition #%s (%s/%s/%s): %s',
++                    null === $rejection['index'] ? 'definition' : sprintf('index %s', (string) $rejection['index']),
++                    null !== $definitionId ? (string) $definitionId : 'unknown',
++                    (string) ($row['entity_name'] ?? 'unknown'),
++                    (string) ($row['module_name'] ?? ExtraPropertyDefinition::CORE_MODULE_KEY),
++                    (string) ($row['property_name'] ?? 'unknown'),
++                    $rejection['reason']
++                ), [
++                    'object_type' => 'extra_property_definition',
++                    'object_id' => $definitionId,
++                ]);
++            } catch (Throwable) {
++                // Logging must never turn a degraded definition into a failed request.
++            }
++        }
++    }
++
+     /**
+      * Enriches registry rows with the synthetic 'nullable', 'enum_values' and 'multi_shop'
+      * keys, deduced from the live DB structure of each definition's storage table/column.
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyRegistry.php b/src/Core/ExtraProperty/Definition/ExtraPropertyRegistry.php
+index ac5f1dd5bca56..6c78b51fe15fe 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyRegistry.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyRegistry.php
+@@ -12,8 +12,10 @@
+ use PrestaShop\PrestaShop\Adapter\Shop\Repository\ShopRepository;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\ExtraPropertyException;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\ExtraPropertyRegistryException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyConstraintException;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\FormOptionsValidator;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Schema\ExtraPropertySchemaManagerInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
+ use Psr\Log\LoggerInterface;
+ use Throwable;
+@@ -41,6 +43,7 @@ public function __construct(
+         // where the form factory is always available — never in the FO legacy container.
+         protected readonly FormOptionsValidator $formOptionsValidator,
+         protected readonly ShopRepository $shopRepository,
++        protected readonly ExtraPropertyConstraintNormalizer $constraintNormalizer,
+     ) {
+     }
+ 
+@@ -77,7 +80,7 @@ public function __construct(
+      * removal) require unregister() + register() — automatic data migration is not supported.
+      *
+      * @throws ExtraPropertyRegistryException the failure reason is carried by the exception code:
+-     *                                        SCOPE_CONFLICT, DESTRUCTIVE_SCHEMA_CHANGE, INVALID_FORM_OPTIONS,
++     *                                        SCOPE_CONFLICT, DESTRUCTIVE_SCHEMA_CHANGE, INVALID_FORM_OPTIONS, INVALID_CONSTRAINTS,
+      *                                        UNKNOWN_SHOP, BASE_TABLE_NOT_FOUND, SCHEMA_FAILURE or
+      *                                        PERSISTENCE_FAILURE
+      */
+@@ -91,7 +94,26 @@ public function register(ExtraPropertyDefinition $definition): int
+         $scope = $definition->getScope();
+         $normalizedScope = $scope->value;
+ 
+-        // 1. (entity, module, property) is unique across scopes — a single lookup covers both
++        // 1. Refuse constraints that cannot be stored, before any DDL runs: a definition rejected
++        // later would otherwise leave an orphan storage column behind.
++        try {
++            // The result is discarded: this is a dry-run of what save() will do. It must stay a
++            // full normalization — a shallower check (supportsNormalization(), for instance) would
++            // accept constraints that fail while saving, after step 7 created the storage column.
++            $this->constraintNormalizer->normalize($definition->getConstraints());
++        } catch (InvalidExtraPropertyConstraintException $exception) {
++            $message = sprintf(
++                'Invalid constraints for extra property %s.%s: %s',
++                $entityName,
++                $propertyName,
++                $exception->getMessage()
++            );
++            $this->logger->error($message, ['exception' => $exception]);
++
++            throw new ExtraPropertyRegistryException($message, ExtraPropertyRegistryException::INVALID_CONSTRAINTS, $exception);
++        }
++
++        // 2. (entity, module, property) is unique across scopes — a single lookup covers both
+         // the scope-uniqueness rule and the immutability check on an existing definition.
+         $existingDefinition = $this->readRepository->findDefinitionByModuleAndField(
+             $entityName,
+@@ -112,7 +134,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             throw new ExtraPropertyRegistryException($message, ExtraPropertyRegistryException::SCOPE_CONFLICT);
+         }
+ 
+-        // 1b. Refuse a different entity name resolving to the SAME storage (table + column):
++        // 3. Refuse a different entity name resolving to the SAME storage (table + column):
+         // the DB unique key on (entity_name, module_name, property_name) cannot see across
+         // entity spellings, but two definitions writing the same physical column would
+         // corrupt each other (an explicit tableName pointing at another entity's table is
+@@ -138,7 +160,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             }
+         }
+ 
+-        // 2. Refuse destructive schema changes on an existing definition.
++        // 4. Refuse destructive schema changes on an existing definition.
+         if (null !== $existingDefinition && $this->hasStorageChanges($definition, $existingDefinition)) {
+             $message = sprintf(
+                 'Refusing destructive schema change (type/scope/table change, size decrease, nullable tightening, enum value removal) for existing extra property %s.%s.',
+@@ -150,7 +172,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             throw new ExtraPropertyRegistryException($message, ExtraPropertyRegistryException::DESTRUCTIVE_SCHEMA_CHANGE);
+         }
+ 
+-        // 3. Refuse a definition whose form field could not be built at render time — being the
++        // 5. Refuse a definition whose form field could not be built at render time — being the
+         // single write choke point, this covers every path: BO form, CQRS commands and
+         // Module::registerExtraProperty(). The errors must reach the human who typed the options.
+         $formOptionErrors = $this->formOptionsValidator->validate(
+@@ -187,7 +209,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             throw new ExtraPropertyRegistryException($message, ExtraPropertyRegistryException::INVALID_DEFAULT_VALUE);
+         }
+ 
+-        // 4. Refuse unknown shop ids in the association, BEFORE any DDL or row write: the
++        // 6. Refuse unknown shop ids in the association, BEFORE any DDL or row write: the
+         //    association rows carry no foreign key, so an unknown id (e.g. a module calling
+         //    registerExtraProperty() with a wrong shop id) would be stored silently and make
+         //    the definition invisible on every real shop. Being the single write choke point,
+@@ -216,7 +238,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             }
+         }
+ 
+-        // 5. Ensure the *_extra table and column exist and match the definition: the schema
++        // 7. Ensure the *_extra table and column exist and match the definition: the schema
+         //    manager also syncs remaining non-destructive changes on the live column.
+         //    DDL runs BEFORE the row write (see the method docblock): a DDL failure here
+         //    persists nothing on a creation and leaves the previous row intact on an update.
+@@ -236,7 +258,7 @@ public function register(ExtraPropertyDefinition $definition): int
+             throw new ExtraPropertyRegistryException($message, ExtraPropertyRegistryException::SCHEMA_FAILURE, $exception);
+         }
+ 
+-        // 6. Insert or update the registry row.
++        // 8. Insert or update the registry row.
+         $savedId = $this->writeRepository->save($definition);
+ 
+         if (false === $savedId) {
+diff --git a/src/Core/ExtraProperty/Exception/ExtraPropertyRegistryException.php b/src/Core/ExtraProperty/Exception/ExtraPropertyRegistryException.php
+index e0ab3adf0c888..61be22b77088c 100644
+--- a/src/Core/ExtraProperty/Exception/ExtraPropertyRegistryException.php
++++ b/src/Core/ExtraProperty/Exception/ExtraPropertyRegistryException.php
+@@ -77,6 +77,12 @@ class ExtraPropertyRegistryException extends ExtraPropertyException
+      */
+     public const INVALID_DEFAULT_VALUE = 9;
+ 
++    /**
++     * The declared constraints contain a class, an option or a value the extra property
++     * constraint format cannot carry safely.
++     */
++    public const INVALID_CONSTRAINTS = 10;
++
+     /**
+      * @param list<string> $errors individual human-readable errors when the failure
+      *                             aggregates several (only INVALID_FORM_OPTIONS provides
+diff --git a/src/Core/ExtraProperty/Form/ConstraintRowPresenter.php b/src/Core/ExtraProperty/Form/ConstraintRowPresenter.php
+index 2313ec19047f5..bcf45b1b390a7 100644
+--- a/src/Core/ExtraProperty/Form/ConstraintRowPresenter.php
++++ b/src/Core/ExtraProperty/Form/ConstraintRowPresenter.php
+@@ -9,6 +9,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\ExtraProperty\Form;
+ 
++use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\ExtraPropertyException;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintMapper;
+ 
+ /**
+@@ -26,6 +27,12 @@
+  * editable form the row form type validates names on submit). A token without the Name/Name(...)/
+  * Name[...] shape cannot be represented as a row and is skipped; the mapper never renders such a
+  * token, so this only drops hand-edited database values.
++ *
++ * Every row carries 'composite_options' even when it is empty, which is only ever filled for a
++ * composite. This is deliberate: the field is declared on the row form type, so Symfony binds it on
++ * every row regardless — a submitted row comes back with 'composite_options' => null even when the
++ * request did not carry it. Emitting it only for composites would make this output disagree with the
++ * shape of the bound data, which is exactly what the form round-trip compares.
+  */
+ class ConstraintRowPresenter
+ {
+@@ -37,7 +44,7 @@ private function __construct()
+     }
+ 
+     /**
+-     * @return list<array{name: string, options: string, per_language: string}>
++     * @return list<array{name: string, options: string, composite_options: string, per_language: string}>
+      */
+     public static function rows(?string $raw): array
+     {
+@@ -45,14 +52,30 @@ public static function rows(?string $raw): array
+             return [];
+         }
+ 
++        // Displaying a definition must never fail: tokenize() enforces the grammar bounds and throws
++        // past them, but a row that cannot be shown is better rendered as an empty builder than as a
++        // broken page. The definition itself is unaffected — only this view of it.
++        try {
++            $tokens = ExtraPropertyConstraintMapper::tokenize($raw);
++        } catch (ExtraPropertyException) {
++            return [];
++        }
++
+         $rows = [];
+         $allExploded = false;
+-        foreach (ExtraPropertyConstraintMapper::tokenize($raw) as [$token, $line]) {
++        foreach ($tokens as [$token, $line]) {
+             // The first top-level All[...] feeds the per-language zone: each child becomes its own
+             // per_language row, folded back into one All[...] line on serialization.
+             if (!$allExploded && 1 === preg_match('/^All\s*\[(.*)\]$/s', $token, $matches)) {
++                try {
++                    $children = ExtraPropertyConstraintMapper::tokenize($matches[1]);
++                } catch (ExtraPropertyException) {
++                    // Unrepresentable children (hand-edited database value): this All is dropped and
++                    // the per-language zone stays available to the next top-level All.
++                    continue;
++                }
+                 $allExploded = true;
+-                foreach (ExtraPropertyConstraintMapper::tokenize($matches[1]) as [$childToken, $childLine]) {
++                foreach ($children as [$childToken, $childLine]) {
+                     self::appendTokenRow($rows, $childToken, '1');
+                 }
+                 continue;
+@@ -65,22 +88,36 @@ public static function rows(?string $raw): array
+     }
+ 
+     /**
+-     * @param list<array{name: string, options: string, per_language: string}> $rows
++     * @param list<array{name: string, options: string, composite_options: string, per_language: string}> $rows
+      */
+     private static function appendTokenRow(array &$rows, string $token, string $perLanguage): void
+     {
+-        // Composite shape: Name[ nested, constraints ]
+-        if (1 === preg_match('/^(\w+)\s*\[(.*)\]$/s', $token, $matches)) {
+-            $rows[] = ['name' => $matches[1], 'options' => trim($matches[2]), 'per_language' => $perLanguage];
+-
++        // The mapper owns the grammar: it splits the token with the same quote and delimiter rules
++        // the parser applies, so the builder never drifts from what the server will accept.
++        $parts = ExtraPropertyConstraintMapper::splitToken($token);
++        if (null === $parts) {
++            // Any other shape is unrepresentable without the raw edition — dropped (see class docblock).
+             return;
+         }
+ 
+-        // Regular shape: Name or Name(argument)
+-        if (1 === preg_match('/^(\w+)\s*(?:\((.*)\))?$/s', $token, $matches)) {
+-            $rows[] = ['name' => $matches[1], 'options' => trim($matches[2] ?? ''), 'per_language' => $perLanguage];
++        if (null !== $parts['children']) {
++            // Composite, with or without its own options tail:
++            // "All[ Url ]" or "Collection(allowExtraFields: true)[ name: NotBlank ]".
++            $rows[] = [
++                'name' => $parts['name'],
++                'options' => trim($parts['children']),
++                'composite_options' => trim($parts['options'] ?? ''),
++                'per_language' => $perLanguage,
++            ];
++
++            return;
+         }
+ 
+-        // Any other shape is unrepresentable without the raw edition — dropped (see class docblock).
++        $rows[] = [
++            'name' => $parts['name'],
++            'options' => trim($parts['options'] ?? ''),
++            'composite_options' => '',
++            'per_language' => $perLanguage,
++        ];
+     }
+ }
+diff --git a/src/Core/ExtraProperty/Form/ConstraintRowSerializer.php b/src/Core/ExtraProperty/Form/ConstraintRowSerializer.php
+index bea303ce34235..8abbd9478a948 100644
+--- a/src/Core/ExtraProperty/Form/ConstraintRowSerializer.php
++++ b/src/Core/ExtraProperty/Form/ConstraintRowSerializer.php
+@@ -71,10 +71,11 @@ public static function serialize(array $rows): ?string
+     }
+ 
+     /**
+-     * Serializes a single row into its DSL token: "Name", "Name(tail)" or "Name[tail]" for
+-     * composites. An empty name serializes to nothing (skipped row).
++     * Serializes a single row into its DSL token: "Name", "Name(tail)", "Name[tail]" for composites
++     * and "Name(options)[tail]" for a composite carrying its own options. An empty name serializes
++     * to nothing (skipped row).
+      *
+-     * @param array{name?: string|null, options?: string|null, per_language?: string|null} $row
++     * @param array{name?: string|null, options?: string|null, composite_options?: string|null, per_language?: string|null} $row
+      */
+     public static function token(array $row): string
+     {
+@@ -84,16 +85,18 @@ public static function token(array $row): string
+         }
+ 
+         $tail = trim($row['options'] ?? '');
+-        if ('' === $tail) {
+-            // An empty composite keeps its brackets ("All[]" — the mapper's own toNames render);
+-            // a regular constraint reads bare ("NotBlank").
+-            return in_array($name, ExtraPropertyConstraintMapper::compositeNames(), true) ? $name . '[]' : $name;
+-        }
++        $isComposite = in_array($name, ExtraPropertyConstraintMapper::compositeNames(), true);
+ 
+-        if (in_array($name, ExtraPropertyConstraintMapper::compositeNames(), true)) {
+-            return $name . '[' . $tail . ']';
++        if (!$isComposite) {
++            return '' === $tail ? $name : $name . '(' . $tail . ')';
+         }
+ 
+-        return $name . '(' . $tail . ')';
++        // A composite may carry its own options ahead of its children:
++        // "Collection(allowExtraFields: true)[ name: NotBlank ]".
++        $compositeOptions = trim($row['composite_options'] ?? '');
++        $head = '' === $compositeOptions ? $name : $name . '(' . $compositeOptions . ')';
++
++        // An empty composite keeps its brackets ("All[]" — the mapper's own toNames render).
++        return $head . '[' . $tail . ']';
+     }
+ }
+diff --git a/src/Core/ExtraProperty/Validation/DecodedConstraints.php b/src/Core/ExtraProperty/Validation/DecodedConstraints.php
+new file mode 100644
+index 0000000000000..e66e27b418808
+--- /dev/null
++++ b/src/Core/ExtraProperty/Validation/DecodedConstraints.php
+@@ -0,0 +1,57 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ExtraProperty\Validation;
++
++use Symfony\Component\Validator\Constraint;
++
++/**
++ * Outcome of a tolerant decoding: what could be read, and what had to be dropped.
++ *
++ * The tolerant path never throws — a corrupt registry row must not break a front-office render — so
++ * it needs a way to report what it discarded without hiding it. Returning both halves in one value
++ * keeps the decoding to a single pass and lets the caller decide what to do with the rejections
++ * (the repository logs them with their registry context).
++ */
++final class DecodedConstraints
++{
++    /**
++     * @param list<Constraint> $constraints
++     * @param list<array{index: int|string|null, reason: string}> $rejections
++     */
++    public function __construct(
++        private readonly array $constraints = [],
++        private readonly array $rejections = [],
++    ) {
++    }
++
++    /**
++     * Null rather than an empty list when nothing usable remains, mirroring the "no validation"
++     * default a definition carries when its constraints column is empty.
++     *
++     * @return list<Constraint>|null
++     */
++    public function getConstraints(): ?array
++    {
++        return [] !== $this->constraints ? $this->constraints : null;
++    }
++
++    /**
++     * @return list<array{index: int|string|null, reason: string}>
++     */
++    public function getRejections(): array
++    {
++        return $this->rejections;
++    }
++
++    public function hasRejections(): bool
++    {
++        return [] !== $this->rejections;
++    }
++}
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintCatalog.php b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintCatalog.php
+index 9d1616c2e5a3b..1d52ca0315054 100644
+--- a/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintCatalog.php
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintCatalog.php
+@@ -14,6 +14,7 @@
+ use ReflectionProperty;
+ use ReflectionUnionType;
+ use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\Constraints as Assert;
+ use Symfony\Component\Validator\Constraints\Composite;
+ 
+ /**
+@@ -89,9 +90,24 @@ private function describe(string $name, string $fqcn): array
+             ? array_map(static fn (string $type): array => ['type' => $type], self::OPTION_OVERRIDES[$name])
+             : $this->reflectOptions($reflection);
+ 
++        $isComposite = is_subclass_of($fqcn, Composite::class);
++        if ($isComposite) {
++            // The nested constraints travel in the composite's "[...]" tail and have their own
++            // editor, so the option carrying them must not be offered as a regular option.
++            unset($options[Assert\Collection::class === $fqcn ? 'fields' : ($prototype->getDefaultOption() ?? 'constraints')]);
++        }
++
++        // Options the persisted format refuses are not offered either — the builder must not let a
++        // merchant compose a constraint the registry will then reject.
++        $options = array_filter(
++            $options,
++            static fn (string $option): bool => !ExtraPropertyConstraintMapper::isForbiddenOption($option),
++            ARRAY_FILTER_USE_KEY
++        );
++
+         return [
+             'defaultOption' => $prototype->getDefaultOption(),
+-            'composite' => is_subclass_of($fqcn, Composite::class),
++            'composite' => $isComposite,
+             'required' => array_values(array_map(strval(...), $prototype->getRequiredOptions())),
+             'options' => $options,
+         ];
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintMapper.php b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintMapper.php
+index b3092c6bf5b3a..d7325a0ba4345 100644
+--- a/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintMapper.php
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintMapper.php
+@@ -127,6 +127,32 @@ class ExtraPropertyConstraintMapper
+      */
+     private const NON_RENDERABLE_OPTIONS = ['groups', 'payload'];
+ 
++    /**
++     * Wrappers Symfony generates inside a Collection for each of its fields. They are part of the
++     * grammar — a Collection cannot round-trip without them — but they are NOT public constraints:
++     * they never appear in getAllowedConstraints(), so the BO builder catalog does not offer them,
++     * and they are only accepted directly under a Collection.
++     */
++    private const INTERNAL_CONSTRAINTS = [
++        'Optional' => Assert\Optional::class,
++        'Required' => Assert\Required::class,
++    ];
++
++    /**
++     * Options whose value Symfony invokes as a callable at validation time. `unserialize()` is gone,
++     * but a stored DSL string is still attacker-reachable through the database, so these are refused
++     * wherever a constraint is built.
++     */
++    private const CALLABLE_OPTIONS = ['callback', 'normalizer'];
++
++    /**
++     * Bounds applied to any DSL string being parsed. The value stored in the registry is parsed on
++     * read, so a tampered row must not be able to exhaust the stack or the request budget.
++     */
++    public const MAX_NESTING_DEPTH = 16;
++    public const MAX_RAW_LENGTH = 65535;
++    public const MAX_TOKENS = 256;
++
+     /**
+      * Parses a "one constraint per line (or comma-separated)" textarea value into Constraint instances.
+      *
+@@ -143,8 +169,12 @@ public static function fromNames(?string $rawNames): ?array
+             return null;
+         }
+ 
++        // tokenize() carries the token-count bound, so every caller splitting a definition gets it.
++        // The length bound belongs to the encoder, which guards both of its decoding paths with it.
++        $tokens = self::tokenize($rawNames);
++
+         $constraints = [];
+-        foreach (self::splitTopLevelWithLines($rawNames, ",\n") as [$token, $line]) {
++        foreach ($tokens as [$token, $line]) {
+             try {
+                 $constraints[] = self::parseToken($token);
+             } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException $e) {
+@@ -191,6 +221,16 @@ public static function getAllowedNames(): array
+         return array_keys(self::ALLOWED_CONSTRAINTS);
+     }
+ 
++    /**
++     * Whether an option name is refused wherever a constraint is built: callable options Symfony
++     * invokes at validation time, and property-path options that traverse the validated object.
++     */
++    public static function isForbiddenOption(string $option): bool
++    {
++        return in_array($option, self::CALLABLE_OPTIONS, true)
++            || str_ends_with(strtolower($option), 'propertypath');
++    }
++
+     /**
+      * The whitelist itself (name => constraint FQCN), e.g. to build a machine-readable catalog.
+      *
+@@ -211,7 +251,115 @@ public static function getAllowedConstraints(): array
+      */
+     public static function tokenize(string $raw): array
+     {
+-        return self::splitTopLevelWithLines($raw, ",\n");
++        $tokens = self::splitTopLevelWithLines($raw, ",\n");
++        if (count($tokens) > self::MAX_TOKENS) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint definition exceeds the maximum of %d top-level constraints.',
++                self::MAX_TOKENS
++            ));
++        }
++
++        return $tokens;
++    }
++
++    /**
++     * The grammar alias of a class, or null when the class is outside the grammar.
++     *
++     * @param class-string $fqcn
++     */
++    public static function aliasOfClass(string $fqcn): ?string
++    {
++        return self::aliasesByClass()[$fqcn] ?? null;
++    }
++
++    /**
++     * Whether a raw definition only mentions constraints this grammar knows, with no forbidden option.
++     *
++     * A name-level examination: it walks the token structure, resolves every name against the core
++     * allowlist and checks the option names, but **builds nothing** — an unknown name is rejected on
++     * its name alone, before anything could be instantiated from it.
++     *
++     * It is deliberately shallower than parsing. It cannot tell whether an option actually exists on
++     * a constraint, whether a required value is missing, or whether a value can be rendered back:
++     * those only surface while building. Callers that must not fail later parse for real.
++     */
++    public static function describesKnownConstraints(string $raw): bool
++    {
++        try {
++            $tokens = self::tokenize($raw);
++        } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException) {
++            return false;
++        }
++
++        foreach ($tokens as [$token, $line]) {
++            if (!self::tokenDescribesKnownConstraint($token, 0, false)) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    private static function tokenDescribesKnownConstraint(string $token, int $depth, bool $allowInternal): bool
++    {
++        if ($depth > self::MAX_NESTING_DEPTH) {
++            return false;
++        }
++
++        $parts = self::splitTokenParts(trim($token));
++        if (null === $parts) {
++            return false;
++        }
++
++        $fqcn = self::ALLOWED_CONSTRAINTS[$parts['name']]
++            ?? ($allowInternal ? (self::INTERNAL_CONSTRAINTS[$parts['name']] ?? null) : null);
++        if (null === $fqcn) {
++            return false;
++        }
++
++        $options = null !== $parts['options'] ? trim($parts['options']) : '';
++        if ('' !== $options && self::looksLikeNamedOptions($options)) {
++            foreach (self::splitTopLevel($options, ',') as $option) {
++                if (1 === preg_match('/^(\w+)\s*:/', $option, $matches) && self::isForbiddenOption($matches[1])) {
++                    return false;
++                }
++            }
++        }
++
++        if (null === $parts['children']) {
++            return true;
++        }
++
++        $keysChildren = Assert\Collection::class === $fqcn;
++        foreach (self::splitTopLevel($parts['children'], ",\n") as $child) {
++            // Only a Collection keys its children, and only there do the internal wrappers apply.
++            if ($keysChildren && 1 === preg_match('/^(\w+)\s*:\s*(.+)$/s', $child, $childMatches)) {
++                if (!self::tokenDescribesKnownConstraint(trim($childMatches[2]), $depth + 1, true)) {
++                    return false;
++                }
++
++                continue;
++            }
++            if (!self::tokenDescribesKnownConstraint($child, $depth + 1, false)) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /**
++     * Splits one token into its name, its optional "(...)" options tail and its optional "[...]"
++     * children tail, or returns null when the token does not match the grammar.
++     *
++     * Exposed so the BO builder's row presenter splits tokens with the exact same quote and
++     * delimiter rules as the parser, instead of re-implementing them with a weaker regex.
++     *
++     * @return array{name: string, options: string|null, children: string|null}|null
++     */
++    public static function splitToken(string $token): ?array
++    {
++        return self::splitTokenParts(trim($token));
+     }
+ 
+     /**
+@@ -300,42 +448,174 @@ private static function bufferChar(string &$buffer, string $char, bool &$bufferS
+      * @throws UnknownExtraPropertyConstraintException
+      * @throws InvalidExtraPropertyConstraintException
+      */
+-    private static function parseToken(string $token): Constraint
++    private static function parseToken(string $token, int $depth = 0, bool $allowInternal = false): Constraint
+     {
+-        // Composite shape: Name[ nested, constraints ]
+-        if (1 === preg_match('/^(\w+)\s*\[(.*)\]$/s', $token, $matches)) {
+-            return self::parseComposite($matches[1], $matches[2], $token);
++        if ($depth > self::MAX_NESTING_DEPTH) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint nesting exceeds the maximum depth of %d.',
++                self::MAX_NESTING_DEPTH
++            ));
+         }
+ 
+-        if (1 !== preg_match('/^(\w+)\s*(?:\((.*)\))?$/s', $token, $matches)) {
++        $parts = self::splitTokenParts($token);
++        if (null === $parts) {
+             throw new UnknownExtraPropertyConstraintException(sprintf(
+-                'Malformed constraint "%s". Use a name optionally followed by a value — e.g. NotBlank, TypedRegex(generic_name), Length(min: 2, max: 64) or All[Url].',
++                'Malformed constraint "%s". Use a name optionally followed by a value and/or nested constraints — e.g. NotBlank, TypedRegex(generic_name), Length(min: 2, max: 64), All[Url] or Collection(allowExtraFields: true)[ name: NotBlank ].',
+                 $token
+             ));
+         }
+ 
+-        $fqcn = self::resolveName($matches[1]);
+-        $hasArgument = isset($matches[2]) && '' !== trim($matches[2]);
++        // Composite shape: Name[ children ], optionally preceded by its own options.
++        if (null !== $parts['children']) {
++            return self::parseComposite($parts['name'], $parts['children'], $parts['options'], $token, $depth, $allowInternal);
++        }
++
++        $fqcn = self::resolveName($parts['name'], $allowInternal);
++        $inner = null !== $parts['options'] ? trim($parts['options']) : '';
+ 
+-        if (!$hasArgument) {
++        if ('' === $inner) {
+             return self::instantiate($fqcn, $token, null);
+         }
+ 
+-        $inner = trim($matches[2]);
+-
+         if (self::looksLikeNamedOptions($inner)) {
+-            return self::instantiate($fqcn, $token, self::parseNamedOptions($inner, $token));
++            return self::instantiate($fqcn, $token, self::assertOptionsAllowed(self::parseNamedOptions($inner, $token), $token));
+         }
+ 
+         $defaultOption = self::defaultOptionOf($fqcn);
+         if (null === $defaultOption) {
+             throw new InvalidExtraPropertyConstraintException(sprintf(
+                 'Constraint "%s" does not accept a value.',
+-                $matches[1]
++                $parts['name']
+             ));
+         }
+ 
+-        return self::instantiate($fqcn, $token, [$defaultOption => self::parseArgument($inner)]);
++        return self::instantiate($fqcn, $token, self::assertOptionsAllowed([$defaultOption => self::parseArgument($inner)], $token));
++    }
++
++    /**
++     * Splits a token into its name, its optional "(...)" options tail and its optional "[...]"
++     * children tail, honoring quoted runs and nested delimiters. Returns null when the token has a
++     * shape this grammar does not describe (missing name, unbalanced delimiters, trailing text).
++     *
++     * Both tails may be present, in that order: "Collection(allowExtraFields: true)[ name: NotBlank ]".
++     *
++     * @return array{name: string, options: string|null, children: string|null}|null
++     */
++    private static function splitTokenParts(string $token): ?array
++    {
++        $length = strlen($token);
++        $cursor = 0;
++        while ($cursor < $length && (ctype_alnum($token[$cursor]) || '_' === $token[$cursor])) {
++            ++$cursor;
++        }
++        if (0 === $cursor) {
++            return null;
++        }
++
++        $name = substr($token, 0, $cursor);
++        $options = null;
++        $children = null;
++
++        $cursor = self::skipWhitespace($token, $cursor);
++        if ($cursor < $length && '(' === $token[$cursor]) {
++            $end = self::matchingDelimiter($token, $cursor, '(', ')');
++            if (null === $end) {
++                return null;
++            }
++            $options = substr($token, $cursor + 1, $end - $cursor - 1);
++            $cursor = self::skipWhitespace($token, $end + 1);
++        }
++
++        if ($cursor < $length && '[' === $token[$cursor]) {
++            $end = self::matchingDelimiter($token, $cursor, '[', ']');
++            if (null === $end) {
++                return null;
++            }
++            $children = substr($token, $cursor + 1, $end - $cursor - 1);
++            $cursor = self::skipWhitespace($token, $end + 1);
++        }
++
++        // Anything left after both tails means the token is not fully described by this grammar.
++        return $cursor === $length ? ['name' => $name, 'options' => $options, 'children' => $children] : null;
++    }
++
++    /**
++     * Returns the offset of the delimiter closing the run opened at $start, or null when the run is
++     * never closed. Quoted sections (with backslash escapes) are skipped, and nested pairs counted.
++     */
++    private static function matchingDelimiter(string $raw, int $start, string $open, string $close): ?int
++    {
++        $length = strlen($raw);
++        $depth = 0;
++        $quote = null;
++
++        for ($i = $start; $i < $length; ++$i) {
++            $char = $raw[$i];
++            if (null !== $quote) {
++                if ('\\' === $char && $i + 1 < $length) {
++                    ++$i;
++                } elseif ($char === $quote) {
++                    $quote = null;
++                }
++
++                continue;
++            }
++            if ("'" === $char || '"' === $char) {
++                $quote = $char;
++            } elseif ($char === $open) {
++                ++$depth;
++            } elseif ($char === $close && 0 === --$depth) {
++                return $i;
++            }
++        }
++
++        return null;
++    }
++
++    private static function skipWhitespace(string $raw, int $cursor): int
++    {
++        $length = strlen($raw);
++        while ($cursor < $length && ctype_space($raw[$cursor])) {
++            ++$cursor;
++        }
++
++        return $cursor;
++    }
++
++    /**
++     * Rejects the options that make a stored constraint executable or able to traverse the
++     * validated object. They are refused wherever a constraint is built — the BO textarea, the
++     * builder and the registry row alike — because the DSL is also the persisted format.
++     *
++     * @param array<string, mixed> $options
++     *
++     * @return array<string, mixed>
++     *
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private static function assertOptionsAllowed(array $options, string $token): array
++    {
++        foreach ($options as $option => $value) {
++            if (null === $value) {
++                continue;
++            }
++            if (in_array($option, self::CALLABLE_OPTIONS, true)) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Option "%s" is not supported in constraint "%s" because it may execute a callable. Normalize the value in module code before validation.',
++                    $option,
++                    $token
++                ));
++            }
++            if (self::isForbiddenOption($option)) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Option "%s" is not supported in constraint "%s" because it may traverse the validated object. An extra property constraint validates a single value.',
++                    $option,
++                    $token
++                ));
++            }
++        }
++
++        return $options;
+     }
+ 
+     /**
+@@ -345,9 +625,15 @@ private static function parseToken(string $token): Constraint
+      * @throws UnknownExtraPropertyConstraintException
+      * @throws InvalidExtraPropertyConstraintException
+      */
+-    private static function parseComposite(string $name, string $inner, string $token): Constraint
+-    {
+-        $fqcn = self::resolveName($name);
++    private static function parseComposite(
++        string $name,
++        string $inner,
++        ?string $rawOptions,
++        string $token,
++        int $depth = 0,
++        bool $allowInternal = false
++    ): Constraint {
++        $fqcn = self::resolveName($name, $allowInternal);
+ 
+         if (!is_subclass_of($fqcn, Composite::class)) {
+             throw new InvalidExtraPropertyConstraintException(sprintf(
+@@ -368,19 +654,36 @@ private static function parseComposite(string $name, string $inner, string $toke
+                         $name
+                     ));
+                 }
+-                $children[$childMatches[1]] = self::parseToken(trim($childMatches[2]));
++                // A Collection field may name its Required/Optional wrapper explicitly.
++                $children[$childMatches[1]] = self::parseToken(trim($childMatches[2]), $depth + 1, true);
+             } else {
+-                $children[] = self::parseToken($childToken);
++                // Required/Optional only exist as Collection fields, so they stay refused here.
++                $children[] = self::parseToken($childToken, $depth + 1);
+             }
+         }
+ 
+-        if (Assert\Collection::class === $fqcn) {
+-            return self::instantiate($fqcn, $token, ['fields' => $children]);
++        // A composite may carry its own options ahead of its children:
++        // "Collection(allowExtraFields: true)[ name: NotBlank ]".
++        $options = [];
++        $trimmedOptions = null !== $rawOptions ? trim($rawOptions) : '';
++        if ('' !== $trimmedOptions) {
++            if (!self::looksLikeNamedOptions($trimmedOptions)) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Composite constraint "%s" only accepts named options before its nested constraints — e.g. Collection(allowExtraFields: true)[ name: NotBlank ].',
++                    $name
++                ));
++            }
++            $options = self::assertOptionsAllowed(self::parseNamedOptions($trimmedOptions, $token), $token);
+         }
+ 
+-        // List composites (All, AtLeastOneOf, Sequentially) take the children through their default
+-        // option ("constraints").
+-        return self::instantiate($fqcn, $token, [self::defaultOptionOf($fqcn) ?? 'constraints' => $children]);
++        // The children always win over a same-named option coming from the options tail, so a
++        // hand-written "constraints:"/"fields:" cannot smuggle a second children list.
++        $childrenOption = Assert\Collection::class === $fqcn
++            ? 'fields'
++            : (self::defaultOptionOf($fqcn) ?? 'constraints');
++        $options[$childrenOption] = $children;
++
++        return self::instantiate($fqcn, $token, $options);
+     }
+ 
+     /**
+@@ -388,8 +691,12 @@ private static function parseComposite(string $name, string $inner, string $toke
+      *
+      * @throws UnknownExtraPropertyConstraintException
+      */
+-    private static function resolveName(string $name): string
++    private static function resolveName(string $name, bool $allowInternal = false): string
+     {
++        if ($allowInternal && isset(self::INTERNAL_CONSTRAINTS[$name])) {
++            return self::INTERNAL_CONSTRAINTS[$name];
++        }
++
+         if (!isset(self::ALLOWED_CONSTRAINTS[$name])) {
+             throw new UnknownExtraPropertyConstraintException(sprintf(
+                 'Unknown extra property constraint "%s". Allowed constraints: %s.',
+@@ -401,6 +708,22 @@ private static function resolveName(string $name): string
+         return self::ALLOWED_CONSTRAINTS[$name];
+     }
+ 
++    /**
++     * Reverse map FQCN => alias, covering public constraints and the internal Collection wrappers.
++     *
++     * Rendering resolves the alias through this map instead of ReflectionClass::getShortName(), so a
++     * class outside the grammar is structurally unrenderable rather than emitted as a name the
++     * parser would later reject.
++     *
++     * @return array<class-string, string>
++     */
++    private static function aliasesByClass(): array
++    {
++        static $aliases = null;
++
++        return $aliases ??= array_flip(self::ALLOWED_CONSTRAINTS + self::INTERNAL_CONSTRAINTS);
++    }
++
+     /**
+      * The whitelisted names whose token uses the composite bracket shape ("Name[ children ]")
+      * instead of the parenthesis shape — the same distinction parseToken() applies. Exposed so
+@@ -557,13 +880,27 @@ private static function defaultOptionOf(string $fqcn): ?string
+ 
+     private static function render(Constraint $constraint, int $indent): string
+     {
++        // A composite built in PHP can reference itself; the indent doubles as the recursion bound.
++        if ($indent > self::MAX_NESTING_DEPTH) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint nesting exceeds the maximum depth of %d.',
++                self::MAX_NESTING_DEPTH
++            ));
++        }
++
+         $pad = str_repeat('  ', $indent);
+-        $shortName = (new ReflectionClass($constraint))->getShortName();
++        $alias = self::aliasOf($constraint);
+ 
+         if ($constraint instanceof Composite) {
++            // The children travel in their own "[...]" tail, so the option carrying them must not be
++            // rendered a second time as a regular option.
++            $configured = self::configuredOptions($constraint);
++            unset($configured[self::childrenOptionOf($constraint)]);
++            $optionsTail = self::renderOptionsTail($configured, $alias);
++
+             $nested = $constraint->getNestedConstraints();
+             if ([] === $nested) {
+-                return $pad . $shortName . '[]';
++                return $pad . $alias . $optionsTail . '[]';
+             }
+ 
+             $children = [];
+@@ -576,7 +913,7 @@ private static function render(Constraint $constraint, int $indent): string
+                 $children[] = $rendered;
+             }
+ 
+-            return $pad . $shortName . "[\n" . implode(",\n", $children) . "\n" . $pad . ']';
++            return $pad . $alias . $optionsTail . "[\n" . implode(",\n", $children) . "\n" . $pad . ']';
+         }
+ 
+         $configured = self::configuredOptions($constraint);
+@@ -586,30 +923,79 @@ private static function render(Constraint $constraint, int $indent): string
+         if (null !== $defaultOption && [$defaultOption] === array_keys($configured)) {
+             $value = $configured[$defaultOption];
+             if (is_scalar($value) && '' !== (string) $value) {
+-                return $pad . $shortName . '(' . self::renderValue($value) . ')';
++                return $pad . $alias . '(' . self::renderValue($value) . ')';
+             }
+             if (is_array($value) && [] !== $value && self::isScalarList($value)) {
+-                return $pad . $shortName . '([' . implode(', ', array_map(self::renderValue(...), $value)) . '])';
++                return $pad . $alias . '([' . implode(', ', array_map(self::renderValue(...), $value)) . '])';
+             }
+         }
+ 
+-        // Named shape for any other configured option combination (alphabetical for determinism).
+-        ksort($configured);
++        return $pad . $alias . self::renderOptionsTail($configured, $alias);
++    }
++
++    /**
++     * Renders the "(option: value, ...)" tail, alphabetically for determinism, or an empty string
++     * when nothing is configured.
++     *
++     * Anything the grammar cannot express raises instead of being dropped: this render is the
++     * persisted form, so a silent omission would be a silent loss of validation.
++     *
++     * @param array<string, mixed> $options
++     *
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private static function renderOptionsTail(array $options, string $alias): string
++    {
++        if ([] === $options) {
++            return '';
++        }
++
++        ksort($options);
+         $rendered = [];
+-        foreach ($configured as $option => $value) {
++        foreach ($options as $option => $value) {
+             if (is_scalar($value)) {
+                 $rendered[] = $option . ': ' . self::renderValue($value);
+-            } elseif (is_array($value) && [] !== $value && self::isScalarList($value)) {
++            } elseif (is_array($value) && self::isScalarList($value)) {
+                 $rendered[] = $option . ': [' . implode(', ', array_map(self::renderValue(...), $value)) . ']';
++            } else {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Option "%s" of constraint "%s" holds a %s, which the extra property constraint format cannot represent. Only scalars and lists of scalars are supported.',
++                    $option,
++                    $alias,
++                    get_debug_type($value)
++                ));
+             }
+-            // Non-scalar options (objects, closures, nested maps) have no textarea shape: skipped.
+         }
+ 
+-        if ([] !== $rendered) {
+-            return $pad . $shortName . '(' . implode(', ', $rendered) . ')';
++        return '(' . implode(', ', $rendered) . ')';
++    }
++
++    /**
++     * The option through which a composite carries its nested constraints.
++     */
++    private static function childrenOptionOf(Composite $constraint): string
++    {
++        return $constraint instanceof Assert\Collection
++            ? 'fields'
++            : ($constraint->getDefaultOption() ?? 'constraints');
++    }
++
++    /**
++     * The grammar alias of a constraint instance.
++     *
++     * @throws InvalidExtraPropertyConstraintException when the class is outside the grammar
++     */
++    private static function aliasOf(Constraint $constraint): string
++    {
++        $alias = self::aliasesByClass()[$constraint::class] ?? null;
++        if (null === $alias) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint class "%s" is not part of the extra property constraint grammar and cannot be represented.',
++                $constraint::class
++            ));
+         }
+ 
+-        return $pad . $shortName;
++        return $alias;
+     }
+ 
+     /**
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizer.php b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizer.php
+new file mode 100644
+index 0000000000000..30e3465785cc4
+--- /dev/null
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizer.php
+@@ -0,0 +1,418 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ExtraProperty\Validation;
++
++use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyConstraintException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\UnknownExtraPropertyConstraintException;
++use ReflectionObject;
++use Symfony\Component\Serializer\Normalizer\DenormalizerInterface;
++use Symfony\Component\Serializer\Normalizer\NormalizerInterface;
++use Symfony\Component\Validator\Constraint;
++
++/**
++ * Converts extra property constraints to and from their persisted form.
++ *
++ * The persisted form is the constraint DSL itself — the very text the back-office "Validation" field
++ * shows — so the registry column holds no serialized PHP object graph at all. There is therefore no
++ * `unserialize()` anywhere on this path: reading a row means parsing a grammar whose class names are
++ * resolved exclusively against a core-owned allowlist, never taken from the stored value.
++ *
++ * Two guarantees are enforced here, and they are independent:
++ *
++ * - **Fidelity** — everything written is re-read identically. Rather than maintaining an exhaustive
++ *   per-constraint option schema, encode() decodes what it just produced and compares the two graphs
++ *   strictly. Anything the grammar cannot carry is refused at write time instead of being silently
++ *   dropped weeks later.
++ * - **Safety** — the round-trip says nothing about danger: an executable option such as
++ *   `normalizer: 'system'` survives it perfectly. Callable and property-path options are therefore
++ *   rejected explicitly, by the grammar on the way in and by this encoder on the way out.
++ *
++ * Failure policy differs by direction, which is what the two sides of the contract express:
++ * - {@see self::normalize()} fails closed — it throws, and nothing is persisted;
++ * - {@see self::denormalize()} never throws. It returns what it could read together with what it had
++ *   to drop, because definitions are hydrated during front-office requests too and a corrupt or
++ *   tampered row must not break a render. The caller decides what to do with the rejections: the
++ *   repository logs them with their registry context.
++ *
++ * It implements Symfony's normalizer contracts, whose semantics match this use case: denormalize the
++ * value read from the database into constraints, normalize constraints into a persistable string.
++ * The service is deliberately NOT tagged `serializer.normalizer` — nothing routes through the
++ * Serializer here, the callers are direct.
++ *
++ * Usable as a service (its constructor takes no argument) and instantiable on demand where no
++ * container is available.
++ */
++class ExtraPropertyConstraintNormalizer implements NormalizerInterface, DenormalizerInterface
++{
++    /**
++     * The type this encoder handles: a list of Symfony constraints.
++     */
++    public const SUPPORTED_TYPE = Constraint::class . '[]';
++
++    /**
++     * Normalizes constraints into the value stored in the registry.
++     *
++     * @param list<Constraint>|null $object
++     * @param array<string, mixed> $context
++     *
++     * @throws InvalidExtraPropertyConstraintException when a constraint cannot be represented safely
++     *                                                 or would not survive the round-trip
++     */
++    public function normalize(mixed $object, ?string $format = null, array $context = []): ?string
++    {
++        $constraints = $object;
++        if (null === $constraints || [] === $constraints) {
++            return null;
++        }
++
++        $this->assertConstraintList($constraints);
++
++        $encoded = ExtraPropertyConstraintMapper::toNames($constraints);
++        if (null === $encoded) {
++            return null;
++        }
++
++        // Fidelity contract: what we are about to store must decode back to what we were given.
++        // This is what removes the need for an exhaustive option schema per constraint class.
++        try {
++            $decoded = ExtraPropertyConstraintMapper::fromNames($encoded);
++        } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException $exception) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraints cannot be persisted: the encoded form is not readable back (%s).',
++                $exception->getMessage()
++            ), 0, $exception);
++        }
++
++        if (!$this->isIdentical($constraints, $decoded)) {
++            throw new InvalidExtraPropertyConstraintException(
++                'Constraints cannot be persisted without loss: decoding the encoded form does not yield the original constraints. '
++                . 'This usually means an option the extra property constraint format does not carry.'
++            );
++        }
++
++        return $encoded;
++    }
++
++    /**
++     * Whether these constraints look like something this normalizer handles.
++     *
++     * The interface passes the data, not just the type, precisely so this can inspect it: every
++     * constraint must belong to the grammar and carry no option the persisted format refuses. It
++     * never throws and builds nothing.
++     *
++     * This answers "does it look like mine?", not "will it normalize?". The deeper failures — an
++     * option the constraint class does not declare, a value the format cannot render — only surface
++     * while normalizing, so a caller that must not fail later runs {@see self::normalize()} itself
++     * rather than relying on this.
++     */
++    public function supportsNormalization(mixed $data, ?string $format = null, array $context = []): bool
++    {
++        if (null === $data || [] === $data) {
++            return true;
++        }
++        if (!is_array($data) || !array_is_list($data)) {
++            return false;
++        }
++
++        foreach ($data as $constraint) {
++            if (!$constraint instanceof Constraint
++                || null === ExtraPropertyConstraintMapper::aliasOfClass($constraint::class)
++                || $this->hasForbiddenOption($constraint)
++            ) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /**
++     * Whether a constraint carries an option the persisted format refuses, without building anything.
++     */
++    private function hasForbiddenOption(Constraint $constraint): bool
++    {
++        foreach ((new ReflectionObject($constraint))->getProperties() as $property) {
++            if ($property->isStatic() || !$property->isInitialized($constraint)) {
++                continue;
++            }
++            if (null !== $property->getValue($constraint)
++                && ExtraPropertyConstraintMapper::isForbiddenOption($property->getName())
++            ) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
++    /**
++     * Whether a stored value looks like something this normalizer can read.
++     *
++     * Inspects the string itself, not only the type: it checks the grammar bounds and that every
++     * constraint name it mentions belongs to the core allowlist, carrying no forbidden option. It
++     * never throws and — importantly — never builds a constraint to decide, so an unknown name is
++     * rejected on its name alone.
++     *
++     * A true answer means the value is worth decoding, not that decoding will yield every
++     * constraint: {@see self::denormalize()} still reports what it had to drop.
++     */
++    public function supportsDenormalization(mixed $data, string $type, ?string $format = null, array $context = []): bool
++    {
++        if (self::SUPPORTED_TYPE !== $type) {
++            return false;
++        }
++        if (null === $data || is_array($data)) {
++            return true;
++        }
++        if (!is_string($data)) {
++            return false;
++        }
++        if ('' === trim($data)) {
++            return true;
++        }
++
++        try {
++            $this->assertWithinLengthBound($data);
++
++            return ExtraPropertyConstraintMapper::describesKnownConstraints($data);
++        } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException) {
++            return false;
++        }
++    }
++
++    /**
++     * @return array<class-string|string, bool|null>
++     */
++    public function getSupportedTypes(?string $format): array
++    {
++        return [self::SUPPORTED_TYPE => true];
++    }
++
++    /**
++     * Denormalizes a stored value into constraints, tolerating a corrupt one.
++     *
++     * Never throws. Each top-level constraint is decoded on its own: an invalid one is dropped and
++     * reported in the result, while its valid siblings stay active. A composite is always dropped as
++     * a whole — a partially decoded composite would silently weaken the validation it describes.
++     *
++     * @param array<string, mixed> $context
++     */
++    public function denormalize(mixed $data, string $type = self::SUPPORTED_TYPE, ?string $format = null, array $context = []): DecodedConstraints
++    {
++        $raw = $data;
++        if (is_array($raw)) {
++            return new DecodedConstraints(array_values($raw));
++        }
++        if (!is_string($raw) || '' === trim($raw)) {
++            return new DecodedConstraints();
++        }
++
++        try {
++            $this->assertWithinLengthBound($raw);
++            $tokens = ExtraPropertyConstraintMapper::tokenize($raw);
++        } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException $exception) {
++            return new DecodedConstraints([], [['index' => null, 'reason' => $exception->getMessage()]]);
++        }
++
++        $constraints = [];
++        $rejections = [];
++        foreach ($tokens as $index => [$token, $line]) {
++            try {
++                $parsed = ExtraPropertyConstraintMapper::fromNames($token);
++            } catch (UnknownExtraPropertyConstraintException|InvalidExtraPropertyConstraintException $exception) {
++                // fromNames() numbers lines within the single token it was handed, which is always
++                // line 1 here; the meaningful number is the one from the full definition.
++                $reason = preg_replace('/^Line \d+: /', '', $exception->getMessage()) ?? $exception->getMessage();
++                $rejections[] = ['index' => $index, 'reason' => sprintf('line %d: %s', $line, $reason)];
++
++                continue;
++            }
++            foreach ($parsed ?? [] as $constraint) {
++                $constraints[] = $constraint;
++            }
++        }
++
++        return new DecodedConstraints($constraints, $rejections);
++    }
++
++    /**
++     * The single length bound both decoding paths apply, so neither can drift from the other.
++     *
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private function assertWithinLengthBound(string $raw): void
++    {
++        if (strlen($raw) > ExtraPropertyConstraintMapper::MAX_RAW_LENGTH) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint definition exceeds the maximum length of %d characters.',
++                ExtraPropertyConstraintMapper::MAX_RAW_LENGTH
++            ));
++        }
++    }
++
++    /**
++     * Validates the object graph handed over by module code, before anything is rendered.
++     *
++     * The grammar already refuses an unknown class or an unrepresentable value while rendering, but
++     * two families would otherwise slip through silently: options excluded from rendering by design
++     * (`groups`, `payload`), and executable options that render and re-parse perfectly.
++     *
++     * @param list<Constraint> $constraints
++     *
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private function assertConstraintList(array $constraints): void
++    {
++        if (!array_is_list($constraints)) {
++            throw new InvalidExtraPropertyConstraintException('Extra property constraints must be provided as a list.');
++        }
++
++        foreach ($constraints as $index => $constraint) {
++            if (!$constraint instanceof Constraint) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Extra property constraint at index %d must extend %s, got %s.',
++                    $index,
++                    Constraint::class,
++                    get_debug_type($constraint)
++                ));
++            }
++
++            $this->assertConstraintEncodable($constraint, 0, sprintf('constraints[%d]', $index));
++        }
++    }
++
++    /**
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private function assertConstraintEncodable(Constraint $constraint, int $depth, string $path): void
++    {
++        if ($depth > ExtraPropertyConstraintMapper::MAX_NESTING_DEPTH) {
++            throw new InvalidExtraPropertyConstraintException(sprintf(
++                'Constraint nesting exceeds the maximum depth of %d at %s.',
++                ExtraPropertyConstraintMapper::MAX_NESTING_DEPTH,
++                $path
++            ));
++        }
++
++        foreach ((new ReflectionObject($constraint))->getProperties() as $property) {
++            if ($property->isStatic() || !$property->isInitialized($constraint)) {
++                continue;
++            }
++
++            $name = $property->getName();
++            $value = $property->getValue($constraint);
++
++            if (null !== $value && ExtraPropertyConstraintMapper::isForbiddenOption($name)) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Option "%s" is not supported for extra property constraints at %s: it may execute a callable or traverse the validated object. Normalize the value in module code before validation.',
++                    $name,
++                    $path
++                ));
++            }
++
++            // Excluded from the rendered form by design, so they must be refused rather than lost.
++            if ('groups' === $name && ['Default'] !== $value) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Validation groups are not supported for extra property constraints at %s; only the default group applies.',
++                    $path
++                ));
++            }
++            if ('payload' === $name && null !== $value) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'The "payload" option is not supported for extra property constraints at %s.',
++                    $path
++                ));
++            }
++
++            $this->assertValueEncodable($value, $depth, $path . '.' . $name);
++        }
++    }
++
++    /**
++     * @throws InvalidExtraPropertyConstraintException
++     */
++    private function assertValueEncodable(mixed $value, int $depth, string $path): void
++    {
++        if (null === $value || is_scalar($value)) {
++            return;
++        }
++
++        if (is_array($value)) {
++            foreach ($value as $key => $item) {
++                $this->assertValueEncodable($item, $depth + 1, sprintf('%s[%s]', $path, (string) $key));
++            }
++
++            return;
++        }
++
++        if ($value instanceof Constraint) {
++            $this->assertConstraintEncodable($value, $depth + 1, $path);
++
++            return;
++        }
++
++        throw new InvalidExtraPropertyConstraintException(sprintf(
++            'Value of type %s at %s cannot be represented in an extra property constraint. Only scalars, lists of scalars and nested constraints are supported.',
++            get_debug_type($value),
++            $path
++        ));
++    }
++
++    /**
++     * Strict structural comparison of two constraint graphs.
++     *
++     * PHP's `==` is deliberately not used: it treats 5 and '5', or ['1'] and [1], as equal, whereas
++     * the DSL distinguishes them on purpose. A type drift would therefore pass unnoticed through a
++     * loose comparison, which is exactly what the fidelity contract exists to catch.
++     *
++     * @param list<Constraint> $expected
++     * @param list<Constraint>|null $actual
++     */
++    private function isIdentical(array $expected, ?array $actual): bool
++    {
++        return null !== $actual && $this->toComparableForm($expected) === $this->toComparableForm($actual);
++    }
++
++    /**
++     * Reduces a graph to nested arrays of scalars, keeping class names, keys, order and scalar types,
++     * so a plain `===` becomes a strict structural comparison.
++     */
++    private function toComparableForm(mixed $value): mixed
++    {
++        if (is_array($value)) {
++            $normalized = [];
++            foreach ($value as $key => $item) {
++                $normalized[$key] = $this->toComparableForm($item);
++            }
++
++            return $normalized;
++        }
++
++        if (!is_object($value)) {
++            // Keeps 5 and '5' apart, which a loose comparison would not.
++            return [get_debug_type($value), $value];
++        }
++
++        $normalized = ['#class' => $value::class];
++        $reflection = new ReflectionObject($value);
++        $properties = $reflection->getProperties();
++        usort($properties, static fn ($a, $b): int => strcmp($a->getName(), $b->getName()));
++        foreach ($properties as $property) {
++            if ($property->isStatic()) {
++                continue;
++            }
++            $normalized[$property->getName()] = $property->isInitialized($value)
++                ? $this->toComparableForm($property->getValue($value))
++                : '#uninitialized';
++        }
++
++        return $normalized;
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ExtraPropertyDefinitionController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ExtraPropertyDefinitionController.php
+index aeba78cc8c642..d63956dd2ab75 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ExtraPropertyDefinitionController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ExtraPropertyDefinitionController.php
+@@ -480,6 +480,11 @@ protected function getErrorMessages(): array
+                     [],
+                     'Admin.Advparameters.Notification'
+                 ),
++                ExtraPropertyRegistrationFailureException::INVALID_CONSTRAINTS => $this->trans(
++                    'The validation constraints could not be saved: they contain a constraint, an option or a value that is not supported. Use only the constraints and options offered by the validation builder.',
++                    [],
++                    'Admin.Advparameters.Notification'
++                ),
+                 ExtraPropertyRegistrationFailureException::UNKNOWN_SHOP => $this->trans(
+                     'The store association contains a store that does not exist. Refresh the page and try again.',
+                     [],
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyConstraintRowType.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyConstraintRowType.php
+index eb67ed4d322e2..a3fac7bd51560 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyConstraintRowType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyConstraintRowType.php
+@@ -47,6 +47,11 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
+             ->add('options', HiddenType::class, [
+                 'required' => false,
+             ])
++            // Options a composite carries ahead of its children
++            // ("Collection(allowExtraFields: true)[ ... ]"); empty for every other shape.
++            ->add('composite_options', HiddenType::class, [
++                'required' => false,
++            ])
+             ->add('per_language', HiddenType::class, [
+                 'required' => false,
+             ]);
+@@ -64,7 +69,7 @@ public function validateRow(?array $row, ExecutionContextInterface $context): vo
+         $token = ConstraintRowSerializer::token($row);
+ 
+         if ('' === $token) {
+-            if ('' !== trim((string) ($row['options'] ?? ''))) {
++            if ('' !== trim((string) ($row['options'] ?? '')) || '' !== trim((string) ($row['composite_options'] ?? ''))) {
+                 $context->buildViolation(
+                     $this->trans('The constraint name is required.', 'Admin.Advparameters.Notification')
+                 )->atPath('[name]')->addViolation();
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+index 39e302bf59c6b..bd3f7987b1bf1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+@@ -75,3 +75,10 @@ services:
+       - '%database_prefix%'
+ 
+   PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository: ~
++
++  # Legacy logger (writes ps_log), defined here so that every container has it: the hand-built
++  # front-office container does not import adapter/services.yml. The Symfony kernels keep Monolog
++  # behind Psr\Log\LoggerInterface; only the front office aliases the interface onto this service,
++  # in its own config (config/services/front/services_prod.yml).
++  prestashop.adapter.legacy.logger:
++    class: PrestaShop\PrestaShop\Adapter\LegacyLogger
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/services.yml b/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
+index b114773431d0e..55e8f5d7dda09 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/services.yml
+@@ -67,9 +67,6 @@ services:
+   prestashop.adapter.legacy.kpi_configuration:
+     class: PrestaShop\PrestaShop\Adapter\Configuration\KpiConfiguration
+ 
+-  prestashop.adapter.legacy.logger:
+-    class: PrestaShop\PrestaShop\Adapter\LegacyLogger
+-
+   PrestaShop\PrestaShop\Adapter\Hook\HookInformationProvider:
+     public: false
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+index 66860b793d5be..a6689a73d697f 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+@@ -34,6 +34,7 @@ services:
+       $formOptionsValidator: '@PrestaShop\PrestaShop\Core\ExtraProperty\Form\FormOptionsValidator'
+       # Existence check on the shop association ids (the *_shop rows carry no foreign key).
+       $shopRepository: '@PrestaShop\PrestaShop\Adapter\Shop\Repository\ShopRepository'
++      $constraintNormalizer: '@PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer'
+ 
+   PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyRegistryInterface:
+     alias: 'PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyRegistry'
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+index 37e8437e7b6aa..a5522e519fda6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+@@ -14,10 +14,18 @@ services:
+ 
+   # ─── Repository ──────────────────────────────────────────────────────────────
+ 
++  # The logger is taken through its interface on purpose: in the Symfony kernels (back office,
++  # Admin API) Psr\Log\LoggerInterface is Monolog, which writes to var/logs and never touches the
++  # database. The hand-built front-office container has no Monolog and aliases the interface to the
++  # legacy logger (ps_log) in config/services/front/services_prod.yml.
+   PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepository:
+     arguments:
+       $connection: '@doctrine.dbal.default_connection'
+       $prefix: '%database_prefix%'
++      $logger: '@Psr\Log\LoggerInterface'
++      $constraintNormalizer: '@PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer'
++
++  PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer: ~
+ 
+   # Note: the definition WRITER interface (ExtraPropertyDefinitionWriterInterface) is intentionally NOT aliased
+   # here. Writing definitions (register/unregister) is a back-office-only concern, so the alias lives in
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/FormTheme/definition_form_theme.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/FormTheme/definition_form_theme.html.twig
+index a3419a962e52d..84f688ae81a8d 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/FormTheme/definition_form_theme.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/FormTheme/definition_form_theme.html.twig
+@@ -341,9 +341,12 @@
+         {{ form_widget(form.name, {attr: {'data-role': 'name-input', class: 'extra-property-row__name', placeholder: 'Constraint'|trans, 'aria-label': 'Constraint'|trans, autocomplete: 'off'}}) }}
+       </span>
+       <span class="extra-property-row__options" data-role="options-display">
++        {%- if form.composite_options.vars.value is not empty -%}
++          <code>({{ form.composite_options.vars.value }})</code>
++        {%- endif -%}
+         {%- if form.options.vars.value is not empty -%}
+           <code>{{ form.options.vars.value }}</code>
+-        {%- else -%}
++        {%- elseif form.composite_options.vars.value is empty -%}
+           <span class="text-muted">{{ 'no options'|trans({}, 'Admin.Advparameters.Help') }}</span>
+         {%- endif -%}
+       </span>
+@@ -351,6 +354,9 @@
+          server-rendered display above is then removed. #}
+       <span class="extra-property-options-editor" data-role="options-editor"></span>
+       {{ form_widget(form.options, {attr: {'data-role': 'options-input'}}) }}
++      {# A composite's own options ("Collection(allowExtraFields: true)[ ... ]"), kept apart from
++         the nested constraints the options input carries. #}
++      {{ form_widget(form.composite_options, {attr: {'data-role': 'composite-options-input'}}) }}
+     </div>
+     {{ form_widget(form.per_language, {attr: {'data-role': 'per-language-input'}}) }}
+     {{ block('extra_property_row_remove') }}
+diff --git a/tests/Integration/Adapter/ContainerBuilderTest.php b/tests/Integration/Adapter/ContainerBuilderTest.php
+index bbdbd3a2b8f66..c063e58e92974 100644
+--- a/tests/Integration/Adapter/ContainerBuilderTest.php
++++ b/tests/Integration/Adapter/ContainerBuilderTest.php
+@@ -11,6 +11,7 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\Module\Banner\Repository\FrontRepository;
+ use PrestaShop\PrestaShop\Adapter\ContainerBuilder;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
+ use PrestaShopBundle\Exception\ServiceContainerException;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
+@@ -32,6 +33,34 @@ public function testFrontContainerContainsAnEntityManager()
+         $this->assertInstanceOf(EntityManagerInterface::class, $entityManager);
+     }
+ 
++    /**
++     * The extra property repository has mandatory collaborators (a logger and the constraint
++     * encoder). The hand-built front-office container imports the extra_property services but not
++     * adapter/services.yml, so it is the one that would break first if either were unresolvable.
++     */
++    public function testFrontContainerBuildsTheExtraPropertyRepository(): void
++    {
++        $container = ContainerBuilder::getContainer('front', true);
++
++        $repository = $container->get(ExtraPropertyDefinitionRepositoryInterface::class);
++
++        $this->assertInstanceOf(ExtraPropertyDefinitionRepositoryInterface::class, $repository);
++    }
++
++    /**
++     * The legacy webservice (webservice/dispatcher.php) runs on its own hand-built container, built from
++     * config/services/webservice/*.yml: everything the front container needs from config/services/common.yml
++     * (the logger the extra property repository depends on, for instance) must resolve there too.
++     */
++    public function testWebserviceContainerBuildsTheExtraPropertyRepository(): void
++    {
++        $container = ContainerBuilder::getContainer('webservice', true);
++
++        $repository = $container->get(ExtraPropertyDefinitionRepositoryInterface::class);
++
++        $this->assertInstanceOf(ExtraPropertyDefinitionRepositoryInterface::class, $repository);
++    }
++
+     public function testContainerLoadsModuleAutoload()
+     {
+         ContainerBuilder::getContainer('front', true);
+diff --git a/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryRejectionLogTest.php b/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryRejectionLogTest.php
+new file mode 100644
+index 0000000000000..c0c897ca69d60
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryRejectionLogTest.php
+@@ -0,0 +1,154 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Definition;
++
++use Doctrine\DBAL\Connection;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepository;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer;
++use Psr\Log\AbstractLogger;
++use Psr\Log\LoggerInterface;
++use Stringable;
++
++/**
++ * Hydrating a definition whose stored constraints cannot be decoded drops them and logs the
++ * rejection. The log must be written once per row content, and writing it must never re-enter the
++ * hydration: the legacy logger persists through an ObjectModel, whose save loads the definitions
++ * again, which decodes the same row again.
++ */
++class ExtraPropertyDefinitionRepositoryRejectionLogTest extends TestCase
++{
++    private const CORRUPT_ROW = [
++        'id_extra_property_definition' => 19,
++        'entity_name' => 'category',
++        'module_name' => null,
++        'property_name' => 'qa_code',
++        'constraints' => '{{ this is not a constraint ]] ~~',
++    ];
++
++    public function testACorruptRowIsDroppedAndLoggedOnce(): void
++    {
++        $logger = new RecordingLogger();
++        $repository = $this->repository($logger);
++
++        $rows = $repository->decode([self::CORRUPT_ROW]);
++
++        $this->assertNull($rows[0]['constraints']);
++        $this->assertCount(1, $logger->records);
++        $this->assertSame('error', $logger->records[0]['level']);
++        $this->assertStringContainsString('for definition #19 (category/_core/qa_code)', $logger->records[0]['message']);
++        $this->assertSame(['object_type' => 'extra_property_definition', 'object_id' => 19], $logger->records[0]['context']);
++    }
++
++    public function testTheSameRowContentIsNotReportedTwiceByTheSameInstance(): void
++    {
++        $logger = new RecordingLogger();
++        $repository = $this->repository($logger);
++
++        $repository->decode([self::CORRUPT_ROW]);
++        $repository->decode([self::CORRUPT_ROW]);
++
++        $this->assertCount(1, $logger->records);
++    }
++
++    public function testAChangedRowContentIsReportedAgain(): void
++    {
++        $logger = new RecordingLogger();
++        $repository = $this->repository($logger);
++
++        $repository->decode([self::CORRUPT_ROW]);
++        $repository->decode([['constraints' => 'NotBlank, Nope(foo: 1)'] + self::CORRUPT_ROW]);
++
++        $this->assertCount(2, $logger->records);
++        $this->assertStringContainsString('Nope', $logger->records[1]['message']);
++    }
++
++    public function testValidRowsAreNotLogged(): void
++    {
++        $logger = new RecordingLogger();
++        $repository = $this->repository($logger);
++
++        $rows = $repository->decode([['constraints' => "NotBlank\nLength(min: 2, max: 64)"] + self::CORRUPT_ROW]);
++
++        $this->assertCount(2, $rows[0]['constraints']);
++        $this->assertSame([], $logger->records);
++    }
++
++    /**
++     * The legacy logger writes a ps_log row through ObjectModel::add(), which may hydrate the
++     * definitions again while the first hydration is still logging. The second pass must find the
++     * rejection already reported and return instead of logging (and recursing) again.
++     */
++    public function testALoggerThatHydratesDefinitionsAgainDoesNotRecurse(): void
++    {
++        $logger = new RehydratingLogger();
++        $repository = $this->repository($logger);
++        $logger->repository = $repository;
++        $logger->row = self::CORRUPT_ROW;
++
++        $rows = $repository->decode([self::CORRUPT_ROW]);
++
++        $this->assertNull($rows[0]['constraints']);
++        $this->assertSame(1, $logger->reentries, 'the nested hydration must not log (and recurse) again');
++        $this->assertCount(1, $logger->messages);
++    }
++
++    private function repository(LoggerInterface $logger): DecodingRepository
++    {
++        // The connection is never used by the decoding path under test.
++        return new DecodingRepository($this->createMock(Connection::class), 'ps_', new ExtraPropertyConstraintNormalizer(), $logger);
++    }
++}
++
++/**
++ * enrichRowsWithDecodedConstraints() is protected: this subclass only exposes it.
++ */
++final class DecodingRepository extends ExtraPropertyDefinitionRepository
++{
++    /**
++     * @param array<int, array<string, mixed>> $rows
++     *
++     * @return array<int, array<string, mixed>>
++     */
++    public function decode(array $rows): array
++    {
++        return $this->enrichRowsWithDecodedConstraints($rows);
++    }
++}
++
++final class RecordingLogger extends AbstractLogger
++{
++    /** @var list<array{level: string, message: string, context: array<string, mixed>}> */
++    public array $records = [];
++
++    public function log($level, string|Stringable $message, array $context = []): void
++    {
++        $this->records[] = ['level' => (string) $level, 'message' => (string) $message, 'context' => $context];
++    }
++}
++
++/**
++ * Behaves like the legacy logger seen from the repository: every log call hydrates the definitions again.
++ */
++final class RehydratingLogger extends AbstractLogger
++{
++    /** @var list<string> */
++    public array $messages = [];
++    public int $reentries = 0;
++    public ?DecodingRepository $repository = null;
++    /** @var array<string, mixed> */
++    public array $row = [];
++
++    public function log($level, string|Stringable $message, array $context = []): void
++    {
++        $this->messages[] = (string) $message;
++        ++$this->reentries;
++        $this->repository?->decode([$this->row]);
++    }
++}
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
+index ecd94720738f9..3da940f4eb59a 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
+@@ -66,9 +66,14 @@ public function testEmptyOrInvalidEnumValuesFallBackToNull(): void
+         $this->assertNull($invalid->getEnumValues());
+     }
+ 
+-    public function testConstraintsRoundTripFromSerializedRow(): void
++    /**
++     * Decoding is the repository's job — it owns the normalizer and can report a rejected constraint
++     * with the row it came from. fromRow() receives constraints already decoded, and only carries
++     * them through.
++     */
++    public function testConstraintsAreCarriedThroughAlreadyDecoded(): void
+     {
+-        $row = self::BASE_ROW + ['constraints' => serialize([new Assert\Url(), new Assert\Length(['max' => 50])])];
++        $row = self::BASE_ROW + ['constraints' => [new Assert\Url(), new Assert\Length(['max' => 50])]];
+ 
+         $constraints = ExtraPropertyDefinition::fromRow($row)->getConstraints();
+ 
+@@ -76,14 +81,18 @@ public function testConstraintsRoundTripFromSerializedRow(): void
+         $this->assertCount(2, $constraints);
+         $this->assertInstanceOf(Assert\Url::class, $constraints[0]);
+         $this->assertInstanceOf(Assert\Length::class, $constraints[1]);
++        $this->assertSame(50, $constraints[1]->max);
+     }
+ 
+-    public function testConstraintsAbsentOrUnusableFallBackToNull(): void
++    public function testConstraintsAbsentOrEmptyFallBackToNull(): void
+     {
+         $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW)->getConstraints(), 'No constraints key → null.');
+-        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => ''])->getConstraints(), 'Empty string → null.');
+-        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => 'not-serialized'])->getConstraints(), 'Unserializable garbage → null.');
+-        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => serialize(['x', 123])])->getConstraints(), 'Non-Constraint entries are filtered out → null.');
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => []])->getConstraints(), 'Empty list → null.');
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => null])->getConstraints(), 'Null → null.');
++        $this->assertNull(
++            ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => "Url\nLength(max: 50)"])->getConstraints(),
++            'A raw stored string is not decoded here: that belongs to the repository.'
++        );
+     }
+ 
+     /**
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyRegistryTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyRegistryTest.php
+index 29af9cf3f55a4..117c3f62228f8 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyRegistryTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyRegistryTest.php
+@@ -22,6 +22,7 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertyFormTypeMap;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\FormOptionsValidator;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Schema\ExtraPropertySchemaManagerInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer;
+ use Psr\Log\NullLogger;
+ use RuntimeException;
+ use Symfony\Component\Form\Extension\Validator\ValidatorExtension;
+@@ -510,6 +511,7 @@ private function createRegistry(
+                 new ExtraPropertyFormTypeMap()
+             ),
+             $shopRepository,
++            new ExtraPropertyConstraintNormalizer(),
+         );
+     }
+ 
+diff --git a/tests/Unit/Core/ExtraProperty/Form/ConstraintRowPresenterTest.php b/tests/Unit/Core/ExtraProperty/Form/ConstraintRowPresenterTest.php
+index e6b4a113d5475..82f37f19db3d4 100644
+--- a/tests/Unit/Core/ExtraProperty/Form/ConstraintRowPresenterTest.php
++++ b/tests/Unit/Core/ExtraProperty/Form/ConstraintRowPresenterTest.php
+@@ -31,7 +31,7 @@ public function testEmptyValueGivesNoRows(): void
+     /**
+      * @dataProvider rowsProvider
+      *
+-     * @param list<array{name: string, options: string, per_language: string}> $expected
++     * @param list<array{name: string, options: string, composite_options: string, per_language: string}> $expected
+      */
+     public function testRows(string $raw, array $expected): void
+     {
+@@ -43,59 +43,96 @@ public function testRows(string $raw, array $expected): void
+      */
+     public static function rowsProvider(): iterable
+     {
++        // A composite carrying its own options: the children go to 'options', the options tail to
++        // 'composite_options'. This is the shape the whole field exists for.
++        yield 'composite with its own options splits both tails' => [
++            'Collection(allowExtraFields: true, allowMissingFields: false)[ a: NotBlank, b: Length(max: 5) ]', [
++                [
++                    'name' => 'Collection',
++                    'options' => 'a: NotBlank, b: Length(max: 5)',
++                    'composite_options' => 'allowExtraFields: true, allowMissingFields: false',
++                    'per_language' => '0',
++                ],
++            ]];
++
++        yield 'list composite with its own option' => [
++            'AtLeastOneOf(includeInternalMessages: false)[ NotBlank, Email ]', [
++                [
++                    'name' => 'AtLeastOneOf',
++                    'options' => 'NotBlank, Email',
++                    'composite_options' => 'includeInternalMessages: false',
++                    'per_language' => '0',
++                ],
++            ]];
++
++        // Not All[...]: the first top-level All is exploded into per-language rows instead.
++        yield 'composite without options leaves the tail empty' => ['Sequentially[ NotBlank, Email ]', [
++            ['name' => 'Sequentially', 'options' => 'NotBlank, Email', 'composite_options' => '', 'per_language' => '0'],
++        ]];
++
+         yield 'bare name' => ['NotBlank', [
+-            ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
++            ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'positional value keeps the verbatim tail' => ["TypedRegex('generic_name')", [
+-            ['name' => 'TypedRegex', 'options' => "'generic_name'", 'per_language' => '0'],
++            ['name' => 'TypedRegex', 'options' => "'generic_name'", 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'named options keep the verbatim tail' => ['Length(min: 2, max: 64)', [
+-            ['name' => 'Length', 'options' => 'min: 2, max: 64', 'per_language' => '0'],
++            ['name' => 'Length', 'options' => 'min: 2, max: 64', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'comma-separated tokens on one line' => ['NotBlank, GreaterThan(5)', [
+-            ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
+-            ['name' => 'GreaterThan', 'options' => '5', 'per_language' => '0'],
++            ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
++            ['name' => 'GreaterThan', 'options' => '5', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'first All explodes into per-language rows' => ["DefaultLanguage('Video link')\nAll[ Url, Length(max: 255) ]", [
+-            ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'per_language' => '0'],
+-            ['name' => 'Url', 'options' => '', 'per_language' => '1'],
+-            ['name' => 'Length', 'options' => 'max: 255', 'per_language' => '1'],
++            ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'composite_options' => '', 'per_language' => '0'],
++            ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
++            ['name' => 'Length', 'options' => 'max: 255', 'composite_options' => '', 'per_language' => '1'],
+         ]];
+ 
+         yield 'multi-line rendered All (toNames output) explodes the same way' => ["All[\n  Url,\n  NotBlank\n]", [
+-            ['name' => 'Url', 'options' => '', 'per_language' => '1'],
+-            ['name' => 'NotBlank', 'options' => '', 'per_language' => '1'],
++            ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
++            ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
+         ]];
+ 
+         yield 'second All stays an opaque set-level composite row' => ['All[Url], All[NotBlank]', [
+-            ['name' => 'Url', 'options' => '', 'per_language' => '1'],
+-            ['name' => 'All', 'options' => 'NotBlank', 'per_language' => '0'],
++            ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
++            ['name' => 'All', 'options' => 'NotBlank', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
++        // Only reachable on a hand-edited database value: the first All carries more children than the
++        // grammar allows, so its tokenize() throws. It is dropped, and the per-language zone must still
++        // be fed by the next top-level All instead of presenting it as an opaque set-level row.
++        yield 'an All whose children cannot be tokenized is dropped and the next All still explodes' => [
++            'All[ ' . implode(', ', array_fill(0, ExtraPropertyConstraintMapper::MAX_TOKENS + 1, 'NotBlank')) . " ]\nAll[ Url ]",
++            [
++                ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
++            ],
++        ];
++
+         yield 'non-All composites stay set-level rows with their verbatim inner tail' => ['Collection[name: NotBlank, code: Length(max: 5)]', [
+-            ['name' => 'Collection', 'options' => 'name: NotBlank, code: Length(max: 5)', 'per_language' => '0'],
++            ['name' => 'Collection', 'options' => 'name: NotBlank, code: Length(max: 5)', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'unknown name still presents as a structured row (validated on submit, not here)' => ["Lenght(max: 64)\nNotBlank", [
+-            ['name' => 'Lenght', 'options' => 'max: 64', 'per_language' => '0'],
+-            ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
++            ['name' => 'Lenght', 'options' => 'max: 64', 'composite_options' => '', 'per_language' => '0'],
++            ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'unknown name inside All presents as a per-language row' => ['All[ Lenght(max: 64), Url ]', [
+-            ['name' => 'Lenght', 'options' => 'max: 64', 'per_language' => '1'],
+-            ['name' => 'Url', 'options' => '', 'per_language' => '1'],
++            ['name' => 'Lenght', 'options' => 'max: 64', 'composite_options' => '', 'per_language' => '1'],
++            ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
+         ]];
+ 
+         yield 'shapeless token is skipped' => ["weird token!\nNotBlank", [
+-            ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
++            ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
+         ]];
+ 
+         yield 'quoted separators never split a token' => ["Choice(['a,b', 'c'])", [
+-            ['name' => 'Choice', 'options' => "['a,b', 'c']", 'per_language' => '0'],
++            ['name' => 'Choice', 'options' => "['a,b', 'c']", 'composite_options' => '', 'per_language' => '0'],
+         ]];
+     }
+ 
+diff --git a/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizerTest.php b/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizerTest.php
+new file mode 100644
+index 0000000000000..fd1be35c30455
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizerTest.php
+@@ -0,0 +1,320 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Validation;
++
++use DateTimeImmutable;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyConstraintException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintMapper;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyConstraintNormalizer;
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\Constraints as Assert;
++
++class ExtraPropertyConstraintNormalizerTest extends TestCase
++{
++    private ExtraPropertyConstraintNormalizer $normalizer;
++
++    protected function setUp(): void
++    {
++        $this->normalizer = new ExtraPropertyConstraintNormalizer();
++    }
++
++    /**
++     * The persisted form is the DSL, so no PHP deserialization primitive may remain on this path.
++     */
++    public function testNoPhpDeserializationRemainsOnTheConstraintPath(): void
++    {
++        $sources = [
++            __DIR__ . '/../../../../../src/Core/ExtraProperty/Validation/ExtraPropertyConstraintNormalizer.php',
++            __DIR__ . '/../../../../../src/Core/ExtraProperty/Validation/ExtraPropertyConstraintMapper.php',
++            __DIR__ . '/../../../../../src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php',
++            __DIR__ . '/../../../../../src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php',
++        ];
++
++        foreach ($sources as $source) {
++            $code = (string) file_get_contents($source);
++            // Strip comments so the documentation explaining the absence does not trip the check.
++            $code = (string) preg_replace('#/\*.*?\*/|//[^\n]*#s', '', $code);
++
++            $this->assertDoesNotMatchRegularExpression(
++                '/\b(un)?serialize\s*\(/',
++                $code,
++                sprintf('%s must not call serialize()/unserialize().', basename($source))
++            );
++        }
++    }
++
++    /**
++     * @dataProvider losslessConstraintProvider
++     *
++     * @param list<Constraint> $constraints
++     */
++    public function testConstraintsSurviveTheStorageRoundTrip(string $_label, array $constraints): void
++    {
++        $encoded = $this->normalizer->normalize($constraints);
++        $this->assertIsString($encoded);
++
++        $decoded = $this->normalizer->denormalize($encoded)->getConstraints();
++
++        // var_export keeps scalar types apart, which a loose comparison would not.
++        $this->assertSame(var_export($constraints, true), var_export($decoded, true));
++    }
++
++    public static function losslessConstraintProvider(): iterable
++    {
++        yield 'plain constraints' => ['plain', [new Assert\NotBlank(), new Assert\Length(['min' => 2, 'max' => 64])]];
++
++        yield 'composite with its own options' => ['composite options', [
++            new Assert\Collection([
++                'fields' => ['name' => new Assert\NotBlank(), 'code' => new Assert\Length(['max' => 5])],
++                'allowExtraFields' => true,
++                'allowMissingFields' => true,
++            ]),
++        ]];
++
++        yield 'composite list option' => ['at least one of', [
++            new Assert\AtLeastOneOf([
++                'constraints' => [new Assert\NotBlank(), new Assert\Email()],
++                'includeInternalMessages' => false,
++            ]),
++        ]];
++
++        yield 'explicit Optional wrapper' => ['optional wrapper', [
++            new Assert\Collection(['fields' => [
++                'a' => new Assert\Required([new Assert\NotBlank()]),
++                'b' => new Assert\Optional([new Assert\Email()]),
++            ]]),
++        ]];
++
++        yield 'scalar typing is preserved' => ['scalar typing', [
++            new Assert\Choice(['choices' => ['1', '2']]),
++            new Assert\Count(['max' => 10]),
++        ]];
++    }
++
++    public function testEveryPublicConstraintSurvivesTheRoundTrip(): void
++    {
++        $samples = [
++            'Length' => 'Length(max: 10)', 'Regex' => "Regex('/^a$/')", 'Range' => 'Range(min: 0, max: 10)',
++            'EqualTo' => 'EqualTo(1)', 'NotEqualTo' => 'NotEqualTo(1)', 'IdenticalTo' => 'IdenticalTo(1)',
++            'NotIdenticalTo' => 'NotIdenticalTo(1)', 'LessThan' => 'LessThan(1)', 'LessThanOrEqual' => 'LessThanOrEqual(1)',
++            'GreaterThan' => 'GreaterThan(1)', 'GreaterThanOrEqual' => 'GreaterThanOrEqual(1)', 'DivisibleBy' => 'DivisibleBy(2)',
++            'CardScheme' => "CardScheme(['VISA'])", 'Count' => 'Count(max: 10)', 'Type' => "Type('string')",
++            'All' => 'All[ NotBlank ]', 'AtLeastOneOf' => 'AtLeastOneOf[ NotBlank, NotNull ]',
++            'Collection' => 'Collection[ field: NotBlank ]', 'Sequentially' => 'Sequentially[ NotBlank, Length(max: 10) ]',
++            'TypedRegex' => "TypedRegex('generic_name')",
++        ];
++
++        foreach (ExtraPropertyConstraintMapper::getAllowedNames() as $name) {
++            $constraints = ExtraPropertyConstraintMapper::fromNames($samples[$name] ?? $name);
++            $this->assertIsArray($constraints);
++
++            $decoded = $this->normalizer->denormalize($this->normalizer->normalize($constraints));
++
++            $this->assertSame([], $decoded->getRejections(), sprintf('%s must decode without a rejection.', $name));
++            $this->assertSame(
++                var_export($constraints, true),
++                var_export($decoded->getConstraints(), true),
++                sprintf('%s must survive the storage round-trip.', $name)
++            );
++        }
++    }
++
++    /**
++     * @dataProvider refusedConstraintProvider
++     */
++    public function testConstraintsThatCannotBeStoredSafelyAreRefused(Constraint $constraint, string $expectedMessage): void
++    {
++        $this->expectException(InvalidExtraPropertyConstraintException::class);
++        $this->expectExceptionMessageMatches($expectedMessage);
++
++        $this->normalizer->normalize([$constraint]);
++    }
++
++    public static function refusedConstraintProvider(): iterable
++    {
++        $normalizer = new Assert\Length(['max' => 5]);
++        $normalizer->normalizer = 'system';
++        yield 'callable normalizer' => [$normalizer, '/may execute a callable/'];
++
++        $callback = new Assert\Choice(['choices' => ['a']]);
++        $callback->callback = 'system';
++        yield 'callable callback' => [$callback, '/may execute a callable/'];
++
++        $propertyPath = new Assert\LessThan(1);
++        $propertyPath->propertyPath = 'secret';
++        yield 'property path' => [$propertyPath, '/traverse the validated object/'];
++
++        $payload = new Assert\NotBlank();
++        $payload->payload = ['anything'];
++        yield 'payload' => [$payload, '/payload/'];
++
++        $groups = new Assert\NotBlank();
++        $groups->groups = ['Custom'];
++        yield 'custom validation group' => [$groups, '/groups are not supported/'];
++
++        yield 'object option' => [new Assert\LessThan(new DateTimeImmutable('2030-01-01')), '/cannot be represented/'];
++
++        yield 'constraint outside the grammar' => [new NormalizerUnsupportedConstraint(), '/not part of the extra property constraint grammar/'];
++    }
++
++    public function testSelfReferencingCompositeIsRefused(): void
++    {
++        $composite = new Assert\All([new Assert\NotBlank()]);
++        $composite->constraints[] = $composite;
++
++        $this->expectException(InvalidExtraPropertyConstraintException::class);
++        $this->expectExceptionMessageMatches('/exceeds the maximum depth/');
++
++        $this->normalizer->normalize([$composite]);
++    }
++
++    /**
++     * A tampered registry row must not be able to reintroduce an executable option, and must not
++     * take its valid neighbours down with it.
++     */
++    public function testTamperedStoredValueLosesOnlyTheOffendingConstraint(): void
++    {
++        $decoded = $this->normalizer->denormalize("Url\nLength(max: 5, normalizer: 'system')\nNotBlank");
++
++        $constraints = $decoded->getConstraints();
++        $this->assertIsArray($constraints);
++        $this->assertCount(2, $constraints);
++        $this->assertInstanceOf(Assert\Url::class, $constraints[0]);
++        $this->assertInstanceOf(Assert\NotBlank::class, $constraints[1]);
++
++        $this->assertTrue($decoded->hasRejections());
++        $this->assertCount(1, $decoded->getRejections());
++        $this->assertSame(1, $decoded->getRejections()[0]['index']);
++        $this->assertStringContainsString('may execute a callable', $decoded->getRejections()[0]['reason']);
++    }
++
++    public function testMalformedStoredValueIsReportedWithoutThrowing(): void
++    {
++        $decoded = $this->normalizer->denormalize('}{ not a constraint');
++
++        $this->assertNull($decoded->getConstraints());
++        $this->assertCount(1, $decoded->getRejections());
++    }
++
++    public function testOversizedStoredValueIsRefusedBeforeParsing(): void
++    {
++        $decoded = $this->normalizer->denormalize(
++            str_repeat('NotBlank,', ExtraPropertyConstraintMapper::MAX_RAW_LENGTH)
++        );
++
++        $this->assertNull($decoded->getConstraints());
++        $this->assertStringContainsString('maximum length', $decoded->getRejections()[0]['reason']);
++    }
++
++    public function testTooManyTopLevelConstraintsAreRefused(): void
++    {
++        $decoded = $this->normalizer->denormalize(
++            implode(',', array_fill(0, ExtraPropertyConstraintMapper::MAX_TOKENS + 1, 'NotBlank'))
++        );
++
++        $this->assertNull($decoded->getConstraints());
++        $this->assertStringContainsString('maximum of', $decoded->getRejections()[0]['reason']);
++    }
++
++    /**
++     * The wrappers Collection generates are part of the grammar but must never be offered as
++     * constraints a merchant can pick, nor accepted at the top level of a definition.
++     */
++    public function testCollectionWrappersStayInternal(): void
++    {
++        $this->assertNotContains('Required', ExtraPropertyConstraintMapper::getAllowedNames());
++        $this->assertNotContains('Optional', ExtraPropertyConstraintMapper::getAllowedNames());
++
++        // Accepted where they belong: as the wrappers of a Collection's fields.
++        $accepted = $this->normalizer->denormalize('Collection[ a: Required[ NotBlank ], b: Optional[ Email ] ]');
++        $this->assertSame([], $accepted->getRejections());
++        $constraints = $accepted->getConstraints();
++        $this->assertIsArray($constraints);
++        $this->assertInstanceOf(Assert\Collection::class, $constraints[0]);
++        $this->assertInstanceOf(Assert\Required::class, $constraints[0]->fields['a']);
++        $this->assertInstanceOf(Assert\Optional::class, $constraints[0]->fields['b']);
++
++        // Refused anywhere else: they are grammar plumbing, not constraints a merchant picks.
++        $refused = $this->normalizer->denormalize('Required[ NotBlank ]');
++        $this->assertNull($refused->getConstraints());
++        $this->assertStringContainsString(
++            'Unknown extra property constraint "Required"',
++            $refused->getRejections()[0]['reason']
++        );
++    }
++
++    /**
++     * @dataProvider supportedStoredValueProvider
++     */
++    public function testSupportsDenormalizationInspectsTheStoredValue(string $raw, bool $expected): void
++    {
++        $this->assertSame(
++            $expected,
++            $this->normalizer->supportsDenormalization($raw, ExtraPropertyConstraintNormalizer::SUPPORTED_TYPE)
++        );
++    }
++
++    public static function supportedStoredValueProvider(): iterable
++    {
++        yield 'known constraints' => ["NotBlank\nLength(max: 10)", true];
++        yield 'composite with its own options' => ['Collection(allowExtraFields: true)[ a: NotBlank ]', true];
++        yield 'empty value' => ['', true];
++        yield 'unknown name' => ['NotAConstraint', false];
++        yield 'callable option' => ["Length(max: 5, normalizer: 'system')", false];
++        yield 'property path option' => ["LessThan(propertyPath: 'secret')", false];
++        yield 'internal wrapper at the top level' => ['Required[ NotBlank ]', false];
++        yield 'malformed' => ['}{ garbage', false];
++        yield 'too deep' => [str_repeat('All[', 40) . 'NotBlank' . str_repeat(']', 40), false];
++    }
++
++    public function testSupportsDenormalizationRejectsAnotherType(): void
++    {
++        $this->assertFalse($this->normalizer->supportsDenormalization('NotBlank', 'SomethingElse'));
++    }
++
++    public function testSupportsNormalizationInspectsTheConstraints(): void
++    {
++        $this->assertTrue($this->normalizer->supportsNormalization([new Assert\NotBlank(), new Assert\Length(['max' => 5])]));
++        $this->assertTrue($this->normalizer->supportsNormalization([]));
++        $this->assertTrue($this->normalizer->supportsNormalization(null));
++
++        $callable = new Assert\Length(['max' => 5]);
++        $callable->normalizer = 'system';
++        $this->assertFalse($this->normalizer->supportsNormalization([$callable]));
++
++        $this->assertFalse($this->normalizer->supportsNormalization([new NormalizerUnsupportedConstraint()]));
++    }
++
++    /**
++     * The support checks answer "does this look like mine?", never "will this normalize?". Anything
++     * relying on the second — the registry guard in particular — must normalize for real, or it
++     * accepts constraints that fail once the storage column already exists.
++     */
++    public function testSupportChecksAreShallowerThanNormalization(): void
++    {
++        // A keyed map. Every name and option is fine — only the rendering cannot represent it, the
++        // format carrying scalars and lists of scalars but no map. That is a known limitation rather
++        // than a desirable rule, tracked for a follow-up (epic #41422): Symfony ignores the keys of
++        // Choice::$choices, so normalizing such a map down to its values would change no validation
++        // behaviour. What it does change is the strict round-trip contract, which is why it is not
++        // done here.
++        $constraints = [new Assert\Choice(['choices' => ['a' => 1, 'b' => 2]])];
++
++        $this->assertTrue($this->normalizer->supportsNormalization($constraints));
++
++        $this->expectException(InvalidExtraPropertyConstraintException::class);
++        $this->normalizer->normalize($constraints);
++    }
++}
++
++final class NormalizerUnsupportedConstraint extends Constraint
++{
++}
+diff --git a/tests/Unit/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyDefinitionValidationTypeTest.php b/tests/Unit/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyDefinitionValidationTypeTest.php
+index 04c83733eeacd..954821fbf089e 100644
+--- a/tests/Unit/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyDefinitionValidationTypeTest.php
++++ b/tests/Unit/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/ExtraPropertyDefinition/ExtraPropertyDefinitionValidationTypeTest.php
+@@ -44,24 +44,59 @@ public function testProviderRowsRoundTripThroughSubmit(): void
+     {
+         $form = $this->factory->create(ExtraPropertyDefinitionValidationType::class, [
+             'constraints' => [
+-                ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
++                ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
+             ],
+         ]);
+ 
+         $form->submit([
+             'constraints' => [
+-                ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'per_language' => '0'],
+-                ['name' => 'Url', 'options' => '', 'per_language' => '1'],
+-                ['name' => 'Length', 'options' => 'max: 255', 'per_language' => '1'],
++                ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'composite_options' => '', 'per_language' => '0'],
++                ['name' => 'Url', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
++                ['name' => 'Length', 'options' => 'max: 255', 'composite_options' => '', 'per_language' => '1'],
+             ],
+         ]);
+ 
+         $this->assertTrue($form->isValid());
+         // TextType/HiddenType normalize empty submitted values to null on rebind.
+         $this->assertSame([
+-            ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'per_language' => '0'],
+-            ['name' => 'Url', 'options' => null, 'per_language' => '1'],
+-            ['name' => 'Length', 'options' => 'max: 255', 'per_language' => '1'],
++            ['name' => 'DefaultLanguage', 'options' => "'Video link'", 'composite_options' => null, 'per_language' => '0'],
++            ['name' => 'Url', 'options' => null, 'composite_options' => null, 'per_language' => '1'],
++            ['name' => 'Length', 'options' => 'max: 255', 'composite_options' => null, 'per_language' => '1'],
++        ], $form->getData()['constraints']);
++    }
++
++    /**
++     * A composite carries two tails, so the row form must bind both: the children in 'options' and
++     * the composite's own options in 'composite_options'. The presenter's split is covered in
++     * ConstraintRowPresenterTest; what matters here is that the extra hidden field survives a submit.
++     */
++    public function testCompositeOwnOptionsSurviveASubmit(): void
++    {
++        $form = $this->factory->create(ExtraPropertyDefinitionValidationType::class, [
++            'constraints' => [
++                ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
++            ],
++        ]);
++
++        $form->submit([
++            'constraints' => [
++                [
++                    'name' => 'Collection',
++                    'options' => 'a: NotBlank',
++                    'composite_options' => 'allowExtraFields: true',
++                    'per_language' => '0',
++                ],
++            ],
++        ]);
++
++        $this->assertTrue($form->isValid());
++        $this->assertSame([
++            [
++                'name' => 'Collection',
++                'options' => 'a: NotBlank',
++                'composite_options' => 'allowExtraFields: true',
++                'per_language' => '0',
++            ],
+         ], $form->getData()['constraints']);
+     }
+ 
+@@ -71,15 +106,15 @@ public function testAbandonedRowsAreDroppedAtSubmit(): void
+ 
+         $form->submit([
+             'constraints' => [
+-                ['name' => 'NotBlank', 'options' => '', 'per_language' => '0'],
++                ['name' => 'NotBlank', 'options' => '', 'composite_options' => '', 'per_language' => '0'],
+                 // Zone bookkeeping alone (per_language) does not make a row worth keeping.
+-                ['name' => '', 'options' => '', 'per_language' => '1'],
++                ['name' => '', 'options' => '', 'composite_options' => '', 'per_language' => '1'],
+             ],
+         ]);
+ 
+         $this->assertTrue($form->isValid());
+         $this->assertSame(
+-            [['name' => 'NotBlank', 'options' => null, 'per_language' => '0']],
++            [['name' => 'NotBlank', 'options' => null, 'composite_options' => null, 'per_language' => '0']],
+             $form->getData()['constraints']
+         );
+     }

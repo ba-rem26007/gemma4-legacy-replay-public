@@ -1,0 +1,256 @@
+diff --git a/controllers/front/OrderDetailController.php b/controllers/front/OrderDetailController.php
+index 93333ded6c9af..3c893a8bfd091 100644
+--- a/controllers/front/OrderDetailController.php
++++ b/controllers/front/OrderDetailController.php
+@@ -1,4 +1,5 @@
+ <?php
++
+ /**
+  * Copyright since 2007 PrestaShop SA and Contributors
+  * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
+@@ -23,7 +24,10 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
++
+ use PrestaShop\PrestaShop\Adapter\Presenter\Order\OrderPresenter;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ 
+ class OrderDetailControllerCore extends FrontController
+ {
+@@ -208,10 +212,14 @@ public function initContent(): void
+ 
+                 $this->reference = $order->reference;
+ 
++                /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++                $featureFlagManager = $this->get(FeatureFlagStateCheckerInterface::class);
++
+                 $this->context->smarty->assign([
+                     'order' => $this->order_to_display,
+                     'orderIsVirtual' => $order->isVirtual(),
+                     'HOOK_DISPLAYORDERDETAIL' => Hook::exec('displayOrderDetail', ['order' => $order]),
++                    'is_multishipment_enabled' => $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT),
+                 ]);
+             } else {
+                 $this->redirect_after = '404';
+diff --git a/src/Adapter/Presenter/Order/OrderDetailLazyArray.php b/src/Adapter/Presenter/Order/OrderDetailLazyArray.php
+index c657da2bc5aa5..0e7e38fd7696f 100644
+--- a/src/Adapter/Presenter/Order/OrderDetailLazyArray.php
++++ b/src/Adapter/Presenter/Order/OrderDetailLazyArray.php
+@@ -32,9 +32,13 @@
+ use Currency;
+ use HistoryController;
+ use Order;
++use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+ use PrestaShop\PrestaShop\Adapter\Presenter\AbstractLazyArray;
+ use PrestaShop\PrestaShop\Adapter\Presenter\LazyArrayAttribute;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Localization\LocaleInterface;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ use PrestaShopBundle\Translation\TranslatorComponent;
+ use PrestaShopException;
+ use Tools;
+@@ -61,17 +65,20 @@ class OrderDetailLazyArray extends AbstractLazyArray
+      */
+     private $translator;
+ 
++    private $shipmentRepository;
++
+     /**
+      * OrderDetailLazyArray constructor.
+      *
+      * @param Order $order
+      */
+-    public function __construct(Order $order)
++    public function __construct(Order $order, ShipmentRepository $shipmentRepository)
+     {
+         $this->order = $order;
+         $this->context = Context::getContext();
+         $this->translator = Context::getContext()->getTranslator();
+         $this->locale = $this->context->getCurrentLocale();
++        $this->shipmentRepository = $shipmentRepository;
+         parent::__construct();
+     }
+ 
+@@ -202,9 +209,50 @@ public function getIsVirtual()
+     #[LazyArrayAttribute(arrayAccess: true)]
+     public function getShipping()
+     {
+-        $order = $this->order;
++        $containerFinder = new ContainerFinder(Context::getContext());
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $containerFinder->getContainer()->get(FeatureFlagStateCheckerInterface::class);
++
++        if ($featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
++            return $this->getShipments();
++        }
++
++        return $this->getCarrier();
++    }
++
++    /**
++     * Used when the feature flag FEATURE_FLAG_IMPROVED_SHIPMENT is enabled.
++     * Since the feature flag introduce a new "shipment" concept in PrestaShop, we now need to get
++     * all shipments for the given order.
++     */
++    private function getShipments()
++    {
++        $shipments = $this->shipmentRepository->getShipmentWithWeightByOrderId($this->order->id);
+ 
+-        $shippingList = $order->getShipping();
++        foreach ($shipments as &$shipment) {
++            if ($shipment['carrier_tracking_url']) {
++                $shipment['carrier_tracking_url'] = str_replace('@', $shipment['tracking_number'], $shipment['carrier_tracking_url']);
++            }
++
++            $shipment['date_add'] = Tools::displayDate($shipment['date_add'], false);
++
++            $shipment['package_weight'] = ($shipment['package_weight'] > 0) ? sprintf('%.3f', $shipment['package_weight']) . ' ' .
++                Configuration::get('PS_WEIGHT_UNIT') : '-';
++            $packageCost = ($this->order->getTaxCalculationMethod()) ? $shipment['shipping_cost_tax_excl'] : $shipment['shipping_cost_tax_incl'];
++            $shipment['package_cost'] = ($packageCost > 0) ? $this->locale->formatPrice($packageCost, Currency::getIsoCodeById((int) $this->order->id_currency))
++                : $this->translator->trans('Free', [], 'Shop.Theme.Checkout');
++        }
++
++        return $shipments;
++    }
++
++    /**
++     * Used when the feature flag FEATURE_FLAG_IMPROVED_SHIPMENT is disabled.
++     * Get carrier details used for the given order.
++     */
++    private function getCarrier()
++    {
++        $shippingList = $this->order->getShipping();
+         $orderShipping = [];
+ 
+         foreach ($shippingList as $shippingId => $shipping) {
+@@ -214,13 +262,13 @@ public function getShipping()
+                     Tools::displayDate($shipping['date_add'], false);
+                 $orderShipping[$shippingId]['shipping_weight'] =
+                     ($shipping['weight'] > 0) ? sprintf('%.3f', $shipping['weight']) . ' ' .
+-                        Configuration::get('PS_WEIGHT_UNIT') : '-';
++                    Configuration::get('PS_WEIGHT_UNIT') : '-';
+                 $shippingCost =
+-                    ($order->getTaxCalculationMethod()) ? $shipping['shipping_cost_tax_excl']
+-                        : $shipping['shipping_cost_tax_incl'];
++                    ($this->order->getTaxCalculationMethod()) ? $shipping['shipping_cost_tax_excl']
++                    : $shipping['shipping_cost_tax_incl'];
+                 $orderShipping[$shippingId]['shipping_cost'] =
+-                    ($shippingCost > 0) ? $this->locale->formatPrice($shippingCost, Currency::getIsoCodeById((int) $order->id_currency))
+-                        : $this->translator->trans('Free', [], 'Shop.Theme.Checkout');
++                    ($shippingCost > 0) ? $this->locale->formatPrice($shippingCost, Currency::getIsoCodeById((int) $this->order->id_currency))
++                    : $this->translator->trans('Free', [], 'Shop.Theme.Checkout');
+ 
+                 $tracking_line = '-';
+                 if ($shipping['tracking_number']) {
+diff --git a/src/Adapter/Presenter/Order/OrderLazyArray.php b/src/Adapter/Presenter/Order/OrderLazyArray.php
+index 76191be816bcc..0aab8d269e405 100644
+--- a/src/Adapter/Presenter/Order/OrderLazyArray.php
++++ b/src/Adapter/Presenter/Order/OrderLazyArray.php
+@@ -360,7 +360,7 @@ public function getAmounts()
+     #[LazyArrayAttribute(arrayAccess: true)]
+     public function getDetails()
+     {
+-        return new OrderDetailLazyArray($this->order);
++        return new OrderDetailLazyArray($this->order, $this->shipmentRepository);
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index 9657f6bcbd6da..004e386129558 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -1,4 +1,5 @@
+ <?php
++
+ /**
+  * Copyright since 2007 PrestaShop SA and Contributors
+  * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
+@@ -35,6 +36,16 @@
+ 
+ class ShipmentRepository extends EntityRepository
+ {
++    /**
++     * @var string
++     */
++    public $tablePrefix;
++
++    public function setTablePrefix(string $tablePrefix): void
++    {
++        $this->tablePrefix = $tablePrefix;
++    }
++
+     /**
+      * @param int $orderId
+      *
+@@ -110,6 +121,41 @@ public function mergeProductsToShipment(Shipment $source, Shipment $target, arra
+         }
+     }
+ 
++    /**
++     * @return array<int, array{
++     *     id_shipment: int,
++     *     id_order: int,
++     *     id_carrier: int,
++     *     id_delivery_address: int,
++     *     shipping_cost_tax_excl: string,
++     *     shipping_cost_tax_incl: string,
++     *     packed_at: string|null,
++     *     shipped_at: string|null,
++     *     delivered_at: string|null,
++     *     cancelled_at: string|null,
++     *     tracking_number: string|null,
++     *     date_add: string,
++     *     date_upd: string,
++     *     package_weight: string|null,
++     *     carrier_name: string|null
++     * }>
++     */
++    public function getShipmentWithWeightByOrderId(int $orderId): array
++    {
++        $conn = $this->getEntityManager()->getConnection();
++
++        $qb = $conn->createQueryBuilder();
++        $qb->select('s.*', 'SUM(od.product_weight * sp.quantity) as package_weight, c.name as carrier_name, c.url as carrier_tracking_url')
++            ->from($this->tablePrefix . 'shipment', 's')
++            ->leftJoin('s', $this->tablePrefix . 'shipment_product', 'sp', 's.id_shipment = sp.id_shipment')
++            ->leftJoin('sp', $this->tablePrefix . 'order_detail', 'od', 'sp.id_order_detail = od.id_order_detail')
++            ->leftJoin('s', $this->tablePrefix . 'carrier', 'c', 's.id_carrier = c.id_carrier')->where('s.id_order = :orderId')
++            ->setParameter('orderId', $orderId)
++            ->groupBy('s.id_shipment');
++
++        return $qb->executeQuery()->fetchAllAssociative();
++    }
++
+     private function getShipmentProductByOrderDetailId(Shipment $shipment): array
+     {
+         return array_reduce($shipment->getProducts()->toArray(), function ($carry, ShipmentProduct $product) {
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+index 255cca2d802a8..e213b74036f2f 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+@@ -13,6 +13,8 @@ services:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+     arguments:
+       - PrestaShopBundle\Entity\Shipment
++    calls:
++      - setTablePrefix: [ '%database_prefix%' ]
+     lazy: true
+     public: true
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+index b1fca35481090..2885955c2eaae 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+@@ -158,6 +158,8 @@ services:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+     arguments:
+       - PrestaShopBundle\Entity\Shipment
++    calls:
++      - setTablePrefix: [ '%database_prefix%' ]
+ 
+   PrestaShopBundle\Entity\Repository\MutationRepository:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]

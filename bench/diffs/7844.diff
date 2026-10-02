@@ -1,0 +1,106 @@
+diff --git a/classes/stock/StockManager.php b/classes/stock/StockManager.php
+index 05ef3fbfffe88..d6a84ff5e31d1 100644
+--- a/classes/stock/StockManager.php
++++ b/classes/stock/StockManager.php
+@@ -836,6 +836,28 @@ public function getProductCoverage($id_product, $id_product_attribute, $coverage
+             $coverage = 7;
+         } // Week by default
+ 
++        $quantity_out = $this->getProductOutForCoverage($id_product, $id_product_attribute, $coverage, $id_warehouse);
++        if (!$quantity_out) {
++            return -1;
++        }
++
++        $quantity_per_day = Tools::ps_round($quantity_out / $coverage);
++        $physical_quantity = $this->getProductPhysicalQuantities($id_product,
++                                                                 $id_product_attribute,
++                                                                 ($id_warehouse ? array($id_warehouse) : null),
++                                                                 true);
++        $time_left = ($quantity_per_day == 0) ? (-1) : Tools::ps_round($physical_quantity / $quantity_per_day);
++
++        return $time_left;
++    }
++
++    /**
++     * @see StockManagerInterface::getProductOutForCoverage()
++     * Here, $coverage is a number of days
++     * @return int number of products sold over the coverage period
++     */
++    public function getProductOutForCoverage($id_product, $id_product_attribute, $coverage, $id_warehouse = null) {
++
+         // gets all stock_mvt for the given coverage period
+         $query = '
+ 			SELECT SUM(view.quantity) as quantity_out
+@@ -856,19 +878,7 @@ public function getProductCoverage($id_product, $id_product_attribute, $coverage
+ 				GROUP BY sm.`id_stock_mvt`
+ 			) as view';
+ 
+-        $quantity_out = Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue($query);
+-        if (!$quantity_out) {
+-            return -1;
+-        }
+-
+-        $quantity_per_day = $quantity_out / $coverage;
+-        $physical_quantity = $this->getProductPhysicalQuantities($id_product,
+-                                                                 $id_product_attribute,
+-                                                                 ($id_warehouse ? array($id_warehouse) : null),
+-                                                                 true);
+-        $time_left = ($quantity_per_day == 0) ? (-1) : Tools::ps_round($physical_quantity / $quantity_per_day);
+-
+-        return $time_left;
++        return Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue($query);
+     }
+ 
+     /**
+diff --git a/classes/stock/StockManagerInterface.php b/classes/stock/StockManagerInterface.php
+index edefe3df44c11..5d681d5f36ae6 100644
+--- a/classes/stock/StockManagerInterface.php
++++ b/classes/stock/StockManagerInterface.php
+@@ -135,4 +135,16 @@ public function transferBetweenWarehouses($id_product, $id_product_attribute, $q
+      * @return int time
+      */
+     public function getProductCoverage($id_product, $id_product_attribute, $coverage, $id_warehouse = null);
++
++    /**
++     * For a given product, returns the number of products sold for the the given coverage period.
++     * By default, for the given product, it will use sum(quantities removed in all warehouses)
++     *
++     * @param int $id_product
++     * @param int $id_product_attribute
++     * @param int $coverage
++     * @param int|null $id_warehouse Optional
++     * @return int Number of products sold over the coverage period
++     */
++    public function getProductOutForCoverage($id_product, $id_product_attribute, $coverage, $id_warehouse = null);
+ }
+diff --git a/controllers/admin/AdminStockCoverController.php b/controllers/admin/AdminStockCoverController.php
+index ffb92687f8234..3d35a85c5ce05 100644
+--- a/controllers/admin/AdminStockCoverController.php
++++ b/controllers/admin/AdminStockCoverController.php
+@@ -365,20 +365,12 @@ protected function getCurrentWarning()
+      */
+     protected function getQuantitySold($id_product, $id_product_attribute, $coverage)
+     {
+-        $query = new DbQuery();
+-        $query->select('SUM(od.product_quantity)');
+-        $query->from('order_detail', 'od');
+-        $query->leftJoin('orders', 'o', 'od.id_order = o.id_order');
+-        $query->leftJoin('order_history', 'oh', 'o.date_upd = oh.date_add');
+-        $query->leftJoin('order_state', 'os', 'os.id_order_state = oh.id_order_state');
+-        $query->where('od.product_id = '.(int)$id_product);
+-        $query->where('od.product_attribute_id = '.(int)$id_product_attribute);
+-        $query->where('TO_DAYS("'.date('Y-m-d').' 00:00:00") - TO_DAYS(oh.date_add) <= '.(int)$coverage);
+-        $query->where('o.valid = 1');
+-        $query->where('os.logable = 1 AND os.delivery = 1 AND os.shipped = 1');
+-
+-        $quantity = Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue($query);
+-        return $quantity;
++        return StockManagerFactory::getManager()->getProductOutForCoverage(
++                $id_product,
++                $id_product_attribute,
++                $coverage,
++                (($this->getCurrentCoverageWarehouse() == -1) ? null : Tools::getValue('id_warehouse', -1))
++        );
+     }
+     
+     public function initContent()

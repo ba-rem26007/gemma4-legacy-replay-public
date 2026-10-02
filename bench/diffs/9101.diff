@@ -1,0 +1,87 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index c2b3c4673d6a6..2dc26c987f81e 100755
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -317,9 +317,20 @@ public static function haveCartRuleToday($idCustomer)
+         static $haveCartRuleToday = array();
+ 
+         if (!isset($haveCartRuleToday[$idCustomer])) {
+-            $sql = 'SELECT 1 FROM `' . _DB_PREFIX_ . 'cart_rule` ' .
+-                 'WHERE NOW() BETWEEN date_from AND date_to '.
+-                 'AND `id_customer` IN (0,' . (int)$idCustomer . ') LIMIT 1';
++            $sql = '(SELECT 1 FROM `' . _DB_PREFIX_ . 'cart_rule` ' .
++                'WHERE date_to >= "' . date('Y-m-d 00:00:00') .
++                '" AND date_to <= "' . date('Y-m-d 23:59:59') .
++                '" AND `id_customer` IN (0,' . (int)$idCustomer . ') LIMIT 1)';
++
++            $sql .= 'UNION ALL (SELECT 1 FROM `' . _DB_PREFIX_ . 'cart_rule` ' .
++                'WHERE date_from >= "' . date('Y-m-d 00:00:00') .
++                '" AND date_from <= "' . date('Y-m-d 23:59:59') .
++                '" AND `id_customer` IN (0,' . (int)$idCustomer . ') LIMIT 1)';
++
++            $sql .= 'UNION ALL (SELECT 1 FROM `' . _DB_PREFIX_ . 'cart_rule` ' .
++                'WHERE date_from < "' . date('Y-m-d 00:00:00') .
++                '" AND date_to > "' . date('Y-m-d 23:59:59') .
++                '" AND `id_customer` IN (0,' . (int)$idCustomer . ') LIMIT 1) LIMIT 1';
+ 
+             $haveCartRuleToday[$idCustomer] = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($sql);
+         }
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 4da0105f337c7..c3c1b472cd10a 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -208,7 +208,9 @@ CREATE TABLE `PREFIX_cart_rule` (
+ 	KEY `id_customer` (`id_customer`, `active`, `date_to`),
+ 	KEY `group_restriction` (`group_restriction`, `active`, `date_to`),
+ 	KEY `id_customer_2` (`id_customer`,`active`,`highlight`,`date_to`),
+-  KEY `group_restriction_2` (`group_restriction`,`active`,`highlight`,`date_to`)
++  KEY `group_restriction_2` (`group_restriction`,`active`,`highlight`,`date_to`),
++  KEY `date_from` (`date_from`),
++  KEY `date_to` (`date_to`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8 COLLATION;
+ 
+ /* Localized name assocatied with a promo code */
+diff --git a/install-dev/upgrade/sql/1.7.4.1.sql b/install-dev/upgrade/sql/1.7.4.1.sql
+new file mode 100644
+index 0000000000000..43aa3923a7b8b
+--- /dev/null
++++ b/install-dev/upgrade/sql/1.7.4.1.sql
+@@ -0,0 +1,4 @@
++SET SESSION sql_mode = '';
++SET NAMES 'utf8';
++
++ALTER TABLE `PREFIX_cart_rule` ADD KEY `date_from` (`date_from`), ADD KEY `date_to` (`date_to`);
+\ No newline at end of file
+diff --git a/tests/Unit/Core/Cart/AbstractCartTest.php b/tests/Unit/Core/Cart/AbstractCartTest.php
+index 54119850e6128..9f58ccc13723b 100644
+--- a/tests/Unit/Core/Cart/AbstractCartTest.php
++++ b/tests/Unit/Core/Cart/AbstractCartTest.php
+@@ -274,7 +274,7 @@ protected function insertCartRule($cartRuleFixtureId, $cartRuleData)
+         }
+         $now = new DateTime();
+         // sub 1s to avoid bad comparisons with strictly greater than
+-        $now->sub(new DateInterval('PT1S'));
++        $now->sub(new DateInterval('P2D'));
+         $cartRule->date_from = $now->format('Y-m-d H:i:s');
+         $now->add(new DateInterval('P1Y'));
+         $cartRule->date_to = $now->format('Y-m-d H:i:s');
+diff --git a/tests/Unit/Core/Cart/Adding/CartRule/AddRuleTest.php b/tests/Unit/Core/Cart/Adding/CartRule/AddRuleTest.php
+index a0b8756f7b3eb..ae033923ae84f 100644
+--- a/tests/Unit/Core/Cart/Adding/CartRule/AddRuleTest.php
++++ b/tests/Unit/Core/Cart/Adding/CartRule/AddRuleTest.php
+@@ -29,6 +29,7 @@
+ use Cart;
+ use Configuration;
+ use Tests\Unit\Core\Cart\AbstractCartTest;
++use CartRule;
+ 
+ class AddRuleTest extends AbstractCartTest
+ {
+@@ -76,6 +77,7 @@ public function testCartRuleValidity(
+             $this->cart->addCartRule($cartRule->id);
+         }
+         $this->assertEquals($shouldRulesBeApplied, $result);
++        $this->assertTrue(CartRule::haveCartRuleToday(0));
+         $this->assertEquals($expectedProductCountAfterRules, Cart::getNbProducts($this->cart->id));
+     }
+ 

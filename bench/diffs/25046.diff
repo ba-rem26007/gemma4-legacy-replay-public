@@ -1,0 +1,152 @@
+diff --git a/admin-dev/themes/default/js/tree.js b/admin-dev/themes/default/js/tree.js
+index 05dc9e3c0e4b5..849b72a7c517e 100644
+--- a/admin-dev/themes/default/js/tree.js
++++ b/admin-dev/themes/default/js/tree.js
+@@ -173,18 +173,25 @@ Tree.prototype = {
+ 
+       const useCheckBox = inputType === 'checkbox' ? 1 : 0;
+ 
++      const data = {
++        controller: 'AdminProducts',
++        token: currentToken,
++        action: 'getCategoryTree',
++        type: idTree,
++        fullTree: 1,
++        selected,
++        inputName: name,
++        useCheckBox,
++      };
++
++      // Fetch the first category of the select
++      if (selected.length > 0) {
++        data.category = selected[0];
++      }
++
+       $.get(
+         'ajax-tab.php',
+-        {
+-          controller: 'AdminProducts',
+-          token: currentToken,
+-          action: 'getCategoryTree',
+-          type: idTree,
+-          fullTree: 1,
+-          selected,
+-          inputName: name,
+-          useCheckBox,
+-        },
++        data,
+         (content) => {
+           targetTree.html(content);
+           targetTree.tree('init');
+diff --git a/classes/Category.php b/classes/Category.php
+index 5f890492d4bd4..996d3f9429628 100644
+--- a/classes/Category.php
++++ b/classes/Category.php
+@@ -1107,7 +1107,7 @@ public static function getRootCategory($idLang = null, Shop $shop = null)
+             return new Category($shop->getCategory(), $idLang);
+         }
+         $isMoreThanOneRootCategory = count(Category::getCategoriesWithoutParent()) > 1;
+-        if (Shop::isFeatureActive() && $isMoreThanOneRootCategory && Shop::getContext() != Shop::CONTEXT_SHOP) {
++        if (Shop::isFeatureActive() && $isMoreThanOneRootCategory) {
+             $category = Category::getTopCategory($idLang);
+         } else {
+             $category = new Category($shop->getCategory(), $idLang);
+diff --git a/classes/helper/HelperTreeCategories.php b/classes/helper/HelperTreeCategories.php
+index 3eb91a8db59ca..27f978c5ae530 100644
+--- a/classes/helper/HelperTreeCategories.php
++++ b/classes/helper/HelperTreeCategories.php
+@@ -256,6 +256,13 @@ public function getRootCategory()
+         return $this->_root_category;
+     }
+ 
++    /**
++     * @param array<int> $value
++     *
++     * @return self
++     *
++     * @throws PrestaShopException
++     */
+     public function setSelectedCategories($value)
+     {
+         if (!is_array($value)) {
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
+index dec9cbf971398..6b928351d19b3 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
+@@ -26,6 +26,7 @@
+ 
+ namespace PrestaShopBundle\Controller\Admin\Sell\Catalog;
+ 
++use Category;
+ use Exception;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Command\BulkDeleteCategoriesCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Command\BulkDisableCategoriesCommand;
+@@ -88,7 +89,7 @@ public function indexAction(Request $request, CategoryFilters $filters)
+     {
+         $categoriesKpiFactory = $this->get('prestashop.core.kpi_row.factory.categories');
+ 
+-        $currentCategoryId = $filters->getFilters()['id_category_parent'];
++        $currentCategoryId = (int) $filters->getFilters()['id_category_parent'];
+         $categoryViewDataProvider = $this->get('prestashop.adapter.category.category_view_data_provider');
+         $categoryViewData = $categoryViewDataProvider->getViewData($currentCategoryId);
+ 
+@@ -100,7 +101,7 @@ public function indexAction(Request $request, CategoryFilters $filters)
+         $categoryGridFactory = $this->get('prestashop.core.grid.factory.category_decorator');
+         $categoryGrid = $categoryGridFactory->getGrid($filters);
+ 
+-        $deleteCategoriesForm = $this->createForm(DeleteCategoriesType::class, ['categories_to_delete_parent' => (int) $currentCategoryId], []);
++        $deleteCategoriesForm = $this->createForm(DeleteCategoriesType::class, ['categories_to_delete_parent' => $currentCategoryId], []);
+ 
+         $showcaseCardIsClosed = $this->getQueryBus()->handle(
+             new GetShowcaseCardIsClosed((int) $this->getContext()->employee->id, ShowcaseCard::CATEGORIES_CARD)
+@@ -111,7 +112,7 @@ public function indexAction(Request $request, CategoryFilters $filters)
+             'enableSidebar' => true,
+             'categoriesGrid' => $this->presentGrid($categoryGrid),
+             'categoriesKpi' => $categoriesKpiFactory->build(),
+-            'layoutHeaderToolbarBtn' => $this->getCategoryToolbarButtons($request),
++            'layoutHeaderToolbarBtn' => $this->getCategoryToolbarButtons($request, $currentCategoryId),
+             'currentCategoryView' => $categoryViewData,
+             'deleteCategoriesForm' => $deleteCategoriesForm->createView(),
+             'isSingleShopContext' => $this->get('prestashop.adapter.shop.context')->isSingleShopContext(),
+@@ -802,10 +803,11 @@ private function formatCategoriesTreeForPresentation(array $categoriesTree, int
+ 
+     /**
+      * @param Request $request
++     * @param int $categoryId
+      *
+      * @return array
+      */
+-    private function getCategoryToolbarButtons(Request $request)
++    private function getCategoryToolbarButtons(Request $request, int $categoryId): array
+     {
+         $toolbarButtons = [];
+ 
+@@ -817,16 +819,22 @@ private function getCategoryToolbarButtons(Request $request)
+             ];
+         }
+ 
+-        $categoryId = $request->attributes->get('categoryId');
++        if ($categoryId === 0) {
++            $categoryId = $request->attributes->get('categoryId');
++        }
+         if (empty($categoryId)) {
+             $categoryId = $this->configuration->getInt('PS_HOME_CATEGORY');
+         }
+ 
+-        $toolbarButtons['add'] = [
+-            'href' => $this->generateUrl('admin_categories_create', ['id_parent' => $categoryId]),
+-            'desc' => $this->trans('Add new category', 'Admin.Catalog.Feature'),
+-            'icon' => 'add_circle_outline',
+-        ];
++        // Display the button "Add new category" if the current category is not a root category
++        $category = new Category($categoryId);
++        if (!$category->isRootCategory()) {
++            $toolbarButtons['add'] = [
++                'href' => $this->generateUrl('admin_categories_create', ['id_parent' => $categoryId]),
++                'desc' => $this->trans('Add new category', 'Admin.Catalog.Feature'),
++                'icon' => 'add_circle_outline',
++            ];
++        }
+ 
+         return $toolbarButtons;
+     }

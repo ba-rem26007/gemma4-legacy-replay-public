@@ -1,0 +1,86 @@
+diff --git a/install-dev/upgrade/php/ps_1770_preset_tab_enabled.php b/install-dev/upgrade/php/ps_1770_preset_tab_enabled.php
+index eefb5cdd63fd0..4b9ab8c895d85 100644
+--- a/install-dev/upgrade/php/ps_1770_preset_tab_enabled.php
++++ b/install-dev/upgrade/php/ps_1770_preset_tab_enabled.php
+@@ -29,8 +29,8 @@
+  */
+ function ps_1770_preset_tab_enabled() {
+     //First set all tabs enabled
+-    Db::getInstance()->execute(
+-        'UPDATE `'._DB_PREFIX_.'tab` SET `enabled`= 1'
++    $result = Db::getInstance()->execute(
++        'UPDATE `'._DB_PREFIX_.'tab` SET `enabled` = 1'
+     );
+ 
+     //Then search for inactive modules and disable their tabs
+@@ -41,7 +41,11 @@ function ps_1770_preset_tab_enabled() {
+     foreach ($inactiveModules as $inactiveModule) {
+         $moduleNames[] = $inactiveModule['name'];
+     }
+-    Db::getInstance()->execute(
+-        'UPDATE `'._DB_PREFIX_.'tab` SET `enabled`= 0 WHERE `module` IN (' . implode(',', $moduleNames) . ')'
+-    );
++    if (count($moduleNames) > 0) {
++        $result &= Db::getInstance()->execute(
++            'UPDATE `'._DB_PREFIX_.'tab` SET `enabled` = 0 WHERE `module` IN (' . implode(',', $moduleNames) . ')'
++        );
++    }
++
++    return $result;
+ }
+diff --git a/install-dev/upgrade/sql/1.7.7.0.sql b/install-dev/upgrade/sql/1.7.7.0.sql
+index b3edcaf42a94a..4029ae6ae7231 100644
+--- a/install-dev/upgrade/sql/1.7.7.0.sql
++++ b/install-dev/upgrade/sql/1.7.7.0.sql
+@@ -24,7 +24,6 @@ ALTER TABLE `PREFIX_hook` CHANGE `title` `title` VARCHAR(255) NOT NULL;
+ ALTER TABLE `PREFIX_hook_alias` CHANGE `name` `name` VARCHAR(191) NOT NULL;
+ ALTER TABLE `PREFIX_hook_alias` CHANGE `alias` `alias` VARCHAR(191) NOT NULL;
+ 
+-
+ /* Utf8mb4 conversion */
+ ALTER TABLE `PREFIX_access` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_accessory` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+@@ -514,4 +513,6 @@ ALTER TABLE `PREFIX_web_browser` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb
+ ALTER TABLE `PREFIX_zone` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ ALTER TABLE `PREFIX_zone_shop` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+ 
+-/* PHP:ps_1770_preset_tab_enabled(); */
++/* Doctrine update happens too late to update the new enabled field, so we preset everything here */
++ALTER TABLE `PREFIX_tab` ADD enabled TINYINT(1) NOT NULL;
++/* PHP:ps_1770_preset_tab_enabled(); */;
+diff --git a/src/PrestaShopBundle/Install/Upgrade.php b/src/PrestaShopBundle/Install/Upgrade.php
+index 0759700d22370..7e487890f373d 100644
+--- a/src/PrestaShopBundle/Install/Upgrade.php
++++ b/src/PrestaShopBundle/Install/Upgrade.php
+@@ -110,6 +110,7 @@ class Upgrade
+ 
+         const FILE_PREFIX = 'PREFIX_';
+         const ENGINE_TYPE = 'ENGINE_TYPE';
++        const DB_NAME = 'DB_NAME';
+ 
+         private static $classes14 = ['Cache', 'CacheFS', 'CarrierModule', 'Db', 'FrontController', 'Helper', 'ImportModule',
+             'MCached', 'Module', 'ModuleGraph', 'ModuleGraphEngine', 'ModuleGrid', 'ModuleGridEngine',
+@@ -420,7 +421,7 @@ private function getSQLFiles()
+                         $this->logError('Error while loading SQL upgrade file "%file%.sql".', 33, array('%file%' => $version));
+                     }
+                     $sqlContent .= "\n";
+-                    $sqlContent = str_replace(array(self::FILE_PREFIX, self::ENGINE_TYPE), array(_DB_PREFIX_, $mysqlEngine), $sqlContent);
++                    $sqlContent = str_replace(array(self::FILE_PREFIX, self::ENGINE_TYPE, self::DB_NAME), array(_DB_PREFIX_, $mysqlEngine, _DB_NAME_), $sqlContent);
+                     $sqlContent = preg_split("/;\s*[\r\n]+/", $sqlContent);
+ 
+                     $sqlContentVersion[$version] = $sqlContent;
+diff --git a/tools/build/Library/ReleaseCreator.php b/tools/build/Library/ReleaseCreator.php
+index 3e87ef912a86c..eff2270e35e27 100644
+--- a/tools/build/Library/ReleaseCreator.php
++++ b/tools/build/Library/ReleaseCreator.php
+@@ -352,8 +352,8 @@ protected function setConfigDefinesConstants()
+     {
+         $configDefinesPath = $this->tempProjectPath . '/config/defines.inc.php';
+         $configDefinesContent = file_get_contents($configDefinesPath);
+-        $configDefinesNewContent = preg_replace('/(.*(define).*)_PS_MODE_DEV_(.*);/Ui', 'define(\'_PS_MODE_DEV_\', false);', $configDefinesContent);
+-        $configDefinesNewContent = preg_replace('/(.*)_PS_DISPLAY_COMPATIBILITY_WARNING_(.*);/Ui', 'define(\'_PS_DISPLAY_COMPATIBILITY_WARNING_\', false);', $configDefinesNewContent);
++        $configDefinesNewContent = preg_replace('/(.*(define).*)["\']_PS_MODE_DEV_["\'](.*);/Ui', 'define(\'_PS_MODE_DEV_\', false);', $configDefinesContent);
++        $configDefinesNewContent = preg_replace('/(.*)["\']_PS_DISPLAY_COMPATIBILITY_WARNING_["\'](.*);/Ui', 'define(\'_PS_DISPLAY_COMPATIBILITY_WARNING_\', false);', $configDefinesNewContent);
+ 
+         if (!file_put_contents($configDefinesPath, $configDefinesNewContent)) {
+             throw new BuildException("Unable to update contents of '$configDefinesPath'");

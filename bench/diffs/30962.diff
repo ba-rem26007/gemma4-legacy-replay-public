@@ -1,0 +1,54 @@
+diff --git a/classes/controller/AdminController.php b/classes/controller/AdminController.php
+index 214388a9f9b82..480d0086022af 100644
+--- a/classes/controller/AdminController.php
++++ b/classes/controller/AdminController.php
+@@ -33,6 +33,7 @@
+ use PrestaShop\PrestaShop\Core\Localization\Specification\Number as NumberSpecification;
+ use PrestaShop\PrestaShop\Core\Localization\Specification\Price as PriceSpecification;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
++use Symfony\Component\Routing\Exception\RouteNotFoundException;
+ 
+ class AdminControllerCore extends Controller
+ {
+@@ -2140,7 +2141,23 @@ private function getTabs($parentId = 0, $level = 0)
+                 $tabs[$index]['current'] = false;
+             }
+             $tabs[$index]['img'] = null;
+-            $tabs[$index]['href'] = $this->context->link->getTabLink($tab);
++            try {
++                $tabs[$index]['href'] = $this->context->link->getTabLink($tab);
++            } catch (RouteNotFoundException $e) {
++                // If the route specified is not accessible we remove the tab (it can happen during module install process
++                // the route should be usable in next request/process once the cache has been cleared - on process shutdown).
++                // This is not ideal, but clearing the cache during a process and restart the whole kernel is quite a challenge.
++                $this->get('logger')->addWarning(
++                    sprintf('Route not found in one of the Tab %s', $tab['route_name'] ?? ''),
++                    [
++                        'message' => $e->getMessage(),
++                        'file' => $e->getFile(),
++                        'line' => $e->getLine(),
++                    ]
++                );
++                unset($tabs[$index]);
++                continue;
++            }
+             $tabs[$index]['sub_tabs'] = array_values($this->getTabs($tab['id_tab'], $level + 1));
+ 
+             $subTabHref = $this->getTabLinkFromSubTabs($tabs[$index]['sub_tabs']);
+diff --git a/src/Core/Module/ModuleManager.php b/src/Core/Module/ModuleManager.php
+index e77b7803edd4b..bf999d5f676a6 100644
+--- a/src/Core/Module/ModuleManager.php
++++ b/src/Core/Module/ModuleManager.php
+@@ -110,7 +110,11 @@ public function install(string $name, $source = null): bool
+ 
+         $module = $this->moduleRepository->getModule($name);
+         $installed = $module->onInstall();
+-        $this->dispatch(ModuleManagementEvent::INSTALL, $module);
++        if ($installed) {
++            // Only trigger install event if install has succeeded otherwise it could automatically add tabs linked to a
++            // module not installed (@see ModuleTabManagementSubscriber) or other unwanted automatic actions.
++            $this->dispatch(ModuleManagementEvent::INSTALL, $module);
++        }
+ 
+         return $installed;
+     }

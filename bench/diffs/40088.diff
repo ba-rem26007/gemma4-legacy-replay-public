@@ -1,0 +1,600 @@
+diff --git a/composer.json b/composer.json
+index 1c795f1ff09c8..153f4ff32732a 100644
+--- a/composer.json
++++ b/composer.json
+@@ -72,7 +72,7 @@
+         "prestashop/hummingbird": "^1.0.1",
+         "prestashop/pagesnotfound": "^2",
+         "prestashop/productcomments": "^7.0",
+-        "prestashop/ps_apiresources": "dev-dev",
++        "prestashop/ps_apiresources": "dev-product-categories",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -212,7 +212,7 @@
+         },
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/PrestaShop/ps_apiresources"
++            "url": "https://github.com/jolelievre/ps_apiresources"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 2ec668eb0b73f..0db46a8f3350a 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "01030ac3c9fe67217e8b7682a6d3b099",
++    "content-hash": "c9e0c9e40adf5bae89118d1d10313c8d",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5261,16 +5261,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "dev-dev",
++            "version": "dev-product-categories",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/PrestaShop/ps_apiresources.git",
+-                "reference": "66f06b2442cb8af76a3fb34749c2d24b41dc9c24"
++                "url": "https://github.com/jolelievre/ps_apiresources.git",
++                "reference": "a5192780cc5cb98a7ac449144bb8f89a7d0e9e30"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/66f06b2442cb8af76a3fb34749c2d24b41dc9c24",
+-                "reference": "66f06b2442cb8af76a3fb34749c2d24b41dc9c24",
++                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/a5192780cc5cb98a7ac449144bb8f89a7d0e9e30",
++                "reference": "a5192780cc5cb98a7ac449144bb8f89a7d0e9e30",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5284,7 +5284,6 @@
+                 "prestashop/php-dev-tools": "^4.3",
+                 "rector/rector": "^2.0"
+             },
+-            "default-branch": true,
+             "type": "prestashop-module",
+             "autoload": {
+                 "psr-4": {
+@@ -5335,9 +5334,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/PrestaShop/ps_apiresources/tree/dev"
++                "source": "https://github.com/jolelievre/ps_apiresources/tree/product-categories"
+             },
+-            "time": "2025-11-21T15:46:55+00:00"
++            "time": "2025-11-25T11:38:01+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+diff --git a/src/PrestaShopBundle/ApiPlatform/NormalizationMapper.php b/src/PrestaShopBundle/ApiPlatform/NormalizationMapper.php
+index a4c813ee0019a..e1c469611814d 100644
+--- a/src/PrestaShopBundle/ApiPlatform/NormalizationMapper.php
++++ b/src/PrestaShopBundle/ApiPlatform/NormalizationMapper.php
+@@ -26,8 +26,10 @@
+ 
+ namespace PrestaShopBundle\ApiPlatform;
+ 
++use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ use Symfony\Component\PropertyAccess\PropertyAccess;
+ use Symfony\Component\PropertyAccess\PropertyAccessorInterface;
++use Symfony\Component\PropertyAccess\PropertyPath;
+ 
+ class NormalizationMapper
+ {
+@@ -67,6 +69,9 @@ public function mapNormalizedData(mixed &$normalizedData, array &$context): void
+             return;
+         }
+ 
++        // Update mapping when it contains indexes placeholders
++        $this->updateMappingIndexes($normalizedData, $normalizationMapping);
++
+         foreach ($normalizationMapping as $originPath => $targetPath) {
+             if ($this->propertyAccessor->isReadable($normalizedData, $originPath) && $this->propertyAccessor->isWritable($normalizedData, $targetPath)) {
+                 $this->propertyAccessor->setValue($normalizedData, $targetPath, $this->propertyAccessor->getValue($normalizedData, $originPath));
+@@ -76,4 +81,91 @@ public function mapNormalizedData(mixed &$normalizedData, array &$context): void
+         // Mapping is only done once, so we unset it for next recursive calls
+         unset($context[self::NORMALIZATION_MAPPING]);
+     }
++
++    /**
++     * Update normalization mapping when it contains indexes, for example:
++     *
++     *     '[categoriesInformation][categoriesInformation][@index][id]' => '[categories][@index][categoryId]',
++     *
++     * is transformed into:
++     *
++     *     '[categoriesInformation][categoriesInformation][0][id]' => '[categories][0][categoryId]',
++     *     '[categoriesInformation][categoriesInformation][1][id]' => '[categories][1][categoryId]',
++     *
++     * depending on the computed array length from the normalized data.
++     */
++    protected function updateMappingIndexes(mixed $normalizedData, array &$normalizationMapping): void
++    {
++        // Copy mapping that will  be modified by reference, to leave the loop one untouched while we do modifications
++        $updatedNormalizationMapping = $normalizationMapping;
++        foreach ($updatedNormalizationMapping as $originPath => $targetPath) {
++            $this->transformMappingPath($normalizedData, $originPath, $targetPath, $normalizationMapping);
++        }
++    }
++
++    /**
++     * Transform one of the mapping path if it contains indexes, the original path containing placeholders is cleaned.
++     */
++    protected function transformMappingPath(mixed $normalizedData, string $originPath, string $targetPath, array &$normalizationMapping): void
++    {
++        $propertyPath = new PropertyPath($originPath);
++        $indexes = [];
++        for ($i = 0; $i < $propertyPath->getLength(); ++$i) {
++            $property = $propertyPath->getElement($i);
++            if (in_array($property, $indexes)) {
++                throw new InvalidArgumentException(sprintf('You cannot use the same index twice %s', $property));
++            }
++
++            if (str_starts_with($property, '@')) {
++                $indexes[] = $property;
++            }
++        }
++
++        // No indexes detected nothing to do
++        if (empty($indexes)) {
++            return;
++        }
++
++        foreach ($indexes as $index) {
++            $this->computeMappingIndex($propertyPath, $index, $normalizedData, $originPath, $targetPath, $normalizationMapping);
++        }
++
++        // Remove the generic one with index placeholders, and then the job is done
++        unset($normalizationMapping[$originPath]);
++    }
++
++    /**
++     * Dive through the data following a property path, when the path segment matching $indexPlaceholder is reached we
++     * compute the length of the current array level and generate a mapping path for each element.
++     */
++    protected function computeMappingIndex(PropertyPath $propertyPath, string $indexPlaceholder, mixed $normalizedData, string $originPath, string $targetPath, array &$normalizationMapping): void
++    {
++        $data = $normalizedData;
++        for ($elementIndex = 0; $elementIndex < $propertyPath->getLength(); ++$elementIndex) {
++            $property = $propertyPath->getElement($elementIndex);
++            // We reached the path segment containing the index placeholder
++            if ($property === $indexPlaceholder) {
++                // We can only transform indexes for arrays
++                if (!is_array($data)) {
++                    return;
++                }
++
++                // Build new mapping with hard-coded indexes
++                for ($index = 0; $index < count($data); ++$index) {
++                    $originIndexPath = str_replace($indexPlaceholder, (string) $index, $originPath);
++                    $targetIndexPath = str_replace($indexPlaceholder, (string) $index, $targetPath);
++                    $normalizationMapping[$originIndexPath] = $targetIndexPath;
++                }
++
++                return;
++            } else {
++                // We keep diving into the data
++                $subPath = $propertyPath->isIndex($elementIndex) ? '[' . $property . ']' : '.' . $property;
++                if (!$this->propertyAccessor->isReadable($data, $subPath)) {
++                    return;
++                }
++                $data = $this->propertyAccessor->getValue($data, $subPath);
++            }
++        }
++    }
+ }
+diff --git a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+index ef6fe0141a991..9630c2e91d6b3 100644
+--- a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
++++ b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+@@ -443,6 +443,34 @@ public static function provideJsonSchemaFactoryCases(): iterable
+                         'items' => ['type' => 'integer'],
+                         'example' => [1, 3],
+                     ]),
++                    // Categories use @index replacement, but their definition uses an ApiProperty
++                    'categories' => new ArrayObject([
++                        'type' => 'array',
++                        'items' => [
++                            'type' => 'object',
++                            'properties' => [
++                                'categoryId' => [
++                                    'type' => 'integer',
++                                ],
++                                'name' => [
++                                    'type' => 'string',
++                                ],
++                                'displayName' => [
++                                    'type' => 'string',
++                                ],
++                            ],
++                        ],
++                        'example' => [
++                            [
++                                'categoryId' => 2,
++                                'name' => 'Home',
++                                'displayName' => 'Home',
++                            ],
++                        ],
++                    ]),
++                    'defaultCategoryId' => new ArrayObject([
++                        'type' => 'integer',
++                    ]),
+                 ],
+             ]),
+         ];
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_product/06_patchProductIdShops.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_product/06_patchProductIdShops.ts
+index 314fc11ebdf37..8654a92cb3be6 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_product/06_patchProductIdShops.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_product/06_patchProductIdShops.ts
+@@ -214,8 +214,10 @@ describe('API : PATCH /products/{productId}/shops', async () => {
+           'availableLaterLabels',
+           'availableNowLabels',
+           'carrierReferenceIds',
++          'categories',
+           'condition',
+           'coverThumbnailUrl',
++          'defaultCategoryId',
+           'deliveryTimeInStockNotes',
+           'deliveryTimeNoteType',
+           'deliveryTimeOutOfStockNotes',
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_product/08_getProductId.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_product/08_getProductId.ts
+index 371113d411f18..2035e277746c5 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_product/08_getProductId.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_product/08_getProductId.ts
+@@ -158,8 +158,10 @@ describe('API : GET /products/{productId}', async () => {
+         'availableLaterLabels',
+         'availableNowLabels',
+         'carrierReferenceIds',
++        'categories',
+         'condition',
+         'coverThumbnailUrl',
++        'defaultCategoryId',
+         'deliveryTimeInStockNotes',
+         'deliveryTimeNoteType',
+         'deliveryTimeOutOfStockNotes',
+@@ -260,5 +262,28 @@ describe('API : GET /products/{productId}', async () => {
+       expect(jsonResponse.shopIds[0]).to.be.a('number');
+       expect(jsonResponse.shopIds[0]).to.be.equal(1);
+     });
++
++    it('should check the JSON Response : `categories`', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkResponseCategories', baseContext);
++
++      expect(jsonResponse).to.have.property('categories');
++      expect(jsonResponse.categories).to.be.a('array');
++      expect(jsonResponse.categories.length).to.be.greaterThan(0);
++      expect(jsonResponse.categories[0]).to.be.a('object');
++
++      // We don't need to check then context, mostly the structure itself
++      const productCategory = jsonResponse.categories[0];
++      expect(productCategory.categoryId).to.be.a('number');
++      expect(productCategory.name).to.be.a('string');
++      expect(productCategory.displayName).to.be.a('string');
++    });
++
++    it('should check the JSON Response : `defaultCategoryId`', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkResponseDefaultCategoryId', baseContext);
++
++      expect(jsonResponse).to.have.property('defaultCategoryId');
++      expect(jsonResponse.defaultCategoryId).to.be.a('number');
++      expect(jsonResponse.defaultCategoryId).to.be.greaterThan(0);
++    });
+   });
+ });
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_product/09_patchProductId.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_product/09_patchProductId.ts
+index 8e0e75aba658b..8cbd9e1f633eb 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_product/09_patchProductId.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_product/09_patchProductId.ts
+@@ -357,8 +357,10 @@ describe('API : PATCH /products/{productId}', async () => {
+             'availableLaterLabels',
+             'availableNowLabels',
+             'carrierReferenceIds',
++            'categories',
+             'condition',
+             'coverThumbnailUrl',
++            'defaultCategoryId',
+             'deliveryTimeInStockNotes',
+             'deliveryTimeNoteType',
+             'deliveryTimeOutOfStockNotes',
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_product/10_postProduct.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_product/10_postProduct.ts
+index 2d654f81d7c9d..ba8350475e7f7 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_product/10_postProduct.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_product/10_postProduct.ts
+@@ -83,9 +83,11 @@ describe('API : POST /products', async () => {
+         'availableForOrder',
+         'availableLaterLabels',
+         'availableNowLabels',
++        'categories',
+         'carrierReferenceIds',
+         'condition',
+         'coverThumbnailUrl',
++        'defaultCategoryId',
+         'deliveryTimeInStockNotes',
+         'deliveryTimeNoteType',
+         'deliveryTimeOutOfStockNotes',
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/NormalizationMapperTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/NormalizationMapperTest.php
+new file mode 100644
+index 0000000000000..24ce1a059c2dc
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/NormalizationMapperTest.php
+@@ -0,0 +1,271 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\ApiPlatform;
++
++use PHPUnit\Framework\TestCase;
++
++class NormalizationMapperTest extends TestCase
++{
++    /**
++     * @dataProvider getDataToMap
++     */
++    public function testNormalize(array $normalizedData, array $mapping, $expectedData): void
++    {
++        $normalizer = new NormalizationMapper();
++        $context = [NormalizationMapper::NORMALIZATION_MAPPING => $mapping];
++        $normalizer->mapNormalizedData($normalizedData, $context);
++        $this->assertEquals($expectedData, $normalizedData);
++    }
++
++    public function getDataToMap(): iterable
++    {
++        yield 'handle renaming of field names' => [
++            [
++                'isActive' => true,
++                'names' => [
++                    'en-US' => 'name',
++                    'fr-FR' => 'nom',
++                ],
++            ],
++            [
++                '[isActive]' => '[active]',
++                '[names]' => '[localizedNames]',
++            ],
++            [
++                'isActive' => true,
++                'active' => true,
++                'names' => [
++                    'en-US' => 'name',
++                    'fr-FR' => 'nom',
++                ],
++                'localizedNames' => [
++                    'en-US' => 'name',
++                    'fr-FR' => 'nom',
++                ],
++            ],
++        ];
++
++        yield 'handle renaming of more advanced data structure' => [
++            [
++                'basicInformation' => [
++                    'localizedNames' => [
++                        'en-US' => 'name',
++                        'fr-FR' => 'nom',
++                    ],
++                    'localizedDescriptions' => [
++                        'en-US' => 'description',
++                        'fr-FR' => 'description',
++                    ],
++                ],
++            ],
++            [
++                '[basicInformation][localizedNames]' => '[names]',
++                '[basicInformation][localizedDescriptions]' => '[descriptions]',
++            ],
++            [
++                'basicInformation' => [
++                    'localizedNames' => [
++                        'en-US' => 'name',
++                        'fr-FR' => 'nom',
++                    ],
++                    'localizedDescriptions' => [
++                        'en-US' => 'description',
++                        'fr-FR' => 'description',
++                    ],
++                ],
++                'names' => [
++                    'en-US' => 'name',
++                    'fr-FR' => 'nom',
++                ],
++                'descriptions' => [
++                    'en-US' => 'description',
++                    'fr-FR' => 'description',
++                ],
++            ],
++        ];
++
++        yield 'handle property path that include an index placeholder' => [
++            [
++                'categoriesInformation' => [
++                    'categoriesInformation' => [
++                        [
++                            'id' => 1,
++                            'name' => 'Category 1',
++                            'displayName' => 'Displayed category 1',
++                        ],
++                        [
++                            'id' => 14,
++                            'name' => 'Category 14',
++                            'displayName' => 'Displayed category 14',
++                        ],
++                    ],
++                ],
++            ],
++            [
++                '[categoriesInformation][categoriesInformation][@index][id]' => '[categories][@index][categoryId]',
++                '[categoriesInformation][categoriesInformation][@index][name]' => '[categories][@index][name]',
++                '[categoriesInformation][categoriesInformation][@index][displayName]' => '[categories][@index][displayName]',
++            ],
++            [
++                'categoriesInformation' => [
++                    'categoriesInformation' => [
++                        [
++                            'id' => 1,
++                            'name' => 'Category 1',
++                            'displayName' => 'Displayed category 1',
++                        ],
++                        [
++                            'id' => 14,
++                            'name' => 'Category 14',
++                            'displayName' => 'Displayed category 14',
++                        ],
++                    ],
++                ],
++                'categories' => [
++                    [
++                        'categoryId' => 1,
++                        'name' => 'Category 1',
++                        'displayName' => 'Displayed category 1',
++                    ],
++                    [
++                        'categoryId' => 14,
++                        'name' => 'Category 14',
++                        'displayName' => 'Displayed category 14',
++                    ],
++                ],
++            ],
++        ];
++
++        // Multiple index case is not handled yet, maybe an interesting improvement in the future if needed
++        /*yield 'handle property path that include multiple index placeholder' => [
++            [
++                'attributeGroups' => [
++                    'attributes' => [
++                        [
++                            'id' => 1,
++                            'name' => 'Attribute 1',
++                            'tags' => [
++                                [
++                                    'id' => 1,
++                                    'value' => 'tag 1',
++                                ],
++                            ],
++                        ],
++                        [
++                            'id' => 5,
++                            'name' => 'Attribute 5',
++                            'tags' => [
++                                [
++                                    'id' => 2,
++                                    'value' => 'tag 2',
++                                ],
++                                [
++                                    'id' => 8,
++                                    'value' => 'tag 8',
++                                ],
++                                [
++                                    'id' => 45,
++                                    'value' => 'tag 45',
++                                ],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++            [
++                '[attributeGroups][attributes][@attributeIndex][id]' => '[attributes][@attributeIndex][attributeId]',
++                '[attributeGroups][attributes][@attributeIndex][name]' => '[attributes][@attributeIndex][name]',
++                '[attributeGroups][attributes][@attributeIndex][tags][@tagIndex][id]' => '[attributes][@attributeIndex][tags][@tagIndex][tagId]',
++                '[attributeGroups][attributes][@attributeIndex][tags][@tagIndex][value]' => '[attributes][@attributeIndex][tags][@tagIndex][value]',
++            ],
++            [
++                'attributeGroups' => [
++                    'attributes' => [
++                        [
++                            'id' => 1,
++                            'name' => 'Attribute 1',
++                            'tags' => [
++                                [
++                                    'id' => 1,
++                                    'value' => 'tag 1',
++                                ],
++                            ],
++                        ],
++                        [
++                            'id' => 5,
++                            'name' => 'Attribute 5',
++                            'tags' => [
++                                [
++                                    'id' => 2,
++                                    'value' => 'tag 2',
++                                ],
++                                [
++                                    'id' => 8,
++                                    'value' => 'tag 8',
++                                ],
++                                [
++                                    'id' => 45,
++                                    'value' => 'tag 45',
++                                ],
++                            ],
++                        ],
++                    ],
++                ],
++                'attributes' => [
++                    [
++                        'attributeId' => 1,
++                        'name' => 'Attribute 1',
++                        'tags' => [
++                            [
++                                'tagId' => 1,
++                                'value' => 'tag 1',
++                            ],
++                        ],
++                    ],
++                    [
++                        'attributeId' => 5,
++                        'name' => 'Attribute 5',
++                        'tags' => [
++                            [
++                                'tagId' => 2,
++                                'value' => 'tag 2',
++                            ],
++                            [
++                                'tagId' => 8,
++                                'value' => 'tag 8',
++                            ],
++                            [
++                                'tagId' => 45,
++                                'value' => 'tag 45',
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++        ];*/
++    }
++}

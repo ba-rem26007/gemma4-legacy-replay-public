@@ -1,0 +1,561 @@
+diff --git a/app/config/admin-api/services.yml b/app/config/admin-api/services.yml
+index 8e3e9da3dddb7..d93b5c18b247b 100644
+--- a/app/config/admin-api/services.yml
++++ b/app/config/admin-api/services.yml
+@@ -49,6 +49,12 @@ services:
+     tags:
+       - { name: kernel.event_listener, event: kernel.request, method: onKernelRequest, priority: 5 }
+ 
++  # Wraps BulkCommandExceptionInterface in HttpException(207) so the FlattenException carries the correct status code.
++  # Must run BEFORE ApiPlatform ExceptionListener (priority -96).
++  PrestaShopBundle\EventListener\API\BulkCommandExceptionListener:
++    tags:
++      - { name: kernel.event_listener, event: kernel.exception, method: onKernelException, priority: -90 }
++
+   # SSL middleware
+   PrestaShopBundle\EventListener\API\SSLMiddlewareListener:
+     autowire: true
+@@ -60,6 +66,12 @@ services:
+   # Serializer modifications, the following services are automatically injected in the serializer Symfony service,
+   # to limit their impact on the Admin they are only defined for the API context.
+ 
++  # Normalizes BulkCommandExceptionInterface into a 207 Multi-Status response with the list of individual errors
++  PrestaShopBundle\ApiPlatform\Normalizer\BulkCommandExceptionNormalizer:
++    autowire: true
++    tags:
++      - { name: 'serializer.normalizer', priority: 100 }
++
+   # This normalizer disables the denormalization process of File fields
+   PrestaShopBundle\ApiPlatform\Normalizer\UploadedFileNormalizer:
+     autowire: true
+diff --git a/composer.json b/composer.json
+index dc18c8cf0fbdb..dd76d65b4103e 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/hummingbird": "^2.0",
+         "prestashop/pagesnotfound": "^3",
+         "prestashop/productcomments": "^8.0",
+-        "prestashop/ps_apiresources": "0.5.0",
++        "prestashop/ps_apiresources": "dev-fix-bulk-error-status-code",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -213,7 +213,7 @@
+         },
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/PrestaShop/ps_apiresources"
++            "url": "https://github.com/boherm/ps_apiresources"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 5f23946e806eb..87c3d8cd4b4e4 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "d093436d510292d38939f8f83b18d79d",
++    "content-hash": "5c37c613f9eeab7c56d7f8d701142033",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5208,16 +5208,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "v0.5.0",
++            "version": "dev-fix-bulk-error-status-code",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/PrestaShop/ps_apiresources.git",
+-                "reference": "9521020fbdbc3b8791b077f1af148e007a99dce1"
++                "url": "https://github.com/boherm/ps_apiresources.git",
++                "reference": "51be59ee995aa61dda4c0fe309c352da4c407221"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/9521020fbdbc3b8791b077f1af148e007a99dce1",
+-                "reference": "9521020fbdbc3b8791b077f1af148e007a99dce1",
++                "url": "https://api.github.com/repos/boherm/ps_apiresources/zipball/51be59ee995aa61dda4c0fe309c352da4c407221",
++                "reference": "51be59ee995aa61dda4c0fe309c352da4c407221",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5253,6 +5253,12 @@
+                     "@composer clear-test-cache",
+                     "@composer setup-local-tests -- --build-db"
+                 ],
++                "header-stamp": [
++                    "@php vendor/bin/header-stamp --license=vendor/prestashop/header-stamp/assets/afl.txt --exclude=vendor --dry-run"
++                ],
++                "header-stamp-fix": [
++                    "@php vendor/bin/header-stamp --license=vendor/prestashop/header-stamp/assets/afl.txt --exclude=vendor"
++                ],
+                 "run-module-tests": [
+                     "@php -d date.timezone=UTC ./vendor/bin/phpunit -c tests/Integration/phpunit-local.xml"
+                 ],
+@@ -5267,6 +5273,15 @@
+                 ],
+                 "rector-fix": [
+                     "vendor/bin/rector process"
++                ],
++                "phpstan": [
++                    "_PS_ROOT_DIR_=${_PS_ROOT_DIR_:?'Set _PS_ROOT_DIR_ to your PrestaShop installation path'} _PS_BRANCH_=${_PS_BRANCH_:?'Set _PS_BRANCH_ to 9.0.x|9.1.x|develop'} php -d memory_limit=-1 vendor/bin/phpstan analyse --configuration=tests/PHPStan/phpstan-${_PS_BRANCH_}.neon --no-progress"
++                ],
++                "phpstan-baseline": [
++                    "_PS_ROOT_DIR_=${_PS_ROOT_DIR_:?'Set _PS_ROOT_DIR_ to your PrestaShop installation path'} _PS_BRANCH_=${_PS_BRANCH_:?'Set _PS_BRANCH_ to 9.0.x|9.1.x|develop'} php -d memory_limit=-1 vendor/bin/phpstan analyse --configuration=tests/PHPStan/phpstan-${_PS_BRANCH_}.neon --no-progress --generate-baseline=tests/PHPStan/phpstan-${_PS_BRANCH_}-baseline.neon"
++                ],
++                "phpstan:docker": [
++                    "bash tests/phpstan.sh"
+                 ]
+             },
+             "license": [
+@@ -5281,10 +5296,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/PrestaShop/ps_apiresources/tree/v0.5.0",
+-                "issues": "https://github.com/PrestaShop/ps_apiresources/issues"
++                "source": "https://github.com/boherm/ps_apiresources/tree/fix-bulk-error-status-code"
+             },
+-            "time": "2026-02-18T13:38:08+00:00"
++            "time": "2026-03-18T09:54:23+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -18303,7 +18317,9 @@
+     ],
+     "aliases": [],
+     "minimum-stability": "dev",
+-    "stability-flags": {},
++    "stability-flags": {
++        "prestashop/ps_apiresources": 20
++    },
+     "prefer-stable": true,
+     "prefer-lowest": false,
+     "platform": {
+diff --git a/src/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizer.php b/src/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizer.php
+new file mode 100644
+index 0000000000000..bb4e3e7fd961d
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizer.php
+@@ -0,0 +1,119 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Normalizer;
++
++use ApiPlatform\Metadata\HttpOperation;
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use Symfony\Component\ErrorHandler\Exception\FlattenException;
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\Serializer\Normalizer\NormalizerInterface;
++use Throwable;
++
++/**
++ * Normalizes BulkCommandExceptionInterface errors into a multi-status response
++ * containing the list of individual errors that occurred during the bulk operation.
++ *
++ * In the API Platform error flow, the serializer receives a FlattenException which loses
++ * the original exception's getExceptions() data. The original BulkCommandExceptionInterface
++ * is retrieved from the request attributes where Symfony's ErrorListener stores it.
++ * It may be stored directly or as the previous exception of an HttpException wrapper
++ * (set by BulkCommandExceptionListener).
++ */
++class BulkCommandExceptionNormalizer implements NormalizerInterface
++{
++    public function __construct(
++        private readonly RequestStack $requestStack,
++    ) {
++    }
++
++    public function normalize(mixed $object, ?string $format = null, array $context = []): array
++    {
++        $bulkException = $this->getBulkException();
++        $exceptionToStatus = $this->getExceptionToStatus();
++
++        return [
++            'type' => get_class($bulkException),
++            'status' => Response::HTTP_MULTI_STATUS,
++            'message' => $bulkException->getMessage(),
++            'errors' => array_map(
++                fn (Throwable $e) => [
++                    'type' => get_class($e),
++                    'status' => $this->resolveExceptionStatus($e, $exceptionToStatus),
++                    'message' => $e->getMessage(),
++                ],
++                $bulkException->getExceptions()
++            ),
++        ];
++    }
++
++    public function supportsNormalization(mixed $data, ?string $format = null, array $context = []): bool
++    {
++        if (!$data instanceof FlattenException) {
++            return false;
++        }
++
++        return $this->getBulkException() !== null;
++    }
++
++    public function getSupportedTypes(?string $format): array
++    {
++        return [
++            FlattenException::class => false,
++        ];
++    }
++
++    /**
++     * @param array<class-string, int> $exceptionToStatus
++     */
++    private function resolveExceptionStatus(Throwable $exception, array $exceptionToStatus): int
++    {
++        foreach ($exceptionToStatus as $class => $status) {
++            if (is_a($exception, $class)) {
++                return $status;
++            }
++        }
++
++        return Response::HTTP_INTERNAL_SERVER_ERROR;
++    }
++
++    private function getExceptionToStatus(): array
++    {
++        $request = $this->requestStack->getCurrentRequest();
++        $operation = $request?->attributes->get('_api_previous_operation')
++            ?? $request?->attributes->get('_api_operation');
++
++        if ($operation instanceof HttpOperation) {
++            return $operation->getExceptionToStatus() ?? [];
++        }
++
++        return [];
++    }
++
++    private function getBulkException(): ?BulkCommandExceptionInterface
++    {
++        $request = $this->requestStack->getCurrentRequest();
++        if (!$request) {
++            return null;
++        }
++
++        $exception = $request->attributes->get('exception');
++        if ($exception instanceof BulkCommandExceptionInterface) {
++            return $exception;
++        }
++
++        // When wrapped in HttpException by BulkCommandExceptionListener, the original
++        // BulkCommandExceptionInterface is stored as the previous exception
++        if ($exception instanceof Throwable && $exception->getPrevious() instanceof BulkCommandExceptionInterface) {
++            return $exception->getPrevious();
++        }
++
++        return null;
++    }
++}
+diff --git a/src/PrestaShopBundle/EventListener/API/BulkCommandExceptionListener.php b/src/PrestaShopBundle/EventListener/API/BulkCommandExceptionListener.php
+new file mode 100644
+index 0000000000000..8c477c323e857
+--- /dev/null
++++ b/src/PrestaShopBundle/EventListener/API/BulkCommandExceptionListener.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\EventListener\API;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\Event\ExceptionEvent;
++use Symfony\Component\HttpKernel\Exception\HttpException;
++
++/**
++ * Wraps BulkCommandExceptionInterface in an HttpException with status 207
++ * so that the FlattenException created by Symfony carries the correct HTTP status code.
++ * The response body formatting is handled by BulkCommandExceptionNormalizer.
++ */
++class BulkCommandExceptionListener
++{
++    public function onKernelException(ExceptionEvent $event): void
++    {
++        $exception = $event->getThrowable();
++
++        if (!$exception instanceof BulkCommandExceptionInterface) {
++            return;
++        }
++
++        $event->setThrowable(new HttpException(
++            Response::HTTP_MULTI_STATUS,
++            $exception->getMessage(),
++            $exception
++        ));
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizerTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizerTest.php
+new file mode 100644
+index 0000000000000..05a434167cbe2
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Normalizer/BulkCommandExceptionNormalizerTest.php
+@@ -0,0 +1,172 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\ApiPlatform\Normalizer;
++
++use ApiPlatform\Metadata\Get;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\BulkFeatureException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureNotFoundException;
++use PrestaShopBundle\ApiPlatform\Normalizer\BulkCommandExceptionNormalizer;
++use RuntimeException;
++use stdClass;
++use Symfony\Component\ErrorHandler\Exception\FlattenException;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\Exception\HttpException;
++use Throwable;
++
++class BulkCommandExceptionNormalizerTest extends TestCase
++{
++    public function testSupportsNormalizationWithDirectBulkException(): void
++    {
++        $bulkException = new BulkFeatureException(
++            [new FeatureException('error')],
++            'Bulk error'
++        );
++        $normalizer = $this->createNormalizerWithException($bulkException);
++        $flattenException = FlattenException::createFromThrowable($bulkException);
++
++        $this->assertTrue($normalizer->supportsNormalization($flattenException));
++    }
++
++    public function testSupportsNormalizationWithWrappedBulkException(): void
++    {
++        $bulkException = new BulkFeatureException(
++            [new FeatureException('error')],
++            'Bulk error'
++        );
++        $httpException = new HttpException(Response::HTTP_MULTI_STATUS, 'Bulk error', $bulkException);
++        $normalizer = $this->createNormalizerWithException($httpException);
++        $flattenException = FlattenException::createFromThrowable($httpException);
++
++        $this->assertTrue($normalizer->supportsNormalization($flattenException));
++    }
++
++    public function testSupportsNormalizationReturnsFalseForNonBulkException(): void
++    {
++        $runtimeException = new RuntimeException('error');
++        $normalizer = $this->createNormalizerWithException($runtimeException);
++        $flattenException = FlattenException::createFromThrowable($runtimeException);
++
++        $this->assertFalse($normalizer->supportsNormalization($flattenException));
++    }
++
++    public function testSupportsNormalizationReturnsFalseForNonFlattenException(): void
++    {
++        $normalizer = $this->createNormalizerWithException(null);
++
++        $this->assertFalse($normalizer->supportsNormalization(new stdClass()));
++    }
++
++    public function testSupportsNormalizationReturnsFalseWithNoRequest(): void
++    {
++        $requestStack = new RequestStack();
++        $normalizer = new BulkCommandExceptionNormalizer($requestStack);
++        $flattenException = FlattenException::createFromThrowable(new RuntimeException('error'));
++
++        $this->assertFalse($normalizer->supportsNormalization($flattenException));
++    }
++
++    public function testNormalizeUsesExceptionToStatusFromOperation(): void
++    {
++        $innerExceptions = [
++            new FeatureNotFoundException('Feature #1 not found'),
++            new FeatureException('Feature #2 cannot be deleted'),
++        ];
++        $bulkException = new BulkFeatureException(
++            $innerExceptions,
++            'Errors occurred during Feature bulk delete action',
++            BulkFeatureException::FAILED_BULK_DELETE
++        );
++
++        $exceptionToStatus = [
++            FeatureNotFoundException::class => Response::HTTP_NOT_FOUND,
++        ];
++
++        $normalizer = $this->createNormalizerWithException($bulkException, $exceptionToStatus);
++        $flattenException = FlattenException::createFromThrowable($bulkException);
++
++        $result = $normalizer->normalize($flattenException);
++
++        $this->assertSame(BulkFeatureException::class, $result['type']);
++        $this->assertSame(Response::HTTP_MULTI_STATUS, $result['status']);
++
++        $this->assertCount(2, $result['errors']);
++
++        $this->assertSame(FeatureNotFoundException::class, $result['errors'][0]['type']);
++        $this->assertSame(Response::HTTP_NOT_FOUND, $result['errors'][0]['status']);
++        $this->assertSame('Feature #1 not found', $result['errors'][0]['message']);
++
++        $this->assertSame(FeatureException::class, $result['errors'][1]['type']);
++        $this->assertSame(Response::HTTP_INTERNAL_SERVER_ERROR, $result['errors'][1]['status']);
++        $this->assertSame('Feature #2 cannot be deleted', $result['errors'][1]['message']);
++    }
++
++    public function testNormalizeDefaultsTo500WhenNoExceptionToStatus(): void
++    {
++        $bulkException = new BulkFeatureException(
++            [new FeatureException('error')],
++            'Bulk error'
++        );
++
++        $normalizer = $this->createNormalizerWithException($bulkException);
++        $flattenException = FlattenException::createFromThrowable($bulkException);
++
++        $result = $normalizer->normalize($flattenException);
++
++        $this->assertSame(Response::HTTP_INTERNAL_SERVER_ERROR, $result['errors'][0]['status']);
++    }
++
++    public function testNormalizeWithWrappedBulkException(): void
++    {
++        $bulkException = new BulkFeatureException(
++            [new FeatureException('Only one failed')],
++            'Bulk error'
++        );
++        $httpException = new HttpException(Response::HTTP_MULTI_STATUS, 'Bulk error', $bulkException);
++
++        $normalizer = $this->createNormalizerWithException($httpException);
++        $flattenException = FlattenException::createFromThrowable($httpException);
++
++        $result = $normalizer->normalize($flattenException);
++
++        $this->assertSame(BulkFeatureException::class, $result['type']);
++        $this->assertSame(Response::HTTP_MULTI_STATUS, $result['status']);
++        $this->assertCount(1, $result['errors']);
++        $this->assertSame('Only one failed', $result['errors'][0]['message']);
++    }
++
++    public function testGetSupportedTypes(): void
++    {
++        $normalizer = $this->createNormalizerWithException(null);
++
++        $supportedTypes = $normalizer->getSupportedTypes(null);
++
++        $this->assertArrayHasKey(FlattenException::class, $supportedTypes);
++        $this->assertFalse($supportedTypes[FlattenException::class]);
++    }
++
++    private function createNormalizerWithException(?Throwable $exception, array $exceptionToStatus = []): BulkCommandExceptionNormalizer
++    {
++        $requestStack = new RequestStack();
++
++        $request = new Request();
++        if ($exception !== null) {
++            $request->attributes->set('exception', $exception);
++        }
++        if (!empty($exceptionToStatus)) {
++            $request->attributes->set('_api_previous_operation', new Get(exceptionToStatus: $exceptionToStatus));
++        }
++        $requestStack->push($request);
++
++        return new BulkCommandExceptionNormalizer($requestStack);
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/API/BulkCommandExceptionListenerTest.php b/tests/Unit/PrestaShopBundle/EventListener/API/BulkCommandExceptionListenerTest.php
+new file mode 100644
+index 0000000000000..6c2db79f1fbc1
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/EventListener/API/BulkCommandExceptionListenerTest.php
+@@ -0,0 +1,69 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\EventListener\API;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\BulkFeatureException;
++use PrestaShop\PrestaShop\Core\Domain\Feature\Exception\FeatureException;
++use PrestaShopBundle\EventListener\API\BulkCommandExceptionListener;
++use RuntimeException;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\Event\ExceptionEvent;
++use Symfony\Component\HttpKernel\Exception\HttpException;
++use Symfony\Component\HttpKernel\HttpKernelInterface;
++use Throwable;
++
++class BulkCommandExceptionListenerTest extends TestCase
++{
++    private BulkCommandExceptionListener $listener;
++
++    protected function setUp(): void
++    {
++        $this->listener = new BulkCommandExceptionListener();
++    }
++
++    public function testItWrapsInHttpExceptionWithMultiStatus(): void
++    {
++        $bulkException = new BulkFeatureException(
++            [new FeatureException('Feature #1 not found')],
++            'Bulk error'
++        );
++
++        $event = $this->createExceptionEvent($bulkException);
++        $this->listener->onKernelException($event);
++
++        $wrappedException = $event->getThrowable();
++        $this->assertInstanceOf(HttpException::class, $wrappedException);
++        $this->assertSame(Response::HTTP_MULTI_STATUS, $wrappedException->getStatusCode());
++        $this->assertSame('Bulk error', $wrappedException->getMessage());
++        $this->assertSame($bulkException, $wrappedException->getPrevious());
++    }
++
++    public function testItIgnoresNonBulkExceptions(): void
++    {
++        $runtimeException = new RuntimeException('Some error');
++        $event = $this->createExceptionEvent($runtimeException);
++        $this->listener->onKernelException($event);
++
++        $this->assertSame($runtimeException, $event->getThrowable());
++    }
++
++    private function createExceptionEvent(Throwable $exception): ExceptionEvent
++    {
++        $kernel = $this->createMock(HttpKernelInterface::class);
++
++        return new ExceptionEvent(
++            $kernel,
++            new Request(),
++            HttpKernelInterface::MAIN_REQUEST,
++            $exception
++        );
++    }
++}

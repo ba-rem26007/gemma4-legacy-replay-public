@@ -1,0 +1,210 @@
+diff --git a/classes/Carrier.php b/classes/Carrier.php
+index eac80ddf174bc..fcea9ef85cff3 100644
+--- a/classes/Carrier.php
++++ b/classes/Carrier.php
+@@ -40,6 +40,10 @@ class CarrierCore extends ObjectModel
+ 	const SHIPPING_METHOD_PRICE = 2;
+ 	const SHIPPING_METHOD_FREE = 3;
+ 
++	const SHIPPING_PRICE_EXCEPTION = 0;
++	const SHIPPING_WEIGHT_EXCEPTION = 1;
++	const SHIPPING_SIZE_EXCEPTION = 2;
++
+ 	const SORT_BY_PRICE = 0;
+ 	const SORT_BY_POSITION = 1;
+ 
+@@ -565,9 +569,10 @@ public static function getDefaultCarrierSelection($carriers, $default_carrier =
+ 	 *
+ 	 * @param int $id_zone
+ 	 * @param Array $groups group of the customer
++	 * @param array &$error contain an error message if an error occurs
+ 	 * @return Array
+ 	 */
+-	public static function getCarriersForOrder($id_zone, $groups = null, $cart = null)
++	public static function getCarriersForOrder($id_zone, $groups = null, $cart = null, &$error = array())
+ 	{
+ 		$context = Context::getContext();
+ 		$id_lang = $context->language->id;
+@@ -589,9 +594,15 @@ public static function getCarriersForOrder($id_zone, $groups = null, $cart = nul
+ 			if ($shipping_method != Carrier::SHIPPING_METHOD_FREE)
+ 			{
+ 				// Get only carriers that are compliant with shipping method
+-				if (($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT && $carrier->getMaxDeliveryPriceByWeight($id_zone) === false)
+-					|| ($shipping_method == Carrier::SHIPPING_METHOD_PRICE && $carrier->getMaxDeliveryPriceByPrice($id_zone) === false))
++				if (($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT && $carrier->getMaxDeliveryPriceByWeight($id_zone) === false))
++				{
++					$error[$carrier->id] = Carrier::SHIPPING_WEIGHT_EXCEPTION;
++					unset($result[$k]);
++					continue;
++				}
++				if (($shipping_method == Carrier::SHIPPING_METHOD_PRICE && $carrier->getMaxDeliveryPriceByPrice($id_zone) === false))
+ 				{
++					$error[$carrier->id] = Carrier::SHIPPING_PRICE_EXCEPTION;
+ 					unset($result[$k]);
+ 					continue;
+ 				}
+@@ -604,11 +615,18 @@ public static function getCarriersForOrder($id_zone, $groups = null, $cart = nul
+ 							$id_zone = Country::getIdZone(Country::getDefaultCountryId());
+ 
+ 					// Get only carriers that have a range compatible with cart
+-					if (($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT
++					if ($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT
+ 						&& (!Carrier::checkDeliveryPriceByWeight($row['id_carrier'], $cart->getTotalWeight(), $id_zone)))
+-						|| ($shipping_method == Carrier::SHIPPING_METHOD_PRICE
+-						&& (!Carrier::checkDeliveryPriceByPrice($row['id_carrier'], $cart->getOrderTotal(true, Cart::BOTH_WITHOUT_SHIPPING), $id_zone, $id_currency))))
+ 					{
++						$error[$carrier->id] = Carrier::SHIPPING_WEIGHT_EXCEPTION;
++						unset($result[$k]);
++						continue;
++					}
++
++					if ($shipping_method == Carrier::SHIPPING_METHOD_PRICE
++						&& (!Carrier::checkDeliveryPriceByPrice($row['id_carrier'], $cart->getOrderTotal(true, Cart::BOTH_WITHOUT_SHIPPING), $id_zone, $id_currency)))
++					{
++						$error[$carrier->id] = Carrier::SHIPPING_PRICE_EXCEPTION;
+ 						unset($result[$k]);
+ 						continue;
+ 					}
+@@ -1192,9 +1210,10 @@ public static function getHigherPosition()
+ 	 *
+ 	 * @since 1.5.0
+ 	 * @param Product $product The id of the product, or an array with at least the package size and weight
++	 * @param array &$error contain an error message if an error occurs
+ 	 * @return array
+ 	 */
+-	public static function getAvailableCarrierList(Product $product, $id_warehouse, $id_address_delivery = null, $id_shop = null, $cart = null)
++	public static function getAvailableCarrierList(Product $product, $id_warehouse, $id_address_delivery = null, $id_shop = null, $cart = null, &$error = array())
+ 	{
+ 		if (is_null($id_shop))
+ 			$id_shop = Context::getContext()->shop->id;
+@@ -1254,7 +1273,7 @@ public static function getAvailableCarrierList(Product $product, $id_warehouse,
+ 
+ 		$available_carrier_list = array();
+ 		$customer = new Customer($cart->id_customer);
+-		$carriers = Carrier::getCarriersForOrder($id_zone, $customer->getGroups(), $cart);
++		$carriers = Carrier::getCarriersForOrder($id_zone, $customer->getGroups(), $cart, $error);
+ 
+ 		foreach ($carriers as $carrier)
+ 			$available_carrier_list[] = $carrier['id_carrier'];
+@@ -1287,9 +1306,17 @@ public static function getAvailableCarrierList(Product $product, $id_warehouse,
+ 
+ 				if (($carrier_sizes[0] > 0 && $carrier_sizes[0] < $product_sizes[0])
+ 					|| ($carrier_sizes[1] > 0 && $carrier_sizes[1] < $product_sizes[1])
+-					|| ($carrier_sizes[2] > 0 && $carrier_sizes[2] < $product_sizes[2])
+-					|| ($carrier->max_weight > 0 && $carrier->max_weight < $product->weight * $cart_quantity))
++					|| ($carrier_sizes[2] > 0 && $carrier_sizes[2] < $product_sizes[2]))
++				{
++					$error[$carrier->id] = Carrier::SHIPPING_SIZE_EXCEPTION;
++					unset($carrier_list[$key]);
++				}
++
++				if ($carrier->max_weight > 0 && $carrier->max_weight < $product->weight * $cart_quantity)
++				{
++					$error[$carrier->id] = Carrier::SHIPPING_WEIGHT_EXCEPTION;
+ 					unset($carrier_list[$key]);
++				}
+ 			}
+ 		}
+ 		return $carrier_list;
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 93f4caa570e11..99183f69137b4 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -3891,16 +3891,16 @@ public static function addExtraCarriers(&$array)
+ 	 * Get all the ids of the delivery addresses without carriers
+ 	 *
+ 	 * @param bool $return_collection Return a collection
+-	 *
++	 * @param array &$error contain an error message if an error occurs
+ 	 * @return array Array of address id or of address object
+ 	 */
+-	public function getDeliveryAddressesWithoutCarriers($return_collection = false)
++	public function getDeliveryAddressesWithoutCarriers($return_collection = false, &$error = array())
+ 	{
+ 		$addresses_without_carriers = array();
+ 		foreach ($this->getProducts() as $product)
+ 		{
+ 			if (!in_array($product['id_address_delivery'], $addresses_without_carriers)
+-				&& !count(Carrier::getAvailableCarrierList(new Product($product['id_product']), null, $product['id_address_delivery'])))
++				&& !count(Carrier::getAvailableCarrierList(new Product($product['id_product']), null, $product['id_address_delivery'], null, null, $error)))
+ 				$addresses_without_carriers[] = $product['id_address_delivery'];
+ 		}
+ 		if (!$return_collection)
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index 9d470e96bec23..95b2e617177bd 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -317,14 +317,34 @@ public function processAddress()
+ 				$this->_updateMessage(Tools::getValue('message'));
+ 
+ 			// Add checking for all addresses
+-			$address_without_carriers = $this->context->cart->getDeliveryAddressesWithoutCarriers();
++			$errors = array();
++			$address_without_carriers = $this->context->cart->getDeliveryAddressesWithoutCarriers(false, $errors);
+ 			if (count($address_without_carriers) && !$this->context->cart->isVirtualCart())
+ 			{
+-				if (count($address_without_carriers) > 1)
++				$flag_error_message = false;
++				foreach ($errors as $error)
++				{
++					if ($error == Carrier::SHIPPING_WEIGHT_EXCEPTION && !$flag_error_message)
++					{
++						$this->errors[] = sprintf(Tools::displayError('The product selection cannot be delivered by the available carrier(s): it is too heavy. Please amend your cart to lower its weight.', !Tools::getValue('ajax')));
++						$flag_error_message = true;
++					}
++					elseif ($error == Carrier::SHIPPING_PRICE_EXCEPTION && !$flag_error_message)
++					{
++						$this->errors[] = sprintf(Tools::displayError('The product selection cannot be delivered by the available carrier(s). Please amend your cart.', !Tools::getValue('ajax')));
++						$flag_error_message = true;
++					}
++					elseif ($error == Carrier::SHIPPING_SIZE_EXCEPTION && !$flag_error_message)
++					{
++						$this->errors[] = sprintf(Tools::displayError('The product selection cannot be delivered by the available carrier(s): its size does not fit. Please amend your cart to reduce its size.', !Tools::getValue('ajax')));
++						$flag_error_message = true;
++					}
++				}
++				if (count($address_without_carriers) > 1 && !$flag_error_message)
+ 					$this->errors[] = sprintf(Tools::displayError('There are no carriers that deliver to some addresses you selected.', !Tools::getValue('ajax')));
+-				elseif ($this->context->cart->isMultiAddressDelivery())
++				elseif ($this->context->cart->isMultiAddressDelivery() && !$flag_error_message)
+ 					$this->errors[] = sprintf(Tools::displayError('There are no carriers that deliver to one of the address you selected.', !Tools::getValue('ajax')));
+-				else
++				elseif (!$flag_error_message)
+ 					$this->errors[] = sprintf(Tools::displayError('There are no carriers that deliver to the address you selected.', !Tools::getValue('ajax')));
+ 			}
+ 		}
+diff --git a/themes/default-bootstrap/order-carrier.tpl b/themes/default-bootstrap/order-carrier.tpl
+index 231f1350bc7fb..b313e44ddafb2 100644
+--- a/themes/default-bootstrap/order-carrier.tpl
++++ b/themes/default-bootstrap/order-carrier.tpl
+@@ -261,12 +261,28 @@
+ 							{if isset($HOOK_EXTRACARRIER_ADDR) &&  isset($HOOK_EXTRACARRIER_ADDR.$id_address)}{$HOOK_EXTRACARRIER_ADDR.$id_address}{/if}
+ 						</div>
+ 						{foreachelse}
++							{assign var='errors' value=' '|explode:''}
+ 							<p class="alert alert-warning" id="noCarrierWarning">
+-								{foreach $cart->getDeliveryAddressesWithoutCarriers(true) as $address}
++								{foreach $cart->getDeliveryAddressesWithoutCarriers(true, $errors) as $address}
+ 									{if empty($address->alias)}
+ 										{l s='No carriers available.'}
+ 									{else}
+-										{l s='No carriers available for the address "%s".' sprintf=$address->alias}
++										{assign var='flag_error_message' value=false}
++										{foreach $errors as $error}
++											{if $error == Carrier::SHIPPING_WEIGHT_EXCEPTION}
++												{$flag_error_message = true}
++												{l s='The product selection cannot be delivered by the available carrier(s): it is too heavy. Please amend your cart to lower its weight.'}
++											{elseif $error == Carrier::SHIPPING_PRICE_EXCEPTION}
++												{$flag_error_message = true}
++												{l s='The product selection cannot be delivered by the available carrier(s). Please amend your cart.'}
++											{elseif $error == Carrier::SHIPPING_SIZE_EXCEPTION}
++												{$flag_error_message = true}
++												{l s='The product selection cannot be delivered by the available carrier(s): its size does not fit. Please amend your cart to reduce its size.'}
++											{/if}
++										{/foreach}
++										{if !$flag_error_message}
++											{l s='No carriers available for the address "%s".' sprintf=$address->alias}
++										{/if}
+ 									{/if}
+ 									{if !$address@last}
+ 										<br />

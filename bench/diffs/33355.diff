@@ -1,0 +1,179 @@
+diff --git a/src/Adapter/Cache/Clearer/DoctrineCacheClearer.php b/src/Adapter/Cache/Clearer/DoctrineCacheClearer.php
+new file mode 100644
+index 0000000000000..130f48d939ea5
+--- /dev/null
++++ b/src/Adapter/Cache/Clearer/DoctrineCacheClearer.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Cache\Clearer;
++
++use PrestaShop\PrestaShop\Core\Cache\Clearer\CacheClearerInterface;
++use Symfony\Component\Cache\DoctrineProvider;
++
++final class DoctrineCacheClearer implements CacheClearerInterface
++{
++    /** @var DoctrineProvider */
++    private $doctrineProvider;
++
++    public function __construct(
++        DoctrineProvider $doctrineProvider
++    ) {
++        $this->doctrineProvider = $doctrineProvider;
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function clear()
++    {
++        $this->doctrineProvider->deleteAll();
++    }
++}
+diff --git a/src/Core/Addon/Module/ModuleManagerBuilder.php b/src/Core/Addon/Module/ModuleManagerBuilder.php
+index e99f17dbdf48e..be50ef1ee6e30 100644
+--- a/src/Core/Addon/Module/ModuleManagerBuilder.php
++++ b/src/Core/Addon/Module/ModuleManagerBuilder.php
+@@ -136,7 +136,8 @@ public function buildRepository()
+                     self::$adminModuleDataProvider,
+                     self::$cacheProvider,
+                     new HookManager(),
+-                    _PS_MODULE_DIR_
++                    _PS_MODULE_DIR_,
++                    Context::getContext()->language->id
+                 );
+             }
+         }
+diff --git a/src/Core/Module/ModuleRepository.php b/src/Core/Module/ModuleRepository.php
+index ecec666138092..0e5f582e0610b 100644
+--- a/src/Core/Module/ModuleRepository.php
++++ b/src/Core/Module/ModuleRepository.php
+@@ -74,18 +74,25 @@ class ModuleRepository implements ModuleRepositoryInterface
+     /** @var Module[] */
+     private $modulesFromHook;
+ 
++    /**
++     * @var int
++     */
++    private $contextLangId;
++
+     public function __construct(
+         ModuleDataProvider $moduleDataProvider,
+         AdminModuleDataProvider $adminModuleDataProvider,
+         CacheProvider $cacheProvider,
+         HookManager $hookManager,
+-        string $modulePath
++        string $modulePath,
++        int $contextLangId
+     ) {
+         $this->moduleDataProvider = $moduleDataProvider;
+         $this->adminModuleDataProvider = $adminModuleDataProvider;
+         $this->cacheProvider = $cacheProvider;
+         $this->hookManager = $hookManager;
+         $this->modulePath = $modulePath;
++        $this->contextLangId = $contextLangId;
+     }
+ 
+     public function getList(): ModuleCollection
+@@ -227,7 +234,7 @@ protected function getCacheKey(string $moduleName, ?int $shopId = null): string
+     {
+         $shop = $shopId ? [$shopId] : Shop::getContextListShopID();
+ 
+-        return $moduleName . implode('-', $shop);
++        return $moduleName . implode('-', $shop) . $this->contextLangId;
+     }
+ 
+     private function getModuleAttributes(string $moduleName, bool $isValid): array
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/cache.yml b/src/PrestaShopBundle/Resources/config/services/adapter/cache.yml
+index ae571d917cca4..dc488cbd9bc8d 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/cache.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/cache.yml
+@@ -16,3 +16,7 @@ services:
+ 
+   prestashop.adapter.cache.clearer.xml_cache_clearer:
+     class: 'PrestaShop\PrestaShop\Adapter\Cache\Clearer\XmlCacheClearer'
++
++  PrestaShop\PrestaShop\Adapter\Cache\Clearer\DoctrineCacheClearer:
++    arguments:
++      - '@doctrine.cache.provider'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/cache.yml b/src/PrestaShopBundle/Resources/config/services/core/cache.yml
+index e1a60197942e5..1202143718ea1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/cache.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/cache.yml
+@@ -19,6 +19,7 @@ services:
+       - '@prestashop.adapter.cache.clearer.xml_cache_clearer'
+       - '@prestashop.adapter.cache.clearer.media_cache_clearer'
+       - '@prestashop.adapter.cache.clearer.class_index_cache_clearer'
++      - '@PrestaShop\PrestaShop\Adapter\Cache\Clearer\DoctrineCacheClearer'
+ 
+   prestashop.core.cache.clearer.product_cache_clearer_chain:
+     class: 'PrestaShop\PrestaShop\Core\Cache\Clearer\CacheClearerChain'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/module.yml b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+index 0fb7ddc088db9..679dfc3f3b1ac 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/module.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+@@ -12,12 +12,14 @@ services:
+ 
+   PrestaShop\PrestaShop\Core\Module\ModuleRepository:
+     public: false
++    lazy: true
+     arguments:
+       - '@prestashop.adapter.data_provider.module'
+       - '@prestashop.adapter.admin.data_provider.module'
+       - '@doctrine.cache.provider'
+       - '@PrestaShop\PrestaShop\Adapter\HookManager'
+       - "@=service('prestashop.adapter.legacy.configuration').get('_PS_MODULE_DIR_')"
++      - '@=service("prestashop.adapter.legacy.context").getContext().language.id'
+ 
+   prestashop.core.admin.module.repository.eventsubscriber:
+     class: PrestaShop\PrestaShop\Core\Module\EventSubscriber
+diff --git a/tests/Integration/Core/Module/ModuleRepositoryTest.php b/tests/Integration/Core/Module/ModuleRepositoryTest.php
+index 8c9f5d4f94643..9934aed81276d 100644
+--- a/tests/Integration/Core/Module/ModuleRepositoryTest.php
++++ b/tests/Integration/Core/Module/ModuleRepositoryTest.php
+@@ -94,7 +94,8 @@ protected function setUp(): void
+             $this->createMock(AdminModuleDataProvider::class),
+             new DoctrineProvider(new ArrayAdapter()),
+             $hookManager,
+-            dirname(__DIR__, 3) . '/Resources/modules/'
++            dirname(__DIR__, 3) . '/Resources/modules/',
++            1
+         );
+     }
+ 
+diff --git a/tests/Unit/Core/Module/ModuleRepositoryTest.php b/tests/Unit/Core/Module/ModuleRepositoryTest.php
+index 1852ccbc31b6a..0f99139948560 100644
+--- a/tests/Unit/Core/Module/ModuleRepositoryTest.php
++++ b/tests/Unit/Core/Module/ModuleRepositoryTest.php
+@@ -75,6 +75,7 @@ public function setUp(): void
+                 $this->createMock(CacheProvider::class),
+                 $this->createMock(HookManager::class),
+                 dirname(__DIR__, 3) . '/Resources/modules',
++                1,
+             ])
+             ->onlyMethods(['getModule'])
+             ->getMock()

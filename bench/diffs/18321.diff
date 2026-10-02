@@ -1,0 +1,95 @@
+diff --git a/src/Core/Cart/Calculator.php b/src/Core/Cart/Calculator.php
+index 8bf3eb09d7a10..33d287bef1636 100644
+--- a/src/Core/Cart/Calculator.php
++++ b/src/Core/Cart/Calculator.php
+@@ -200,7 +200,15 @@ public function getRowTotalWithoutDiscount()
+     public function getDiscountTotal()
+     {
+         $amount = new AmountImmutable();
++        $isFreeShippingAppliedToAmount = false;
+         foreach ($this->cartRules as $cartRule) {
++            if ((bool) $cartRule->getRuleData()['free_shipping']) {
++                if ($isFreeShippingAppliedToAmount) {
++                    $initialShippingFees = $this->getFees()->getInitialShippingFees();
++                    $amount = $amount->sub($initialShippingFees);
++                }
++                $isFreeShippingAppliedToAmount = true;
++            }
+             $amount = $amount->add($cartRule->getDiscountApplied());
+         }
+ 
+diff --git a/src/Core/Cart/Fees.php b/src/Core/Cart/Fees.php
+index c4643bd951c6e..4aba44a008c78 100644
+--- a/src/Core/Cart/Fees.php
++++ b/src/Core/Cart/Fees.php
+@@ -64,6 +64,11 @@ class Fees
+      */
+     protected $isProcessed = false;
+ 
++    public function __construct()
++    {
++        $this->shippingFees = new AmountImmutable();
++    }
++
+     /**
+      * @param Cart $cart
+      * @param CartRowCollection $cartRowCollection
+diff --git a/tests/Integration/Behaviour/Features/Context/AbstractPrestaShopFeatureContext.php b/tests/Integration/Behaviour/Features/Context/AbstractPrestaShopFeatureContext.php
+index 752520465117a..ab725f91fdc5a 100644
+--- a/tests/Integration/Behaviour/Features/Context/AbstractPrestaShopFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/AbstractPrestaShopFeatureContext.php
+@@ -41,11 +41,19 @@ abstract class AbstractPrestaShopFeatureContext implements BehatContext
+ 
+     protected function checkFixtureExists(array $fixtures, $fixtureName, $fixtureIndex)
+     {
++        $searchLength = 10;
++
+         if (!isset($fixtures[$fixtureIndex])) {
+             $fixtureNames = array_keys($fixtures);
+-            $firstFixtureNames = array_splice($fixtureNames, 0, 5);
++            $firstFixtureNames = array_splice($fixtureNames, 0, $searchLength);
+             $firstFixtureNamesStr = implode(',', $firstFixtureNames);
+-            throw new \Exception($fixtureName . ' named "' . $fixtureIndex . '" was not added in fixtures. First 5 added are: ' . $firstFixtureNamesStr);
++            throw new \RuntimeException(sprintf(
++                '%s named "%s" was not added in fixtures. First %d added are: %s',
++                $fixtureName,
++                $fixtureIndex,
++                $searchLength,
++                $firstFixtureNamesStr
++            ));
+         }
+     }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature
+index c230b83df5e71..e01ed0d61804f 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/free_shipping.feature
+@@ -26,3 +26,28 @@ Feature: Cart rule (amount) calculation with one cart rule offering free shippin
+     When I use the discount "cartrule4"
+     Then my cart total should be 14.812 tax included
+     Then my cart total using previous calculation method should be 14.812 tax included
++
++  Scenario: One product in cart, four different cartRules offering free shipping
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a cart rule named "cartrule5" that applies an amount discount of 5.0 with priority 4, quantity of 100 and quantity per user 10
++    Given there is a cart rule named "cartrule6" that applies no discount with priority 5, quantity of 100 and quantity per user 10
++    Given there is a cart rule named "cartrule7" that applies no discount with priority 6, quantity of 100 and quantity per user 10
++    Given there is a cart rule named "cartrule8" that applies an amount discount of 5.0 with priority 4, quantity of 100 and quantity per user 10
++    Given cart rule "cartrule5" offers free shipping
++    Given cart rule "cartrule5" has a discount code "foo5"
++    Given cart rule "cartrule6" offers free shipping
++    Given cart rule "cartrule6" has a discount code "foo6"
++    Given cart rule "cartrule7" offers free shipping
++    Given cart rule "cartrule7" has a discount code "foo7"
++    Given cart rule "cartrule8" has a discount code "foo8"
++    When I add 1 items of product "product1" in my cart
++    When I use the discount "cartrule5"
++    Then my cart total should be 14.812 tax included
++    When I use the discount "cartrule6"
++    Then my cart total should be 14.812 tax included
++    When I use the discount "cartrule7"
++    Then my cart total should be 14.812 tax included
++    When I use the discount "cartrule8"
++    Then my cart total should be 9.8 tax included

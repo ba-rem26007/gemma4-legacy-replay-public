@@ -1,0 +1,137 @@
+diff --git a/src/Core/Grid/Query/WebserviceKeyQueryBuilder.php b/src/Core/Grid/Query/WebserviceKeyQueryBuilder.php
+index 32b52861e970a..ea6c3b8c2032e 100644
+--- a/src/Core/Grid/Query/WebserviceKeyQueryBuilder.php
++++ b/src/Core/Grid/Query/WebserviceKeyQueryBuilder.php
+@@ -40,20 +40,28 @@ final class WebserviceKeyQueryBuilder extends AbstractDoctrineQueryBuilder
+      */
+     private $searchCriteriaApplicator;
+ 
++    /**
++     * @var array
++     */
++    private $contextShopIds;
++
+     /**
+      * WebserviceKeyQueryBuilder constructor.
+      *
+      * @param Connection $connection
+      * @param $dbPrefix
+      * @param DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator
++     * @param array $contextShopIds
+      */
+     public function __construct(
+         Connection $connection,
+         $dbPrefix,
+-        DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator
++        DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator,
++        array $contextShopIds
+     ) {
+         parent::__construct($connection, $dbPrefix);
+         $this->searchCriteriaApplicator = $searchCriteriaApplicator;
++        $this->contextShopIds = $contextShopIds;
+     }
+ 
+     /**
+@@ -67,6 +75,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+                 $this->getModifiedOrderBy($searchCriteria->getOrderBy()),
+                 $searchCriteria->getOrderWay()
+             )
++            ->groupBy('wa.`id_webservice_account`')
+         ;
+ 
+         $this->searchCriteriaApplicator->applyPagination($searchCriteria, $qb);
+@@ -79,8 +88,9 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+      */
+     public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria)
+     {
+-        $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+-        $qb->select('COUNT(wa.`id_webservice_account`)');
++        $qb = $this->getQueryBuilder($searchCriteria->getFilters())
++            ->select('COUNT(DISTINCT wa.`id_webservice_account`)')
++        ;
+ 
+         return $qb;
+     }
+@@ -96,7 +106,18 @@ private function getQueryBuilder(array $filters)
+     {
+         $qb = $this->connection
+             ->createQueryBuilder()
+-            ->from($this->dbPrefix . 'webservice_account', 'wa');
++            ->from($this->dbPrefix . 'webservice_account', 'wa')
++            ->innerJoin(
++                'wa',
++                $this->dbPrefix . 'webservice_account_shop',
++                'was',
++                'was.`id_webservice_account` = wa.`id_webservice_account`'
++            )
++        ;
++
++        $qb->andWhere('was.`id_shop` IN (:shops)');
++
++        $qb->setParameter('shops', $this->contextShopIds, Connection::PARAM_INT_ARRAY);
+ 
+         foreach ($filters as $filterName => $value) {
+             if ('active' === $filterName && is_numeric($value)) {
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/WebserviceController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/WebserviceController.php
+index 00d8dba0bb2d4..ffbb1a9936046 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/WebserviceController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/WebserviceController.php
+@@ -63,12 +63,6 @@ public function indexAction(WebserviceKeyFilters $filters, Request $request)
+ 
+         $configurationWarnings = $this->lookForWarnings($request);
+ 
+-        if (false === empty($configurationWarnings)) {
+-            foreach ($configurationWarnings as $warningMessage) {
+-                $this->addFlash('warning', $warningMessage);
+-            }
+-        }
+-
+         $twigValues = [
+             'layoutHeaderToolbarBtn' => [
+                 'add' => [
+@@ -86,6 +80,7 @@ public function indexAction(WebserviceKeyFilters $filters, Request $request)
+             'requireFilterStatus' => false,
+             'form' => $form->createView(),
+             'grid' => $presentedGrid,
++            'configurationWarnings' => $configurationWarnings,
+         ];
+ 
+         return $this->render('@AdvancedParameters/WebservicePage/webservice.html.twig', $twigValues);
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid.yml b/src/PrestaShopBundle/Resources/config/services/core/grid.yml
+index 2d51b3b48edc2..7aad0395ebf9d 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid.yml
+@@ -182,6 +182,7 @@ services:
+         parent: 'prestashop.core.grid.abstract_query_builder'
+         arguments:
+             - '@prestashop.core.query.doctrine_search_criteria_applicator'
++            - '@=service("prestashop.adapter.shop.context").getContextListShopID()'
+         public: true
+ 
+     prestashop.core.grid.query_builder.meta:
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/WebservicePage/webservice.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/WebservicePage/webservice.html.twig
+index 40d3325641101..0bcc58da31256 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/WebservicePage/webservice.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/WebservicePage/webservice.html.twig
+@@ -27,6 +27,21 @@
+ {% trans_default_domain "Admin.Advparameters.Feature" %}
+ 
+ {% block content %}
++
++  {% block webservice_list_notifications %}
++    {% if configurationWarnings is not empty  %}
++      <div class="row">
++        <div class="col">
++          <div class="alert alert-warning" role="alert">
++            {% for warning in configurationWarnings %}
++              <p class="alert-text">{{ warning }}</p>
++            {% endfor %}
++          </div>
++        </div>
++      </div>
++    {% endif %}
++  {% endblock %}
++
+   <div class="row">
+     <div class="col">
+       {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {'grid': grid }) }}

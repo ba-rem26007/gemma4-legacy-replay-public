@@ -1,0 +1,166 @@
+diff --git a/classes/module/Module.php b/classes/module/Module.php
+index ebaf5d92eade8..bc8187f2f0795 100755
+--- a/classes/module/Module.php
++++ b/classes/module/Module.php
+@@ -416,19 +416,23 @@ public function install()
+         }
+ 
+         // Check for override conflicts
+-        $moduleOverrideChecker = $this->get(ModuleOverrideChecker::class);
+-        if (!$moduleOverrideChecker) {
+-            $moduleOverrideChecker = new ModuleOverrideChecker($this->getTranslator(), _PS_OVERRIDE_DIR_);
+-        }
+-        if ($moduleOverrideChecker->hasOverrideConflict($this->getLocalPath() . 'override')) {
+-            $this->_errors = array_merge($moduleOverrideChecker->getErrors(), $this->_errors);
++        if (!Configuration::get('PS_DISABLE_MODULE_OVERRIDES')) {
++            $moduleOverrideChecker = $this->get(ModuleOverrideChecker::class);
++            if (!$moduleOverrideChecker) {
++                $moduleOverrideChecker = new ModuleOverrideChecker($this->getTranslator(), _PS_OVERRIDE_DIR_);
++            }
++            if ($moduleOverrideChecker->hasOverrideConflict($this->getLocalPath() . 'override')) {
++                $this->_errors = array_merge($moduleOverrideChecker->getErrors(), $this->_errors);
+ 
+-            return false;
++                return false;
++            }
+         }
+ 
+         if (!$this->installControllers()) {
+             $this->_errors[] = Context::getContext()->getTranslator()->trans('Could not install module controllers.', [], 'Admin.Modules.Notification');
+-            $this->uninstallOverrides();
++            if (!Configuration::get('PS_DISABLE_MODULE_OVERRIDES')) {
++                $this->uninstallOverrides();
++            }
+ 
+             return false;
+         }
+@@ -444,7 +448,9 @@ public function install()
+             if (method_exists($this, 'uninstallTabs')) {
+                 $this->uninstallTabs();
+             }
+-            $this->uninstallOverrides();
++            if (!Configuration::get('PS_DISABLE_MODULE_OVERRIDES')) {
++                $this->uninstallOverrides();
++            }
+ 
+             return false;
+         }
+@@ -903,7 +909,7 @@ public function uninstall()
+         }
+ 
+         // Uninstall all overrides this module may have used
+-        if (!$this->uninstallOverrides()) {
++        if (!Configuration::get('PS_DISABLE_MODULE_OVERRIDES') && !$this->uninstallOverrides()) {
+             return false;
+         }
+ 
+@@ -1031,8 +1037,7 @@ public function enable($force_all = false)
+         if (!$moduleOverrideChecker) {
+             $moduleOverrideChecker = new ModuleOverrideChecker($this->getTranslator(), _PS_OVERRIDE_DIR_);
+         }
+-
+-        if ($this->getOverrides() != null) {
++        if ($this->getOverrides() != null && !Configuration::get('PS_DISABLE_MODULE_OVERRIDES')) {
+             if (!$moduleOverrideChecker->hasOverrideConflict($this->getLocalPath() . 'override')) {
+                 // Install overrides
+                 try {
+@@ -1170,7 +1175,7 @@ public function disable($force_all = false)
+         Hook::exec('actionModuleDisable', ['module' => $this]);
+ 
+         $result = true;
+-        if ($this->getOverrides() != null) {
++        if (!Configuration::get('PS_DISABLE_MODULE_OVERRIDES') && $this->getOverrides() != null) {
+             $result &= $this->uninstallOverrides();
+         }
+ 
+diff --git a/src/Adapter/Configuration.php b/src/Adapter/Configuration.php
+index 233af1192ae64..9b0183f50139f 100644
+--- a/src/Adapter/Configuration.php
++++ b/src/Adapter/Configuration.php
+@@ -441,4 +441,9 @@ private function getStrictValue(string $key, ShopConstraint $shopConstraint)
+ 
+         return null;
+     }
++
++    public function setTemporary(string $key, $value): void
++    {
++        ConfigurationLegacy::set($key, $value);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Command/ModuleCommand.php b/src/PrestaShopBundle/Command/ModuleCommand.php
+index 30fb41b4c7f69..a30e058b3c58a 100644
+--- a/src/PrestaShopBundle/Command/ModuleCommand.php
++++ b/src/PrestaShopBundle/Command/ModuleCommand.php
+@@ -7,16 +7,17 @@
+ namespace PrestaShopBundle\Command;
+ 
+ use Employee;
++use PrestaShop\PrestaShop\Adapter\Configuration;
+ use PrestaShop\PrestaShop\Adapter\LegacyContext;
+ use PrestaShop\PrestaShop\Adapter\Module\AdminModuleDataProvider;
+ use PrestaShop\PrestaShop\Adapter\Module\Configuration\ModuleSelfConfigurator;
+-use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Context\ContextBuilderPreparer;
+ use PrestaShop\PrestaShop\Core\Module\ModuleManager;
+ use Symfony\Component\Console\Command\Command;
+ use Symfony\Component\Console\Helper\FormatterHelper;
+ use Symfony\Component\Console\Input\InputArgument;
+ use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
+ use Symfony\Component\Console\Output\OutputInterface;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+@@ -49,7 +50,7 @@ public function __construct(
+         protected readonly ModuleSelfConfigurator $moduleSelfConfigurator,
+         protected readonly ModuleManager $moduleManager,
+         protected readonly ContextBuilderPreparer $contextBuilderPreparer,
+-        protected readonly ConfigurationInterface $configuration,
++        protected readonly Configuration $configuration,
+     ) {
+         parent::__construct();
+     }
+@@ -61,7 +62,8 @@ protected function configure()
+             ->setDescription('Manage your modules via command line')
+             ->addArgument('action', InputArgument::REQUIRED, sprintf('Action to execute (Allowed actions: %s).', implode(' / ', $this->allowedActions)))
+             ->addArgument('module name', InputArgument::REQUIRED, 'Module on which the action will be executed')
+-            ->addArgument('file path', InputArgument::OPTIONAL, 'YML file path for configuration');
++            ->addArgument('file path', InputArgument::OPTIONAL, 'YML file path for configuration')
++            ->addOption('skip-overrides', null, InputOption::VALUE_NONE, 'Skip installing/uninstalling module overrides');
+     }
+ 
+     protected function init(InputInterface $input, OutputInterface $output)
+@@ -83,6 +85,8 @@ protected function execute(InputInterface $input, OutputInterface $output): int
+     {
+         $this->init($input, $output);
+ 
++        $skipOverrides = (bool) $input->getOption('skip-overrides');
++
+         $moduleName = $input->getArgument('module name');
+         $action = $input->getArgument('action');
+         $file = $input->getArgument('file path');
+@@ -100,10 +104,21 @@ protected function execute(InputInterface $input, OutputInterface $output): int
+             return 1;
+         }
+ 
+-        if ($action === 'configure') {
+-            $this->executeConfigureModuleAction($moduleName, $file);
+-        } else {
+-            $this->executeGenericModuleAction($action, $moduleName);
++        if ($skipOverrides) {
++            $disableModuleOriginaleValue = $this->configuration->get('PS_DISABLE_MODULE_OVERRIDES');
++            $this->configuration->setTemporary('PS_DISABLE_MODULE_OVERRIDES', 1);
++        }
++
++        try {
++            if ($action === 'configure') {
++                $this->executeConfigureModuleAction($moduleName, $file);
++            } else {
++                $this->executeGenericModuleAction($action, $moduleName);
++            }
++        } finally {
++            if ($skipOverrides) {
++                $this->configuration->setTemporary('PS_DISABLE_MODULE_OVERRIDES', $disableModuleOriginaleValue);
++            }
+         }
+ 
+         return 0;

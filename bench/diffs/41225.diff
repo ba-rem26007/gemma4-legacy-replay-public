@@ -1,0 +1,97 @@
+diff --git a/classes/Pack.php b/classes/Pack.php
+index 4a11dcf270a79..4c7a9fb1280cf 100644
+--- a/classes/Pack.php
++++ b/classes/Pack.php
+@@ -184,7 +184,7 @@ public static function getItems($id_product, $id_lang)
+ 					LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl ON (ag.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) Context::getContext()->language->id . ')
+ 					WHERE pa.`id_product_attribute` = ' . $row['id_product_attribute_item'] . '
+ 					GROUP BY pa.`id_product_attribute`, ag.`id_attribute_group`
+-					ORDER BY pa.`id_product_attribute`';
++					ORDER BY ag.`position`, a.`position`';
+ 
+                 $combinations = Db::getInstance()->executeS($sql);
+                 foreach ($combinations as $k => $combination) {
+@@ -382,7 +382,7 @@ public static function getItemTable($id_product, $id_lang, $full = false)
+ 				LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_image` pai ON (' . $line['id_product_attribute_item'] . ' = pai.`id_product_attribute`)
+ 				WHERE pa.`id_product` = ' . (int) $line['id_product'] . ' AND pa.`id_product_attribute` = ' . $line['id_product_attribute_item'] . '
+ 				GROUP BY pa.`id_product_attribute`, ag.`id_attribute_group`
+-				ORDER BY pa.`id_product_attribute`';
++				ORDER BY ag.`position`, a.`position`';
+ 
+                 $attr_name = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($sql);
+ 
+diff --git a/classes/Product.php b/classes/Product.php
+index f312bce4a32ad..6c4d41ee70a63 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -2481,7 +2481,7 @@ public function getAttributesResume($id_lang, $attribute_value_separator = ' - '
+ 
+         $combinationIds = array_keys($combinations);
+ 
+-        $lang = Db::getInstance()->executeS('SELECT pac.id_product_attribute, GROUP_CONCAT(agl.`name`, \'' . pSQL($attribute_value_separator) . '\',al.`name` ORDER BY agl.`id_attribute_group` SEPARATOR \'' . pSQL($attribute_separator) . '\') as attribute_designation
++        $lang = Db::getInstance()->executeS('SELECT pac.id_product_attribute, GROUP_CONCAT(agl.`name`, \'' . pSQL($attribute_value_separator) . '\',al.`name` ORDER BY ag.`position`, a.`position` SEPARATOR \'' . pSQL($attribute_separator) . '\') as attribute_designation
+                 FROM `' . _DB_PREFIX_ . 'product_attribute_combination` pac
+                 LEFT JOIN `' . _DB_PREFIX_ . 'attribute` a ON a.`id_attribute` = pac.`id_attribute`
+                 LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag ON ag.`id_attribute_group` = a.`id_attribute_group`
+@@ -2537,7 +2537,7 @@ public function getAttributeCombinations($id_lang = null, $groupByIdAttributeGro
+         }
+ 
+         $sql = 'SELECT pa.*, product_attribute_shop.*, ag.`id_attribute_group`, ag.`is_color_group`, agl.`name` AS group_name, al.`name` AS attribute_name, ' .
+-            'a.`id_attribute`, stock.location ' .
++            'a.`id_attribute`, a.`position` AS attribute_position, stock.location ' .
+             'FROM `' . _DB_PREFIX_ . 'product_attribute` pa ' .
+             Shop::addSqlAssociation('product_attribute', 'pa') . ' ' .
+             'LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac ON pac.`id_product_attribute` = pa.`id_product_attribute` ' .
+@@ -2548,7 +2548,7 @@ public function getAttributeCombinations($id_lang = null, $groupByIdAttributeGro
+             'LEFT JOIN `' . _DB_PREFIX_ . 'stock_available` stock ON (stock.id_product = pa.id_product AND stock.id_product_attribute = IFNULL(pa.`id_product_attribute`, 0)) ' .
+             'WHERE pa.`id_product` = ' . (int) $this->id . ' ' .
+             'GROUP BY pa.`id_product_attribute`' . ($groupByIdAttributeGroup ? ', ag.`id_attribute_group` ' : '') .
+-            'ORDER BY pa.`id_product_attribute`';
++            'ORDER BY pa.`id_product_attribute`, ag.`position`, a.`position`';
+ 
+         $res = Db::getInstance()->executeS($sql);
+ 
+@@ -2595,7 +2595,7 @@ public function getAttributeCombinationsById($id_product_attribute, $id_lang, $g
+                 WHERE pa.`id_product` = ' . (int) $this->id . '
+                 AND pa.`id_product_attribute` = ' . (int) $id_product_attribute . '
+                 GROUP BY pa.`id_product_attribute`' . ($groupByIdAttributeGroup ? ',ag.`id_attribute_group`' : '') . '
+-                ORDER BY pa.`id_product_attribute`';
++                ORDER BY pa.`id_product_attribute`, ag.`position`, a.`position`';
+ 
+         $res = Db::getInstance()->executeS($sql);
+ 
+@@ -7210,11 +7210,14 @@ public static function getAttributesParams($id_product, $id_product_attribute)
+             ' . Shop::addSqlAssociation('product_attribute', 'pa') . '
+             LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_lang` pal
+                 ON (pal.`id_product_attribute` = pac.`id_product_attribute` AND pal.`id_lang` = ' . (int) $id_lang . ')
++            LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag
++                ON (a.`id_attribute_group` = ag.`id_attribute_group`)
+             LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl
+                 ON (a.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) $id_lang . ')
+             WHERE pa.`id_product` = ' . (int) $id_product . '
+                 AND pac.`id_product_attribute` = ' . (int) $id_product_attribute . '
+-                AND agl.`id_lang` = ' . (int) $id_lang);
++                AND agl.`id_lang` = ' . (int) $id_lang . '
++            ORDER BY ag.`position` ASC, a.`position` ASC');
+             Cache::store($cache_id, $result);
+         } else {
+             $result = Cache::retrieve($cache_id);
+@@ -7235,6 +7238,8 @@ public static function getAttributesInformationsByProduct($id_product)
+         FROM `' . _DB_PREFIX_ . 'attribute` a
+         LEFT JOIN `' . _DB_PREFIX_ . 'attribute_lang` al
+             ON (a.`id_attribute` = al.`id_attribute` AND al.`id_lang` = ' . (int) Context::getContext()->language->id . ')
++        LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag
++            ON (a.`id_attribute_group` = ag.`id_attribute_group`)
+         LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl
+             ON (a.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) Context::getContext()->language->id . ')
+         LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac
+@@ -7243,7 +7248,8 @@ public static function getAttributesInformationsByProduct($id_product)
+             ON (pac.`id_product_attribute` = pa.`id_product_attribute`)
+         ' . Shop::addSqlAssociation('product_attribute', 'pa') . '
+         ' . Shop::addSqlAssociation('attribute', 'pac') . '
+-        WHERE pa.`id_product` = ' . (int) $id_product);
++        WHERE pa.`id_product` = ' . (int) $id_product . '
++        ORDER BY ag.`position` ASC, a.`position` ASC');
+ 
+         return $result;
+     }

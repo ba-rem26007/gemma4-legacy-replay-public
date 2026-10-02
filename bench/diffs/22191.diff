@@ -1,0 +1,181 @@
+diff --git a/src/Adapter/Currency/CommandHandler/AbstractCurrencyHandler.php b/src/Adapter/Currency/CommandHandler/AbstractCurrencyHandler.php
+index 6cc847872c0af..1c8581a666e87 100644
+--- a/src/Adapter/Currency/CommandHandler/AbstractCurrencyHandler.php
++++ b/src/Adapter/Currency/CommandHandler/AbstractCurrencyHandler.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Command\EditCurrencyCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CannotCreateCurrencyException;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CannotUpdateCurrencyException;
++use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CurrencyConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Language\Exception\LanguageNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
+ use PrestaShop\PrestaShop\Core\Language\LanguageInterface;
+@@ -160,6 +161,7 @@ protected function addEntity(Currency $entity, AddCurrencyCommand $command)
+         $this->applyPatternTransformations($entity, $command->getLocalizedTransformations());
+ 
+         $this->refreshLocalizedData($entity);
++        $this->validateCurrency($entity);
+ 
+         //IMPORTANT: specify that we want to save null values
+         if (false === $entity->save(true, true)) {
+@@ -201,6 +203,7 @@ protected function updateEntity(Currency $entity, EditCurrencyCommand $command)
+         }
+ 
+         $this->refreshLocalizedData($entity);
++        $this->validateCurrency($entity);
+ 
+         //IMPORTANT: specify that we want to save null values
+         if (false === $entity->update(true)) {
+@@ -218,6 +221,45 @@ protected function updateEntity(Currency $entity, EditCurrencyCommand $command)
+         }
+     }
+ 
++    /**
++     * @param Currency $currency
++     *
++     * @throws CurrencyConstraintException
++     * @throws PrestaShopException
++     */
++    private function validateCurrency(Currency $currency): void
++    {
++        $this->validateLocalizedField($currency, 'name', CurrencyConstraintException::INVALID_NAME);
++        $this->validateLocalizedField($currency, 'symbol', CurrencyConstraintException::INVALID_SYMBOL);
++        $this->validateLocalizedField($currency, 'pattern', CurrencyConstraintException::INVALID_SYMBOL);
++    }
++
++    /**
++     * @param Currency $currency
++     * @param string $propertyName
++     * @param int $errorCode
++     *
++     * @throws CurrencyConstraintException
++     * @throws PrestaShopException
++     */
++    private function validateLocalizedField(Currency $currency, string $propertyName, int $errorCode): void
++    {
++        $localizedValues = $currency->{$propertyName};
++
++        foreach ($localizedValues as $langId => $value) {
++            if (true !== $currency->validateField($propertyName, $value, $langId)) {
++                throw new CurrencyConstraintException(
++                    sprintf(
++                        'Invalid Currency localized property "%s" for language with id "%d"',
++                        $propertyName,
++                        $langId
++                    ),
++                    $errorCode
++                );
++            }
++        }
++    }
++
+     /**
+      * @param int $langId
+      *
+diff --git a/src/Core/Domain/Currency/Exception/CurrencyConstraintException.php b/src/Core/Domain/Currency/Exception/CurrencyConstraintException.php
+index 3c66ec9a58bb4..0d4c232b771de 100644
+--- a/src/Core/Domain/Currency/Exception/CurrencyConstraintException.php
++++ b/src/Core/Domain/Currency/Exception/CurrencyConstraintException.php
+@@ -78,4 +78,19 @@ class CurrencyConstraintException extends CurrencyException
+      * @see Precision
+      */
+     const INVALID_PRECISION = 8;
++
++    /**
++     * Code used when an invalid name is used
++     */
++    const INVALID_NAME = 9;
++
++    /**
++     * Code used when an invalid symbol is used
++     */
++    const INVALID_SYMBOL = 10;
++
++    /**
++     * Code used when an invalid pattern is used
++     */
++    const INVALID_PATTERN = 11;
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/CurrencyController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/CurrencyController.php
+index 767ed08c2f8d4..eac6736dffd67 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/CurrencyController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/CurrencyController.php
+@@ -496,6 +496,13 @@ private function getErrorMessages(Exception $e)
+                             sprintf('"%s"', $this->trans('Exchange rate', 'Admin.International.Feature')),
+                         ]
+                     ),
++                CurrencyConstraintException::INVALID_NAME => $this->trans(
++                    'The %s field is not valid',
++                    'Admin.Notifications.Error',
++                    [
++                        sprintf('"%s"', $this->trans('Currency name', 'Admin.International.Feature')),
++                    ]
++                ),
+                 CurrencyConstraintException::CURRENCY_ALREADY_EXISTS => $this->trans(
+                     'This currency already exists.',
+                     'Admin.International.Notification'
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CurrencyFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CurrencyFeatureContext.php
+index 5e07b3ac13218..62df7df2f52da 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CurrencyFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CurrencyFeatureContext.php
+@@ -267,6 +267,14 @@ public function assertLastErrorIsInvalidUnofficialCurrency()
+         $this->assertLastErrorIs(InvalidUnofficialCurrencyException::class);
+     }
+ 
++    /**
++     * @Then /^I should get error that currency name is invalid$/
++     */
++    public function assertLastErrorIsInvalidCurrencyName()
++    {
++        $this->assertLastErrorIs(CurrencyConstraintException::class, CurrencyConstraintException::INVALID_NAME);
++    }
++
+     /**
+      * @Then I should get error that currency already exists
+      */
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Currency/currency_management.feature b/tests/Integration/Behaviour/Features/Scenario/Currency/currency_management.feature
+index 2474b9a23781a..75596472599bd 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Currency/currency_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Currency/currency_management.feature
+@@ -396,3 +396,41 @@ Feature: Currency Management
+     And currency "currency18" should be available in shop "shop1"
+     And currency "currency18" should have pattern empty for language "fr-FR"
+     And currency "currency18" should have pattern empty for language "en-US"
++
++  Scenario: Adding invalid named currency
++    When I add new currency "currency19" with following properties:
++      | iso_code         | IVL       |
++      | exchange_rate    | 0.88      |
++      | name             | <>        |
++      | symbol           | €         |
++      | is_enabled       | 1         |
++      | is_unofficial    | 1         |
++      | shop_association | shop1     |
++    Then I should get error that currency name is invalid
++    When I add new currency "currency19" with following properties:
++      | iso_code         | AOA       |
++      | exchange_rate    | 0.88      |
++      | name             | <>        |
++      | symbol           | €         |
++      | is_enabled       | 1         |
++      | is_unofficial    | 0         |
++      | shop_association | shop1     |
++    Then I should get error that currency name is invalid
++    When I edit currency "currency17" with following properties:
++      | iso_code         | JPP                     |
++      | exchange_rate    | 0.8                     |
++      | name             | <>                      |
++      | is_enabled       | 1                       |
++      | is_unofficial    | 1                       |
++      | shop_association | shop1                   |
++      | transformations  | en-US:rightWithoutSpace |
++    Then I should get error that currency name is invalid
++    When I edit currency "currency16" with following properties:
++      | iso_code         | JPY                  |
++      | exchange_rate    | 0.08                 |
++      | name             | <>                   |
++      | is_enabled       | 1                    |
++      | is_unofficial    | 0                    |
++      | shop_association | shop1                |
++      | transformations  | en-US:rightWithSpace |
++    Then I should get error that currency name is invalid

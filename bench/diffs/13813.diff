@@ -1,0 +1,106 @@
+diff --git a/admin-dev/themes/default/template/helpers/list/list_action_enable.tpl b/admin-dev/themes/default/template/helpers/list/list_action_enable.tpl
+index fa8b187a1def7..0120db8498ccd 100644
+--- a/admin-dev/themes/default/template/helpers/list/list_action_enable.tpl
++++ b/admin-dev/themes/default/template/helpers/list/list_action_enable.tpl
+@@ -22,6 +22,12 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  * International Registered Trademark & Property of PrestaShop SA
+  *}
++
++{* Workaround to add compatibility for enable/disable actions to be able to use symfony endpoints *}
++{if isset($migrated_url_enable)}
++  {assign var="url_enable" value=$migrated_url_enable}
++{/if}
++
+ <a class="list-action-enable{if isset($ajax) && $ajax} ajax_table_link{/if}{if $enabled} action-enabled{else} action-disabled{/if}" href="{$url_enable|escape:'html':'UTF-8'}"{if isset($confirm)} onclick="return confirm('{$confirm}');"{/if} title="{if $enabled}{l s='Enabled' d='Admin.Global'}{else}{l s='Disabled' d='Admin.Global'}{/if}">
+ 	<i class="icon-check{if !$enabled} hidden{/if}"></i>
+ 	<i class="icon-remove{if $enabled} hidden{/if}"></i>
+diff --git a/admin-dev/themes/default/template/helpers/list/list_header.tpl b/admin-dev/themes/default/template/helpers/list/list_header.tpl
+index bbe9c42ac70e0..c27fabd49e0f2 100644
+--- a/admin-dev/themes/default/template/helpers/list/list_header.tpl
++++ b/admin-dev/themes/default/template/helpers/list/list_header.tpl
+@@ -29,8 +29,13 @@
+ 			$(".ajax_table_link").click(function () {
+ 				var link = $(this);
+ 				$.post($(this).attr('href'), function (data) {
+-					if (data.success == 1) {
+-						showSuccessMessage(data.text);
++				  // If response comes from symfony controller
++          // then data has "status" and "message" properties
++          // otherwise if response comes from legacy controller
++          // then data has "success" and "text" properties.
++
++					if (data.success == 1 || data.status === true) {
++						showSuccessMessage(data.text || data.message);
+ 						if (link.hasClass('action-disabled')){
+ 							link.removeClass('action-disabled').addClass('action-enabled');
+ 						} else {
+@@ -44,7 +49,7 @@
+ 							}
+ 						});
+ 					} else {
+-						showErrorMessage(data.text);
++						showErrorMessage(data.text || data.message);
+ 					}
+ 				}, 'json');
+ 				return false;
+diff --git a/controllers/admin/AdminTrackingController.php b/controllers/admin/AdminTrackingController.php
+index 0ef6939657dfe..85b1cadd12210 100644
+--- a/controllers/admin/AdminTrackingController.php
++++ b/controllers/admin/AdminTrackingController.php
+@@ -23,6 +23,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  * International Registered Trademark & Property of PrestaShop SA
+  */
++use PrestaShop\PrestaShop\Adapter\SymfonyContainer;
+ 
+ /**
+  * @property Product|Category $object
+@@ -92,8 +93,6 @@ public function getCustomListCategoriesEmpty()
+ 
+         $this->addRowAction('edit');
+         $this->addRowAction('view');
+-        $this->addRowAction('delete');
+-        $this->addRowActionSkipList('delete', array((int) Configuration::get('PS_ROOT_CATEGORY')));
+         $this->addRowActionSkipList('edit', array((int) Configuration::get('PS_ROOT_CATEGORY')));
+ 
+         $this->fields_list = (array(
+@@ -324,7 +323,7 @@ public function getCustomListProductsWithoutPrice()
+             'id_product' => array('title' => $this->trans('ID', array(), 'Admin.Global'), 'class' => 'fixed-width-xs', 'align' => 'center'),
+             'reference' => array('title' => $this->trans('Reference', array(), 'Admin.Global')),
+             'name' => array('title' => $this->trans('Name', array(), 'Admin.Global'), 'filter_key' => 'b!name'),
+-            'active' => array('title' => $this->trans('Status', array(), 'Admin.Global'), 'type' => 'bool', 'active' => 'status', 'align' => 'center', 'class' => 'fixed-width-xs'),
++            'active' => array('title' => $this->trans('Status', array(), 'Admin.Global'), 'type' => 'bool', 'active' => 'status', 'align' => 'center', 'class' => 'fixed-width-xs', 'ajax' => true),
+         );
+         $this->clearFilters();
+         $this->_join = Shop::addSqlAssociation('product', 'a');
+@@ -383,6 +382,29 @@ public function displayEnableLink($token, $id, $value, $active, $id_category = n
+         $this->_helper_list->identifier = $this->identifier;
+         $this->_helper_list->table = $this->table;
+ 
++        // Since Categories controller is migrated to Symfony
++        // it makes use of new endpoint instead of relaying on legacy controller
++        if ($this->list_id === 'empty_categories') {
++            $url = SymfonyContainer::getInstance()->get('router')->generate('admin_categories_toggle_status', [
++                'categoryId' => $id,
++            ]);
++            $this->context->smarty->assign('migrated_url_enable', $url);
++
++            $html = $this->_helper_list->displayEnableLink(
++                $this->_list_token,
++                $id,
++                $value,
++                $active,
++                $id_category,
++                $id_product,
++                true
++            );
++
++            $this->context->smarty->clearAssign('migrated_url_enable');
++
++            return $html;
++        }
++
+         return $this->_helper_list->displayEnableLink($this->_list_token, $id, $value, $active, $id_category, $id_product);
+     }
+ 

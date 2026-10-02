@@ -1,0 +1,1975 @@
+diff --git a/classes/module/Module.php b/classes/module/Module.php
+index bb9cf3f3bf291..6d42edf26a320 100755
+--- a/classes/module/Module.php
++++ b/classes/module/Module.php
+@@ -1304,6 +1304,37 @@ public static function configXmlStringFormat($string)
+         return Tools::htmlentitiesDecodeUTF8($string);
+     }
+ 
++    public static function loadModuleXMLConfig(string $technicalName, ?string $languageIsoCode = null): ?array
++    {
++        if (empty($languageIsoCode)) {
++            $languageIsoCode = substr(Context::getContext()->language->iso_code, 0, 2);
++        }
++
++        // Config file
++        $configFilePath = _PS_MODULE_DIR_ . $technicalName . '/config_' . $languageIsoCode . '.xml';
++        // For "en" iso code, we keep the default config.xml name
++        if ($languageIsoCode == 'en' || !file_exists($configFilePath)) {
++            $configFilePath = _PS_MODULE_DIR_ . $technicalName . '/config.xml';
++            if (!file_exists($configFilePath)) {
++                return null;
++            }
++        }
++
++        // Load config.xml
++        libxml_use_internal_errors(true);
++        $moduleConfigXML = @simplexml_load_file($configFilePath);
++        if (!$moduleConfigXML) {
++            return null;
++        }
++
++        $moduleConfig = [];
++        foreach ($moduleConfigXML as $key => $value) {
++            $moduleConfig[(string) $key] = (string) $value;
++        }
++
++        return $moduleConfig;
++    }
++
+     public static function getModuleName($module)
+     {
+         $iso = substr(Context::getContext()->language->iso_code, 0, 2);
+diff --git a/composer.json b/composer.json
+index 8fd638f68d63e..5e5f41fbbf41a 100644
+--- a/composer.json
++++ b/composer.json
+@@ -72,7 +72,7 @@
+         "prestashop/hummingbird": "dev-develop",
+         "prestashop/pagesnotfound": "^2",
+         "prestashop/productcomments": "^7.0",
+-        "prestashop/ps_apiresources": "dev-reset-module",
++        "prestashop/ps_apiresources": "dev-install-uninstall-module",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -258,7 +258,7 @@
+     "repositories": {
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/jinpresta/ps_apiresources.git"
++            "url": "https://github.com/jolelievre/ps_apiresources.git"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 30d233ce6d7be..d58edf0ba5d03 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "6420a9dee0439988a2462be3865bfc6e",
++    "content-hash": "c4e96763d84a33afcb1eeb54a1ffad92",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5676,16 +5676,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "dev-reset-module",
++            "version": "dev-install-uninstall-module",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/jinpresta/ps_apiresources.git",
+-                "reference": "aec9dcfcd51f7766885bbe8143174abf1e9be77f"
++                "url": "https://github.com/jolelievre/ps_apiresources.git",
++                "reference": "566a92a61e7419d58348c3768d5b90d978fb75de"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/jinpresta/ps_apiresources/zipball/aec9dcfcd51f7766885bbe8143174abf1e9be77f",
+-                "reference": "aec9dcfcd51f7766885bbe8143174abf1e9be77f",
++                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/566a92a61e7419d58348c3768d5b90d978fb75de",
++                "reference": "566a92a61e7419d58348c3768d5b90d978fb75de",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5693,6 +5693,7 @@
+             },
+             "require-dev": {
+                 "czproject/git-php": "^4.2",
++                "friendsofphp/php-cs-fixer": "^v3",
+                 "phpunit/phpunit": "^9.6",
+                 "prestashop/php-dev-tools": "^4.3"
+             },
+@@ -5737,9 +5738,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/jinpresta/ps_apiresources/tree/reset-module"
++                "source": "https://github.com/jolelievre/ps_apiresources/tree/install-uninstall-module"
+             },
+-            "time": "2024-10-21T16:46:05+00:00"
++            "time": "2024-11-06T14:43:11+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -18304,5 +18305,5 @@
+     "platform-overrides": {
+         "php": "8.1.0"
+     },
+-    "plugin-api-version": "2.3.0"
++    "plugin-api-version": "2.6.0"
+ }
+diff --git a/src/Adapter/Module/AdminModuleDataProvider.php b/src/Adapter/Module/AdminModuleDataProvider.php
+index a2e54142a7e5e..ecbcbf4af292e 100644
+--- a/src/Adapter/Module/AdminModuleDataProvider.php
++++ b/src/Adapter/Module/AdminModuleDataProvider.php
+@@ -169,7 +169,7 @@ public function isAllowedAccess($action, $name = '')
+             return false;
+         }
+ 
+-        if (in_array($action, ['install', 'upgrade'])) {
++        if (in_array($action, ['install', 'upgrade', 'upload'])) {
+             return $this->employee->can('add', 'AdminModulessf');
+         }
+ 
+diff --git a/src/Adapter/Module/CommandHandler/BulkToggleModuleStatusHandler.php b/src/Adapter/Module/CommandHandler/BulkToggleModuleStatusHandler.php
+index 3bf2209900a81..9242c44637b49 100755
+--- a/src/Adapter/Module/CommandHandler/BulkToggleModuleStatusHandler.php
++++ b/src/Adapter/Module/CommandHandler/BulkToggleModuleStatusHandler.php
+@@ -29,13 +29,13 @@
+ namespace PrestaShop\PrestaShop\Adapter\Module\CommandHandler;
+ 
+ use Module;
+-use PrestaShop\PrestaShop\Core\Cache\Clearer\CacheClearerInterface;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\BulkToggleModuleStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler\BulkToggleModuleStatusHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleNotInstalledException;
+ use PrestaShop\PrestaShop\Core\Module\ModuleManager;
++use PrestaShop\PrestaShop\Core\Module\ModuleRepository;
+ use Psr\Log\LoggerInterface;
+-use Validate;
+ 
+ /**
+  * Bulk toggles Module status
+@@ -43,32 +43,15 @@
+ #[AsCommandHandler]
+ class BulkToggleModuleStatusHandler implements BulkToggleModuleStatusHandlerInterface
+ {
+-    /**
+-     * @return ModuleManager
+-     */
+-    protected $moduleManager;
+-    /**
+-     * @return LoggerInterface
+-     */
+-    protected $logger;
+-    /**
+-     * @return CacheClearerInterface
+-     */
+-    protected $cacheClearer;
+-
+     /**
+      * @param ModuleManager $moduleManager
+      * @param LoggerInterface $logger
+-     * @param CacheClearerInterface $cacheClearer
+      */
+     public function __construct(
+-        ModuleManager $moduleManager,
+-        LoggerInterface $logger,
+-        CacheClearerInterface $cacheClearer
++        private readonly ModuleManager $moduleManager,
++        private readonly ModuleRepository $moduleRepository,
++        private readonly LoggerInterface $logger,
+     ) {
+-        $this->moduleManager = $moduleManager;
+-        $this->logger = $logger;
+-        $this->cacheClearer = $cacheClearer;
+     }
+ 
+     /**
+@@ -76,11 +59,23 @@ public function __construct(
+      */
+     public function handle(BulkToggleModuleStatusCommand $command): void
+     {
++        $modulesToUpdate = [];
++        // First loop checks that the provided modules exist and don't need some update
++        // If one module is not found the whole bulk is cancelled because an exception is thrown
+         foreach ($command->getModules() as $moduleName) {
+-            if ($this->isDisablingAlreadyDisabledModule($command->getExpectedStatus(), $moduleName) || !Validate::isLoadedObject(Module::getInstanceByName($moduleName))) {
++            $module = $this->moduleRepository->getPresentModule($moduleName);
++            if (!$module->isInstalled()) {
++                throw new ModuleNotInstalledException('Cannot toggle status for module ' . $moduleName . ' since it is not installed');
++            }
++
++            if ($this->isDisablingAlreadyDisabledModule($command->getExpectedStatus(), $moduleName)) {
+                 continue;
+             }
++            $modulesToUpdate[] = $moduleName;
++        }
+ 
++        // Now we can perform the toggle
++        foreach ($modulesToUpdate as $moduleName) {
+             if ($command->getExpectedStatus()) {
+                 if ($this->moduleManager->enable($moduleName)) {
+                     $this->logger->warning(
+@@ -101,13 +96,6 @@ public function handle(BulkToggleModuleStatusCommand $command): void
+                 }
+             }
+         }
+-
+-        // Clear cache
+-        // Why ?
+-        //    It seems that in prod environment the kernel caches the list of activated modules.
+-        //    So after this loop we clear the caches (especially Symfony one but it's safer to clear them all).
+-        //    If you don't the modification of the status will be ignored even if the state of the DB has changed.
+-        $this->cacheClearer->clear();
+     }
+ 
+     private function isDisablingAlreadyDisabledModule(bool $expectedStatus, string $moduleName): bool
+diff --git a/src/Adapter/Module/CommandHandler/BulkUninstallModuleHandler.php b/src/Adapter/Module/CommandHandler/BulkUninstallModuleHandler.php
+index 304d14ad87240..01e7957a9a0e6 100644
+--- a/src/Adapter/Module/CommandHandler/BulkUninstallModuleHandler.php
++++ b/src/Adapter/Module/CommandHandler/BulkUninstallModuleHandler.php
+@@ -45,14 +45,18 @@ public function __construct(
+ 
+     public function handle(BulkUninstallModuleCommand $command): void
+     {
+-        $deleteFile = $command->getDeteleFile();
++        $deleteFile = $command->deleteFiles();
++        // First loop through all the modules and check if they are valid for uninstallation
+         foreach ($command->getModules() as $moduleName) {
+             $module = $this->moduleRepository->getPresentModule($moduleName->getValue());
+ 
+             if (!$module->isInstalled()) {
+-                throw new ModuleNotInstalledException('Module ' . $moduleName->getValue() . ' not installed.');
++                throw new ModuleNotInstalledException('Cannot uninstall module ' . $moduleName->getValue() . ' since it is not installed');
+             }
++        }
+ 
++        // Then perform the bulk action
++        foreach ($command->getModules() as $moduleName) {
+             $result = $this->moduleManager->uninstall($moduleName->getValue(), $deleteFile);
+ 
+             if (!$result) {
+diff --git a/src/Adapter/Module/CommandHandler/InstallModuleHandler.php b/src/Adapter/Module/CommandHandler/InstallModuleHandler.php
+new file mode 100644
+index 0000000000000..fc3551364193a
+--- /dev/null
++++ b/src/Adapter/Module/CommandHandler/InstallModuleHandler.php
+@@ -0,0 +1,59 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Module\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\InstallModuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler\InstallModuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\AlreadyInstalledModuleException;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\CannotInstallModuleException;
++use PrestaShop\PrestaShop\Core\Module\ModuleManager;
++use PrestaShop\PrestaShop\Core\Module\ModuleRepository;
++
++#[AsCommandHandler]
++class InstallModuleHandler implements InstallModuleHandlerInterface
++{
++    public function __construct(
++        protected ModuleManager $moduleManager,
++        protected ModuleRepository $moduleRepository,
++    ) {
++    }
++
++    public function handle(InstallModuleCommand $command): void
++    {
++        $module = $this->moduleRepository->getPresentModule($command->getTechnicalName()->getValue());
++        if ($module->isInstalled()) {
++            throw new AlreadyInstalledModuleException('Cannot install module ' . $command->getTechnicalName()->getValue() . ' since it is already installed');
++        }
++
++        $result = $this->moduleManager->install($command->getTechnicalName()->getValue());
++
++        if (!$result) {
++            throw new CannotInstallModuleException('Technical error occurred while installing module.');
++        }
++    }
++}
+diff --git a/src/Adapter/Module/CommandHandler/ResetModuleHandler.php b/src/Adapter/Module/CommandHandler/ResetModuleHandler.php
+index ac2a260caf313..e48777024972a 100644
+--- a/src/Adapter/Module/CommandHandler/ResetModuleHandler.php
++++ b/src/Adapter/Module/CommandHandler/ResetModuleHandler.php
+@@ -30,6 +30,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\ResetModuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler\ResetModuleHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Exception\CannotResetModuleException;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleNotInstalledException;
+ use PrestaShop\PrestaShop\Core\Module\ModuleManager;
+ use PrestaShop\PrestaShop\Core\Module\ModuleRepository;
+ 
+@@ -45,13 +46,8 @@ public function __construct(
+     public function handle(ResetModuleCommand $command): void
+     {
+         $module = $this->moduleRepository->getPresentModule($command->getTechnicalName()->getValue());
+-
+         if (!$module->isInstalled()) {
+-            throw new CannotResetModuleException('Cannot reset module that is not installed', CannotResetModuleException::NOT_INSTALLED);
+-        }
+-
+-        if (!$module->isActive()) {
+-            throw new CannotResetModuleException('Cannot reset module that is disabled', CannotResetModuleException::NOT_ACTIVE);
++            throw new ModuleNotInstalledException('Cannot reset module ' . $command->getTechnicalName()->getValue() . ' since it is not installed');
+         }
+ 
+         if (!$this->moduleManager->reset($command->getTechnicalName()->getValue(), $command->keepData())) {
+diff --git a/src/Adapter/Module/CommandHandler/UninstallModuleHandler.php b/src/Adapter/Module/CommandHandler/UninstallModuleHandler.php
+index 441412e1150f2..597431632680f 100644
+--- a/src/Adapter/Module/CommandHandler/UninstallModuleHandler.php
++++ b/src/Adapter/Module/CommandHandler/UninstallModuleHandler.php
+@@ -45,16 +45,18 @@ public function __construct(
+ 
+     public function handle(UninstallModuleCommand $command): void
+     {
+-        $moduleName = $command->getTechnicalName()->getValue();
+-        $deleteFile = $command->getDeteleFile();
++        $module = $this->moduleRepository->getPresentModule($command->getTechnicalName()->getValue());
+ 
+-        $module = $this->moduleRepository->getPresentModule($moduleName);
+-
+-        if (!$module->isInstalled()) {
+-            throw new ModuleNotInstalledException('Module ' . $moduleName . ' not installed.');
++        // Cannot perform uninstall action of the module is not installed yet UNLESS the commands aims at removing files
++        if (!$module->isInstalled() && !$command->deleteFiles()) {
++            throw new ModuleNotInstalledException('Cannot uninstall module ' . $command->getTechnicalName()->getValue() . ' since it is not installed');
+         }
+ 
+-        $result = $this->moduleManager->uninstall($moduleName, $deleteFile);
++        if ($module->isInstalled()) {
++            $result = $this->moduleManager->uninstall($command->getTechnicalName()->getValue(), $command->deleteFiles());
++        } else {
++            $result = $this->moduleManager->delete($command->getTechnicalName()->getValue());
++        }
+ 
+         if (!$result) {
+             throw new CannotUninstallModuleException('Technical error occurred while uninstalling module.');
+diff --git a/src/Adapter/Module/CommandHandler/UpdateModuleStatusHandler.php b/src/Adapter/Module/CommandHandler/UpdateModuleStatusHandler.php
+index d3d8571f8e39b..75b111f284eb1 100644
+--- a/src/Adapter/Module/CommandHandler/UpdateModuleStatusHandler.php
++++ b/src/Adapter/Module/CommandHandler/UpdateModuleStatusHandler.php
+@@ -30,6 +30,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\UpdateModuleStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler\UpdateModuleStatusHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Exception\CannotToggleModuleStatusException;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleNotInstalledException;
+ use PrestaShop\PrestaShop\Core\Module\ModuleManager;
+ use PrestaShop\PrestaShop\Core\Module\ModuleRepository;
+ 
+@@ -44,7 +45,11 @@ public function __construct(
+ 
+     public function handle(UpdateModuleStatusCommand $command): void
+     {
+-        $this->moduleRepository->getPresentModule($command->getTechnicalName()->getValue());
++        $module = $this->moduleRepository->getPresentModule($command->getTechnicalName()->getValue());
++
++        if (!$module->isInstalled()) {
++            throw new ModuleNotInstalledException('Cannot toggle status for module ' . $command->getTechnicalName()->getValue() . ' since it is not installed');
++        }
+ 
+         if ($command->isEnabled()) {
+             $result = $this->moduleManager->enable($command->getTechnicalName()->getValue());
+diff --git a/src/Adapter/Module/CommandHandler/UploadModuleHandler.php b/src/Adapter/Module/CommandHandler/UploadModuleHandler.php
+new file mode 100644
+index 0000000000000..a42432fea7313
+--- /dev/null
++++ b/src/Adapter/Module/CommandHandler/UploadModuleHandler.php
+@@ -0,0 +1,66 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Module\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\UploadModuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler\UploadModuleHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\CannotUploadModuleException;
++use PrestaShop\PrestaShop\Core\Domain\Module\QueryResult\ModuleInfos;
++use PrestaShop\PrestaShop\Core\Module\ModuleManager;
++use PrestaShop\PrestaShop\Core\Module\ModuleRepository;
++use Throwable;
++
++#[AsCommandHandler]
++class UploadModuleHandler implements UploadModuleHandlerInterface
++{
++    public function __construct(
++        protected ModuleManager $moduleManager,
++        protected ModuleRepository $moduleRepository,
++    ) {
++    }
++
++    public function handle(UploadModuleCommand $command): ModuleInfos
++    {
++        try {
++            $technicalName = $this->moduleManager->upload($command->getSource());
++        } catch (Throwable $th) {
++            throw new CannotUploadModuleException('Technical error occurred while uploading module.');
++        }
++
++        $module = $this->moduleRepository->getPresentModule($technicalName);
++
++        return new ModuleInfos(
++            $module->database->get('id'),
++            $module->get('name'),
++            $module->disk->get('version'),
++            $module->database->get('version', null),
++            $module->isActive(),
++            $module->isInstalled(),
++        );
++    }
++}
+diff --git a/src/Adapter/Module/QueryHandler/GetModuleInfosHandler.php b/src/Adapter/Module/QueryHandler/GetModuleInfosHandler.php
+index c5036e7dfd459..94aaa62cc9095 100644
+--- a/src/Adapter/Module/QueryHandler/GetModuleInfosHandler.php
++++ b/src/Adapter/Module/QueryHandler/GetModuleInfosHandler.php
+@@ -49,7 +49,8 @@ public function handle(GetModuleInfos $query): ModuleInfos
+         return new ModuleInfos(
+             $module->database->get('id'),
+             $module->get('name'),
+-            $module->get('version'),
++            $module->disk->get('version'),
++            $module->database->get('version', null),
+             $module->isActive(),
+             $module->isInstalled(),
+         );
+diff --git a/src/Core/Domain/Module/Command/BulkUninstallModuleCommand.php b/src/Core/Domain/Module/Command/BulkUninstallModuleCommand.php
+index db8cddb4902b3..682394690492f 100644
+--- a/src/Core/Domain/Module/Command/BulkUninstallModuleCommand.php
++++ b/src/Core/Domain/Module/Command/BulkUninstallModuleCommand.php
+@@ -38,21 +38,17 @@ class BulkUninstallModuleCommand
+     /**
+      * @var array<ModuleTechnicalName>
+      */
+-    private $modules;
+-
+-    /**
+-     * @var bool
+-     */
+-    private $deleteFile;
++    private array $modules;
+ 
+     /**
+      * @param array<string> $modules Array of technical names for modules
+-     * @param bool $deleteFile Boolean for delete modules files
++     * @param bool $deleteFiles Boolean for delete modules files
+      */
+-    public function __construct(array $modules, bool $deleteFile = false)
+-    {
++    public function __construct(
++        array $modules,
++        private readonly bool $deleteFiles = false
++    ) {
+         $this->modules = array_map(fn (string $technicalName) => new ModuleTechnicalName($technicalName), $modules);
+-        $this->deleteFile = $deleteFile;
+     }
+ 
+     /**
+@@ -63,11 +59,8 @@ public function getModules(): array
+         return $this->modules;
+     }
+ 
+-    /**
+-     * @return bool
+-     */
+-    public function getDeteleFile(): bool
++    public function deleteFiles(): bool
+     {
+-        return $this->deleteFile;
++        return $this->deleteFiles;
+     }
+ }
+diff --git a/src/Core/Domain/Module/Command/InstallModuleCommand.php b/src/Core/Domain/Module/Command/InstallModuleCommand.php
+new file mode 100644
+index 0000000000000..1134986058db7
+--- /dev/null
++++ b/src/Core/Domain/Module/Command/InstallModuleCommand.php
+@@ -0,0 +1,58 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Module\ValueObject\ModuleTechnicalName;
++
++/**
++ * Install module
++ */
++class InstallModuleCommand
++{
++    /**
++     * @var ModuleTechnicalName
++     */
++    private $technicalName;
++
++    /**
++     * @param string $technicalName Technical name for module
++     */
++    public function __construct(string $technicalName)
++    {
++        $this->technicalName = new ModuleTechnicalName($technicalName);
++    }
++
++    /**
++     * @return ModuleTechnicalName
++     */
++    public function getTechnicalName(): ModuleTechnicalName
++    {
++        return $this->technicalName;
++    }
++}
+diff --git a/src/Core/Domain/Module/Command/UninstallModuleCommand.php b/src/Core/Domain/Module/Command/UninstallModuleCommand.php
+index 4c151c504015e..dbf081542678a 100644
+--- a/src/Core/Domain/Module/Command/UninstallModuleCommand.php
++++ b/src/Core/Domain/Module/Command/UninstallModuleCommand.php
+@@ -37,16 +37,15 @@ class UninstallModuleCommand
+ {
+     private ModuleTechnicalName $technicalName;
+ 
+-    private bool $deleteFile;
+-
+     /**
+      * @param string $technicalName Array of technical names for modules
+-     * @param bool $deleteFile Boolean for delete module files
++     * @param bool $deleteFiles Boolean for delete module files
+      */
+-    public function __construct(string $technicalName, bool $deleteFile = false)
+-    {
++    public function __construct(
++        string $technicalName,
++        private readonly bool $deleteFiles = false
++    ) {
+         $this->technicalName = new ModuleTechnicalName($technicalName);
+-        $this->deleteFile = $deleteFile;
+     }
+ 
+     /**
+@@ -60,8 +59,8 @@ public function getTechnicalName(): ModuleTechnicalName
+     /**
+      * @return bool
+      */
+-    public function getDeteleFile(): bool
++    public function deleteFiles(): bool
+     {
+-        return $this->deleteFile;
++        return $this->deleteFiles;
+     }
+ }
+diff --git a/src/Core/Domain/Module/Command/UploadModuleCommand.php b/src/Core/Domain/Module/Command/UploadModuleCommand.php
+new file mode 100644
+index 0000000000000..ab00814a8ed17
+--- /dev/null
++++ b/src/Core/Domain/Module/Command/UploadModuleCommand.php
+@@ -0,0 +1,48 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\Command;
++
++/**
++ * Upload module
++ */
++class UploadModuleCommand
++{
++    /**
++     * @param string $source Source for module
++     */
++    public function __construct(
++        private readonly string $source
++    ) {
++    }
++
++    public function getSource(): string
++    {
++        return $this->source;
++    }
++}
+diff --git a/src/Core/Domain/Module/CommandHandler/InstallModuleHandlerInterface.php b/src/Core/Domain/Module/CommandHandler/InstallModuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..f8f40cd2e5702
+--- /dev/null
++++ b/src/Core/Domain/Module/CommandHandler/InstallModuleHandlerInterface.php
+@@ -0,0 +1,34 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\InstallModuleCommand;
++
++interface InstallModuleHandlerInterface
++{
++    public function handle(InstallModuleCommand $command): void;
++}
+diff --git a/src/Core/Domain/Module/CommandHandler/UploadModuleHandlerInterface.php b/src/Core/Domain/Module/CommandHandler/UploadModuleHandlerInterface.php
+new file mode 100644
+index 0000000000000..88ffe33b7cb88
+--- /dev/null
++++ b/src/Core/Domain/Module/CommandHandler/UploadModuleHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\UploadModuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\Module\QueryResult\ModuleInfos;
++
++interface UploadModuleHandlerInterface
++{
++    public function handle(UploadModuleCommand $command): ModuleInfos;
++}
+diff --git a/src/Core/Domain/Module/Exception/AlreadyInstalledModuleException.php b/src/Core/Domain/Module/Exception/AlreadyInstalledModuleException.php
+new file mode 100644
+index 0000000000000..8a30e7befeceb
+--- /dev/null
++++ b/src/Core/Domain/Module/Exception/AlreadyInstalledModuleException.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\Exception;
++
++class AlreadyInstalledModuleException extends ModuleException
++{
++}
+diff --git a/src/Core/Domain/Module/Exception/CannotInstallModuleException.php b/src/Core/Domain/Module/Exception/CannotInstallModuleException.php
+new file mode 100644
+index 0000000000000..4287a72b51a45
+--- /dev/null
++++ b/src/Core/Domain/Module/Exception/CannotInstallModuleException.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\Exception;
++
++class CannotInstallModuleException extends ModuleException
++{
++}
+diff --git a/src/Core/Domain/Module/Exception/CannotUploadModuleException.php b/src/Core/Domain/Module/Exception/CannotUploadModuleException.php
+new file mode 100644
+index 0000000000000..fc7583dcdcbba
+--- /dev/null
++++ b/src/Core/Domain/Module/Exception/CannotUploadModuleException.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Module\Exception;
++
++class CannotUploadModuleException extends ModuleException
++{
++}
+diff --git a/src/Core/Domain/Module/QueryResult/ModuleInfos.php b/src/Core/Domain/Module/QueryResult/ModuleInfos.php
+index 4ac9bda8474bc..def9adf2a095e 100644
+--- a/src/Core/Domain/Module/QueryResult/ModuleInfos.php
++++ b/src/Core/Domain/Module/QueryResult/ModuleInfos.php
+@@ -33,7 +33,8 @@ class ModuleInfos
+     public function __construct(
+         private readonly ?int $moduleId,
+         private readonly string $technicalName,
+-        private readonly string $version,
++        private readonly string $moduleVersion,
++        private readonly ?string $installedVersion,
+         private readonly bool $enabled,
+         private readonly bool $installed,
+     ) {
+@@ -49,9 +50,14 @@ public function getTechnicalName(): string
+         return $this->technicalName;
+     }
+ 
+-    public function getVersion(): string
++    public function getModuleVersion(): string
+     {
+-        return $this->version;
++        return $this->moduleVersion;
++    }
++
++    public function getInstalledVersion(): ?string
++    {
++        return $this->installedVersion;
+     }
+ 
+     public function isEnabled(): bool
+diff --git a/src/Core/Grid/Data/Factory/DoctrineGridDataFactory.php b/src/Core/Grid/Data/Factory/DoctrineGridDataFactory.php
+index 5812d09ad6407..4619b2dbcb3f7 100644
+--- a/src/Core/Grid/Data/Factory/DoctrineGridDataFactory.php
++++ b/src/Core/Grid/Data/Factory/DoctrineGridDataFactory.php
+@@ -38,28 +38,8 @@
+ /**
+  * Class DoctrineGridDataFactory is responsible for returning grid data using Doctrine query builders.
+  */
+-final class DoctrineGridDataFactory implements GridDataFactoryInterface
++class DoctrineGridDataFactory implements GridDataFactoryInterface
+ {
+-    /**
+-     * @var DoctrineQueryBuilderInterface
+-     */
+-    private $gridQueryBuilder;
+-
+-    /**
+-     * @var HookDispatcherInterface
+-     */
+-    private $hookDispatcher;
+-
+-    /**
+-     * @var QueryParserInterface
+-     */
+-    private $queryParser;
+-
+-    /**
+-     * @var string
+-     */
+-    private $gridId;
+-
+     /**
+      * @param DoctrineQueryBuilderInterface $gridQueryBuilder
+      * @param HookDispatcherInterface $hookDispatcher
+@@ -67,15 +47,11 @@ final class DoctrineGridDataFactory implements GridDataFactoryInterface
+      * @param string $gridId
+      */
+     public function __construct(
+-        DoctrineQueryBuilderInterface $gridQueryBuilder,
+-        HookDispatcherInterface $hookDispatcher,
+-        QueryParserInterface $queryParser,
+-        $gridId
++        protected DoctrineQueryBuilderInterface $gridQueryBuilder,
++        protected HookDispatcherInterface $hookDispatcher,
++        protected QueryParserInterface $queryParser,
++        protected string $gridId
+     ) {
+-        $this->gridQueryBuilder = $gridQueryBuilder;
+-        $this->hookDispatcher = $hookDispatcher;
+-        $this->queryParser = $queryParser;
+-        $this->gridId = $gridId;
+     }
+ 
+     /**
+diff --git a/src/Core/Module/EventSubscriber.php b/src/Core/Module/EventSubscriber.php
+index 712bbaf26c104..4c4f551552678 100644
+--- a/src/Core/Module/EventSubscriber.php
++++ b/src/Core/Module/EventSubscriber.php
+@@ -57,6 +57,7 @@ public static function getSubscribedEvents()
+             ModuleManagementEvent::POST_INSTALL => 'onModuleStateChanged',
+             ModuleManagementEvent::UNINSTALL => 'onModuleStateChanged',
+             ModuleManagementEvent::UPGRADE => 'onModuleStateChanged',
++            ModuleManagementEvent::UPLOAD => 'onModuleStateChanged',
+             ModuleManagementEvent::ENABLE => 'onModuleStateChanged',
+             ModuleManagementEvent::DISABLE => 'onModuleStateChanged',
+             ModuleManagementEvent::DELETE => 'onModuleStateChanged',
+@@ -65,8 +66,8 @@ public static function getSubscribedEvents()
+ 
+     public function onModuleStateChanged(ModuleManagementEvent $event): void
+     {
+-        $moduleName = $event->getModule()->get('name');
+-        $this->moduleRepository->clearCache($moduleName, true);
++        // Force clearing all cache because it's so badly handled
++        $this->moduleRepository->clearCache();
+         $this->cacheClearer->clear();
+     }
+ }
+diff --git a/src/Core/Module/ModuleManager.php b/src/Core/Module/ModuleManager.php
+index cad82c6c5f607..a2b28786dab0c 100644
+--- a/src/Core/Module/ModuleManager.php
++++ b/src/Core/Module/ModuleManager.php
+@@ -90,6 +90,25 @@ public function __construct(
+         $this->hookManager = $hookManager;
+     }
+ 
++    public function upload(string $source): string
++    {
++        if (!$this->adminModuleDataProvider->isAllowedAccess(__FUNCTION__)) {
++            throw new Exception($this->translator->trans(
++                'You are not allowed to upload modules.',
++                [],
++                'Admin.Modules.Notification'
++            ));
++        }
++
++        $handler = $this->sourceFactory->getHandler($source);
++        $handler->handle($source);
++        $moduleName = $handler->getModuleName($source);
++        $module = $this->moduleRepository->getModule($moduleName);
++        $this->dispatch(ModuleManagementEvent::UPLOAD, $module);
++
++        return $moduleName;
++    }
++
+     public function install(string $name, $source = null): bool
+     {
+         if (!$this->adminModuleDataProvider->isAllowedAccess(__FUNCTION__)) {
+@@ -161,6 +180,7 @@ public function uninstall(string $name, bool $deleteFiles = false): bool
+ 
+         if ($deleteFiles && $path = $this->moduleRepository->getModulePath($name)) {
+             $this->filesystem->remove($path);
++            $this->dispatch(ModuleManagementEvent::DELETE, $module);
+         }
+ 
+         $this->dispatch(ModuleManagementEvent::UNINSTALL, $module);
+diff --git a/src/Core/Module/ModuleRepository.php b/src/Core/Module/ModuleRepository.php
+index ef261d8a3786a..c945972c19905 100644
+--- a/src/Core/Module/ModuleRepository.php
++++ b/src/Core/Module/ModuleRepository.php
+@@ -269,12 +269,18 @@ private function getModuleAttributes(string $moduleName, bool $isValid): array
+     private function getModuleDiskAttributes(string $moduleName, bool $isValid, int $filemtime): array
+     {
+         $path = $this->modulePath . $moduleName;
++        if ($isValid) {
++            $moduleConfig = ModuleLegacy::loadModuleXMLConfig($moduleName);
++            $version = $moduleConfig['version'] ?? null;
++        } else {
++            $version = null;
++        }
+ 
+         return [
+             'filemtime' => $filemtime,
+             'is_present' => $filemtime > 0,
+             'is_valid' => $isValid,
+-            'version' => $isValid ? ModuleLegacy::getInstanceByName($moduleName)->version : null,
++            'version' => $version,
+             'path' => $path,
+         ];
+     }
+diff --git a/src/Core/Module/SourceHandler/RemoteZipSourceHandler.php b/src/Core/Module/SourceHandler/RemoteZipSourceHandler.php
+index 02ff07e6be17b..8fa05ecf6a78f 100644
+--- a/src/Core/Module/SourceHandler/RemoteZipSourceHandler.php
++++ b/src/Core/Module/SourceHandler/RemoteZipSourceHandler.php
+@@ -98,10 +98,13 @@ public function canHandle($source): bool
+             $this->moduleName = $moduleName[1];
+         }
+ 
++        $contentType = isset($headers['content-type']) ? reset($headers['content-type']) : null;
++
+         if (!empty($this->moduleName)
+             && $response->getStatusCode() === 200
+-            && isset($headers['content-type'])
+-            && reset($headers['content-type']) === 'application/zip'
++            && (
++                $contentType === 'application/zip' || $contentType === 'application/octet-stream'
++            )
+         ) {
+             $this->handledSource = $source;
+ 
+diff --git a/src/PrestaShopBundle/Event/ModuleManagementEvent.php b/src/PrestaShopBundle/Event/ModuleManagementEvent.php
+index ca42b634ddf90..07ebfbe91ca7f 100644
+--- a/src/PrestaShopBundle/Event/ModuleManagementEvent.php
++++ b/src/PrestaShopBundle/Event/ModuleManagementEvent.php
+@@ -37,6 +37,7 @@ class ModuleManagementEvent extends Event
+     public const DISABLE = 'module.disable';
+     public const ENABLE = 'module.enable';
+     public const UPGRADE = 'module.upgrade';
++    public const UPLOAD = 'module.upload';
+     public const RESET = 'module.reset';
+     public const DELETE = 'module.delete';
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/module.yml b/src/PrestaShopBundle/Resources/config/services/adapter/module.yml
+index 89d32e610cebb..d261caed5e849 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/module.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/module.yml
+@@ -2,19 +2,25 @@ services:
+   _defaults:
+     public: true
+ 
+-  prestashop.adapter.module.command_handler.bulk_toggle_module_status_handler:
+-    class: PrestaShop\PrestaShop\Adapter\Module\CommandHandler\BulkToggleModuleStatusHandler
++  PrestaShop\PrestaShop\Adapter\Module\CommandHandler\BulkToggleModuleStatusHandler:
+     autoconfigure: true
+-    arguments:
+-      - '@PrestaShop\PrestaShop\Core\Module\ModuleManager'
+-      - '@prestashop.adapter.legacy.logger'
+-      - '@prestashop.core.cache.clearer.cache_clearer_chain'
++    autowire: true
+ 
+   PrestaShop\PrestaShop\Adapter\Module\CommandHandler\UpdateModuleStatusHandler:
+     autoconfigure: true
+     autowire: true
+     public: false
+ 
++  PrestaShop\PrestaShop\Adapter\Module\CommandHandler\UploadModuleHandler:
++    autoconfigure: true
++    autowire: true
++    public: false
++
++  PrestaShop\PrestaShop\Adapter\Module\CommandHandler\InstallModuleHandler:
++    autoconfigure: true
++    autowire: true
++    public: false
++
+   PrestaShop\PrestaShop\Adapter\Module\CommandHandler\UninstallModuleHandler:
+     autoconfigure: true
+     autowire: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/module.yml b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+index 06afc2c8982dc..aded8980256de 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/module.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+@@ -38,7 +38,7 @@ services:
+   PrestaShop\PrestaShop\Core\Module\SourceHandler\ZipSourceHandler:
+     autowire: true
+     arguments:
+-      $modulePath: '%modules_dir%'
++      $modulePath: '%prestashop.module_dir%'
+     tags: [ core.module.source_handler ]
+ 
+   PrestaShop\PrestaShop\Core\Module\SourceHandler\RemoteZipSourceHandler:
+diff --git a/tests/Integration/Behaviour/Features/Context/CommonFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CommonFeatureContext.php
+index 53803d29a79a5..f9afea637215a 100644
+--- a/tests/Integration/Behaviour/Features/Context/CommonFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CommonFeatureContext.php
+@@ -74,6 +74,7 @@
+ use Manufacturer;
+ use Message;
+ use Meta;
++use Module;
+ use ObjectModel;
+ use OrderCartRule;
+ use OrderHistory;
+@@ -264,7 +265,15 @@ public static function resetImgDir(): void
+     /**
+      * @AfterFeature @reset-test-modules-after-feature
+      */
+-    public static function resetTestModules(): void
++    public static function resetTestModulesAfterFeature(): void
++    {
++        (new ResourceResetter())->resetTestModules();
++    }
++
++    /**
++     * @AfterFeature @reset-test-modules-before-feature
++     */
++    public static function resetTestModulesBeforeFeature(): void
+     {
+         (new ResourceResetter())->resetTestModules();
+     }
+@@ -684,6 +693,7 @@ private static function clearCache(): void
+         Manufacturer::resetStaticCache();
+         Message::resetStaticCache();
+         Meta::resetStaticCache();
++        Module::resetStaticCache();
+         Page::resetStaticCache();
+         ProductDownload::resetStaticCache();
+         ProductSupplier::resetStaticCache();
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ModuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ModuleFeatureContext.php
+index 3f881d89f58a8..461c912bf016e 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ModuleFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ModuleFeatureContext.php
+@@ -33,10 +33,12 @@
+ use PHPUnit\Framework\Assert;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\BulkToggleModuleStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\BulkUninstallModuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\InstallModuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\ResetModuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\UninstallModuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Command\UpdateModuleStatusCommand;
+-use PrestaShop\PrestaShop\Core\Domain\Module\Exception\CannotResetModuleException;
++use PrestaShop\PrestaShop\Core\Domain\Module\Command\UploadModuleCommand;
++use PrestaShop\PrestaShop\Core\Domain\Module\Exception\AlreadyInstalledModuleException;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleException;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Module\Exception\ModuleNotInstalledException;
+@@ -54,21 +56,8 @@ public function assertModuleInfos(string $technicalName, TableNode $tableNode):
+         try {
+             /** @var ModuleInfos $moduleInfos */
+             $moduleInfos = $this->getQueryBus()->handle(new GetModuleInfos($technicalName));
+-
+-            $data = $tableNode->getRowsHash();
+-            if (isset($data['technical_name'])) {
+-                Assert::assertEquals($data['technical_name'], $moduleInfos->getTechnicalName());
+-            }
+-            if (isset($data['version'])) {
+-                Assert::assertEquals($data['version'], $moduleInfos->getVersion());
+-            }
+-            if (isset($data['enabled'])) {
+-                Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($data['enabled']), $moduleInfos->isEnabled(), 'invalid enabled value');
+-            }
+-            if (isset($data['installed'])) {
+-                Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($data['installed']), $moduleInfos->isInstalled(), 'invalid installed value');
+-            }
+-        } catch (ModuleNotFoundException $e) {
++            $this->assertModuleInfosWithData($moduleInfos, $tableNode);
++        } catch (ModuleException $e) {
+             $this->setLastException($e);
+         }
+     }
+@@ -82,11 +71,11 @@ public function assertModuleNotFound(): void
+     }
+ 
+     /**
+-     * @Then I should have an exception that disabled module cannot be reset
++     * @Then I should have an exception that module is already installed
+      */
+-    public function assertDisabledError(): void
++    public function assertModuleIsAlreadyInstalled(): void
+     {
+-        $this->assertLastErrorIs(CannotResetModuleException::class, CannotResetModuleException::NOT_ACTIVE);
++        $this->assertLastErrorIs(AlreadyInstalledModuleException::class);
+     }
+ 
+     /**
+@@ -107,10 +96,14 @@ public function bulkToggleStatus(string $action, string $modulesRef): void
+             $modules[] = $modulesReference;
+         }
+ 
+-        $this->getQueryBus()->handle(new BulkToggleModuleStatusCommand(
+-            $modules,
+-            'enable' === $action
+-        ));
++        try {
++            $this->getCommandBus()->handle(new BulkToggleModuleStatusCommand(
++                $modules,
++                'enable' === $action
++            ));
++        } catch (ModuleException $e) {
++            $this->setLastException($e);
++        }
+ 
+         // Clean the cache
+         Module::resetStaticCache();
+@@ -121,22 +114,26 @@ public function bulkToggleStatus(string $action, string $modulesRef): void
+      */
+     public function updateModuleStatus(string $action, string $technicalName): void
+     {
+-        $this->getCommandBus()->handle(new UpdateModuleStatusCommand(
+-            $technicalName,
+-            $action === 'enable'
+-        ));
++        try {
++            $this->getCommandBus()->handle(new UpdateModuleStatusCommand(
++                $technicalName,
++                $action === 'enable'
++            ));
++        } catch (ModuleException $e) {
++            $this->setLastException($e);
++        }
+ 
+         // Clean the cache
+         Module::resetStaticCache();
+     }
+ 
+     /**
+-     * @When /^I uninstall module "(.+)" with deleteFile (true|false)$/
++     * @When /^I uninstall module "(.+)" with deleteFiles (true|false)$/
+      */
+     public function uninstallModule(string $module, string $deleteFile): void
+     {
+         try {
+-            $this->getQueryBus()->handle(new UninstallModuleCommand($module, $deleteFile == 'true'));
++            $this->getCommandBus()->handle(new UninstallModuleCommand($module, $deleteFile == 'true'));
+         } catch (ModuleException $e) {
+             $this->setLastException($e);
+         }
+@@ -146,7 +143,7 @@ public function uninstallModule(string $module, string $deleteFile): void
+     }
+ 
+     /**
+-     * @When /^I bulk uninstall modules: "(.+)" with deleteFile (true|false)$/
++     * @When /^I bulk uninstall modules: "(.+)" with deleteFiles (true|false)$/
+      */
+     public function bulkUninstallModule(string $modulesRef, string $deleteFile): void
+     {
+@@ -156,7 +153,7 @@ public function bulkUninstallModule(string $modulesRef, string $deleteFile): voi
+                 $modules[] = $modulesReference;
+             }
+ 
+-            $this->getQueryBus()->handle(new BulkUninstallModuleCommand($modules, $deleteFile == 'true'));
++            $this->getCommandBus()->handle(new BulkUninstallModuleCommand($modules, $deleteFile == 'true'));
+         } catch (ModuleException $e) {
+             $this->setLastException($e);
+         }
+@@ -175,11 +172,72 @@ public function resetModule(string $technicalName): void
+                 $technicalName,
+                 false
+             ));
+-        } catch (CannotResetModuleException $e) {
++        } catch (ModuleException $e) {
++            $this->setLastException($e);
++        }
++
++        // Clean the cache
++        Module::resetStaticCache();
++    }
++
++    /**
++     * @When I install module :technicalName
++     */
++    public function installModule(string $technicalName): void
++    {
++        try {
++            $this->getCommandBus()->handle(new InstallModuleCommand($technicalName));
++        } catch (ModuleException $e) {
++            $this->setLastException($e);
++        }
++        // Clean the cache
++        Module::resetStaticCache();
++    }
++
++    /**
++     * @When /^I upload module from "(zip|url)" "(.+)" that should have the following infos:$/
++     */
++    public function uploadModule(string $sourceType, string $sourceGiven, TableNode $tableNode): void
++    {
++        switch ($sourceType) {
++            case 'zip':
++                $source = _PS_MODULE_DIR_ . $sourceGiven;
++                break;
++            case 'url':
++                $source = $sourceGiven;
++                break;
++            default:
++                $source = null;
++                break;
++        }
++        try {
++            $moduleInfos = $this->getCommandBus()->handle(new UploadModuleCommand($source));
++            $this->assertModuleInfosWithData($moduleInfos, $tableNode);
++        } catch (ModuleException $e) {
+             $this->setLastException($e);
+         }
+ 
+         // Clean the cache
+         Module::resetStaticCache();
+     }
++
++    private function assertModuleInfosWithData(ModuleInfos $moduleInfos, TableNode $tableNode): void
++    {
++        $data = $tableNode->getRowsHash();
++        if (isset($data['technical_name'])) {
++            Assert::assertEquals($data['technical_name'], $moduleInfos->getTechnicalName(), 'Invalid technical name');
++        }
++        if (isset($data['installed_version'])) {
++            Assert::assertEquals($data['installed_version'] ?: null, $moduleInfos->getInstalledVersion(), 'Invalid installed version');
++        }
++        if (isset($data['module_version'])) {
++            Assert::assertEquals($data['module_version'], $moduleInfos->getModuleVersion(), 'Invalid module_version version');
++        }
++        if (isset($data['enabled'])) {
++            Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($data['enabled']), $moduleInfos->isEnabled(), 'Invalid enabled value');
++        }
++        if (isset($data['installed'])) {
++            Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($data['installed']), $moduleInfos->isInstalled(), 'Invalid installed value');
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Module/install_module.feature b/tests/Integration/Behaviour/Features/Scenario/Module/install_module.feature
+new file mode 100644
+index 0000000000000..9b93bc785fa1f
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Module/install_module.feature
+@@ -0,0 +1,58 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s module --tags install-module
++@reset-test-modules-before-feature
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@reset-test-modules-after-feature
++@install-module
++Feature: Module
++  PrestaShop allows BO users to manage modules
++  As a BO user
++  I must be able to upload/install modules
++
++  Scenario: Upload module with zip file on disk (not present initially)
++    # Check that module is not present before we upload it
++    Given module test_install_cqrs_command has following infos:
++      | installed | false |
++    Then I should have an exception that module is not found
++    # I cannot install a module not present
++    When I install module "test_install_cqrs_command"
++    Then I should have an exception that module is not found
++    # Now I upload based on a local zip file
++    When I upload module from "zip" "test_install_cqrs_command.zip" that should have the following infos:
++      | technical_name    | test_install_cqrs_command |
++      | installed_version |                           |
++      | module_version    | 1.0.0                     |
++      | enabled           | false                     |
++      | installed         | false                     |
++    And I install module "test_install_cqrs_command"
++    Then module test_install_cqrs_command has following infos:
++      | technical_name    | test_install_cqrs_command |
++      | installed_version | 1.0.0                     |
++      | module_version    | 1.0.0                     |
++      | enabled           | true                      |
++      | installed         | true                      |
++    When I install module "test_install_cqrs_command"
++    Then I should have an exception that module is already installed
++
++  Scenario: Upload module with zip file from remote (not present initially)
++    # Check that module is not present before we upload it
++    Given module dashactivity has following infos:
++      | installed | false |
++    Then I should have an exception that module is not found
++    # I cannot install a module not present
++    When I install module "dashactivity"
++    Then I should have an exception that module is not found
++    # Now I can upload module from external zip file
++    And I upload module from "url" "https://github.com/PrestaShop/dashactivity/releases/download/v2.1.0/dashactivity.zip" that should have the following infos:
++      | technical_name    | dashactivity |
++      | installed_version |              |
++      | module_version    | 2.1.0        |
++      | enabled           | false        |
++      | installed         | false        |
++    And I install module "dashactivity"
++    Then module dashactivity has following infos:
++      | technical_name    | dashactivity |
++      | installed_version | 2.1.0        |
++      | module_version    | 2.1.0        |
++      | enabled           | true         |
++      | installed         | true         |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Module/module.feature b/tests/Integration/Behaviour/Features/Scenario/Module/module.feature
+index 797b5ffecd768..a8de137589feb 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Module/module.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Module/module.feature
+@@ -1,4 +1,5 @@
+ # ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s module --tags module
++@reset-test-modules-before-feature
+ @restore-all-tables-before-feature
+ @clear-cache-before-feature
+ @reset-test-modules-after-feature
+@@ -10,15 +11,17 @@ Feature: Module
+ 
+   Scenario: Bulk Status
+     Given module ps_featuredproducts has following infos:
+-      | technical_name | ps_featuredproducts |
+-      | version        | 1.0.0               |
+-      | enabled        | true                |
+-      | installed      | true                |
++      | technical_name    | ps_featuredproducts |
++      | installed_version | 1.0.0               |
++      | module_version    | 1.0.0               |
++      | enabled           | true                |
++      | installed         | true                |
+     Given module ps_emailsubscription has following infos:
+-      | technical_name | ps_emailsubscription |
+-      | version        | 1.0.0                |
+-      | enabled        | true                 |
+-      | installed      | true                 |
++      | technical_name    | ps_emailsubscription |
++      | installed_version | 1.0.0                |
++      | module_version    | 1.0.0                |
++      | enabled           | true                 |
++      | installed         | true                 |
+     When I bulk disable modules: "ps_featuredproducts,ps_emailsubscription"
+     Then module ps_featuredproducts has following infos:
+       | enabled | false |
+@@ -35,6 +38,20 @@ Feature: Module
+     And module ps_emailsubscription has following infos:
+       | enabled | true |
+ 
++  Scenario: Bulk toggle status on module not found is not allowed
++    Given module ps_emailsubscription has following infos:
++      | enabled | true |
++    When I bulk disable modules: "ps_notthere,ps_emailsubscription"
++    Then I should have an exception that module is not found
++    # The existing module has not been modified
++    And module ps_emailsubscription has following infos:
++      | enabled | true |
++    When I bulk disable modules: "ps_emailsubscription,ps_notthere"
++    Then I should have an exception that module is not found
++    # The result is the same regardless of the order
++    And module ps_emailsubscription has following infos:
++      | enabled | true |
++
+   Scenario: Update module status
+     Given module ps_featuredproducts has following infos:
+       | enabled | true |
+@@ -48,66 +65,39 @@ Feature: Module
+   Scenario: Reset module status
+     Given module ps_featuredproducts has following infos:
+       | technical_name | ps_featuredproducts |
+-      | enabled        | true |
+-      | installed      | true |
+-    When I disable module "ps_featuredproducts"
+-    And I reset module "ps_featuredproducts"
+-    Then I should have an exception that disabled module cannot be reset
+-    When I enable module "ps_featuredproducts"
++      | enabled        | true                |
++      | installed      | true                |
+     When I reset module "ps_featuredproducts"
+     Then module ps_featuredproducts has following infos:
+       | technical_name | ps_featuredproducts |
+-      | enabled        | true |
+-      | installed      | true |
+-
+-  Scenario: Get module infos
+-    Then module ps_emailsubscription has following infos:
+-      | technical_name | ps_emailsubscription |
+-      | version        | 1.0.0                |
+-      | enabled        | true                 |
+-      | installed      | true                 |
++      | enabled        | true                |
++      | installed      | true                |
+ 
+-  Scenario: Uninstall modules
++  Scenario: Reset disabled module is then enabled
++    Given I disable module "ps_featuredproducts"
+     Given module ps_featuredproducts has following infos:
+       | technical_name | ps_featuredproducts |
+-      | version        | 1.0.0               |
+-      | enabled        | true                |
++      | enabled        | false               |
+       | installed      | true                |
+-    Given module ps_emailsubscription has following infos:
+-      | technical_name | ps_emailsubscription |
+-      | version        | 1.0.0                |
+-      | enabled        | true                 |
+-      | installed      | true                 |
+-    When I bulk uninstall modules: "ps_featuredproducts,ps_emailsubscription" with deleteFile false
++    When I reset module "ps_featuredproducts"
+     Then module ps_featuredproducts has following infos:
+-      | installed      | false               |
+-    And module ps_emailsubscription has following infos:
+-      | installed      | false               |
+-
+-  Scenario: Uninstall module
+-    Given module bankwire has following infos:
+-      | technical_name | bankwire            |
+-      | version        | 2.0.0               |
++      | technical_name | ps_featuredproducts |
+       | enabled        | true                |
+       | installed      | true                |
+-    When I uninstall module "bankwire" with deleteFile true
+-    And module bankwire has following infos:
+-      | installed      | false               |
+-    Then I should have an exception that module is not found
+ 
+-  Scenario: Uninstall module are not installed
+-    Given module ps_featuredproducts has following infos:
+-      | technical_name | ps_featuredproducts |
+-      | version        | 1.0.0               |
+-      | enabled        | false                |
+-      | installed      | false               |
+-    When I uninstall module "ps_featuredproducts" with deleteFile false
+-    Then I should have an exception that module is not installed
++  Scenario: Get module infos
++    Then module ps_emailsubscription has following infos:
++      | technical_name    | ps_emailsubscription |
++      | installed_version | 1.0.0                |
++      | module_version    | 1.0.0                |
++      | enabled           | true                 |
++      | installed         | true                 |
+ 
+   Scenario: Get module not present
+     When module ps_notthere has following infos:
+-      | technical_name | ps_notthere |
+-      | version        | 1.0.0       |
+-      | enabled        | true        |
+-      | installed      | true        |
+-    Then I should have an exception that module is not found
+\ No newline at end of file
++      | technical_name    | ps_notthere |
++      | installed_version |             |
++      | module_version    | 1.0.0       |
++      | enabled           | true        |
++      | installed         | true        |
++    Then I should have an exception that module is not found
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Module/uninstall_module.feature b/tests/Integration/Behaviour/Features/Scenario/Module/uninstall_module.feature
+new file mode 100644
+index 0000000000000..32bc64ef1f678
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Module/uninstall_module.feature
+@@ -0,0 +1,161 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s module --tags uninstall-module
++@reset-test-modules-before-feature
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@reset-test-modules-after-feature
++@uninstall-module
++Feature: Module
++  PrestaShop allows BO users to manage modules
++  As a BO user
++  I must be able to uninstall modules
++
++  Scenario: Uninstall modules
++    Given module ps_featuredproducts has following infos:
++      | technical_name    | ps_featuredproducts |
++      | installed_version | 1.0.0               |
++      | module_version    | 1.0.0               |
++      | enabled           | true                |
++      | installed         | true                |
++    Given module ps_emailsubscription has following infos:
++      | technical_name    | ps_emailsubscription |
++      | installed_version | 1.0.0                |
++      | module_version    | 1.0.0                |
++      | enabled           | true                 |
++      | installed         | true                 |
++    When I bulk uninstall modules: "ps_featuredproducts,ps_emailsubscription" with deleteFiles false
++    Then module ps_featuredproducts has following infos:
++      | technical_name    | ps_featuredproducts |
++      | installed_version |                     |
++      | module_version    | 1.0.0               |
++      | enabled           | false               |
++      | installed         | false               |
++    And module ps_emailsubscription has following infos:
++      | technical_name    | ps_emailsubscription |
++      | installed_version |                      |
++      | module_version    | 1.0.0                |
++      | enabled           | false                |
++      | installed         | false                |
++
++  Scenario: Bulk uninstall on uninstalled or not existing modules is not allowed
++    Given module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    Given module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    When I bulk uninstall modules: "ps_emailsubscription,ps_banner" with deleteFiles false
++    Then I should have an exception that module is not installed
++    # The modules have not been modified
++    And module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    And module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    When I bulk uninstall modules: "ps_banner,ps_emailsubscription" with deleteFiles false
++    Then I should have an exception that module is not installed
++    # The result is the same regardless of the order
++    And module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    And module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    # First module error triggers error
++    When I bulk uninstall modules: "ps_banner,ps_emailsubscription,ps_notthere" with deleteFiles false
++    Then I should have an exception that module is not installed
++    When I bulk uninstall modules: "ps_notthere,ps_banner,ps_emailsubscription" with deleteFiles false
++    Then I should have an exception that module is not found
++
++  Scenario: Bulk toggle status on uninstalled or not existing modules is not allowed
++    Given module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    Given module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    When I bulk disable modules: "ps_emailsubscription,ps_banner"
++    Then I should have an exception that module is not installed
++    # The modules have not been modified
++    And module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    And module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    When I bulk disable modules: "ps_banner,ps_emailsubscription"
++    Then I should have an exception that module is not installed
++    # The result is the same regardless of the order
++    And module ps_emailsubscription has following infos:
++      | enabled   | false |
++      | installed | false |
++    And module ps_banner has following infos:
++      | enabled   | true |
++      | installed | true |
++    # First module error triggers error
++    When I bulk disable modules: "ps_banner,ps_emailsubscription,ps_notthere"
++    Then I should have an exception that module is not installed
++    When I bulk disable modules: "ps_notthere,ps_banner,ps_emailsubscription"
++    Then I should have an exception that module is not found
++
++  Scenario: Reset uninstalled the module is installed afterward
++    Given module ps_emailsubscription has following infos:
++      | technical_name | ps_emailsubscription |
++      | enabled        | false                |
++      | installed      | false                |
++    When I reset module "ps_featuredproducts"
++    Then I should have an exception that module is not installed
++    And module ps_emailsubscription has following infos:
++      | technical_name | ps_emailsubscription |
++      | enabled        | false                |
++      | installed      | false                |
++
++  Scenario: Update module status when uninstalled is not allowed
++    Given module ps_emailsubscription has following infos:
++      | technical_name | ps_emailsubscription |
++      | enabled        | false                |
++      | installed      | false                |
++    When I disable module "ps_emailsubscription"
++    Then I should have an exception that module is not installed
++    When I enable module "ps_emailsubscription"
++    Then I should have an exception that module is not installed
++    And module ps_emailsubscription has following infos:
++      | technical_name | ps_emailsubscription |
++      | enabled        | false                |
++      | installed      | false                |
++
++  Scenario: Uninstall module
++    Given module bankwire has following infos:
++      | technical_name    | bankwire |
++      | installed_version | 2.0.0    |
++      | module_version    | 2.0.0    |
++      | enabled           | true     |
++      | installed         | true     |
++    When I uninstall module "bankwire" with deleteFiles true
++    # Since the module is completely removed and is not present it cannot be found anymore
++    And module bankwire has following infos:
++      | installed | false |
++    Then I should have an exception that module is not found
++
++  Scenario: Uninstall module that is not installed
++    Given module ps_featuredproducts has following infos:
++      | technical_name    | ps_featuredproducts |
++      | installed_version |                     |
++      | module_version    | 1.0.0               |
++      | enabled           | false               |
++      | installed         | false               |
++    When I uninstall module "ps_featuredproducts" with deleteFiles false
++    Then I should have an exception that module is not installed
++
++  Scenario: Uninstall module that is not installed possible only to remove files
++    Given I upload module from "zip" "test_install_cqrs_command.zip" that should have the following infos:
++      | technical_name    | test_install_cqrs_command |
++      | installed_version |                           |
++      | module_version    | 1.0.0                     |
++      | enabled           | false                     |
++      | installed         | false                     |
++    When I uninstall module "test_install_cqrs_command" with deleteFiles true
++    # Since the module is completely removed and is not present it cannot be found anymore
++    Then module test_install_cqrs_command has following infos:
++      | installed | false |
++    Then I should have an exception that module is not found
+diff --git a/tests/Resources/modules/test_install_cqrs_command.zip b/tests/Resources/modules/test_install_cqrs_command.zip
+new file mode 100644
+index 0000000000000..00c3e60ed8253
+Binary files /dev/null and b/tests/Resources/modules/test_install_cqrs_command.zip differ
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_module/01_getModuleTechnicalName.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_module/01_getModuleTechnicalName.ts
+index 02fa05c3733f9..41718682dde6b 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_module/01_getModuleTechnicalName.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_module/01_getModuleTechnicalName.ts
+@@ -175,7 +175,8 @@ describe('API : GET /module/{technicalName}', async () => {
+       expect(jsonResponse).to.have.all.keys(
+         'moduleId',
+         'technicalName',
+-        'version',
++        'moduleVersion',
++        'installedVersion',
+         'enabled',
+         'installed',
+       );
+@@ -197,12 +198,20 @@ describe('API : GET /module/{technicalName}', async () => {
+       expect(jsonResponse.technicalName).to.be.equal(moduleInfo.technicalName);
+     });
+ 
+-    it('should check the JSON Response : `version`', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkResponseVersion', baseContext);
++    it('should check the JSON Response : `moduleVersion`', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkResponseModuleVersion', baseContext);
+ 
+-      expect(jsonResponse).to.have.property('version');
+-      expect(jsonResponse.version).to.be.a('string');
+-      expect(jsonResponse.version).to.be.equal(moduleInfo.version);
++      expect(jsonResponse).to.have.property('moduleVersion');
++      expect(jsonResponse.moduleVersion).to.be.a('string');
++      expect(jsonResponse.moduleVersion).to.be.equal(moduleInfo.version);
++    });
++
++    it('should check the JSON Response : `installedVersion`', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkResponseInstalledVersion', baseContext);
++
++      expect(jsonResponse).to.have.property('installedVersion');
++      expect(jsonResponse.installedVersion).to.be.a('string');
++      expect(jsonResponse.installedVersion).to.be.equal(moduleInfo.version);
+     });
+ 
+     it('should check the JSON Response : `enabled`', async function () {
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_module/02_patchModuleTechnicalNameReset.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_module/02_patchModuleTechnicalNameReset.ts
+index 1bdd688644454..e77655d72a803 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_module/02_patchModuleTechnicalNameReset.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_module/02_patchModuleTechnicalNameReset.ts
+@@ -207,7 +207,8 @@ describe('API : PATCH /module/{technicalName}/reset', async () => {
+         expect(jsonResponse).to.have.all.keys(
+           'moduleId',
+           'technicalName',
+-          'version',
++          'moduleVersion',
++          'installedVersion',
+           'enabled',
+           'installed',
+         );
+@@ -229,12 +230,20 @@ describe('API : PATCH /module/{technicalName}/reset', async () => {
+         expect(jsonResponse.technicalName).to.be.equal(moduleInfo.technicalName);
+       });
+ 
+-      it('should check the JSON Response : `version`', async function () {
+-        await testContext.addContextItem(this, 'testIdentifier', `checkResponseVersion${index}`, baseContext);
++      it('should check the JSON Response : `moduleVersion`', async function () {
++        await testContext.addContextItem(this, 'testIdentifier', `checkResponseModuleVersion${index}`, baseContext);
+ 
+-        expect(jsonResponse).to.have.property('version');
+-        expect(jsonResponse.version).to.be.a('string');
+-        expect(jsonResponse.version).to.be.equal(moduleInfo.version);
++        expect(jsonResponse).to.have.property('moduleVersion');
++        expect(jsonResponse.moduleVersion).to.be.a('string');
++        expect(jsonResponse.moduleVersion).to.be.equal(moduleInfo.version);
++      });
++
++      it('should check the JSON Response : `installedVersion`', async function () {
++        await testContext.addContextItem(this, 'testIdentifier', `checkResponseInstalledVersion${index}`, baseContext);
++
++        expect(jsonResponse).to.have.property('installedVersion');
++        expect(jsonResponse.installedVersion).to.be.a('string');
++        expect(jsonResponse.installedVersion).to.be.equal(moduleInfo.version);
+       });
+ 
+       it('should check the JSON Response : `enabled`', async function () {
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/08_module/03_putModuleTechnicalNameStatus.ts b/tests/UI/campaigns/functional/API/02_endpoints/08_module/03_putModuleTechnicalNameStatus.ts
+index 8721ad560c2b6..1bb187db8fe34 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/08_module/03_putModuleTechnicalNameStatus.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/08_module/03_putModuleTechnicalNameStatus.ts
+@@ -182,7 +182,8 @@ describe('API : PUT /module/{technicalName}/status', async () => {
+         expect(jsonResponse).to.have.all.keys(
+           'moduleId',
+           'technicalName',
+-          'version',
++          'moduleVersion',
++          'installedVersion',
+           'enabled',
+           'installed',
+         );
+@@ -204,12 +205,20 @@ describe('API : PUT /module/{technicalName}/status', async () => {
+         expect(jsonResponse.technicalName).to.be.equal(moduleInfo.technicalName);
+       });
+ 
+-      it('should check the JSON Response : `version`', async function () {
+-        await testContext.addContextItem(this, 'testIdentifier', `checkResponseVersion${index}`, baseContext);
++      it('should check the JSON Response : `moduleVersion`', async function () {
++        await testContext.addContextItem(this, 'testIdentifier', `checkResponseModuleVersion${index}`, baseContext);
+ 
+-        expect(jsonResponse).to.have.property('version');
+-        expect(jsonResponse.version).to.be.a('string');
+-        expect(jsonResponse.version).to.be.equal(moduleInfo.version);
++        expect(jsonResponse).to.have.property('moduleVersion');
++        expect(jsonResponse.moduleVersion).to.be.a('string');
++        expect(jsonResponse.moduleVersion).to.be.equal(moduleInfo.version);
++      });
++
++      it('should check the JSON Response : `installedVersion`', async function () {
++        await testContext.addContextItem(this, 'testIdentifier', `checkResponseInstalledVersion${index}`, baseContext);
++
++        expect(jsonResponse).to.have.property('installedVersion');
++        expect(jsonResponse.installedVersion).to.be.a('string');
++        expect(jsonResponse.installedVersion).to.be.equal(moduleInfo.version);
+       });
+ 
+       it('should check the JSON Response : `enabled`', async function () {
+@@ -245,12 +254,9 @@ describe('API : PUT /module/{technicalName}/status', async () => {
+         expect(isModuleVisible).to.be.equal(true);
+       });
+ 
+-      // @todo : https://github.com/PrestaShop/PrestaShop/issues/37253
+       it(`should check the module is ${argStatus ? 'enabled' : 'disabled'}`, async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `checkStatus${index}`, baseContext);
+ 
+-        this.skip();
+-
+         const moduleStatus = await boModuleManagerPage.getModuleInformationNth(page, 1);
+         expect(moduleStatus.enabled).to.equal(argStatus);
+       });
+diff --git a/tests/UI/campaigns/functional/API/02_endpoints/09_modules/02_getModules.ts b/tests/UI/campaigns/functional/API/02_endpoints/09_modules/02_getModules.ts
+index 0121745096207..6bc90dfe2ec6f 100644
+--- a/tests/UI/campaigns/functional/API/02_endpoints/09_modules/02_getModules.ts
++++ b/tests/UI/campaigns/functional/API/02_endpoints/09_modules/02_getModules.ts
+@@ -3,6 +3,7 @@ import testContext from '@utils/testContext';
+ 
+ // Import commonTests
+ import {deleteAPIClientTest} from '@commonTests/BO/advancedParameters/authServer';
++import {ModuleApiInfo} from '@data/types/module';
+ 
+ import {
+   type APIRequestContext,
+@@ -14,7 +15,6 @@ import {
+   type BrowserContext,
+   FakerAPIClient,
+   FakerModule,
+-  type ModuleInfo,
+   type Page,
+   utilsAPI,
+   utilsPlaywright,
+@@ -30,7 +30,7 @@ describe('API : GET /modules', async () => {
+   let clientSecret: string;
+   let accessToken: string;
+   let jsonResponse: any;
+-  const jsonResponseItems: ModuleInfo [] = [];
++  const jsonResponseItems: ModuleApiInfo[] = [];
+ 
+   const clientScope: string = 'module_read';
+   const clientData: FakerAPIClient = new FakerAPIClient({
+@@ -160,17 +160,19 @@ describe('API : GET /modules', async () => {
+       it(`should check the JSON Response keys (page ${arg.page})`, async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `checkResponseKeys${index}`, baseContext);
+ 
++        // All keys are visible for modules event offset and orderBy when they are null
++        // That is because we want null values in module infos to be displayed (like the installedVersion)
++        // But we can't fine tune ApiPlatform enough to select which nullable fields are displayed, so they are all visible
+         const keys = [
+           'totalItems',
+           'sortOrder',
++          'orderBy',
+           'limit',
++          'offset',
+           'filters',
+           'items',
+         ];
+ 
+-        if (arg.page > 0) {
+-          keys.push('offset');
+-        }
+         expect(jsonResponse).to.have.all.keys(keys);
+ 
+         expect(jsonResponse.items.length).to.be.gt(0);
+@@ -184,7 +186,8 @@ describe('API : GET /modules', async () => {
+           expect(jsonResponse.items[i]).to.have.all.keys(
+             'moduleId',
+             'technicalName',
+-            'version',
++            'moduleVersion',
++            'installedVersion',
+             'enabled',
+           );
+           jsonResponseItems.push(jsonResponse.items[i]);
+@@ -222,7 +225,8 @@ describe('API : GET /modules', async () => {
+         const moduleInfos = await boModuleManagerPage.getModuleInformationNth(page, 1);
+         expect(moduleInfos.moduleId).to.equal(jsonResponseItems[idxItem].moduleId);
+         expect(moduleInfos.technicalName).to.equal(jsonResponseItems[idxItem].technicalName);
+-        expect(moduleInfos.version).to.equal(jsonResponseItems[idxItem].version);
++        expect(moduleInfos.version).to.equal(jsonResponseItems[idxItem].moduleVersion);
++        expect(moduleInfos.version).to.equal(jsonResponseItems[idxItem].installedVersion);
+         expect(moduleInfos.enabled).to.equal(jsonResponseItems[idxItem].enabled);
+       }
+     });
+diff --git a/tests/UI/data/types/module.ts b/tests/UI/data/types/module.ts
+new file mode 100644
+index 0000000000000..db1f6b073b94f
+--- /dev/null
++++ b/tests/UI/data/types/module.ts
+@@ -0,0 +1,8 @@
++export type ModuleApiInfo = {
++  moduleId: number
++  technicalName: string
++  moduleVersion: string
++  installedVersion: string|null
++  enabled: boolean
++  installed: boolean
++}

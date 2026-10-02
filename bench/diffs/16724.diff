@@ -1,0 +1,175 @@
+diff --git a/src/Core/Cart/Calculator.php b/src/Core/Cart/Calculator.php
+index 8e525c4e003bb..ad2a40f4bb82d 100644
+--- a/src/Core/Cart/Calculator.php
++++ b/src/Core/Cart/Calculator.php
+@@ -148,12 +148,9 @@ public function getTotal($ignoreProcessedFlag = false)
+             throw new \Exception('Cart must be processed before getting its total');
+         }
+ 
+-        $amount = new AmountImmutable();
+-        foreach ($this->cartRows as $cartRow) {
+-            $rowPrice = $cartRow->getFinalTotalPrice();
+-            $amount = $amount->add($rowPrice);
+-        }
+-        $shippingFees = $this->fees->getFinalShippingFees();
++        $amount = $this->getRowTotalWithoutDiscount();
++        $amount = $amount->sub($this->getDiscountTotal());
++        $shippingFees = $this->fees->getInitialShippingFees();
+         if (null !== $shippingFees) {
+             $amount = $amount->add($shippingFees);
+         }
+@@ -180,6 +177,21 @@ public function getRowTotal()
+         return $amount;
+     }
+ 
++    /**
++     * @return AmountImmutable
++     *
++     * @throws \Exception
++     */
++    public function getRowTotalWithoutDiscount()
++    {
++        $amount = new AmountImmutable();
++        foreach ($this->cartRows as $cartRow) {
++            $amount = $amount->add($cartRow->getInitialTotalPrice());
++        }
++
++        return $amount;
++    }
++
+     /**
+      * @return AmountImmutable
+      *
+@@ -192,6 +204,20 @@ public function getDiscountTotal()
+             $amount = $amount->add($cartRule->getDiscountApplied());
+         }
+ 
++        $allowedMaxDiscount = $this->getRowTotalWithoutDiscount();
++
++        if (null !== $this->getFees()->getInitialShippingFees() && null !== $this->getFees()->getFinalShippingFees()) {
++            $shippingDiscount = (new AmountImmutable())
++                ->add($this->getFees()->getInitialShippingFees())
++                ->sub($this->getFees()->getFinalShippingFees())
++            ;
++            $allowedMaxDiscount = $allowedMaxDiscount->add($shippingDiscount);
++        }
++        // discount cannot be above total cart price
++        if ($amount > $allowedMaxDiscount) {
++            $amount = $allowedMaxDiscount;
++        }
++
+         return $amount;
+     }
+ 
+diff --git a/src/Core/Cart/CartRow.php b/src/Core/Cart/CartRow.php
+index f183678bc53e1..d670d3873531e 100644
+--- a/src/Core/Cart/CartRow.php
++++ b/src/Core/Cart/CartRow.php
+@@ -116,6 +116,11 @@ class CartRow
+      */
+     protected $initialUnitPrice;
+ 
++    /**
++     * @var AmountImmutable
++     */
++    protected $initialTotalPrice;
++
+     /**
+      * @var AmountImmutable
+      */
+@@ -203,6 +208,22 @@ public function getInitialUnitPrice()
+         return $this->initialUnitPrice;
+     }
+ 
++    /**
++     * Returns the initial total price (ie without applying cart rules).
++     *
++     * @return AmountImmutable
++     *
++     * @throws \Exception
++     */
++    public function getInitialTotalPrice()
++    {
++        if (!$this->isProcessed) {
++            throw new \Exception('Row must be processed before getting its total');
++        }
++
++        return $this->initialTotalPrice;
++    }
++
+     /**
+      * return final price: initial minus the cart rule discounts.
+      *
+@@ -248,10 +269,11 @@ public function processCalculation(Cart $cart)
+         $quantity = (int) $rowData['cart_quantity'];
+         $this->initialUnitPrice = $this->getProductPrice($cart, $rowData);
+         // store not rounded values
+-        $this->finalTotalPrice = new AmountImmutable(
++        $this->initialTotalPrice = new AmountImmutable(
+             $this->initialUnitPrice->getTaxIncluded() * $quantity,
+             $this->initialUnitPrice->getTaxExcluded() * $quantity
+         );
++        $this->finalTotalPrice = clone $this->initialTotalPrice;
+         $this->applyRound();
+         // store state
+         $this->isProcessed = true;
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/amount_multiple.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/amount_multiple.feature
+index de23003dd36b4..7fcaf1f08a44b 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/amount_multiple.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/amount_multiple.feature
+@@ -77,3 +77,55 @@ Feature: Cart rule (amount) calculation with multiple cart rules
+     Then my cart total should be precisely 2.345 tax included
+     Then my cart total should be 2.3 tax included
+     Then my cart total using previous calculation method should be 2.3 tax included
++
++  Scenario: One product in my cart, one 10€ global cartRule, 2 free gifts global cartRules
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a product in the catalog named "product2" with a price of 32.388 and 1000 items in stock
++    Given there is a product in the catalog named "product3" with a price of 31.188 and 1000 items in stock
++    Given there is a cart rule named "cartrule-10" that applies an amount discount of 10.0 with priority 1, quantity of 1 and quantity per user 1
++    Given there is a cart rule named "cartrule-free-gift-1" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-1" offers a gift product "product2"
++    Given there is a cart rule named "cartrule-free-gift-2" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-2" offers a gift product "product3"
++    When I add 1 item of product "product1" in my cart
++    Then I should have 3 products in my cart
++    Then my cart total should be precisely 16.812 tax included
++    Then my cart total should be 16.8 tax included
++    Then my cart total using previous calculation method should be 16.8 tax included
++
++  Scenario: One product in my cart, one 30€ global cartRule (which is superior to the product bought), 2 free gifts global cartRules
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a product in the catalog named "product2" with a price of 32.388 and 1000 items in stock
++    Given there is a product in the catalog named "product3" with a price of 31.188 and 1000 items in stock
++    Given there is a cart rule named "cartrule-30" that applies an amount discount of 30.0 with priority 1, quantity of 1 and quantity per user 1
++    Given there is a cart rule named "cartrule-free-gift-1" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-1" offers a gift product "product2"
++    Given there is a cart rule named "cartrule-free-gift-2" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-2" offers a gift product "product3"
++    When I add 1 item of product "product1" in my cart
++    Then I should have 3 products in my cart
++    Then my cart total should be precisely 7.0 tax included
++    Then my cart total should be 7.0 tax included
++    Then my cart total using previous calculation method should be 7.0 tax included
++
++  Scenario: One product in my cart, one 30€ global cartRule (which is superior to the product bought) with free shipping, 2 free gifts global cartRules
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given there is a product in the catalog named "product2" with a price of 32.388 and 1000 items in stock
++    Given there is a product in the catalog named "product3" with a price of 31.188 and 1000 items in stock
++    Given there is a cart rule named "cartrule-30" that applies an amount discount of 30.0 with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-30" offers free shipping
++    Given there is a cart rule named "cartrule-free-gift-1" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-1" offers a gift product "product2"
++    Given there is a cart rule named "cartrule-free-gift-2" that applies no discount with priority 1, quantity of 1 and quantity per user 1
++    Given cart rule "cartrule-free-gift-2" offers a gift product "product3"
++    When I add 1 item of product "product1" in my cart
++    Then I should have 3 products in my cart
++    Then my cart total should be precisely 0.0 tax included
++    Then my cart total should be 0.0 tax included
++    Then my cart total using previous calculation method should be 0.0 tax included

@@ -1,0 +1,62 @@
+diff --git a/classes/Context.php b/classes/Context.php
+index 2175c190f320c..df8e9ee1cca62 100644
+--- a/classes/Context.php
++++ b/classes/Context.php
+@@ -34,6 +34,7 @@
+ use PrestaShopBundle\Translation\TranslatorComponent as Translator;
+ use PrestaShopBundle\Translation\TranslatorLanguageLoader;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
++use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
+ use Symfony\Component\Filesystem\Filesystem;
+ use Symfony\Component\Finder\Finder;
+ use Symfony\Component\HttpFoundation\Session\SessionInterface;
+@@ -445,18 +446,26 @@ public function getTranslatorFromLocale($locale)
+ 
+         try {
+             $containerFinder = new ContainerFinder($this);
+-            $containerFinder->getContainer()->get('prestashop.translation.translator_language_loader')
+-                ->setIsAdminContext($adminContext)
+-                ->loadLanguage($translator, $locale, $withDB, $theme);
++            $container = $containerFinder->getContainer();
++            $translatorLoader = $container->get('prestashop.translation.translator_language_loader');
+         } catch (ContainerNotFoundException $exception) {
++            $translatorLoader = null;
++        } catch (ServiceNotFoundException $e) {
++            $translatorLoader = null;
++        }
++
++        if (null === $translatorLoader) {
+             // If a container is still not found, instantiate manually the translator loader
+             // This will happen in the Front as we have legacy controllers, the Sf container won't be available.
+             // As we get the translator in the controller's constructor and the container is built in the init method, we won't find it here
+-            (new TranslatorLanguageLoader(new ModuleRepository()))
+-                ->setIsAdminContext($adminContext)
+-                ->loadLanguage($translator, $locale, $withDB, $theme);
++            $translatorLoader = (new TranslatorLanguageLoader(new ModuleRepository()));
+         }
+ 
++        $translatorLoader
++            ->setIsAdminContext($adminContext)
++            ->loadLanguage($translator, $locale, $withDB, $theme)
++        ;
++
+         return $translator;
+     }
+ 
+diff --git a/webservice/dispatcher.php b/webservice/dispatcher.php
+index 5dbc33ddd647c..c0f5e370c0204 100644
+--- a/webservice/dispatcher.php
++++ b/webservice/dispatcher.php
+@@ -30,12 +30,6 @@
+ 
+ require_once dirname(__FILE__) . '/../config/config.inc.php';
+ 
+-global $kernel;
+-if (null === $kernel) {
+-    $kernel = new AppKernel(_PS_ENV_, _PS_MODE_DEV_);
+-    $kernel->boot();
+-}
+-
+ // Cart is needed for some requests
+ Context::getContext()->cart = new Cart();
+ Context::getContext()->container = ContainerBuilder::getContainer('webservice', _PS_MODE_DEV_);

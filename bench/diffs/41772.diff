@@ -1,0 +1,163 @@
+diff --git a/.ai/CONTEXT.md b/.ai/CONTEXT.md
+index 4f8c571f3c3d1..abc6c7dd8c512 100644
+--- a/.ai/CONTEXT.md
++++ b/.ai/CONTEXT.md
+@@ -62,6 +62,18 @@ Breaking changes are only allowed in major versions. See [ADR 0017](https://gith
+ | Behavior | Behat | `tests/Integration/Behaviour/` |
+ | UI | Playwright | `tests/UI/` |
+ 
++- **New behavior / bug fix must come with a test.** Add or adjust a unit test on the class actually touched; prefer Behat for command/handler behavior; if an existing E2E covers the area, unskip it and re-run rather than leaving a `@todo`/skip in place.
++
++## PR hygiene
++
++Common slips unrelated to the feature itself — check before pushing:
++
++- **No unrelated lock-file changes.** A PR must not carry `composer.lock` / `package-lock.json` updates for dependencies it doesn't intentionally bump (a stray `composer install` often rewrites them). Restore them, or squash them out before review.
++- **No IDE / local config files** (`.idea/`, editor settings) and no stray blank-line or missing-end-of-line changes.
++- **Keep lists alphabetically sorted** (interface members, imports where applicable, enum-like lists) — not all of this is caught by php-cs-fixer.
++- **Squash noise commits** (review fixups, reverts) so history stays readable.
++- **Target the lowest applicable branch** (`9.1.x` for bug fixes, `develop` for features) — see Branching & Versioning above.
++
+ ## Skills
+ 
+ | Skill | Path | Trigger |
+diff --git a/.ai/Component/CQRS/CONTEXT.md b/.ai/Component/CQRS/CONTEXT.md
+index f0c82078cabdb..dc41032cef0a8 100644
+--- a/.ai/Component/CQRS/CONTEXT.md
++++ b/.ai/Component/CQRS/CONTEXT.md
+@@ -63,6 +63,9 @@ Error code constants must be unique integers within the class. Never throw gener
+ - **Never call another handler** from within a handler — compose at controller level
+ - **Add handler** returns `{Domain}Id`; all other command handlers return `void`
+ - Query handlers always return a typed DTO — never void, never ObjectModel instances
++- **Validation placement** — single-value format validation belongs in the field's Value Object constructor (a `{Domain}ConstraintException`). Cross-field / entity-level business rules (uniqueness, required-fields-by-config, existence of related records) belong in a dedicated **`{Domain}Validator` service** (in `src/Adapter/{Domain}/`) that the handler calls — **not inline in the repository, the controller, or the FormType**. The repository only persists. See `src/Adapter/Country/Validate/CountryValidator.php`
++- **Handler is the single integration point** — cross-cutting/derived logic (auto-filling defaults, normalizing values, side effects) belongs in the command handler, **not** in the FormType or controller. Putting it in the handler means the Admin API, AJAX endpoints, Behat and programmatic callers all get the same behavior for free; logic that only lives in the form is silently bypassed everywhere else
++- **Edit commands are partial updates** — an `Edit{Domain}Command` carries only the fields the caller intends to change (often nullable setters). A handler must apply only what the command actually provides and preserve untouched fields (e.g. don't overwrite all language values when only one was submitted). The command is the source of truth for *what changed*, not for the full entity state
+ 
+ ### Bulk handlers
+ 
+diff --git a/.ai/Component/CQRS/skills/create-doctrine-repository/SKILL.md b/.ai/Component/CQRS/skills/create-doctrine-repository/SKILL.md
+index 7204cfc453a05..0e9d79823503c 100644
+--- a/.ai/Component/CQRS/skills/create-doctrine-repository/SKILL.md
++++ b/.ai/Component/CQRS/skills/create-doctrine-repository/SKILL.md
+@@ -54,3 +54,4 @@ Conventions (stateless, no Context, typed exceptions) are in [CQRS/CONTEXT.md](.
+ 
+ - Never use `Db::getInstance()` — use Doctrine DBAL or ObjectModel methods
+ - Never hard-code `Context::getContext()->shop->id` — receive shop as parameter
++- The repository **only persists** — no business validation (uniqueness, required-by-config, related-record existence). That belongs in the `{Domain}Validator` service the handler calls (see [CQRS/CONTEXT.md](../../CONTEXT.md) → Handlers → Validation placement). The only checks here are existence guards via the base helper `assertObjectModelExists` (add a dedicated `assert{Related}Exists` rather than fetching-and-discarding)
+diff --git a/.ai/Component/Context/CONTEXT.md b/.ai/Component/Context/CONTEXT.md
+index 9a03b94e323c2..f26acbbc8907d 100644
+--- a/.ai/Component/Context/CONTEXT.md
++++ b/.ai/Component/Context/CONTEXT.md
+@@ -20,6 +20,7 @@ Immutable, injectable representations of the current execution environment: acti
+ - Each builder has `buildLegacyContext()` to sync the old `Context::getContext()` global — necessary during the migration period
+ - `LanguageContext` implements both `LanguageInterface` **and** `LocaleInterface` — it can format numbers and prices directly
+ - Each listener set depends on which Application/Kernel is running — configurations are in `app/config/admin/`, `app/config/admin-api/`, etc.
++- **In new code, inject the context service** (`LanguageContext`, `ShopContext`, `CurrencyContext`, `EmployeeContext`) — never read values from the legacy `Context::getContext()` global, and never pass legacy-context values into services, query builders, or repositories. For example, a grid query builder needing the current language must depend on `LanguageContext`, not on the injected legacy context. `buildLegacyContext()` exists only to sync the old global during migration — it is not an entry point for reading
+ 
+ ## Canonical examples
+ 
+diff --git a/.ai/Component/Forms/CONTEXT.md b/.ai/Component/Forms/CONTEXT.md
+index 8f71968a74d23..390d5536b85a2 100644
+--- a/.ai/Component/Forms/CONTEXT.md
++++ b/.ai/Component/Forms/CONTEXT.md
+@@ -38,6 +38,7 @@ Easy to mix up. Wrong folder won't raise a hard error — the service simply isn
+ |---|---|
+ | Reusable form types | **`PrestaShopBundle\Form\Admin\Type\`** holds 80+ generic, PrestaShop-specific form types (`SwitchType`, `TranslatableType`, `MoneyType`, `CountryChoiceType`, `CurrencyChoiceType`, `ColorPickerType`, `IpAddressType`, `EmailType`, `MaterialChoiceTreeType`, etc., plus the `Common/` and `Material/` sub-namespaces). **Check this namespace before reinventing a field** — there is almost always a ready-made type. |
+ | Form extensions | **`PrestaShopBundle\Form\Extension\`** holds 24+ Symfony `AbstractTypeExtension` classes that add custom options to all form types globally: `help`, `hint`, `external_link`, `modify_all_shops`, `autocomplete`, `multistore_configuration_key`, `download_file`, `disabling_switch`, etc. **Check this namespace before inventing a new field option** — the option you want probably already exists. |
++| Field validation | For character-set / format validation, prefer **`TypedRegex`** (`Core\ConstraintValidator\Constraints\TypedRegex`) over an inline `Symfony\...\Regex`. Pass a `type` (e.g. `TypedRegex::TYPE_GENERIC_NAME`, `TYPE_ZIP_CODE_FORMAT`); the pattern lives once in `TypedRegexValidator::getPattern()`. **Reuse an existing type first**; if none fits, add a `TYPE_*` constant + a `case` in the validator (referencing the domain VO's `*_PATTERN` constant when one exists, like `CallPrefix::CALL_PREFIX_PATTERN`) — never hard-code a raw pattern in the FormType. `NotBlank` / `Length` are fine inline. |
+ | Translatable fields | `TranslatableType` (in `Form\Admin\Type\`) wrapping the inner type. Data is an array keyed by language ID. Multilingual textareas wrap `TextareaType` / `FormattedTextareaType`. |
+ | Money / decimal | `MoneyType` for static currency, `AmountType` for multi-currency. PrestaShop stores prices with 6 decimal places — always set explicit decimal scale, never round to float. Commands carry `DecimalNumber`, never native `float`. |
+ | File uploads | `FileType` with `'mapped' => false, 'required' => false`. Actual file saving happens in the DataHandler (CRUD) or DataConfiguration (settings), not the form type. |
+diff --git a/.ai/Component/Forms/skills/create-crud-form-type/SKILL.md b/.ai/Component/Forms/skills/create-crud-form-type/SKILL.md
+index 2d3fdf0fa7607..3e06ecda91909 100644
+--- a/.ai/Component/Forms/skills/create-crud-form-type/SKILL.md
++++ b/.ai/Component/Forms/skills/create-crud-form-type/SKILL.md
+@@ -88,6 +88,6 @@ For image/logo uploads (see [Forms/CONTEXT.md](../../CONTEXT.md) for file upload
+ 
+ Conventions (base classes, file uploads, choice providers, NavigationTabType) are in [Forms/CONTEXT.md](../../CONTEXT.md). Skill-specific reminders:
+ 
+-- Add Symfony validation constraints directly on form fields (`NotBlank`, `Length`, `Regex`)
++- Add Symfony validation constraints directly on form fields. Use `NotBlank` / `Length` inline; for character-set / format validation prefer **`TypedRegex`** (with a reused or newly-added `TYPE_*`) over an inline `Regex` — never hard-code a raw pattern in the FormType. See the "Field validation" row in [Forms/CONTEXT.md](../../CONTEXT.md)
+ - For multi-tab layout, use the `create-form-tab-layout` skill instead
+ - If the page persists into `ps_configuration` (and not into an entity table), this is NOT a CRUD form — switch to [`create-settings-form`](../create-settings-form/SKILL.md)
+diff --git a/.ai/Component/Grid/CONTEXT.md b/.ai/Component/Grid/CONTEXT.md
+index 457b5261a486f..9d9389db294b1 100644
+--- a/.ai/Component/Grid/CONTEXT.md
++++ b/.ai/Component/Grid/CONTEXT.md
+@@ -48,6 +48,7 @@ When grid data needs post-processing (e.g. resolving image URLs from IDs, format
+ 
+ - `{Domain}Filters` (in `src/Core/Search/Filters/`) extends `Filters` which implements `SearchCriteriaInterface` — it is NOT a form type
+ - It defines defaults (grid ID, default sort column/direction, default limit)
++- **Default sort is the identity column (`id_{domain}`)** unless the entity is positionable — positionable entities default to `position ASC`. Don't invent another default sort
+ - Injected into the controller's index action via argument resolver: `indexAction({Domain}Filters $filters)`
+ - Filter values come from the grid filter bar (saved in session by `CommonController::searchGridAction`)
+ 
+@@ -60,6 +61,7 @@ When grid data needs post-processing (e.g. resolving image URLs from IDs, format
+ - **`PositionColumn` requires a `ReorderPositionsButtonType` filter** (associated with the position column) — it provides the drag-and-drop "Rearrange" UX. Canonical example: `FeatureValueGridDefinitionFactory`; see the [`create-position-column`](skills/create-position-column/SKILL.md) skill
+ - `ToggleColumn` requires a dedicated AJAX toggle route — it cannot work without one
+ - Grid definition must declare a `GRID_ID` const shared between the definition factory, the `{Domain}Filters` class, and the JS Grid constructor
++- **No magic string/number values** for filter options, statuses, or states — extract them into class constants, an enum, or a domain Value Object so they can be reused by the query builder, the form, and tests (e.g. a `DiscountState` enum rather than literal `'expired'` strings)
+ 
+ ### Query builders
+ 
+diff --git a/.ai/Component/Migration/CONTEXT.md b/.ai/Component/Migration/CONTEXT.md
+index b2b6d843e7249..b1d6a1368118b 100644
+--- a/.ai/Component/Migration/CONTEXT.md
++++ b/.ai/Component/Migration/CONTEXT.md
+@@ -42,6 +42,16 @@ All fully migrated unless noted:
+ - `stability="beta"` to `"stable"` is a formal step requiring its own PR
+ - Vue components are only needed when a form field is too dynamic for standard JS components — most pages use `initComponents()`
+ 
++## Clean-break rules (don't carry legacy shape into the migrated code)
++
++The migration is the occasion to do things cleanly — replicating the legacy structure is a common mistake:
++
++- **No legacy context.** Don't inject values read from the legacy `Context` (e.g. `Context::getContext()->language->id`). Use the modern context services — `LanguageContext`, `ShopContext`, etc. — passed where needed. This applies to query builders, providers, and services alike
++- **One URL = one action.** Don't keep the legacy controller's habit of a single endpoint that branches on a `method`/`action` parameter to do create *and* delete. Migrated controllers get distinct actions + routes per operation
++- **Generic logic goes in a generic Core component, not a domain namespace.** If a helper has no business logic specific to the domain being migrated (e.g. filling localized names from defaults), put it under the matching `PrestaShop\PrestaShop\Core\{Concern}` namespace so other domains can reuse it — not under `Core\Domain\{ThisDomain}\`
++- **Keep shared-component changes out of scope.** Don't modify shared JS components (`modal.ts`, `confirm-modal.ts`, `Link.php`, generic legacy list behavior) to make one page work — it risks side effects on every other consumer. If a shared component genuinely needs a change, do it in a dedicated PR; otherwise adapt at the call site
++- **Don't replicate legacy bugs as features.** When the legacy page did something dubious, flag it rather than faithfully porting it; a pre-existing legacy-wide bug is a separate dedicated fix, not part of the migration
++
+ ## Lifecycle rules
+ 
+ ### GA (promote to stable)
+diff --git a/.ai/Component/Playwright/CONTEXT.md b/.ai/Component/Playwright/CONTEXT.md
+index 55ac9d18287c1..c57973be9f3f2 100644
+--- a/.ai/Component/Playwright/CONTEXT.md
++++ b/.ai/Component/Playwright/CONTEXT.md
+@@ -115,6 +115,9 @@ describe('BO - International - Taxes : CRUD Tax', async () => {
+ - **Use `function()` not arrow functions** in `describe()` blocks — Mocha needs `this` context
+ - **Clean up after tests:** `afterAll` must leave the system in its pre-test state. Delete created entities, revert settings
+ - **Feature flag:** for pages still in beta, enable the flag in `before()` and it will be removed at GA
++- **No E2E behind a disabled feature flag** — hard rule. Don't add campaigns for a page only reachable with a not-yet-GA flag; the test ships in the GA PR that promotes the flag (see [`promote-feature-flag-to-stable`](../Migration/skills/promote-feature-flag-to-stable/SKILL.md))
++- **Library compatibility with older versions:** ui-testing-library code is shared across supported branches (down to `9.1.x`). A page object / helper change must not break on older versions — when behavior differs by version, branch on it rather than assuming the latest DOM. See your `ui-testing-library-versioning` note
++- **Messages and selectors live in the library, never in the campaign** — assert against a page-object getter / message property exported by ui-testing-library; don't hard-code expected message strings or raw selectors in the core campaign file
+ - **Common tests:** reusable setup/teardown functions live in `tests/UI/commonTests/`. Import and call them to avoid duplication (e.g. `createProductTest`, `deleteProductTest`)
+ - **No random data in assertions:** use deterministic Faker values or predefined data for assertions
+ - **Toggle switches (quick-edit):** toggle status changes happen via AJAX without page reload — assert the new status directly on the grid row
+diff --git a/.ai/Component/Playwright/skills/create-playwright-page-objects/SKILL.md b/.ai/Component/Playwright/skills/create-playwright-page-objects/SKILL.md
+index 5f6bc5afd4edb..e26579392d59f 100644
+--- a/.ai/Component/Playwright/skills/create-playwright-page-objects/SKILL.md
++++ b/.ai/Component/Playwright/skills/create-playwright-page-objects/SKILL.md
+@@ -55,5 +55,8 @@ See [Playwright/CONTEXT.md](../../CONTEXT.md) for POM conventions (never assert,
+ - One page object per distinct BO page (listing page, create/edit page)
+ - Prefer `data-test` attribute selectors when available over CSS classes
+ - Check if page objects already exist before creating new ones
++- **Sort interface / page-object members alphabetically** — this is an expected convention in the ui-testing-library
++- **Expose expected messages and selectors here, not in the campaign** — message strings (success/error) belong as properties on the page object so campaigns assert against them; never hard-code message text in the core campaign
++- **Stay compatible with older branches (≥ `9.1.x`)** — a change must not crash the library on lower versions; branch on version when the DOM differs rather than assuming the latest
+ 
+ **Reference:** check existing page objects in the ui-testing-library for the exact inheritance pattern and method signatures.
+diff --git a/.ai/skills/create-pr/SKILL.md b/.ai/skills/create-pr/SKILL.md
+index 8c92436b5ff12..b94fb64d35192 100644
+--- a/.ai/skills/create-pr/SKILL.md
++++ b/.ai/skills/create-pr/SKILL.md
+@@ -30,7 +30,7 @@ From code analysis and git context, infer as much as possible:
+ | **Branch** | Current git branch or merge target |
+ | **Description** | Summarize from commits and diff. Be specific (versions, browser/server config, module/theme). |
+ | **Type** | `bug fix` · `improvement` · `new feature` · `refacto` — infer from changes |
+-| **Category** | `FO` · `BO` · `CO` · `IN` · `WS` · `TE` · `LO` · `ME` · `PM` — infer from files changed. See [category reference](https://devdocs.prestashop-project.org/9/contribute/contribution-guidelines/pull-requests/#type--category). |
++| **Category** | `FO` · `BO` · `CO` · `IN` · `WS` · `TE` · `LO` · `ME` · `PM` — infer from files changed. See [category reference](https://devdocs.prestashop-project.org/9/contribute/contribution-guidelines/pull-requests/#type--category). **`ME` (Merge) is reserved exclusively for PRs that only import one git branch into another (e.g. an upward `9.1.x` → `develop` merge) — never use it for a normal feature/bugfix/refacto PR.** For documentation/tooling PRs (e.g. `.ai/` context files) use `PM` (Project Management). |
+ | **BC breaks** | Analyze public API changes → `yes` / `no` |
+ | **Deprecations** | Check for new `@deprecated` annotations → `yes` / `no` |
+ | **How to test** | Write step-by-step verification instructions from the PR context |

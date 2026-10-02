@@ -1,0 +1,185 @@
+diff --git a/classes/Dispatcher.php b/classes/Dispatcher.php
+index 7e4e1486445ab..7ea894e6ce9d7 100644
+--- a/classes/Dispatcher.php
++++ b/classes/Dispatcher.php
+@@ -538,14 +538,18 @@ private function buildRequestUri($requestUri, $isMultiLanguageActivated, ?Shop $
+             );
+         }
+ 
+-        // If there are several languages, set $_GET['isolang'] and remove the language part from the request URI
+-        if (
+-            $this->use_routes
+-            && $isMultiLanguageActivated
+-            && preg_match('#^/([a-z]{2})(?:/.*)?$#', $requestUri, $matches)
+-        ) {
+-            $_GET['isolang'] = $matches[1];
+-            $requestUri = substr($requestUri, 3);
++        // If friendly URLs are activated and there are more than one languages on the shop, we handle the language
++        // Set $_GET['isolang'] and remove the language part from the request URI
++        if ($this->use_routes && $isMultiLanguageActivated) {
++            // If we find a language in the URL, we assign it and remove it from the URL
++            if (preg_match('#^/([a-z]{2})(?:/.*)?$#', $requestUri, $matches)) {
++                $_GET['isolang'] = $matches[1];
++                $requestUri = substr($requestUri, 3);
++            // Otherwise, we use the default language
++            } else {
++                $defaultLanguage = new Language((int) Configuration::get('PS_LANG_DEFAULT'));
++                $_GET['isolang'] = $defaultLanguage->iso_code;
++            }
+         }
+ 
+         return $requestUri;
+diff --git a/classes/Link.php b/classes/Link.php
+index 70cc101924a8a..5596c2013bd45 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -1315,6 +1315,8 @@ public function addSortDetails($url, $orderBy, $orderWay)
+     }
+ 
+     /**
++     * Returns a language prefix for the URL if needed.
++     *
+      * @param int|null $idLang
+      * @param Context|null $context
+      * @param int|null $idShop
+@@ -1323,16 +1325,22 @@ public function addSortDetails($url, $orderBy, $orderWay)
+      */
+     protected function getLangLink($idLang = null, ?Context $context = null, $idShop = null)
+     {
+-        static $psRewritingSettings = null;
+-        if ($psRewritingSettings === null) {
+-            $psRewritingSettings = (int) Configuration::get('PS_REWRITING_SETTINGS', null, null, $idShop);
+-        }
+-
++        // Get context if none was passed
+         if (!$context) {
+             $context = Context::getContext();
+         }
+ 
+-        if ((!$this->allow && in_array($idShop, [$context->shop->id,  null])) || !Language::isMultiLanguageActivated($idShop) || !$psRewritingSettings) {
++        // If rewriting is disabled, no prefix needed
++        if ((bool) Configuration::get('PS_REWRITING_SETTINGS', null, null, $idShop) === false) {
++            return '';
++        }
++
++        // If there is just one language, no prefix needed
++        if ((bool) Language::isMultiLanguageActivated($idShop) === false) {
++            return '';
++        }
++
++        if (!$this->allow && in_array($idShop, [$context->shop->id,  null])) {
+             return '';
+         }
+ 
+@@ -1340,6 +1348,14 @@ protected function getLangLink($idLang = null, ?Context $context = null, $idShop
+             $idLang = $context->language->id;
+         }
+ 
++        // If the language is our default language, no prefix needed
++        if (
++            $idLang == Configuration::get('PS_LANG_DEFAULT')
++            && (bool) Configuration::get('PS_DEFAULT_LANGUAGE_URL_PREFIX', null, null, $idShop) === false
++        ) {
++            return '';
++        }
++
+         return Language::getIsoById($idLang) . '/';
+     }
+ 
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 35f7165034cbd..a3d2d24b55da1 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -20,6 +20,9 @@
+   <configuration id="PS_REWRITING_SETTINGS" name="PS_REWRITING_SETTINGS">
+     <value>0</value>
+   </configuration>
++  <configuration id="PS_DEFAULT_LANGUAGE_URL_PREFIX" name="PS_DEFAULT_LANGUAGE_URL_PREFIX">
++    <value>1</value>
++  </configuration>
+   <configuration id="PS_ORDER_OUT_OF_STOCK" name="PS_ORDER_OUT_OF_STOCK">
+     <value>0</value>
+   </configuration>
+diff --git a/src/Adapter/Meta/SetUpUrlsDataConfiguration.php b/src/Adapter/Meta/SetUpUrlsDataConfiguration.php
+index 221f168d2832b..3238d127e4d19 100644
+--- a/src/Adapter/Meta/SetUpUrlsDataConfiguration.php
++++ b/src/Adapter/Meta/SetUpUrlsDataConfiguration.php
+@@ -45,6 +45,7 @@ final class SetUpUrlsDataConfiguration extends AbstractMultistoreConfiguration
+      */
+     private const CONFIGURATION_FIELDS = [
+         'friendly_url',
++        'default_language_url_prefix',
+         'accented_url',
+         'canonical_url_redirection',
+         'disable_apache_multiview',
+@@ -87,6 +88,7 @@ public function getConfiguration()
+ 
+         return [
+             'friendly_url' => (bool) $this->configuration->get('PS_REWRITING_SETTINGS', false, $shopConstraint),
++            'default_language_url_prefix' => (bool) $this->configuration->get('PS_DEFAULT_LANGUAGE_URL_PREFIX', false, $shopConstraint),
+             'accented_url' => (bool) $this->configuration->get('PS_ALLOW_ACCENTED_CHARS_URL', false, $shopConstraint),
+             'canonical_url_redirection' => (int) $this->configuration->get('PS_CANONICAL_REDIRECT', 0, $shopConstraint),
+             'disable_apache_multiview' => (bool) $this->configuration->get('PS_HTACCESS_DISABLE_MULTIVIEWS', false, $shopConstraint),
+@@ -105,6 +107,7 @@ public function updateConfiguration(array $configuration)
+             $shopConstraint = $this->getShopConstraint();
+ 
+             $this->updateConfigurationValue('PS_REWRITING_SETTINGS', 'friendly_url', $configuration, $shopConstraint);
++            $this->updateConfigurationValue('PS_DEFAULT_LANGUAGE_URL_PREFIX', 'default_language_url_prefix', $configuration, $shopConstraint);
+             $this->updateConfigurationValue('PS_ALLOW_ACCENTED_CHARS_URL', 'accented_url', $configuration, $shopConstraint);
+             $this->updateConfigurationValue('PS_CANONICAL_REDIRECT', 'canonical_url_redirection', $configuration, $shopConstraint);
+             $this->updateConfigurationValue('PS_HTACCESS_DISABLE_MULTIVIEWS', 'disable_apache_multiview', $configuration, $shopConstraint);
+@@ -151,6 +154,7 @@ protected function buildResolver(): OptionsResolver
+         $resolver = (new OptionsResolver())
+             ->setDefined(self::CONFIGURATION_FIELDS)
+             ->setAllowedTypes('friendly_url', 'bool')
++            ->setAllowedTypes('default_language_url_prefix', 'bool')
+             ->setAllowedTypes('accented_url', 'bool')
+             ->setAllowedTypes('canonical_url_redirection', 'int')
+             ->setAllowedTypes('disable_apache_multiview', 'bool')
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
+index f27257b07e151..4a0860d045acb 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
+@@ -108,6 +108,14 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'help' => $friendlyUrlHelp,
+                 'multistore_configuration_key' => 'PS_REWRITING_SETTINGS',
+             ])
++            ->add('default_language_url_prefix', SwitchType::class, [
++                'label' => $this->trans('Use prefix for default language', 'Admin.Global'),
++                'help' => $this->trans(
++                    'If there are multiple languages enabled on the shop, all URLs are prefixed with the ISO code of the language. Do you want to do this also for the default language, or keep it un-prefixed? If adding a language to a well established single language shop, it\'s a good idea to disable this and avoid changing the URLs.',
++                    'Admin.Shopparameters.Help'
++                ),
++                'multistore_configuration_key' => 'PS_DEFAULT_LANGUAGE_URL_PREFIX',
++            ])
+             ->add('accented_url', SwitchType::class, [
+                 'label' => $this->trans('Accented URL', 'Admin.Shopparameters.Feature'),
+                 'help' => $this->trans(
+diff --git a/tests/Unit/Adapter/Meta/SetUpUrlsDataConfigurationTest.php b/tests/Unit/Adapter/Meta/SetUpUrlsDataConfigurationTest.php
+index 9a6668ac9bd87..7e74e462b81af 100644
+--- a/tests/Unit/Adapter/Meta/SetUpUrlsDataConfigurationTest.php
++++ b/tests/Unit/Adapter/Meta/SetUpUrlsDataConfigurationTest.php
+@@ -42,6 +42,7 @@ class SetUpUrlsDataConfigurationTest extends AbstractConfigurationTestCase
+ 
+     private const VALID_CONFIGURATION = [
+         'friendly_url' => true,
++        'default_language_url_prefix' => true,
+         'accented_url' => true,
+         'canonical_url_redirection' => 2,
+         'disable_apache_multiview' => true,
+@@ -116,6 +117,7 @@ public function testGetConfiguration(ShopConstraint $shopConstraint): void
+             ->willReturnMap(
+                 [
+                     ['PS_REWRITING_SETTINGS', false, $shopConstraint, true],
++                    ['PS_DEFAULT_LANGUAGE_URL_PREFIX', false, $shopConstraint, true],
+                     ['PS_ALLOW_ACCENTED_CHARS_URL', false, $shopConstraint, true],
+                     ['PS_CANONICAL_REDIRECT', 0, $shopConstraint, 2],
+                     ['PS_HTACCESS_DISABLE_MULTIVIEWS', false, $shopConstraint, true],
+@@ -155,6 +157,7 @@ public function provideInvalidConfiguration(): array
+         return [
+             [UndefinedOptionsException::class, ['does_not_exist' => 'does_not_exist']],
+             [InvalidOptionsException::class, array_merge(self::VALID_CONFIGURATION, ['friendly_url' => 'wrong_type'])],
++            [InvalidOptionsException::class, array_merge(self::VALID_CONFIGURATION, ['default_language_url_prefix' => 'wrong_type'])],
+             [InvalidOptionsException::class, array_merge(self::VALID_CONFIGURATION, ['accented_url' => 'wrong_type'])],
+             [InvalidOptionsException::class, array_merge(self::VALID_CONFIGURATION, ['canonical_url_redirection' => 'wrong_type'])],
+             [InvalidOptionsException::class, array_merge(self::VALID_CONFIGURATION, ['disable_apache_multiview' => 'wrong_type'])],

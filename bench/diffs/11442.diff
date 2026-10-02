@@ -1,0 +1,124 @@
+diff --git a/src/Adapter/Module/Module.php b/src/Adapter/Module/Module.php
+index c995630db863c..f165c9f493b8a 100644
+--- a/src/Adapter/Module/Module.php
++++ b/src/Adapter/Module/Module.php
+@@ -39,7 +39,7 @@
+  */
+ class Module implements ModuleInterface
+ {
+-    /** @var legacyInstance Module The instance of the legacy module */
++    /** @var LegacyModule Module The instance of the legacy module */
+     public $instance = null;
+ 
+     /**
+@@ -232,7 +232,13 @@ public function onInstall()
+         // "Notice: Use of undefined constant _PS_INSTALL_LANGS_PATH_ - assumed '_PS_INSTALL_LANGS_PATH_'"
+         LegacyModule::updateTranslationsAfterInstall(false);
+ 
+-        $result = $this->instance->install();
++        // Casted to Boolean, because some modules returns 1 instead true and 0 instead false.
++        // Other value types are not expected. See also: https://github.com/PrestaShop/PrestaShop/pull/11442#issuecomment-440485268
++        // The best way is to check for non Boolean type and `throw \UnexpectedValueException`,
++        // but it's need much refactoring and testing.
++        // TODO: refactoring.
++        $result = (bool) $this->instance->install();
++
+         $this->database->set('installed', $result);
+         $this->database->set('active', $result);
+         $this->database->set('version', $this->attributes->get('version'));
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+index 703c5924a6f72..832786d2d96b6 100755
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+@@ -384,45 +384,50 @@ public function moduleAction(Request $request)
+             return new JsonResponse($response);
+         }
+ 
++        $actionTitle = str_replace('_', ' ', $action);
++
+         try {
+             $response[$module]['status'] = $moduleManager->{$action}($module);
+-            if ($response[$module]['status'] === null) {
+-                $response[$module]['status'] = false;
++
++            if ($response[$module]['status'] === true) {
+                 $response[$module]['msg'] = $this->trans(
+-                    '%module% did not return a valid response on %action% action.',
++                    '%action% action on module %module% succeeded.',
+                     'Admin.Modules.Notification',
+                     [
++                        '%action%' => ucfirst($actionTitle),
+                         '%module%' => $module,
+-                        '%action%' => $action,
+                     ]
+                 );
++
++                if ($action !== 'uninstall') {
++                    $response[$module]['module_name'] = $module;
++                    $response[$module]['is_configurable'] = (bool) $this
++                        ->get('prestashop.core.admin.module.repository')
++                        ->getModule($module)
++                        ->attributes
++                        ->get('is_configurable');
++                }
+             } elseif ($response[$module]['status'] === false) {
+                 $error = $moduleManager->getError($module);
+                 $response[$module]['msg'] = $this->trans(
+                     'Cannot %action% module %module%. %error_details%',
+                     'Admin.Modules.Notification',
+                     [
+-                        '%action%' => str_replace('_', ' ', $action),
++                        '%action%' => $actionTitle,
+                         '%module%' => $module,
+                         '%error_details%' => $error,
+                     ]
+                 );
+             } else {
++                $response[$module]['status'] = false;
+                 $response[$module]['msg'] = $this->trans(
+-                    '%action% action on module %module% succeeded.',
++                    '%module% did not return a valid response on %action% action.',
+                     'Admin.Modules.Notification',
+                     [
+-                        '%action%' => ucfirst(str_replace('_', ' ', $action)),
+                         '%module%' => $module,
++                        '%action%' => $actionTitle,
+                     ]
+                 );
+-                if ($action != 'uninstall') {
+-                    $response[$module]['module_name'] = $module;
+-                    $response[$module]['is_configurable'] = (bool) $this->get('prestashop.core.admin.module.repository')
+-                                                          ->getModule($module)
+-                                                          ->attributes
+-                                                          ->get('is_configurable');
+-                }
+             }
+         } catch (UnconfirmedModuleActionException $e) {
+             $collection = AddonsCollection::createFrom(array($e->getModule()));
+@@ -432,8 +437,10 @@ public function moduleAction(Request $request)
+                 [
+                     'status' => false,
+                     'confirmation_subject' => $e->getSubject(),
+-                    'module' => $this->container->get('prestashop.adapter.presenter.module')
+-                    ->presentCollection($modules)[0],
++                    'module' => $this
++                        ->container
++                        ->get('prestashop.adapter.presenter.module')
++                        ->presentCollection($modules)[0],
+                     'msg' => $this->trans(
+                         'Confirmation needed by module %module% on %action% (%subject%).',
+                         'Admin.Modules.Notification',
+@@ -451,11 +458,12 @@ public function moduleAction(Request $request)
+                 'Exception thrown by module %module% on %action%. %error_details%',
+                 'Admin.Modules.Notification',
+                 [
+-                    '%action%' => str_replace('_', ' ', $action),
++                    '%action%' => $actionTitle,
+                     '%module%' => $module,
+                     '%error_details%' => $e->getMessage(),
+                 ]
+             );
++
+             $logger = $this->container->get('logger');
+             $logger->error($response[$module]['msg']);
+         }

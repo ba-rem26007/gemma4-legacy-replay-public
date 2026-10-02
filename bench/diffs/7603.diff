@@ -1,0 +1,153 @@
+diff --git a/classes/Customer.php b/classes/Customer.php
+index 4d54131733a05..872f04abca1af 100644
+--- a/classes/Customer.php
++++ b/classes/Customer.php
+@@ -293,7 +293,14 @@ public function update($nullValues = false)
+             }
+         }
+ 
+-        return parent::update(true);
++        try {
++            return parent::update(true);
++        } catch (\PrestaShopException $exception) {
++            $message = $exception->getMessage();
++            error_log($message);
++
++            return false;
++        }
+     }
+ 
+     /**
+diff --git a/classes/form/CustomerForm.php b/classes/form/CustomerForm.php
+index bdc3e1a3095c3..76423782f1404 100644
+--- a/classes/form/CustomerForm.php
++++ b/classes/form/CustomerForm.php
+@@ -76,6 +76,9 @@ public function fillFromCustomer(Customer $customer)
+         return $this->fillWith($params);
+     }
+ 
++    /**
++     * @return \Customer
++     */
+     public function getCustomer()
+     {
+         $customer = new Customer($this->getValue('id_customer'));
+@@ -97,7 +100,8 @@ public function validate()
+     {
+         $emailField = $this->getField('email');
+         $id_customer = Customer::customerExists($emailField->getValue(), true, true);
+-        if ($id_customer && $id_customer != $this->getCustomer()->id) {
++        $customer = $this->getCustomer();
++        if ($id_customer && $id_customer != $customer->id) {
+             $emailField->addError(sprintf(
+                 $this->translator->trans(
+                     'The email "%s" is already used, please choose another one or sign in', array(), 'Shop.Notifications.Error'
+@@ -118,11 +122,62 @@ public function validate()
+             }
+         }
+ 
++        $this->validateFieldsLengths();
+         $this->validateByModules();
+ 
+         return parent::validate();
+     }
+ 
++    protected function validateFieldsLengths()
++    {
++        $this->validateFieldLength('email', 128, $this->getEmailMaxLengthViolationMessage());
++        $this->validateFieldLength('firstname', 255, $this->getFirstNameMaxLengthViolationMessage());
++        $this->validateFieldLength('lastname', 255, $this->getLastNameMaxLengthViolationMessage());
++    }
++
++    /**
++     * @param $fieldName
++     * @param $maximumLength
++     * @param $violationMessage
++     */
++    protected function validateFieldLength($fieldName, $maximumLength, $violationMessage)
++    {
++        $emailField = $this->getField($fieldName);
++        if (strlen($emailField->getValue()) > $maximumLength) {
++            $emailField->addError($violationMessage);
++        }
++    }
++
++    /**
++     * @return mixed
++     */
++    protected function getEmailMaxLengthViolationMessage()
++    {
++        return $this->translator->trans(
++            'The %1$s field is too long (%2$d chars max).',
++            array('email', 128),
++            'Shop.Notifications.Error'
++        );
++    }
++
++    protected function getFirstNameMaxLengthViolationMessage()
++    {
++        return $this->translator->trans(
++            'The %1$s field is too long (%2$d chars max).',
++            array('first name', 255),
++            'Shop.Notifications.Error'
++        );
++    }
++
++    protected function getLastNameMaxLengthViolationMessage()
++    {
++        return $this->translator->trans(
++            'The %1$s field is too long (%2$d chars max).',
++            array('last name', 255),
++            'Shop.Notifications.Error'
++        );
++    }
++
+     public function submit()
+     {
+         if ($this->validate()) {
+diff --git a/classes/form/CustomerFormatter.php b/classes/form/CustomerFormatter.php
+index 9e9a44ade8e70..7b79d64e62d2a 100644
+--- a/classes/form/CustomerFormatter.php
++++ b/classes/form/CustomerFormatter.php
+@@ -107,7 +107,6 @@ public function getFormat()
+ 
+         $format['firstname'] = (new FormField)
+             ->setName('firstname')
+-            ->setMaxLength(255)
+             ->setLabel(
+                 $this->translator->trans(
+                     'First name', [], 'Shop.Forms.Labels'
+@@ -118,7 +117,6 @@ public function getFormat()
+ 
+         $format['lastname'] = (new FormField)
+             ->setName('lastname')
+-            ->setMaxLength(255)
+             ->setLabel(
+                 $this->translator->trans(
+                     'Last name', [], 'Shop.Forms.Labels'
+diff --git a/classes/stock/SupplyOrderDetail.php b/classes/stock/SupplyOrderDetail.php
+index 78a54c8128513..599f9c228d38d 100755
+--- a/classes/stock/SupplyOrderDetail.php
++++ b/classes/stock/SupplyOrderDetail.php
+@@ -302,7 +302,7 @@ public function validateController($htmlentities = true)
+         foreach ($this->fieldsSize as $field => $max_length) {
+             if ($value = $this->{$field} && Tools::strlen($value) > $max_length) {
+                 $errors[] = $this->trans(
+-                    '%1$s is too long. Maximum length: %2$d',
++                    'The %1$s field is too long (%2$d chars max).',
+                     array(SupplyOrderDetail::displayFieldName($field, get_class($this), $htmlentities), $max_length),
+                     'Shop.Notifications.Error'
+                 );
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/modal_addons_connect.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/modal_addons_connect.html.twig
+index 04d089c820ed2..4967cb397ede0 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/modal_addons_connect.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/modal_addons_connect.html.twig
+@@ -34,7 +34,7 @@
+           <div class="row">
+               <div class="col-md-12">
+                   <p>
+-                      {{ "Link your shop to your Addons account: it will automatically import the modules you purchased. Don't have an account yet?"|trans({}, 'Admin.Modules.Feature') }}
++                      {{ "Link your shop to your Addons account to automatically receive important updates for the modules you purchased. Don't have an account yet?"|trans({}, 'Admin.Modules.Feature') }}
+                       <a href="http://addons.prestashop.com/authentication.php" target="_blank">{{ 'Sign up now'|trans({}, 'Admin.Modules.Feature') }}</a>
+                   </p>
+                   <form id="addons-connect-form"  action="{{ path('admin_addons_login') }}" method="POST">

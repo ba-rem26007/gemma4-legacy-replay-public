@@ -1,0 +1,153 @@
+diff --git a/admin-dev/themes/default/js/bundle/admin_parameters/performancePage.js b/admin-dev/themes/default/js/bundle/admin_parameters/performancePage.js
+index 28f3fb24f84c9..1ff5f8208f240 100644
+--- a/admin-dev/themes/default/js/bundle/admin_parameters/performancePage.js
++++ b/admin-dev/themes/default/js/bundle/admin_parameters/performancePage.js
+@@ -92,7 +92,7 @@ function PerformancePage(addServerUrl, removeServerUrl, testServerUrl) {
+         var app = this;
+ 
+         this.send(this.getTestServerUrl(), 'GET', this.getFormValues(), function(results) {
+-            if (!results.hasOwnProperty('error') || results.test === "false") {
++            if (results.hasOwnProperty('error') || results.test === false) {
+                 app.addClass('is-invalid');
+                 return;
+             }
+diff --git a/src/Adapter/Cache/MemcacheServerManager.php b/src/Adapter/Cache/MemcacheServerManager.php
+index 05ab2a6461217..a60ffef6b71db 100644
+--- a/src/Adapter/Cache/MemcacheServerManager.php
++++ b/src/Adapter/Cache/MemcacheServerManager.php
+@@ -82,16 +82,17 @@ public function addServer($serverIp, $serverPort, $serverWeight)
+      *
+      * @return bool
+      */
+-    public function testConfiguration($serverIp, $serverHost)
++    public function testConfiguration($serverIp, $serverPort)
+     {
+         if (extension_loaded('memcached')) {
+             $memcached = new Memcached();
+-            $memcached->addServer($serverIp, $serverHost);
++            $memcached->addServer($serverIp, $serverPort);
++            $version = $memcached->getVersion();
+ 
+-            return false === in_array('255.255.255', $memcached->getVersion(), true);
++            return is_array($version) && false === in_array('255.255.255', $version, true);
+         }
+ 
+-        return true === @memcache_connect($serverIp, $serverHost);
++        return true === @memcache_connect($serverIp, $serverPort);
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/MemcacheServerController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/MemcacheServerController.php
+index 1cef7bd07f693..f979f18fe6072 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/MemcacheServerController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/MemcacheServerController.php
+@@ -32,6 +32,7 @@
+ use Symfony\Component\HttpFoundation\JsonResponse;
+ use PrestaShopBundle\Security\Voter\PageVoter;
+ use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
+ 
+ /**
+  * Responsible of "Configure > Advanced Parameters > Performance" servers block management.
+@@ -66,7 +67,7 @@ public function testAction(Request $request)
+             return new JsonResponse(array('test' => $isValid));
+         }
+ 
+-        return new JsonResponse(array('errors' => 'error'), 400);
++        return new JsonResponse(array('errors' => 'error'), Response::HTTP_BAD_REQUEST);
+     }
+ 
+     /**
+@@ -87,16 +88,19 @@ public function addAction(Request $request)
+                 PageVoter::LEVEL_DELETE,
+             )
+         )) {
+-            return new JsonResponse(array(
+-                'errors' => array($this->trans('You do not have permission to create this.', 'Admin.Notifications.Error'),
++            return new JsonResponse(
++                array(
++                    'errors' => array(
++                        $this->trans('You do not have permission to create this.', 'Admin.Notifications.Error'),
++                    ),
+                 ),
+-            ), 400);
++                Response::HTTP_BAD_REQUEST
++            );
+         }
+ 
+         $postValues = $request->request;
+ 
+-        if (
+-            $postValues->has('server_ip')
++        if ($postValues->has('server_ip')
+             && $postValues->has('server_port')
+             && $postValues->has('server_weight')
+             && $this->getMemcacheManager()->testConfiguration(
+@@ -107,7 +111,7 @@ public function addAction(Request $request)
+             $server = $this->getMemcacheManager()
+                 ->addServer(
+                     $postValues->get('server_ip'),
+-                    $postValues->get('server_port'),
++                    $postValues->getInt('server_port'),
+                     $postValues->get('server_weight')
+                 )
+             ;
+@@ -115,9 +119,14 @@ public function addAction(Request $request)
+             return new JsonResponse($server, 201);
+         }
+ 
+-        return new JsonResponse(array('errors' => array(
+-            $this->trans('The Memcached server cannot be added.', 'Admin.Advparameters.Notification'),
+-        )), 400);
++        return new JsonResponse(
++            array(
++                'errors' => array(
++                    $this->trans('The Memcached server cannot be added.', 'Admin.Advparameters.Notification'),
++                ),
++            ),
++            Response::HTTP_BAD_REQUEST
++        );
+     }
+ 
+     /**
+@@ -138,21 +147,33 @@ public function deleteAction(Request $request)
+                 PageVoter::LEVEL_DELETE,
+             )
+         )) {
+-            return new JsonResponse(array(
+-                'errors' => array($this->trans('You do not have permission to delete this.', 'Admin.Notifications.Error'),
++            return new JsonResponse(
++                array(
++                    'errors' => array(
++                        $this->trans('You do not have permission to delete this.', 'Admin.Notifications.Error'),
++                    ),
+                 ),
+-            ), 400);
++                Response::HTTP_BAD_REQUEST
++            );
+         }
+ 
+         if ($request->request->has('server_id')) {
+             $this->getMemcacheManager()->deleteServer($request->request->get('server_id'));
+ 
+-            return new JsonResponse(array(), 204);
++            return new JsonResponse([], Response::HTTP_NO_CONTENT);
+         }
+ 
+-        return new JsonResponse(array('errors' => array(
+-            $this->trans('There was an error when attempting to delete the Memcached server.', 'Admin.Advparameters.Notification'),
+-        )), 400);
++        return new JsonResponse(
++            array(
++                'errors' => array(
++                    $this->trans(
++                        'There was an error when attempting to delete the Memcached server.',
++                        'Admin.Advparameters.Notification'
++                    ),
++                ),
++            ),
++            Response::HTTP_BAD_REQUEST
++        );
+     }
+ 
+     /**

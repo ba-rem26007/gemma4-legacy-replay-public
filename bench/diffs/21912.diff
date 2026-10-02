@@ -1,0 +1,115 @@
+diff --git a/classes/Currency.php b/classes/Currency.php
+index b4cfddb66456b..f4b3a5cf81f21 100644
+--- a/classes/Currency.php
++++ b/classes/Currency.php
+@@ -1134,13 +1134,9 @@ public function refreshLocalizedCurrencyData(array $languages, LocaleRepository
+         $symbolsByLang = $namesByLang = [];
+         foreach ($languages as $languageData) {
+             $language = new Language($languageData['id_lang']);
+-            if (empty($language->locale)) {
+-                // Language doesn't have locale we can't install this language
+-                continue;
+-            }
+ 
+             // CLDR locale give us the CLDR reference specification
+-            $cldrLocale = $localeRepoCLDR->getLocale($language->locale);
++            $cldrLocale = $localeRepoCLDR->getLocale($language->getLocale());
+             // CLDR currency gives data from CLDR reference, for the given language
+             $cldrCurrency = $cldrLocale->getCurrency($this->iso_code);
+ 
+diff --git a/classes/Language.php b/classes/Language.php
+index 6dc04615c58c3..7866d4d069a65 100644
+--- a/classes/Language.php
++++ b/classes/Language.php
+@@ -783,7 +783,12 @@ public static function getIdByLocale($locale, $noCache = false)
+     {
+         $key = 'Language::getIdByLocale_' . $locale;
+         if ($noCache || !Cache::isStored($key)) {
+-            $idLang = Db::getInstance()->getValue('SELECT `id_lang` FROM `' . _DB_PREFIX_ . 'lang` WHERE `locale` = \'' . pSQL(strtolower($locale)) . '\'');
++            $idLang = Db::getInstance()
++                ->getValue(
++                    'SELECT `id_lang` FROM `' . _DB_PREFIX_ . 'lang`
++                    WHERE `locale` = \'' . pSQL(strtolower($locale)) . '\'
++                    OR `language_code` = \'' . pSQL(strtolower($locale)) . '\''
++                );
+ 
+             Cache::store($key, $idLang);
+ 
+diff --git a/classes/LocalizationPack.php b/classes/LocalizationPack.php
+index abf53ea6f4962..456a45a6a98eb 100644
+--- a/classes/LocalizationPack.php
++++ b/classes/LocalizationPack.php
+@@ -329,7 +329,7 @@ protected function _installCurrencies($xml, $install_mode = false)
+                 /** @var Language $defaultLang */
+                 $defaultLang = new Language((int) Configuration::get('PS_LANG_DEFAULT'));
+ 
+-                $currency = new Currency();
++                $currency = $this->getExistingByIsoCodeOrCreate((string) $attributes['iso_code']);
+                 $currency->name = (string) $attributes['name'];
+                 $currency->iso_code = (string) $attributes['iso_code'];
+                 $currency->iso_code_num = (int) $attributes['iso_code_num'];
+@@ -339,13 +339,14 @@ protected function _installCurrencies($xml, $install_mode = false)
+                 $currency->format = (int) $attributes['format'];
+                 $currency->decimals = (int) $attributes['decimals'];
+                 $currency->active = true;
++                $currency->deleted = false;
+                 if (!$currency->validateFields()) {
+                     $this->_errors[] = Context::getContext()->getTranslator()->trans('Invalid currency properties.', [], 'Admin.International.Notification');
+ 
+                     return false;
+                 }
+                 if (!Currency::exists($currency->iso_code)) {
+-                    if (!$currency->add()) {
++                    if (!$currency->save()) {
+                         $this->_errors[] = Context::getContext()->getTranslator()->trans('An error occurred while importing the currency: %s', [(string) ($attributes['name'])], 'Admin.International.Notification');
+ 
+                         return false;
+@@ -403,7 +404,7 @@ protected function getCldrLocaleRepository()
+     protected function setCurrencyCldrData(Currency $currency, Language $defaultLang)
+     {
+         $localeRepoCLDR = $this->getCldrLocaleRepository();
+-        $cldrLocale = $localeRepoCLDR->getLocale($defaultLang->locale);
++        $cldrLocale = $localeRepoCLDR->getLocale($defaultLang->getLocale());
+         $cldrCurrency = $cldrLocale->getCurrency($currency->iso_code);
+ 
+         $symbol = (string) $cldrCurrency->getSymbol();
+@@ -617,4 +618,26 @@ public function getErrors()
+     {
+         return $this->_errors;
+     }
++
++    /**
++     * Return a currency (that can be soft deleted) if presents in the DB
++     * or a new one if not.
++     *
++     * @param string $isoCode
++     *
++     * @return Currency
++     *
++     * @throws PrestaShopDatabaseException
++     */
++    private function getExistingByIsoCodeOrCreate(string $isoCode): Currency
++    {
++        $currencies = Currency::findAllInstalled();
++        foreach ($currencies as $currency) {
++            if ($currency['iso_code'] === $isoCode) {
++                return new Currency($currency['id_currency']);
++            }
++        }
++
++        return new Currency();
++    }
+ }
+diff --git a/src/PrestaShopBundle/Entity/Lang.php b/src/PrestaShopBundle/Entity/Lang.php
+index 841d4be60b525..12b078c05e634 100644
+--- a/src/PrestaShopBundle/Entity/Lang.php
++++ b/src/PrestaShopBundle/Entity/Lang.php
+@@ -314,7 +314,7 @@ public function isRTL()
+      */
+     public function getLocale()
+     {
+-        return $this->locale;
++        return !empty($this->locale) ? $this->locale : $this->getLanguageCode();
+     }
+ 
+     /**

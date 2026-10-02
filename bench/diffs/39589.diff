@@ -1,0 +1,358 @@
+diff --git a/src/PrestaShopBundle/Command/ListCommandsAndQueriesCommand.php b/src/PrestaShopBundle/Command/ListCommandsAndQueriesCommand.php
+index 43db3d95348fb..cd0414deca2c7 100644
+--- a/src/PrestaShopBundle/Command/ListCommandsAndQueriesCommand.php
++++ b/src/PrestaShopBundle/Command/ListCommandsAndQueriesCommand.php
+@@ -26,12 +26,14 @@
+ 
+ namespace PrestaShopBundle\Command;
+ 
++use ApiPlatform\Metadata\Resource\Factory\AttributesResourceNameCollectionFactory;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceNameCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
++use Exception;
+ use PrestaShop\PrestaShop\Core\CommandBus\Parser\CommandDefinition;
+ use PrestaShop\PrestaShop\Core\CommandBus\Parser\CommandDefinitionParser;
+-use PrestaShopBundle\Exception\DomainClassNameMalformedException;
++use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractorInterface;
+ use Symfony\Component\Console\Command\Command;
+ use Symfony\Component\Console\Formatter\OutputFormatterStyle;
+ use Symfony\Component\Console\Input\InputInterface;
+@@ -54,7 +56,9 @@ public function __construct(
+         private CommandDefinitionParser $commandDefinitionParser,
+         private array $commandAndQueries,
+         private ResourceNameCollectionFactoryInterface $resourceNameCollectionFactory,
+-        private ResourceMetadataCollectionFactoryInterface $resourceMetadataFactory
++        private ResourceMetadataCollectionFactoryInterface $resourceMetadataFactory,
++        private ApiResourceScopesExtractorInterface $apiResourceScopesExtractor,
++        private string $moduleDir
+     ) {
+         parent::__construct();
+         $this->isFormatSimple = false;
+@@ -119,7 +123,9 @@ protected function execute(InputInterface $input, OutputInterface $output): int
+                 $output->writeln(++$key . '.');
+                 $output->writeln('<blue>Class: </blue><info>' . $commandDefinition->getClassName() . '</info>');
+                 $output->writeln('<blue>Type: </blue><info>' . $commandDefinition->getCommandType() . '</info>');
+-                $output->writeln('<blue>API: </blue><info>' . $cqrsEndpointURI . '</info>');
++                if (!empty($cqrsEndpointURI)) {
++                    $output->writeln('<blue>API: </blue><info>' . $cqrsEndpointURI . '</info>');
++                }
+                 $output->writeln('<comment>' . $commandDefinition->getDescription() . '</comment>');
+                 $output->writeln('');
+             }
+@@ -157,58 +163,129 @@ private function filterCQRS(array $filters): void
+     }
+ 
+     /**
+-     * This method rebuild the resources from the api platform attributes.
++     * This method rebuild the resources from the api platform attributes including modules.
+      *
+      * @return ResourceMetadataCollection[]
+      */
+     private function getResourceList(): array
+     {
+         $resourceMetadataCollection = [];
++
++        // Get core resources (original working logic)
+         foreach ($this->resourceNameCollectionFactory->create() as $resourceClass) {
+-            $resourceMetadataCollection[] = $this->resourceMetadataFactory->create($resourceClass);
++            try {
++                $resourceMetadataCollection[] = $this->resourceMetadataFactory->create($resourceClass);
++            } catch (Exception $e) {
++                // Skip resources that can't be loaded
++                continue;
++            }
++        }
++
++        // Get resource classes from modules
++        $moduleApiResourceScopes = array_filter(
++            $this->apiResourceScopesExtractor->getAllApiResourceScopes(),
++            fn ($scope) => !$scope->fromCore()
++        );
++
++        foreach ($moduleApiResourceScopes as $apiResourceScope) {
++            $moduleName = $apiResourceScope->getModuleName();
++            $moduleResourcePaths = $this->getModuleResourcePaths($moduleName);
++
++            if (empty($moduleResourcePaths)) {
++                continue;
++            }
++
++            try {
++                $moduleResourceExtractor = new AttributesResourceNameCollectionFactory($moduleResourcePaths);
++                foreach ($moduleResourceExtractor->create() as $resourceClass) {
++                    try {
++                        $resourceMetadataCollection[] = $this->resourceMetadataFactory->create($resourceClass);
++                    } catch (Exception $e) {
++                        // Skip individual resources that can't be loaded (e.g., missing dependencies)
++                        continue;
++                    }
++                }
++            } catch (Exception $e) {
++                // Skip entire module if resource factory fails (e.g., invalid path)
++                continue;
++            }
+         }
+ 
+         return $resourceMetadataCollection;
+     }
+ 
++    private function getModuleResourcePaths(string $moduleName): array
++    {
++        $paths = [];
++        $modulePath = $this->moduleDir . $moduleName;
++
++        // Folder containing ApiPlatform resources classes
++        $moduleResourcesPath = sprintf('%s/src/ApiPlatform/Resources', $modulePath);
++        if (file_exists($moduleResourcesPath)) {
++            $paths[] = $moduleResourcesPath;
++        }
++
++        return $paths;
++    }
++
+     /**
+      * This method takes the filtered list of routes, and checks it against the list of CQRS.
+      * The CQRS that have a route with the correct method are implemented, so we return the URI of the endpoint.
+      */
+     private function getCQRSEndpointURI(CommandDefinition $commandDefinition): string
+     {
+-        $domainArray = explode('\\', $commandDefinition->getClassName());
+-        if (count($domainArray) >= 5) {
+-            $domain = $domainArray[4];
+-        } else {
+-            throw new DomainClassNameMalformedException();
+-        }
++        $cqrsClassName = $commandDefinition->getClassName();
++        $matchingEndpoints = [];
+ 
+         foreach ($this->apiResourcesList as $apiResources) {
+             foreach ($apiResources as $resource) {
+-                if ($resource->getShortName() !== $domain) {
+-                    return '';
+-                }
+-
+                 $apiResourceOperations = $resource->getOperations();
+                 foreach ($apiResourceOperations as $operation) {
+-                    if ($this->doesMethodsMatchType($operation->getMethod(), $commandDefinition->getCommandType())) {
+-                        return $operation->getUriTemplate();
++                    $extraProperties = $operation->getExtraProperties();
++
++                    // Check if this operation uses the same CQRS class
++                    $operationCQRSClass = null;
++                    if (!empty($extraProperties['CQRSQuery'])) {
++                        $operationCQRSClass = $extraProperties['CQRSQuery'];
++                    } elseif (!empty($extraProperties['CQRSCommand'])) {
++                        $operationCQRSClass = $extraProperties['CQRSCommand'];
++                    }
++
++                    if ($operationCQRSClass === $cqrsClassName
++                        && $this->doesMethodsMatchType($operation->getMethod(), $commandDefinition->getCommandType())) {
++                        $matchingEndpoints[] = [
++                            'method' => $operation->getMethod(),
++                            'uri' => $operation->getUriTemplate(),
++                        ];
+                     }
+                 }
+             }
+         }
+ 
+-        return '';
++        if (empty($matchingEndpoints)) {
++            return '';
++        }
++
++        if (count($matchingEndpoints) === 1) {
++            return $matchingEndpoints[0]['method'] . ' ' . $matchingEndpoints[0]['uri'];
++        }
++
++        // Multiple endpoints - format as method:uri pairs
++        $formattedEndpoints = array_map(
++            fn ($endpoint) => $endpoint['method'] . ' ' . $endpoint['uri'],
++            $matchingEndpoints
++        );
++
++        return implode(', ', array_unique($formattedEndpoints));
+     }
+ 
+     private function doesMethodsMatchType(string $method, string $commandType): bool
+     {
+         switch ($commandType) {
+             case 'Command':
+-                return $method === 'POST' || $method === 'PUT';
++                return in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE']);
+             case 'Query':
+-                return $method === 'GET' || $method === 'DELETE';
++                return $method === 'GET';
+             default:
+                 return false;
+         }
+diff --git a/src/PrestaShopBundle/Resources/config/services_dev/bundle/command.yml b/src/PrestaShopBundle/Resources/config/services_dev/bundle/command.yml
+index dd080f0958672..a7c3b87574e2c 100644
+--- a/src/PrestaShopBundle/Resources/config/services_dev/bundle/command.yml
++++ b/src/PrestaShopBundle/Resources/config/services_dev/bundle/command.yml
+@@ -44,6 +44,8 @@ services:
+       - '%prestashop.commands_and_queries%'
+       - '@api_platform.metadata.resource.name_collection_factory.attributes'
+       - '@api_platform.metadata.resource.metadata_collection_factory.attributes'
++      - '@PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractorInterface'
++      - '%prestashop.module_dir%'
+     tags:
+       - 'console.command'
+ 
+diff --git a/tests/Unit/PrestaShopBundle/Command/ListCommandsAndQueriesCommandTest.php b/tests/Unit/PrestaShopBundle/Command/ListCommandsAndQueriesCommandTest.php
+index e2e6629f68a70..cf6da15d77d80 100644
+--- a/tests/Unit/PrestaShopBundle/Command/ListCommandsAndQueriesCommandTest.php
++++ b/tests/Unit/PrestaShopBundle/Command/ListCommandsAndQueriesCommandTest.php
+@@ -29,6 +29,9 @@
+ 
+ namespace Tests\Unit\PrestaShopBundle\Command;
+ 
++use ApiPlatform\Metadata\ApiResource;
++use ApiPlatform\Metadata\Get;
++use ApiPlatform\Metadata\Operations;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceNameCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
+@@ -36,8 +39,8 @@
+ use PHPUnit\Framework\MockObject\MockObject;
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Core\CommandBus\Parser\CommandDefinitionParser;
++use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractorInterface;
+ use PrestaShopBundle\Command\ListCommandsAndQueriesCommand;
+-use PrestaShopBundle\Exception\DomainClassNameMalformedException;
+ use Symfony\Component\Console\Tester\CommandTester;
+ 
+ class ListCommandsAndQueriesCommandTest extends TestCase
+@@ -55,16 +58,24 @@ class ListCommandsAndQueriesCommandTest extends TestCase
+      */
+     private $resourceMetadataCollectionMock;
+ 
++    /**
++     * @var ApiResourceScopesExtractorInterface|MockObject
++     */
++    private $apiResourceScopesExtractorMock;
++
+     public function setUp(): void
+     {
+         $this->resourceNameCollectionMock = $this->createMock(ResourceNameCollectionFactoryInterface::class);
+         $this->resourceMetadataCollectionMock = $this->createMock(ResourceMetadataCollectionFactoryInterface::class);
++        $this->apiResourceScopesExtractorMock = $this->createMock(ApiResourceScopesExtractorInterface::class);
+ 
+         $command = new ListCommandsAndQueriesCommand(
+             new CommandDefinitionParser(),
+             $this->getListOfCQRSCommands(),
+             $this->resourceNameCollectionMock,
+-            $this->resourceMetadataCollectionMock
++            $this->resourceMetadataCollectionMock,
++            $this->apiResourceScopesExtractorMock,
++            '/test/modules/'
+         );
+ 
+         $this->commandTester = new CommandTester($command);
+@@ -78,8 +89,8 @@ public function setUp(): void
+     public function testExecute(array $options, string $result): void
+     {
+         $this->resourceNameCollectionMock->method('create')->willReturn(new ResourceNameCollection());
+-
+         $this->resourceMetadataCollectionMock->method('create')->willReturn(new ResourceMetadataCollection(''));
++        $this->apiResourceScopesExtractorMock->method('getAllApiResourceScopes')->willReturn([]);
+ 
+         $this->commandTester->execute($options);
+ 
+@@ -88,36 +99,18 @@ public function testExecute(array $options, string $result): void
+         );
+     }
+ 
+-    public function testExecuteWithWrongClass(): void
+-    {
+-        $this->resourceNameCollectionMock->method('create')->willReturn(new ResourceNameCollection());
+-        $this->resourceMetadataCollectionMock->method('create')->willReturn(new ResourceMetadataCollection(''));
+-
+-        $command = new ListCommandsAndQueriesCommand(
+-            new CommandDefinitionParser(),
+-            ["PrestaShop\PrestaShop\Adapter\HookManager"],
+-            $this->resourceNameCollectionMock,
+-            $this->resourceMetadataCollectionMock
+-        );
+-
+-        $commandTester = new CommandTester($command);
+-
+-        $this->expectException(DomainClassNameMalformedException::class);
+-        $commandTester->execute([]);
+-    }
+-
+     public function optionsProvider(): array
+     {
+         return [
+             [
+                 [],
+-                "1.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Command\DeleteCustomerThreadCommand\nType: Command\nAPI: \n\n\n2.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Command\BulkDeleteCustomerThreadCommand\nType: Command\nAPI: \n\n\n3.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerMessage\Command\AddOrderCustomerMessageCommand\nType: Command\nAPI: \nThis command adds/sends message to the customer related with the order.\n\n4.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Query\GetCustomerThreadForViewing\nType: Query\nAPI: \nGets customer thread for viewing\n\n",
++                "1.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Command\DeleteCustomerThreadCommand\nType: Command\n\n\n2.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Command\BulkDeleteCustomerThreadCommand\nType: Command\n\n\n3.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerMessage\Command\AddOrderCustomerMessageCommand\nType: Command\nThis command adds/sends message to the customer related with the order.\n\n4.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerService\Query\GetCustomerThreadForViewing\nType: Query\nGets customer thread for viewing\n\n",
+             ],
+             [
+                 [
+                     '--domain' => ['CustomerMessage'],
+                 ],
+-                "3.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerMessage\Command\AddOrderCustomerMessageCommand\nType: Command\nAPI: \nThis command adds/sends message to the customer related with the order.\n\n",
++                "3.\nClass: PrestaShop\PrestaShop\Core\Domain\CustomerMessage\Command\AddOrderCustomerMessageCommand\nType: Command\nThis command adds/sends message to the customer related with the order.\n\n",
+             ],
+             [
+                 [
+@@ -147,4 +140,56 @@ private function getListOfCQRSCommands(): array
+             "PrestaShop\PrestaShop\Core\Domain\CustomerService\Query\GetCustomerThreadForViewing",
+         ];
+     }
++
++    public function testExecuteWithCoreApiClientResource(): void
++    {
++        // Create a real core ApiClient GET operation
++        $getCoreOperation = new Get(
++            uriTemplate: '/api-client/infos',
++            extraProperties: [
++                'CQRSQuery' => 'PrestaShop\PrestaShop\Core\Domain\ApiClient\Query\GetApiClientForEditing',
++            ]
++        );
++
++        // Mock core API resource with the operation
++        $coreApiResource = $this->createMock(ApiResource::class);
++        $coreApiResource->method('getOperations')->willReturn(new Operations([$getCoreOperation]));
++
++        // Create a real ResourceMetadataCollection since it's final
++        $resourceMetadataCollection = new ResourceMetadataCollection('ApiClient', [$coreApiResource]);
++
++        // Mock the factory to return our collection
++        $resourceMetadataCollectionFactory = $this->createMock(ResourceMetadataCollectionFactoryInterface::class);
++        $resourceMetadataCollectionFactory->method('create')->willReturn($resourceMetadataCollection);
++
++        // Mock resource name collection
++        $resourceNameCollection = new ResourceNameCollection(['ApiClient']);
++        $resourceNameCollectionFactory = $this->createMock(ResourceNameCollectionFactoryInterface::class);
++        $resourceNameCollectionFactory->method('create')->willReturn($resourceNameCollection);
++
++        // Mock API resource scopes extractor to return no module scopes
++        $apiResourceScopesExtractor = $this->createMock(ApiResourceScopesExtractorInterface::class);
++        $apiResourceScopesExtractor->method('getAllApiResourceScopes')->willReturn([]);
++
++        $command = new ListCommandsAndQueriesCommand(
++            new CommandDefinitionParser(),
++            [
++                'PrestaShop\PrestaShop\Core\Domain\ApiClient\Query\GetApiClientForEditing',
++            ],
++            $resourceNameCollectionFactory,
++            $resourceMetadataCollectionFactory,
++            $apiResourceScopesExtractor,
++            '/test/modules/'
++        );
++
++        $commandTester = new CommandTester($command);
++        $commandTester->execute(['--hasApiEndpoint' => 'true']);
++
++        $output = $commandTester->getDisplay();
++
++        // Verify the core ApiClient endpoint is correctly detected
++        $this->assertStringContainsString('GET /api-client/infos', $output);
++        $this->assertStringContainsString('GetApiClientForEditing', $output);
++        $this->assertStringContainsString('PrestaShop\PrestaShop\Core\Domain\ApiClient\Query\GetApiClientForEditing', $output);
++    }
+ }

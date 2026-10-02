@@ -1,0 +1,3190 @@
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index b4f08f56c30ef..f5bd64ee804d9 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -50,6 +50,7 @@ module.exports = {
+     attribute_group: './js/pages/attribute-group',
+     attribute_group_form: './js/pages/attribute-group/form',
+     backup: './js/pages/backup',
++    business_entity_form: './js/pages/business-entity/form',
+     carrier: './js/pages/carrier',
+     carrier_form: './js/pages/carrier/form',
+     cart: './js/pages/cart',
+diff --git a/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-address-collection.ts b/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-address-collection.ts
+new file mode 100644
+index 0000000000000..0360a31ed0c16
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-address-collection.ts
+@@ -0,0 +1,340 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++import BusinessEntityFormMap from '@pages/business-entity/form/business-entity-form-map';
++import CountryPostcodeRequiredToggler from '@components/country-postcode-required-toggler';
++import CountryStateSelectionToggler from '@components/country-state-selection-toggler';
++
++// @TODO: typescript-eslint adds a no-shadow there, remove it when it's fixed on their side
++// eslint-disable-next-line no-shadow
++enum AddressTypeEnum {
++  BILLING = 'billing',
++  SHIPPING = 'shipping',
++}
++
++type AddressCard = HTMLElement & {
++  dataset: DOMStringMap & {
++    addressIndex: string;
++  };
++};
++
++export default class BusinessEntityAddressCollection {
++  private selectedShippingAddress: AddressCard | null = null;
++
++  private selectedBillingAddress: AddressCard | null = null;
++
++  private readonly map: { [key: string]: string } = BusinessEntityFormMap;
++
++  constructor() {
++    this.attachEventListeners();
++    this.initDefaultBillingAddress();
++    this.initDefaultShippingAddress();
++    this.initShippingVisibilityToggle();
++  }
++
++  private attachEventListeners(): void {
++    document.addEventListener('click', this.handleClick);
++  }
++
++  private initShippingVisibilityToggle(): void {
++    const toggles = document.querySelectorAll<HTMLInputElement>(
++      this.map.businessEntityBillingAddressAsShippingToggle,
++    );
++
++    if (toggles.length === 0) {
++      return;
++    }
++
++    toggles.forEach((toggle) => toggle.addEventListener('change', () => this.updateShippingFormVisibility()));
++    this.updateShippingFormVisibility();
++  }
++
++  private updateShippingFormVisibility(): void {
++    const checked = document.querySelector<HTMLInputElement>(
++      `${this.map.businessEntityBillingAddressAsShippingToggle}:checked`,
++    );
++
++    const useBillingAsShipping = checked?.value === '1';
++    const elements = document.querySelectorAll<HTMLElement>(this.map.businessEntityShippingForm);
++
++    for (let index = 0; index < elements.length; index += 1) {
++      elements[index].classList.toggle('d-none', useBillingAsShipping);
++    }
++  }
++
++  private handleClick = (event: Event): void => {
++    const target = event.target as HTMLElement;
++
++    const addBtn = target.closest<HTMLElement>(
++      `${this.map.addBusinessEntityBillingAddress}, ${this.map.addBusinessEntityShippingAddress}`,
++    );
++
++    if (addBtn) {
++      const addressType = addBtn.matches(this.map.addBusinessEntityBillingAddress)
++        ? AddressTypeEnum.BILLING
++        : AddressTypeEnum.SHIPPING;
++      this.addFormToCollection(addBtn, addressType);
++      return;
++    }
++
++    const deleteBtn = target.closest<HTMLElement>(this.map.deleteBusinessEntityAddress);
++
++    if (deleteBtn) {
++      this.removeAddress(deleteBtn);
++      return;
++    }
++
++    const setAsDefaultBtn = target.closest<HTMLElement>(this.map.setAsDefaultBusinessEntityAddress);
++
++    if (setAsDefaultBtn) {
++      this.setAsDefaultAddress(setAsDefaultBtn);
++    }
++  };
++
++  private initDefaultShippingAddress(): void {
++    const defaultElement = document
++      .querySelector(this.map.businessEntityDefaultShippingAddress) as HTMLInputElement;
++    const defaultValue = defaultElement?.value ?? '1';
++
++    document.querySelectorAll<HTMLElement>(this.map.businessEntityShippingAddress)
++      .forEach((input) => {
++        const addressCard = input.querySelector<AddressCard>(this.map.businessEntityAddressId);
++
++        if (addressCard === null) {
++          return;
++        }
++
++        this.addRequiredToggler(addressCard);
++
++        if (addressCard.dataset.addressIndex !== defaultValue) {
++          this.addSetAsDefaultBtn(input);
++        } else {
++          this.selectedShippingAddress = input.querySelector('div.card');
++          BusinessEntityAddressCollection.addBgLightToCard(this.selectedShippingAddress);
++        }
++      });
++  }
++
++  private initDefaultBillingAddress(): void {
++    const defaultElement = document
++      .querySelector(this.map.businessEntityDefaultBillingAddress) as HTMLInputElement;
++    const defaultValue = defaultElement?.value ?? '1';
++
++    document.querySelectorAll<HTMLElement>(this.map.businessEntityBillingAddress)
++      .forEach((input) => {
++        const addressCard = input.querySelector<AddressCard>(this.map.businessEntityAddressId);
++
++        if (addressCard === null) {
++          return;
++        }
++
++        this.addRequiredToggler(addressCard);
++
++        if (addressCard.dataset.addressIndex !== defaultValue) {
++          this.addSetAsDefaultBtn(input);
++        } else {
++          this.selectedBillingAddress = input.querySelector('div.card');
++          BusinessEntityAddressCollection.addBgLightToCard(this.selectedBillingAddress);
++        }
++      });
++  }
++
++  private addRequiredToggler(addressCard: AddressCard): void {
++    this.addCountryPostcodeRequiredToggler(addressCard);
++    this.addCountryStateSelectionToggler(addressCard);
++  }
++
++  private addFormToCollection(addBtn: HTMLElement, addressType: AddressTypeEnum): void {
++    const collectionHolder = document.querySelector(`.${addBtn.dataset.collectionHolderClass}`) as HTMLElement;
++
++    const item = document.createElement('li');
++
++    item.innerHTML = collectionHolder
++      .dataset
++      .prototype!
++      .replace(
++        /__name__/g,
++        collectionHolder.dataset.index!,
++      );
++
++    this.addDeleteLink(item);
++    const addressCard = item.querySelector('div.card') as AddressCard;
++
++    if (addressType === AddressTypeEnum.BILLING && !this.selectedBillingAddress) {
++      this.setDefaultAddress(addressCard, AddressTypeEnum.BILLING);
++    } else if (addressType === AddressTypeEnum.SHIPPING && !this.selectedShippingAddress) {
++      this.setDefaultAddress(addressCard, AddressTypeEnum.SHIPPING);
++    } else {
++      this.addSetAsDefaultBtn(item);
++    }
++
++    collectionHolder.appendChild(item);
++
++    this.addRequiredToggler(addressCard);
++
++    collectionHolder.dataset.index = String(Number(collectionHolder.dataset.index) + 1);
++
++    this.renumberAddresses(collectionHolder);
++  }
++
++  private renumberAddresses(collectionHolder: HTMLElement): void {
++    const template = collectionHolder.dataset.addressLabelTemplate ?? '';
++    const labels = collectionHolder
++      .querySelectorAll<HTMLElement>(`li ${this.map.businessEntityAddressPosition}`);
++
++    for (let index = 0; index < labels.length; index += 1) {
++      labels[index].textContent = template.replace('%position%', String(index + 1));
++    }
++  }
++
++  private addDeleteLink(item: HTMLElement): void {
++    const removeFormButton = document.createElement('button');
++    removeFormButton.type = 'button';
++    removeFormButton.className = `btn btn-link ${this.map.deleteBusinessEntityAddress.slice(1)}`;
++
++    const icon = document.createElement('i');
++    icon.className = 'material-icons text-danger';
++    icon.textContent = 'delete';
++
++    removeFormButton.appendChild(icon);
++
++    const selector = this.map.deleteBusinessEntityAddressBtnPlaceholder;
++    const removeFormButtonLocation = item.querySelector(selector);
++
++    if (removeFormButtonLocation) {
++      removeFormButtonLocation.replaceChildren(removeFormButton);
++    }
++  }
++
++  private removeAddress(deleteBtn: HTMLElement): void {
++    const item = deleteBtn.closest('li');
++
++    if (!item) {
++      return;
++    }
++
++    const collectionHolder = item.parentElement;
++
++    if (item.querySelector(this.map.businessEntityAddressId) === this.selectedShippingAddress) {
++      const addressIndex = this.selectedShippingAddress?.dataset.addressIndex;
++      const addressCardElementSelector = `${this.map.businessEntityShippingAddress} `
++        + `div.card:not([data-address-index="${addressIndex}"])`;
++      this.setDefaultAddress(
++        document.querySelector(addressCardElementSelector) as AddressCard,
++        AddressTypeEnum.SHIPPING,
++      );
++    }
++
++    if (item.querySelector(this.map.businessEntityAddressId) === this.selectedBillingAddress) {
++      const addressIndex = this.selectedBillingAddress?.dataset.addressIndex;
++      const addressCardElementSelector = `${this.map.businessEntityBillingAddress} `
++        + `div.card:not([data-address-index="${addressIndex}"])`;
++      this.setDefaultAddress(
++        document.querySelector(addressCardElementSelector) as AddressCard,
++        AddressTypeEnum.BILLING,
++      );
++    }
++
++    item.remove();
++
++    if (collectionHolder) {
++      this.renumberAddresses(collectionHolder);
++    }
++  }
++
++  private addSetAsDefaultBtn(item: HTMLElement): void {
++    const setAsDefaultBtn = document.createElement('button');
++    setAsDefaultBtn.type = 'button';
++    setAsDefaultBtn.className = `btn btn-link ${this.map.setAsDefaultBusinessEntityAddress.slice(1)}`;
++    setAsDefaultBtn.textContent = window.translate_javascripts['Set as default'];
++
++    const setAsDefaultBtnLocation = item.querySelector(
++      this.map.setAsDefaultBusinessEntityAddressBtnPlaceholder,
++    );
++
++    // `item` may be the <li> wrapper or the card itself: target the card to mirror addBgLightToCard.
++    const card = item.matches('div.card') ? item : item.querySelector('div.card');
++    card?.classList.remove('bg-light');
++    card?.querySelector('div.card-header')?.classList.remove('bg-light');
++
++    if (setAsDefaultBtnLocation) {
++      setAsDefaultBtnLocation.replaceChildren(setAsDefaultBtn);
++    }
++  }
++
++  private setAsDefaultAddress(setAsDefaultBtn: HTMLElement): void {
++    const addressCard = setAsDefaultBtn.closest(this.map.businessEntityAddressId) as AddressCard;
++
++    if (!addressCard) {
++      return;
++    }
++
++    const addressType = setAsDefaultBtn.closest(this.map.businessEntityBillingAddressCollection)
++      ? AddressTypeEnum.BILLING
++      : AddressTypeEnum.SHIPPING;
++
++    this.setDefaultAddress(addressCard, addressType);
++  }
++
++  private static addBgLightToCard(element: AddressCard | null): void {
++    element?.classList.add('bg-light');
++    element?.querySelector('div.card-header')?.classList.add('bg-light');
++  }
++
++  private setDefaultAddress(element: AddressCard, addressType: AddressTypeEnum): void {
++    let selector: string;
++
++    switch (addressType) {
++      case AddressTypeEnum.BILLING:
++        selector = this.map.businessEntityDefaultBillingAddress;
++        break;
++      default:
++        selector = this.map.businessEntityDefaultShippingAddress;
++    }
++
++    if (element) {
++      const defaultBtnPlaceholder = element
++        .querySelector(this.map.setAsDefaultBusinessEntityAddressBtnPlaceholder) as HTMLElement;
++      defaultBtnPlaceholder.innerHTML = '';
++      BusinessEntityAddressCollection.addBgLightToCard(element);
++    }
++
++    if (addressType === AddressTypeEnum.BILLING) {
++      if (this.selectedBillingAddress) {
++        this.addSetAsDefaultBtn(this.selectedBillingAddress);
++      }
++      this.selectedBillingAddress = element;
++    } else if (addressType === AddressTypeEnum.SHIPPING) {
++      if (this.selectedShippingAddress) {
++        this.addSetAsDefaultBtn(this.selectedShippingAddress);
++      }
++      this.selectedShippingAddress = element;
++    }
++
++    const defaultAddressElement = document.querySelector(selector) as HTMLInputElement;
++    defaultAddressElement.value = element?.dataset.addressIndex ?? '0';
++  }
++
++  private addCountryPostcodeRequiredToggler(item: AddressCard): void {
++    const {addressIndex} = item.dataset;
++    const itemSelector = `[data-address-index="${addressIndex}"] `;
++
++    new CountryPostcodeRequiredToggler(
++      itemSelector + this.map.businessEntityAddressCountrySelect,
++      itemSelector + this.map.businessEntityAddressPostcodeSelect,
++      itemSelector + this.map.businessEntityAddressPostcodeLabel,
++    );
++  }
++
++  private addCountryStateSelectionToggler(item: AddressCard): void {
++    const {addressIndex} = item.dataset;
++    const itemSelector = `[data-address-index="${addressIndex}"] `;
++
++    new CountryStateSelectionToggler(
++      itemSelector + this.map.businessEntityAddressCountrySelect,
++      itemSelector + this.map.businessEntityAddressStateSelect,
++      itemSelector + this.map.businessEntityAddressStateBlock,
++    );
++  }
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-form-map.ts b/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-form-map.ts
+new file mode 100644
+index 0000000000000..0df3ae87fd9c4
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/business-entity/form/business-entity-form-map.ts
+@@ -0,0 +1,26 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++export default {
++  businessEntityDefaultBillingAddress: '#business_entity_default_billing_address',
++  businessEntityDefaultShippingAddress: '#business_entity_default_shipping_address',
++  businessEntityAddressId: 'div.card[data-address-index]',
++  addBusinessEntityBillingAddress: '#add_business_entity_billing_address',
++  addBusinessEntityShippingAddress: '#add_business_entity_shipping_address',
++  businessEntityBillingAddressCollection: 'ul.billing_addresses',
++  businessEntityBillingAddress: 'ul.billing_addresses li',
++  businessEntityShippingAddress: 'ul.shipping_addresses li',
++  deleteBusinessEntityAddressBtnPlaceholder: '.delete-business-entity-address-btn-placeholder',
++  setAsDefaultBusinessEntityAddressBtnPlaceholder: '.set-as-default-business-entity-address-btn-placeholder',
++  deleteBusinessEntityAddress: '.delete-business-entity-address',
++  setAsDefaultBusinessEntityAddress: '.set-as-default-business-entity-address',
++  businessEntityAddressCountrySelect: '.js-address-country-select',
++  businessEntityAddressPostcodeSelect: '.js-address-postcode-select',
++  businessEntityAddressPostcodeLabel: '.js-address-postcode-label',
++  businessEntityAddressStateSelect: '.js-address-state-select',
++  businessEntityAddressStateBlock: '.js-address-state-block',
++  businessEntityAddressPosition: '.js-business-entity-address-position',
++  businessEntityShippingForm: '.js-business-entity-shipping-form',
++  businessEntityBillingAddressAsShippingToggle: 'input[name="business_entity[billing_address_as_shipping_address]"]',
++};
+diff --git a/admin-dev/themes/new-theme/js/pages/business-entity/form/index.ts b/admin-dev/themes/new-theme/js/pages/business-entity/form/index.ts
+new file mode 100644
+index 0000000000000..bd629cb4a6fe2
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/business-entity/form/index.ts
+@@ -0,0 +1,10 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++import BusinessEntityAddressCollection from '@pages/business-entity/form/business-entity-address-collection';
++import onReady from '@components/on-ready';
++
++onReady(() => {
++  new BusinessEntityAddressCollection();
++});
+diff --git a/src/Adapter/Address/Repository/AddressRepository.php b/src/Adapter/Address/Repository/AddressRepository.php
+index a367ed56d0cda..3a2a79490c793 100644
+--- a/src/Adapter/Address/Repository/AddressRepository.php
++++ b/src/Adapter/Address/Repository/AddressRepository.php
+@@ -12,7 +12,6 @@
+ use Doctrine\DBAL\Connection;
+ use PrestaShop\PrestaShop\Core\Domain\Address\Exception\AddressNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
+-use PrestaShop\PrestaShop\Core\Domain\AttributeGroup\Attribute\Exception\AttributeNotFoundException;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractMultiShopObjectModelRepository;
+ 
+@@ -32,7 +31,6 @@ public function __construct(
+      *
+      * @return Address
+      *
+-     * @throws AttributeNotFoundException
+      * @throws CoreException
+      */
+     public function get(AddressId $addressId): Address
+@@ -69,4 +67,25 @@ public function getZoneId(AddressId $addressId): int
+             ? (int) $result['id_zone_state']
+             : (int) $result['id_zone'];
+     }
++
++    /**
++     * @throws CoreException
++     */
++    public function add(Address $address): AddressId
++    {
++        $addressId = $this->addObjectModel($address, Address::class);
++
++        return new AddressId($addressId);
++    }
++
++    /**
++     * @throws CoreException
++     */
++    public function delete(AddressId $addressId): void
++    {
++        $this->deleteObjectModel(
++            $this->get($addressId),
++            Address::class
++        );
++    }
+ }
+diff --git a/src/Adapter/BusinessEntity/CommandHandler/AddBusinessEntityHandler.php b/src/Adapter/BusinessEntity/CommandHandler/AddBusinessEntityHandler.php
+new file mode 100644
+index 0000000000000..5c79896a8c094
+--- /dev/null
++++ b/src/Adapter/BusinessEntity/CommandHandler/AddBusinessEntityHandler.php
+@@ -0,0 +1,152 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\BusinessEntity\CommandHandler;
++
++use Address;
++use Exception;
++use PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command\AddBusinessEntityCommand;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\CommandHandler\AddBusinessEntityHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\UnableToCreateBusinessEntityAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\AbstractBusinessEntityAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityBillingAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityId;
++use PrestaShopBundle\Entity\B2B\BusinessEntity;
++use PrestaShopBundle\Entity\B2B\BusinessEntityAddress;
++use PrestaShopBundle\Entity\Enum\AddressTypeEnum;
++use PrestaShopBundle\Entity\Repository\BusinessEntityRepository;
++use Psr\Log\LoggerInterface;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
++
++#[AsCommandHandler]
++final class AddBusinessEntityHandler implements AddBusinessEntityHandlerInterface
++{
++    public function __construct(
++        private readonly BusinessEntityRepository $businessEntityRepository,
++        private readonly AddressRepository $addressRepository,
++        #[Autowire(service: 'prestashop.adapter.legacy.logger')]
++        private readonly LoggerInterface $logger,
++    ) {
++    }
++
++    /**
++     * @throws UnableToCreateBusinessEntityAddress
++     */
++    public function handle(AddBusinessEntityCommand $command): BusinessEntityId
++    {
++        $businessEntity = new BusinessEntity();
++        $businessEntity->setName($command->getName());
++        $businessEntity->setLegalName($command->getLegalName());
++        $businessEntity->setExternalRef($command->getExternalRef());
++        $businessEntity->setDeliveryAuthorized($command->isDeliveryAuthorized());
++        $businessEntity->setStatus($command->getStatus());
++        $businessEntity->setIdShop($command->getShopId());
++        $businessEntity->setIdCustomerGroup($command->getCustomerGroupId());
++
++        /** @var AddressId[] $createdAddressIds */
++        $createdAddressIds = [];
++
++        // Hybrid persistence: the BusinessEntity aggregate is a Doctrine entity, but addresses are
++        // created through the legacy Address ObjectModel (there is no Doctrine Address entity yet, so
++        // BusinessEntityAddress only holds a logical id_address int, not a real ORM relation).
++        // The two persistence layers do NOT share a transaction: the legacy addresses are written to
++        // the database immediately, before the Doctrine flush below. If the flush fails we therefore
++        // have to compensate by deleting the orphan addresses ourselves — there is no transactional
++        // rollback spanning both layers. This stays until Address gets a Doctrine entity of its own.
++        try {
++            $this->addAddressesToBusinessEntity($businessEntity, $command, $createdAddressIds);
++            $this->businessEntityRepository->save($businessEntity);
++        } catch (Exception $e) {
++            foreach ($createdAddressIds as $addressId) {
++                try {
++                    $this->addressRepository->delete($addressId);
++                } catch (Exception $cleanupException) {
++                    $this->logger->error(
++                        'Failed to roll back business entity address after creation failure',
++                        [
++                            'object_type' => 'Address',
++                            'object_id' => $addressId->getValue(),
++                            'exception' => $cleanupException,
++                        ]
++                    );
++                }
++            }
++            throw new UnableToCreateBusinessEntityAddress(previous: $e);
++        }
++
++        $businessEntityId = $businessEntity->getId();
++
++        $this->logger->info(
++            'Business entity created successfully',
++            [
++                'object_type' => 'BusinessEntity',
++                'object_id' => $businessEntityId,
++            ]
++        );
++
++        return new BusinessEntityId($businessEntityId);
++    }
++
++    /**
++     * @param AddressId[] $createdAddressIds
++     *
++     * @throws UnableToCreateBusinessEntityAddress
++     */
++    private function addAddressesToBusinessEntity(BusinessEntity $businessEntity, AddBusinessEntityCommand $command, array &$createdAddressIds): void
++    {
++        foreach (array_merge($command->getBillingAddresses(), $command->getShippingAddresses()) as $address) {
++            $addressId = $this->addAddressToBusinessEntity($address);
++            $createdAddressIds[] = $addressId;
++            $businessEntityAddress = new BusinessEntityAddress();
++
++            if ($address instanceof BusinessEntityBillingAddress) {
++                $addressType = $address->isDefault() && $command->isBillingAddressAsShippingAddress()
++                    ? AddressTypeEnum::BOTH : AddressTypeEnum::INVOICE;
++            } else {
++                $addressType = AddressTypeEnum::DELIVERY;
++            }
++
++            $businessEntityAddress
++                ->setAddressId($addressId->getValue())
++                ->setAddressType($addressType);
++
++            $businessEntityAddress->setIsDefault($address->isDefault());
++
++            $businessEntity->addBusinessEntityAddress($businessEntityAddress);
++        }
++    }
++
++    /**
++     * @throws UnableToCreateBusinessEntityAddress
++     */
++    private function addAddressToBusinessEntity(
++        AbstractBusinessEntityAddress $address
++    ): AddressId {
++        $modelAddress = new Address();
++        $modelAddress->id_country = $address->getCountryId()->getValue();
++        $modelAddress->alias = $address->getAlias();
++        $modelAddress->lastname = 'business-entity';
++        $modelAddress->firstname = 'business-entity';
++        $modelAddress->address1 = $address->getAddress1();
++        $modelAddress->address2 = $address->getAddress2();
++        $modelAddress->city = $address->getCity();
++        $modelAddress->postcode = $address->getPostcode();
++        $modelAddress->id_state = $address->getStateId()->getValue();
++        $modelAddress->phone = $address->getPhone();
++        $modelAddress->phone_mobile = $address->getPhoneMobile();
++
++        try {
++            return $this->addressRepository->add($modelAddress);
++        } catch (Exception $e) {
++            throw new UnableToCreateBusinessEntityAddress(previous: $e);
++        }
++    }
++}
+diff --git a/src/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommand.php b/src/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommand.php
+new file mode 100644
+index 0000000000000..83b3e49dd26fd
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommand.php
+@@ -0,0 +1,160 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\CommandHandler\AddBusinessEntityHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityBillingAddressConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\AbstractBusinessEntityAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityBillingAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityShippingAddress;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++
++/**
++ * Class AddBusinessEntityCommand is used to add a new business entity.
++ *
++ * @see AddBusinessEntityHandlerInterface
++ */
++class AddBusinessEntityCommand
++{
++    /**
++     * @param array<BusinessEntityBillingAddress> $billingAddresses
++     * @param array<BusinessEntityShippingAddress> $shippingAddresses
++     *
++     * @throws BusinessEntityBillingAddressConstraintException
++     */
++    public function __construct(
++        private readonly string $name,
++        private readonly string $legalName,
++        private readonly ?string $externalRef,
++        private readonly bool $deliveryAuthorized,
++        private readonly BusinessEntityStatus $status,
++        private readonly int $shopId,
++        private readonly int $customerGroupId,
++        private readonly bool $billingAddressAsShippingAddress,
++        private readonly array $billingAddresses = [],
++        private readonly array $shippingAddresses = [],
++    ) {
++        $this->assertBusinessEntityAddressAreConsistent();
++    }
++
++    public function getName(): string
++    {
++        return $this->name;
++    }
++
++    public function getLegalName(): string
++    {
++        return $this->legalName;
++    }
++
++    public function getExternalRef(): ?string
++    {
++        return $this->externalRef;
++    }
++
++    public function isDeliveryAuthorized(): bool
++    {
++        return $this->deliveryAuthorized;
++    }
++
++    public function getStatus(): BusinessEntityStatus
++    {
++        return $this->status;
++    }
++
++    public function getShopId(): int
++    {
++        return $this->shopId;
++    }
++
++    public function getCustomerGroupId(): int
++    {
++        return $this->customerGroupId;
++    }
++
++    /**
++     * @return array<BusinessEntityBillingAddress>
++     */
++    public function getBillingAddresses(): array
++    {
++        return $this->billingAddresses;
++    }
++
++    /**
++     * @return array<BusinessEntityShippingAddress>
++     */
++    public function getShippingAddresses(): array
++    {
++        return $this->shippingAddresses;
++    }
++
++    public function isBillingAddressAsShippingAddress(): bool
++    {
++        return $this->billingAddressAsShippingAddress;
++    }
++
++    /**
++     * @throws BusinessEntityBillingAddressConstraintException
++     */
++    private function assertBusinessEntityAddressAreConsistent(): void
++    {
++        if (!count($this->getBillingAddresses())) {
++            throw new BusinessEntityBillingAddressConstraintException(
++                code: BusinessEntityBillingAddressConstraintException::MISSING_BILLING_ADDRESS
++            );
++        }
++
++        $defaultBillingAddressCount = $this->countDefaultAddresses($this->getBillingAddresses());
++        if (0 === $defaultBillingAddressCount) {
++            throw new BusinessEntityBillingAddressConstraintException(
++                code: BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_BILLING_ADDRESS
++            );
++        }
++        if ($defaultBillingAddressCount > 1) {
++            throw new BusinessEntityBillingAddressConstraintException(
++                code: BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_BILLING_ADDRESSES
++            );
++        }
++
++        if (!$this->isBillingAddressAsShippingAddress()) {
++            if (!count($this->getShippingAddresses())) {
++                throw new BusinessEntityBillingAddressConstraintException(
++                    code: BusinessEntityBillingAddressConstraintException::MISSING_SHIPPING_ADDRESS
++                );
++            }
++
++            $defaultShippingAddressCount = $this->countDefaultAddresses($this->getShippingAddresses());
++            if (0 === $defaultShippingAddressCount) {
++                throw new BusinessEntityBillingAddressConstraintException(
++                    code: BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_SHIPPING_ADDRESS
++                );
++            }
++            if ($defaultShippingAddressCount > 1) {
++                throw new BusinessEntityBillingAddressConstraintException(
++                    code: BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_SHIPPING_ADDRESSES
++                );
++            }
++        }
++    }
++
++    /**
++     * @param array<AbstractBusinessEntityAddress> $addresses
++     */
++    private function countDefaultAddresses(array $addresses): int
++    {
++        $count = 0;
++        foreach ($addresses as $address) {
++            if ($address->isDefault()) {
++                ++$count;
++            }
++        }
++
++        return $count;
++    }
++}
+diff --git a/src/Core/Domain/BusinessEntity/CommandHandler/AddBusinessEntityHandlerInterface.php b/src/Core/Domain/BusinessEntity/CommandHandler/AddBusinessEntityHandlerInterface.php
+new file mode 100644
+index 0000000000000..5158efd3928a1
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/CommandHandler/AddBusinessEntityHandlerInterface.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command\AddBusinessEntityCommand;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityId;
++
++interface AddBusinessEntityHandlerInterface
++{
++    public function handle(AddBusinessEntityCommand $command): BusinessEntityId;
++}
+diff --git a/src/Core/Domain/BusinessEntity/Exception/BusinessEntityBillingAddressConstraintException.php b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityBillingAddressConstraintException.php
+new file mode 100644
+index 0000000000000..a9ec9d85275b3
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityBillingAddressConstraintException.php
+@@ -0,0 +1,19 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception;
++
++class BusinessEntityBillingAddressConstraintException extends BusinessEntityException
++{
++    public const MISSING_BILLING_ADDRESS = 1;
++    public const MISSING_DEFAULT_BILLING_ADDRESS = 2;
++    public const MISSING_SHIPPING_ADDRESS = 3;
++    public const MISSING_DEFAULT_SHIPPING_ADDRESS = 4;
++    public const MULTIPLE_DEFAULT_BILLING_ADDRESSES = 5;
++    public const MULTIPLE_DEFAULT_SHIPPING_ADDRESSES = 6;
++}
+diff --git a/src/Core/Domain/BusinessEntity/Exception/BusinessEntityConstraintException.php b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityConstraintException.php
+new file mode 100644
+index 0000000000000..157ce953f01fd
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityConstraintException.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception;
++
++class BusinessEntityConstraintException extends BusinessEntityException
++{
++    /**
++     * When business entity id value is invalid
++     */
++    public const INVALID_ID = 1;
++}
+diff --git a/src/Core/Domain/BusinessEntity/Exception/BusinessEntityException.php b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityException.php
+new file mode 100644
+index 0000000000000..500015e693b19
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/Exception/BusinessEntityException.php
+@@ -0,0 +1,18 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainException;
++
++/**
++ * Class BusinessEntityException is base "BusinessEntity" context exception
++ */
++class BusinessEntityException extends DomainException
++{
++}
+diff --git a/src/Core/Domain/BusinessEntity/Exception/UnableToCreateBusinessEntityAddress.php b/src/Core/Domain/BusinessEntity/Exception/UnableToCreateBusinessEntityAddress.php
+new file mode 100644
+index 0000000000000..d5aa66c3270c5
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/Exception/UnableToCreateBusinessEntityAddress.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception;
++
++class UnableToCreateBusinessEntityAddress extends BusinessEntityException
++{
++}
+diff --git a/src/Core/Domain/BusinessEntity/ValueObject/AbstractBusinessEntityAddress.php b/src/Core/Domain/BusinessEntity/ValueObject/AbstractBusinessEntityAddress.php
+new file mode 100644
+index 0000000000000..66adb6f4059fa
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/ValueObject/AbstractBusinessEntityAddress.php
+@@ -0,0 +1,86 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\NoStateId;
++use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\StateId;
++use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\StateIdInterface;
++
++abstract class AbstractBusinessEntityAddress
++{
++    private readonly CountryId $countryId;
++    private readonly StateIdInterface $stateId;
++
++    public function __construct(
++        private readonly string $alias,
++        private readonly string $address1,
++        private readonly ?string $address2,
++        private readonly string $city,
++        private readonly string $postcode,
++        int $countryId,
++        private readonly bool $default,
++        ?int $stateId,
++        private readonly ?string $phone = null,
++        private readonly ?string $phoneMobile = null,
++    ) {
++        $this->countryId = new CountryId($countryId);
++        $this->stateId = $stateId !== null ? new StateId($stateId) : new NoStateId();
++    }
++
++    public function getCountryId(): CountryId
++    {
++        return $this->countryId;
++    }
++
++    public function getAlias(): string
++    {
++        return $this->alias;
++    }
++
++    public function getAddress1(): string
++    {
++        return $this->address1;
++    }
++
++    public function getAddress2(): ?string
++    {
++        return $this->address2;
++    }
++
++    public function getCity(): string
++    {
++        return $this->city;
++    }
++
++    public function getPostcode(): string
++    {
++        return $this->postcode;
++    }
++
++    public function getStateId(): StateIdInterface
++    {
++        return $this->stateId;
++    }
++
++    public function getPhone(): ?string
++    {
++        return $this->phone;
++    }
++
++    public function getPhoneMobile(): ?string
++    {
++        return $this->phoneMobile;
++    }
++
++    public function isDefault(): bool
++    {
++        return $this->default;
++    }
++}
+diff --git a/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityBillingAddress.php b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityBillingAddress.php
+new file mode 100644
+index 0000000000000..7dbb0b5fb7009
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityBillingAddress.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject;
++
++class BusinessEntityBillingAddress extends AbstractBusinessEntityAddress
++{
++}
+diff --git a/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformation.php b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformation.php
+new file mode 100644
+index 0000000000000..9db8fb11a401f
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformation.php
+@@ -0,0 +1,60 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject;
++
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++
++class BusinessEntityGeneralInformation
++{
++    public function __construct(
++        private readonly string $name,
++        private readonly string $legalName,
++        private readonly ?string $externalRef,
++        private readonly bool $deliveryAuthorized,
++        private readonly BusinessEntityStatus $status,
++        private readonly int $shopId,
++        private readonly int $customerGroupId,
++    ) {
++    }
++
++    public function getName(): string
++    {
++        return $this->name;
++    }
++
++    public function getLegalName(): string
++    {
++        return $this->legalName;
++    }
++
++    public function getExternalRef(): ?string
++    {
++        return $this->externalRef;
++    }
++
++    public function isDeliveryAuthorized(): bool
++    {
++        return $this->deliveryAuthorized;
++    }
++
++    public function getStatus(): BusinessEntityStatus
++    {
++        return $this->status;
++    }
++
++    public function getShopId(): int
++    {
++        return $this->shopId;
++    }
++
++    public function getCustomerGroupId(): int
++    {
++        return $this->customerGroupId;
++    }
++}
+diff --git a/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityId.php b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityId.php
+new file mode 100644
+index 0000000000000..ed2fed71f0b82
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityId.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityConstraintException;
++
++class BusinessEntityId
++{
++    private readonly int $id;
++
++    public function __construct(
++        int $businessEntityId
++    ) {
++        $this->assertIntegerIsGreaterThanZero($businessEntityId);
++        $this->id = $businessEntityId;
++    }
++
++    public function getValue(): int
++    {
++        return $this->id;
++    }
++
++    private function assertIntegerIsGreaterThanZero(int $businessEntityId): void
++    {
++        if (0 >= $businessEntityId) {
++            throw new BusinessEntityConstraintException(
++                sprintf('Business entity id %s is invalid.', $businessEntityId),
++                BusinessEntityConstraintException::INVALID_ID
++            );
++        }
++    }
++}
+diff --git a/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityShippingAddress.php b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityShippingAddress.php
+new file mode 100644
+index 0000000000000..67e65a05b7549
+--- /dev/null
++++ b/src/Core/Domain/BusinessEntity/ValueObject/BusinessEntityShippingAddress.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject;
++
++class BusinessEntityShippingAddress extends AbstractBusinessEntityAddress
++{
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/BusinessEntityFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/BusinessEntityFormDataHandler.php
+new file mode 100644
+index 0000000000000..48fe508435608
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataHandler/BusinessEntityFormDataHandler.php
+@@ -0,0 +1,120 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler;
++
++use PrestaShop\PrestaShop\Adapter\BusinessEntity\CommandHandler\AddBusinessEntityHandler;
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command\AddBusinessEntityCommand;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\AbstractBusinessEntityAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityBillingAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityGeneralInformation;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityShippingAddress;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityAddressType;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityGeneralInformationType;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityType;
++
++final class BusinessEntityFormDataHandler implements FormDataHandlerInterface
++{
++    public function __construct(
++        private readonly CommandBusInterface $commandBus,
++        private readonly ShopContext $shopContext,
++    ) {
++    }
++
++    /**
++     * {@inheritDoc}
++     *
++     * @see AddBusinessEntityHandler::handle
++     */
++    public function create(array $data): int
++    {
++        $generalInformationData = $data[BusinessEntityType::GENERAL_INFORMATION];
++        $generalInformation = new BusinessEntityGeneralInformation(
++            $generalInformationData[BusinessEntityGeneralInformationType::FIELD_NAME],
++            $generalInformationData[BusinessEntityGeneralInformationType::FIELD_LEGAL_NAME],
++            $generalInformationData[BusinessEntityGeneralInformationType::FIELD_EXTERNAL_REF],
++            $generalInformationData[BusinessEntityGeneralInformationType::FIELD_DELIVERY_AUTHORIZED],
++            $generalInformationData[BusinessEntityGeneralInformationType::FIELD_STATUS],
++            (int) $data[BusinessEntityType::SHOP_ID],
++            (int) $generalInformationData[BusinessEntityGeneralInformationType::FIELD_CUSTOMER_GROUP_ID],
++        );
++
++        $command = new AddBusinessEntityCommand(
++            $generalInformation->getName(),
++            $generalInformation->getLegalName(),
++            $generalInformation->getExternalRef(),
++            $generalInformation->isDeliveryAuthorized(),
++            $generalInformation->getStatus(),
++            $this->resolveShopId($generalInformation->getShopId()),
++            $generalInformation->getCustomerGroupId(),
++            (bool) $data[BusinessEntityType::BILLING_ADDRESS_AS_SHIPPING_ADDRESS],
++            $this->buildAddresses(
++                BusinessEntityBillingAddress::class,
++                $data[BusinessEntityType::BILLING_ADDRESS_TYPE] ?? [],
++                (int) ($data[BusinessEntityType::DEFAULT_BILLING_ADDRESS] ?? 0)
++            ),
++            $this->buildAddresses(
++                BusinessEntityShippingAddress::class,
++                $data[BusinessEntityType::SHIPPING_ADDRESS_TYPE] ?? [],
++                (int) ($data[BusinessEntityType::DEFAULT_SHIPPING_ADDRESS] ?? 0)
++            ),
++        );
++
++        return $this->commandBus->handle($command)->getValue();
++    }
++
++    /**
++     * @template T of AbstractBusinessEntityAddress
++     *
++     * @param class-string<T> $addressClass
++     * @param array<int|string, array<string, mixed>> $addressesData
++     *
++     * @return T[]
++     */
++    private function buildAddresses(string $addressClass, array $addressesData, int $defaultIndex): array
++    {
++        $addresses = [];
++        foreach ($addressesData as $index => $addressData) {
++            $addresses[] = new $addressClass(
++                $addressData[BusinessEntityAddressType::FIELD_ALIAS] ?? '',
++                $addressData[BusinessEntityAddressType::FIELD_ADDRESS_1] ?? '',
++                $addressData[BusinessEntityAddressType::FIELD_ADDRESS_2] ?? null,
++                $addressData[BusinessEntityAddressType::FIELD_CITY] ?? '',
++                $addressData[BusinessEntityAddressType::FIELD_POSTCODE] ?? '',
++                (int) ($addressData[BusinessEntityAddressType::FIELD_COUNTRY_ID] ?? 0),
++                (int) $index === $defaultIndex,
++                !empty($addressData[BusinessEntityAddressType::FIELD_STATE_ID])
++                    ? (int) $addressData[BusinessEntityAddressType::FIELD_STATE_ID]
++                    : null,
++                $addressData[BusinessEntityAddressType::FIELD_PHONE] ?? null,
++                $addressData[BusinessEntityAddressType::FIELD_PHONE_MOBILE] ?? null,
++            );
++        }
++
++        return $addresses;
++    }
++
++    private function resolveShopId(int $submittedShopId): int
++    {
++        if ($this->shopContext->isSingleShopContext()) {
++            return $this->shopContext->getId();
++        }
++
++        return $submittedShopId;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function update($id, array $data)
++    {
++        // TODO: US2.1.3
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/BusinessEntityFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/BusinessEntityFormDataProvider.php
+new file mode 100644
+index 0000000000000..0867d26722c59
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataProvider/BusinessEntityFormDataProvider.php
+@@ -0,0 +1,73 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
++
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityAddressType;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityGeneralInformationType;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityType;
++
++final class BusinessEntityFormDataProvider implements FormDataProviderInterface
++{
++    public const DEFAULT_BILLING_ADDRESS_INDEX = 1;
++    public const DEFAULT_SHIPPING_ADDRESS_INDEX = 0;
++
++    /**
++     * @todo Hardcoded default customer group. The configurable default (wired through Configuration)
++     *       is delivered in a separate branch; replace this constant with that setting once merged.
++     */
++    private const DEFAULT_CUSTOMER_GROUP_ID = 3;
++
++    private readonly int $defaultCountryId;
++
++    public function __construct(
++        Configuration $configuration,
++        private readonly ShopContext $shopContext,
++    ) {
++        $this->defaultCountryId = $configuration->getInt('PS_COUNTRY_DEFAULT');
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getData($id)
++    {
++        return [];
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getDefaultData()
++    {
++        return [
++            BusinessEntityType::GENERAL_INFORMATION => [
++                BusinessEntityGeneralInformationType::FIELD_NAME => '',
++                BusinessEntityGeneralInformationType::FIELD_LEGAL_NAME => '',
++                BusinessEntityGeneralInformationType::FIELD_EXTERNAL_REF => '',
++                BusinessEntityGeneralInformationType::FIELD_DELIVERY_AUTHORIZED => false,
++                BusinessEntityGeneralInformationType::FIELD_STATUS => BusinessEntityStatus::PENDING,
++                BusinessEntityGeneralInformationType::FIELD_CUSTOMER_GROUP_ID => self::DEFAULT_CUSTOMER_GROUP_ID,
++            ],
++            BusinessEntityType::BILLING_ADDRESS_TYPE => [
++                self::DEFAULT_BILLING_ADDRESS_INDEX => [
++                    BusinessEntityAddressType::FIELD_COUNTRY_ID => $this->defaultCountryId,
++                ],
++            ],
++            BusinessEntityType::SHIPPING_ADDRESS_TYPE => [
++            ],
++            BusinessEntityType::BILLING_ADDRESS_AS_SHIPPING_ADDRESS => true,
++            BusinessEntityType::DEFAULT_BILLING_ADDRESS => self::DEFAULT_BILLING_ADDRESS_INDEX,
++            BusinessEntityType::DEFAULT_SHIPPING_ADDRESS => self::DEFAULT_SHIPPING_ADDRESS_INDEX,
++            BusinessEntityType::SHOP_ID => $this->shopContext->isSingleShopContext() ? $this->shopContext->getId() : null,
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/BusinessEntity/BusinessEntitiesController.php b/src/PrestaShopBundle/Controller/Admin/Sell/BusinessEntity/BusinessEntitiesController.php
+index 751e68bee4837..37e60725f6fc4 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/BusinessEntity/BusinessEntitiesController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/BusinessEntity/BusinessEntitiesController.php
+@@ -4,10 +4,21 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++declare(strict_types=1);
++
+ namespace PrestaShopBundle\Controller\Admin\Sell\BusinessEntity;
+ 
++use Exception;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityBillingAddressConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\UnableToCreateBusinessEntityAddress;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityAddressType;
++use PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityType;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+ 
+ /**
+@@ -18,6 +29,115 @@ class BusinessEntitiesController extends PrestaShopAdminController
+     #[AdminSecurity("is_granted('read', 'AdminBusinessEntities')")]
+     public function listAction(): Response
+     {
+-        return $this->render('@PrestaShop/Admin/Sell/BusinessEntity/list.html.twig');
++        return $this->render('@PrestaShop/Admin/Sell/BusinessEntity/list.html.twig', [
++            'layoutHeaderToolbarBtn' => $this->getBusinessEntitiesToolbarButtons(),
++        ]);
++    }
++
++    #[AdminSecurity("is_granted('create', 'AdminBusinessEntities')", message: 'You do not have permission to create this.', redirectRoute: 'admin_business_entities_list')]
++    public function createAction(
++        Request $request,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.business_entity_form_builder')]
++        FormBuilderInterface $formBuilder,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.business_entity_form_handler')]
++        FormHandlerInterface $formHandler,
++        #[Autowire(expression: 'service("prestashop.adapter.legacy.context").getContext().country.id')]
++        int $defaultCountryId
++    ): Response {
++        $submittedData = $request->request->all('business_entity');
++
++        // Pre-fill each submitted address with a country so the State choices can be rebuilt
++        // for validation (defaults to the shop country when none was submitted).
++        $formData = [];
++        foreach ([BusinessEntityType::BILLING_ADDRESS_TYPE, BusinessEntityType::SHIPPING_ADDRESS_TYPE] as $addressType) {
++            foreach ($submittedData[$addressType] ?? [] as $index => $address) {
++                $formData[$addressType][$index][BusinessEntityAddressType::FIELD_COUNTRY_ID] =
++                    $address[BusinessEntityAddressType::FIELD_COUNTRY_ID] ?? $defaultCountryId;
++            }
++        }
++
++        $form = $formBuilder->getForm($formData);
++
++        $form->handleRequest($request);
++
++        try {
++            $result = $formHandler->handle($form);
++            if (null !== $result->getIdentifiableObjectId()) {
++                $this->addFlash(
++                    'success',
++                    $this->trans('Business entity successfully created.', [], 'Admin.Notifications.Success')
++                );
++
++                return $this->redirectToRoute('admin_business_entities_list');
++            }
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->render(
++            '@PrestaShop/Admin/Sell/BusinessEntity/create.html.twig',
++            [
++                'layoutTitle' => $this->trans('New business entity', [], 'Admin.Navigation.Menu'),
++                'businessEntityForm' => $form->createView(),
++                'enableSidebar' => true,
++                'help_link' => $this->generateSidebarLink('AdminBusinessEntities'),
++            ]
++        );
++    }
++
++    protected function getBusinessEntitiesToolbarButtons(): array
++    {
++        $toolbarButtons = [];
++
++        $toolbarButtons['add'] = [
++            'href' => $this->generateUrl('admin_business_entities_create'),
++            'desc' => $this->trans('Add new business entity', [], 'Admin.Navigation.Menu'),
++            'icon' => 'add_circle_outline',
++        ];
++
++        return $toolbarButtons;
++    }
++
++    private function getErrorMessages(): array
++    {
++        return [
++            UnableToCreateBusinessEntityAddress::class => $this->trans(
++                'An error occurred while creating the business entity.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            BusinessEntityBillingAddressConstraintException::class => [
++                BusinessEntityBillingAddressConstraintException::MISSING_BILLING_ADDRESS => $this->trans(
++                    'At least one billing address is required if you want to use default billing address as shipping address.',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                BusinessEntityBillingAddressConstraintException::MISSING_SHIPPING_ADDRESS => $this->trans(
++                    'At least one shipping address is required if you don\'t want to use default billing address as shipping address.',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_BILLING_ADDRESS => $this->trans(
++                    'You must have one default billing address',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_SHIPPING_ADDRESS => $this->trans(
++                    'You must have one default shipping address',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_BILLING_ADDRESSES => $this->trans(
++                    'You must have only one default billing address',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++                BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_SHIPPING_ADDRESSES => $this->trans(
++                    'You must have only one default shipping address',
++                    [],
++                    'Admin.Notifications.Error'
++                ),
++            ],
++        ];
+     }
+ }
+diff --git a/src/PrestaShopBundle/Entity/B2B/BusinessEntity.php b/src/PrestaShopBundle/Entity/B2B/BusinessEntity.php
+index 666c9da250aff..224879b7d2b6e 100644
+--- a/src/PrestaShopBundle/Entity/B2B/BusinessEntity.php
++++ b/src/PrestaShopBundle/Entity/B2B/BusinessEntity.php
+@@ -4,6 +4,8 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++declare(strict_types=1);
++
+ namespace PrestaShopBundle\Entity\B2B;
+ 
+ use DateTime;
+@@ -27,7 +29,7 @@
+  *
+  * @ORM\HasLifecycleCallbacks
+  *
+- * @ORM\Entity()
++ * @ORM\Entity(repositoryClass="PrestaShopBundle\Entity\Repository\BusinessEntityRepository")
+  */
+ class BusinessEntity
+ {
+@@ -91,7 +93,7 @@ class BusinessEntity
+     private DateTime $updatedAt;
+ 
+     /**
+-     * @ORM\OneToMany(targetEntity="PrestaShopBundle\Entity\B2B\BusinessEntityAddress", mappedBy="businessEntity")
++     * @ORM\OneToMany(targetEntity="PrestaShopBundle\Entity\B2B\BusinessEntityAddress", mappedBy="businessEntity", cascade={"persist"})
+      */
+     private Collection $businessEntityAddresses;
+ 
+diff --git a/src/PrestaShopBundle/Entity/B2B/BusinessEntityAddress.php b/src/PrestaShopBundle/Entity/B2B/BusinessEntityAddress.php
+index db82869d1e07c..49e63c2a763eb 100644
+--- a/src/PrestaShopBundle/Entity/B2B/BusinessEntityAddress.php
++++ b/src/PrestaShopBundle/Entity/B2B/BusinessEntityAddress.php
+@@ -4,6 +4,8 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++declare(strict_types=1);
++
+ namespace PrestaShopBundle\Entity\B2B;
+ 
+ use DateTime;
+@@ -118,9 +120,9 @@ public function isDefault(): bool
+         return $this->isDefault;
+     }
+ 
+-    public function setDefault(bool $default): self
++    public function setIsDefault(bool $isDefault): self
+     {
+-        $this->isDefault = $default;
++        $this->isDefault = $isDefault;
+ 
+         return $this;
+     }
+diff --git a/src/PrestaShopBundle/Entity/Repository/BusinessEntityRepository.php b/src/PrestaShopBundle/Entity/Repository/BusinessEntityRepository.php
+new file mode 100644
+index 0000000000000..58521f2233615
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/Repository/BusinessEntityRepository.php
+@@ -0,0 +1,23 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity\Repository;
++
++use Doctrine\ORM\EntityRepository;
++use PrestaShopBundle\Entity\B2B\BusinessEntity;
++
++class BusinessEntityRepository extends EntityRepository
++{
++    public function save(BusinessEntity $businessEntity): int
++    {
++        $this->getEntityManager()->persist($businessEntity);
++        $this->getEntityManager()->flush();
++
++        return $businessEntity->getId();
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityAddressType.php b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityAddressType.php
+new file mode 100644
+index 0000000000000..63bde6a93433d
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityAddressType.php
+@@ -0,0 +1,294 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\BusinessEntity;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\AddressStateRequired;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\AddressZipCode;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\CleanHtml;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\TypedRegexValidator;
++use PrestaShop\PrestaShop\Core\Domain\Address\Configuration\AddressConstraint;
++use PrestaShop\PrestaShop\Core\Form\ConfigurableFormChoiceProviderInterface;
++use PrestaShopBundle\Form\Admin\Type\CountryChoiceType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormEvent;
++use Symfony\Component\Form\FormEvents;
++use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Validator\Constraints\Length;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class BusinessEntityAddressType extends TranslatorAwareType
++{
++    public const FIELD_ALIAS = 'alias';
++    public const FIELD_ADDRESS_1 = 'address1';
++    public const FIELD_ADDRESS_2 = 'address2';
++    public const FIELD_POSTCODE = 'postcode';
++    public const FIELD_CITY = 'city';
++    public const FIELD_COUNTRY_ID = 'id_country';
++    public const FIELD_STATE_ID = 'id_state';
++    public const FIELD_PHONE = 'phone';
++    public const FIELD_PHONE_MOBILE = 'phone_mobile';
++
++    /**
++     * @param array<int, array<string, mixed>> $locales
++     */
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++        private readonly ConfigurableFormChoiceProviderInterface $stateChoiceProvider,
++        private readonly int $contextCountryId,
++        private readonly RouterInterface $router
++    ) {
++        parent::__construct($translator, $locales);
++    }
++
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $data = $builder->getData();
++        $countryId = !empty($data[self::FIELD_COUNTRY_ID])
++            ? (int) $data[self::FIELD_COUNTRY_ID]
++            : $this->contextCountryId;
++
++        $genericInvalidCharsMessage = $this->trans(
++            'Invalid characters: %characters%',
++            'Admin.Notifications.Info',
++            ['%characters%' => TypedRegexValidator::GENERIC_NAME_CHARS]
++        );
++
++        $builder->add(self::FIELD_ALIAS, TextType::class, [
++            'label' => $this->trans('Alias', 'Admin.Catalog.Feature'),
++            'help' => $genericInvalidCharsMessage,
++            'required' => true,
++            'attr' => ['autocomplete' => 'off'],
++            'constraints' => [
++                new NotBlank([
++                    'message' => $this->trans(
++                        'This field cannot be empty.',
++                        'Admin.Notifications.Error'
++                    ),
++                ]),
++                new CleanHtml(),
++                new TypedRegex([
++                    'type' => TypedRegex::TYPE_GENERIC_NAME,
++                ]),
++                new Length([
++                    'max' => AddressConstraint::MAX_ALIAS_LENGTH,
++                    'maxMessage' => $this->trans(
++                        'This field cannot be longer than %limit% characters',
++                        'Admin.Notifications.Error',
++                        ['%limit%' => AddressConstraint::MAX_ALIAS_LENGTH]
++                    ),
++                ]),
++            ],
++        ])
++            ->add(self::FIELD_ADDRESS_1, TextType::class, [
++                'label' => $this->trans('Address', 'Admin.Global'),
++                'required' => true,
++                'attr' => ['autocomplete' => 'address-line1'],
++                'constraints' => [
++                    new NotBlank([
++                        'message' => $this->trans(
++                            'This field cannot be empty.',
++                            'Admin.Notifications.Error'
++                        ),
++                    ]),
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_ADDRESS,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_ADDRESS_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_ADDRESS_LENGTH]
++                        ),
++                    ]),
++                ],
++            ])
++            ->add(self::FIELD_ADDRESS_2, TextType::class, [
++                'label' => $this->trans('Address (2)', 'Admin.Global'),
++                'required' => false,
++                'empty_data' => '',
++                'attr' => ['autocomplete' => 'address-line2'],
++                'constraints' => [
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_ADDRESS,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_ADDRESS_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_ADDRESS_LENGTH]
++                        ),
++                    ]),
++                ],
++            ])
++            ->add(self::FIELD_POSTCODE, TextType::class, [
++                'required' => false, // Manage by AddressZipCode and CountryPostcodeRequiredToggler object in FO
++                'label' => $this->trans('Zip/Postal code', 'Admin.Global'),
++                'empty_data' => '',
++                'constraints' => [
++                    new AddressZipCode([
++                        'id_country' => $countryId,
++                        'required' => false,
++                    ]),
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_POST_CODE,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_POSTCODE_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_POSTCODE_LENGTH]
++                        ),
++                    ]),
++                ],
++                'attr' => [
++                    'class' => 'js-address-postcode-select',
++                    'autocomplete' => 'postal-code',
++                ],
++                'label_attr' => [
++                    'class' => 'js-address-postcode-label',
++                ],
++            ])
++            ->add(self::FIELD_CITY, TextType::class, [
++                'label' => $this->trans('City', 'Admin.Global'),
++                'required' => true,
++                'attr' => ['autocomplete' => 'address-level2'],
++                'constraints' => [
++                    new NotBlank([
++                        'message' => $this->trans(
++                            'This field is required',
++                            'Admin.Notifications.Error'
++                        ),
++                    ]),
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_CITY_NAME,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_CITY_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_CITY_LENGTH]
++                        ),
++                    ]),
++                ],
++            ])
++            ->add(self::FIELD_COUNTRY_ID, CountryChoiceType::class, [
++                'label' => $this->trans('Country', 'Admin.Global'),
++                'required' => true,
++                'with_postcode_attr' => true,
++                'constraints' => [
++                    new NotBlank([
++                        'message' => $this->trans(
++                            'This field cannot be empty.',
++                            'Admin.Notifications.Error'
++                        ),
++                    ]),
++                ],
++                'attr' => [
++                    'data-states-url' => $this->router->generate('admin_country_states'),
++                    'class' => 'js-address-country-select',
++                    'autocomplete' => 'country',
++                ],
++            ])
++            ->add(self::FIELD_STATE_ID, ChoiceType::class, ['choices' => []])
++            ->add(self::FIELD_PHONE, TextType::class, [
++                'label' => $this->trans('Phone', 'Admin.Global'),
++                'required' => false,
++                'empty_data' => '',
++                'attr' => ['autocomplete' => 'tel'],
++                'constraints' => [
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_PHONE_NUMBER,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_PHONE_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_PHONE_LENGTH]
++                        ),
++                    ]),
++                ],
++            ])
++            ->add(self::FIELD_PHONE_MOBILE, TextType::class, [
++                'label' => $this->trans('Mobile phone', 'Admin.Global'),
++                'required' => false,
++                'empty_data' => '',
++                'attr' => ['autocomplete' => 'tel'],
++                'constraints' => [
++                    new CleanHtml(),
++                    new TypedRegex([
++                        'type' => TypedRegex::TYPE_PHONE_NUMBER,
++                    ]),
++                    new Length([
++                        'max' => AddressConstraint::MAX_PHONE_LENGTH,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => AddressConstraint::MAX_PHONE_LENGTH]
++                        ),
++                    ]),
++                ],
++            ])
++        ;
++
++        $rebuildStateChoices = function (FormEvent $event): void {
++            $data = $event->getData();
++            $countryId = !empty($data[self::FIELD_COUNTRY_ID])
++                ? (int) $data[self::FIELD_COUNTRY_ID]
++                : $this->contextCountryId;
++
++            $event->getForm()->add(self::FIELD_STATE_ID, ChoiceType::class, $this->getStateFieldOptions($countryId));
++        };
++
++        $builder->addEventListener(FormEvents::POST_SET_DATA, $rebuildStateChoices);
++        $builder->addEventListener(FormEvents::PRE_SUBMIT, $rebuildStateChoices);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function getStateFieldOptions(int $countryId): array
++    {
++        $stateChoices = $this->stateChoiceProvider->getChoices(['id_country' => $countryId]);
++
++        return [
++            'label' => $this->trans('State', 'Admin.Global'),
++            'required' => false,
++            'choices' => $stateChoices,
++            'constraints' => [
++                new AddressStateRequired([
++                    'id_country' => $countryId,
++                ]),
++            ],
++            'row_attr' => [
++                'class' => 'js-address-state-block',
++            ],
++            'attr' => [
++                'visible' => !empty($stateChoices),
++                'class' => 'js-address-state-select',
++                'autocomplete' => 'address-level1',
++            ],
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityGeneralInformationType.php b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityGeneralInformationType.php
+new file mode 100644
+index 0000000000000..8649e28990121
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityGeneralInformationType.php
+@@ -0,0 +1,105 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\BusinessEntity;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\CleanHtml;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
++use PrestaShop\PrestaShop\Core\Form\ChoiceProvider\GroupByIdChoiceProvider;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\EnumType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\Constraints\Length;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class BusinessEntityGeneralInformationType extends TranslatorAwareType
++{
++    public const FIELD_NAME = 'name';
++    public const FIELD_LEGAL_NAME = 'legal_name';
++    public const FIELD_EXTERNAL_REF = 'external_ref';
++    public const FIELD_DELIVERY_AUTHORIZED = 'delivery_authorized';
++    public const FIELD_STATUS = 'status';
++    public const FIELD_CUSTOMER_GROUP_ID = 'customer_group_id';
++
++    public const MAX_NAME_LENGTH = 255;
++
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++        private readonly GroupByIdChoiceProvider $groupByIdChoiceProvider,
++    ) {
++        parent::__construct($translator, $locales);
++    }
++
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add(self::FIELD_NAME, TextType::class, [
++                'label' => $this->trans('Name', 'Admin.Global'),
++                'help' => $this->trans('The display name of the business entity.', 'Admin.Catalog.Feature'),
++                'constraints' => $this->getNameConstraints(),
++                'required' => true,
++            ])
++            ->add(self::FIELD_LEGAL_NAME, TextType::class, [
++                'label' => $this->trans('Legal Name', 'Admin.Global'),
++                'help' => $this->trans('The official registered name of the company.', 'Admin.Catalog.Feature'),
++                'constraints' => $this->getNameConstraints(),
++                'required' => true,
++            ])
++            ->add(self::FIELD_EXTERNAL_REF, TextType::class, [
++                'label' => $this->trans('External Reference', 'Admin.Global'),
++                'required' => false,
++            ])
++            ->add(self::FIELD_DELIVERY_AUTHORIZED, SwitchType::class, [
++                'label' => $this->trans('Delivery authorized', 'Admin.Global'),
++                'help' => $this->trans('Allow the B2B customer to order using an address that does not belong to the business entity.', 'Admin.Catalog.Feature'),
++            ])
++            ->add(self::FIELD_STATUS, EnumType::class, [
++                'label' => $this->trans('Status', 'Admin.Global'),
++                'class' => BusinessEntityStatus::class,
++            ])
++            ->add(self::FIELD_CUSTOMER_GROUP_ID, ChoiceType::class, [
++                'label' => $this->trans('Customer group', 'Admin.Global'),
++                'help' => $this->trans('Customer group attached to this business entity.', 'Admin.Catalog.Feature'),
++                'choices' => $this->groupByIdChoiceProvider->getChoices(),
++                'required' => true,
++            ]);
++    }
++
++    /**
++     * @return array<int, Constraint>
++     */
++    private function getNameConstraints(): array
++    {
++        return [
++            new NotBlank([
++                'message' => $this->trans('This field cannot be empty.', 'Admin.Notifications.Error'),
++            ]),
++            new Length([
++                'max' => self::MAX_NAME_LENGTH,
++                'maxMessage' => $this->trans(
++                    'This field cannot be longer than %limit% characters',
++                    'Admin.Notifications.Error',
++                    ['%limit%' => self::MAX_NAME_LENGTH]
++                ),
++            ]),
++            new TypedRegex([
++                'type' => TypedRegex::TYPE_GENERIC_NAME,
++            ]),
++            new CleanHtml([
++                'message' => $this->trans('%s is invalid.', 'Admin.Notifications.Error'),
++            ]),
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityType.php b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityType.php
+new file mode 100644
+index 0000000000000..5687664a07eaa
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/BusinessEntityType.php
+@@ -0,0 +1,87 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Sell\BusinessEntity;
++
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\BusinessEntityFormDataProvider;
++use PrestaShopBundle\Form\Admin\Type\ShopSelectorType;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\CollectionType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormEvent;
++use Symfony\Component\Form\FormEvents;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class BusinessEntityType extends TranslatorAwareType
++{
++    public const BILLING_ADDRESS_AS_SHIPPING_ADDRESS = 'billing_address_as_shipping_address';
++    public const BILLING_ADDRESS_TYPE = 'billing_address';
++    public const DEFAULT_BILLING_ADDRESS = 'default_billing_address';
++    public const DEFAULT_SHIPPING_ADDRESS = 'default_shipping_address';
++    public const GENERAL_INFORMATION = 'general_information';
++    public const SHIPPING_ADDRESS_TYPE = 'shipping_address';
++    public const SHOP_ID = 'shop_id';
++
++    public function __construct(
++        TranslatorInterface $translator,
++        array $locales,
++    ) {
++        parent::__construct($translator, $locales);
++    }
++
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $data = $builder->getData();
++
++        // $data will always contain the result of getDefaultData
++        $defaultAddressData = $data[self::BILLING_ADDRESS_TYPE][BusinessEntityFormDataProvider::DEFAULT_BILLING_ADDRESS_INDEX] ?? [];
++
++        $builder
++            ->add(self::GENERAL_INFORMATION, BusinessEntityGeneralInformationType::class)
++            ->add(self::BILLING_ADDRESS_TYPE, CollectionType::class, [
++                'entry_type' => BusinessEntityAddressType::class,
++                'allow_add' => true,
++                'allow_delete' => true,
++                'label' => $this->trans('Billing addresses', 'Admin.Global'),
++                'prototype_data' => $defaultAddressData,
++            ])
++            ->add(self::SHIPPING_ADDRESS_TYPE, CollectionType::class, [
++                'entry_type' => BusinessEntityAddressType::class,
++                'allow_add' => true,
++                'allow_delete' => true,
++                'label' => $this->trans('Shipping addresses', 'Admin.Global'),
++                'prototype_data' => $defaultAddressData,
++            ])
++            ->add(self::BILLING_ADDRESS_AS_SHIPPING_ADDRESS, SwitchType::class, [
++                'label' => $this->trans('Use default billing address as shipping address', 'Admin.Global'),
++                'required' => false,
++            ])
++            ->add(self::DEFAULT_BILLING_ADDRESS, TextType::class, [
++                'label' => false,
++                'attr' => ['class' => 'd-none'],
++            ])
++            ->add(self::DEFAULT_SHIPPING_ADDRESS, TextType::class, [
++                'label' => false,
++                'attr' => ['class' => 'd-none'],
++            ])
++            ->add(self::SHOP_ID, HiddenType::class)
++        ;
++
++        $builder->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event): void {
++            $data = $event->getData();
++            if (!empty($data[self::SHOP_ID])) {
++                return;
++            }
++
++            $event->getForm()->add(self::SHOP_ID, ShopSelectorType::class);
++        });
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/sell/business_entity/business_entities.yml b/src/PrestaShopBundle/Resources/config/routing/admin/sell/business_entity/business_entities.yml
+index f19bcc06a6818..e425080b7254b 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/sell/business_entity/business_entities.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/sell/business_entity/business_entities.yml
+@@ -3,3 +3,13 @@ admin_business_entities_list:
+   methods: [ GET ]
+   defaults:
+     _controller: PrestaShopBundle\Controller\Admin\Sell\BusinessEntity\BusinessEntitiesController::listAction
++    _legacy_controller: AdminBusinessEntities
++    _legacy_link: AdminBusinessEntities
++
++admin_business_entities_create:
++  path: /new
++  methods: [ GET, POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Sell\BusinessEntity\BusinessEntitiesController::createAction
++    _legacy_controller: AdminBusinessEntities
++    _legacy_link: AdminBusinessEntities
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/business_entity.yml b/src/PrestaShopBundle/Resources/config/services/adapter/business_entity.yml
+new file mode 100644
+index 0000000000000..4eb318e17d06b
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/business_entity.yml
+@@ -0,0 +1,5 @@
++services:
++  _defaults:
++    autoconfigure: true
++    autowire: true
++  PrestaShop\PrestaShop\Adapter\BusinessEntity\CommandHandler\AddBusinessEntityHandler: ~
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index da92c2c2f6c3c..15c05baf88207 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -46,6 +46,8 @@ services:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Sell/Discount/*"
+   PrestaShopBundle\Form\Admin\Sell\Product\:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Sell/Product/*"
++  PrestaShopBundle\Form\Admin\Sell\BusinessEntity\:
++    resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Sell/BusinessEntity/*"
+   PrestaShopBundle\Form\Admin\Type\:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Type/*"
+   PrestaShopBundle\Form\Admin\AdvancedParameters\:
+@@ -737,6 +739,10 @@ services:
+     arguments:
+       $languagesChoices: '@=service("prestashop.core.form.choice_provider.all_languages").getChoices()'
+ 
++  PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityAddressType:
++    arguments:
++      $stateChoiceProvider: '@prestashop.adapter.form.choice_provider.country_state_by_id'
++
+   PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\ExtraPropertyDefinition\ExtraPropertyDefinitionFieldDefinitionType:
+     arguments:
+       $typeChoiceProvider: '@PrestaShop\PrestaShop\Core\Form\ChoiceProvider\ExtraPropertyTypeChoiceProvider'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+index af525a0b8c8e4..7a072a156fb34 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+@@ -182,3 +182,8 @@ services:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+     arguments:
+       - PrestaShopBundle\Entity\AttributeGroup
++
++  PrestaShopBundle\Entity\Repository\BusinessEntityRepository:
++    factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
++    arguments:
++      - PrestaShopBundle\Entity\B2B\BusinessEntity
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+index b9251cba88b69..f266422d76e1b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+@@ -381,6 +381,13 @@ services:
+       - 'PrestaShopBundle\Form\Admin\Configure\ShopParameters\Tag\TagType'
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\TagFormDataProvider'
+ 
++  prestashop.core.form.identifiable_object.builder.business_entity_form_builder:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
++    factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
++    arguments:
++      - 'PrestaShopBundle\Form\Admin\Sell\BusinessEntity\BusinessEntityType'
++      - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\BusinessEntityFormDataProvider'
++
+   prestashop.core.form.identifiable_object.builder.add_product_form_builder:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
+     factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+index 75e358c151e45..83edffbc64cbb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+@@ -310,3 +310,7 @@ services:
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TagFormDataHandler:
+     autowire: true
+     public: false
++
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\BusinessEntityFormDataHandler:
++    autowire: true
++    public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+index 842fef5ae184a..c2742383d6de8 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+@@ -306,3 +306,7 @@ services:
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\EditProductFormDataProvider:
+     autowire: true
+     public: false
++
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\BusinessEntityFormDataProvider:
++    autowire: true
++    public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+index cb2ec02951311..b18a21e44d126 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+@@ -351,3 +351,9 @@ services:
+     factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+     arguments:
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TagFormDataHandler'
++
++  prestashop.core.form.identifiable_object.business_entity_form_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
++    factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\BusinessEntityFormDataHandler'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig
+new file mode 100644
+index 0000000000000..19e5d62df584a
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig
+@@ -0,0 +1,18 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++<div class="card" data-address-index="{{ index }}">
++  <div class="card-header d-flex justify-content-between">
++    <div class="js-business-entity-address-position">
++      {{ 'Address #%position%'|trans({'%position%': position}, 'Admin.Global') }}
++    </div>
++    <div class="d-flex">
++      <div class="set-as-default-business-entity-address-btn-placeholder"></div>
++      <div class="delete-business-entity-address-btn-placeholder"></div>
++    </div>
++  </div>
++  <div class="card-body">
++    {{ form_widget(address) }}
++  </div>
++</div>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/form.html.twig
+new file mode 100644
+index 0000000000000..61201144e569e
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/Blocks/form.html.twig
+@@ -0,0 +1,144 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% form_theme businessEntityForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig' %}
++
++{% macro customAddressPrototype(prototype, prototype_name) %}
++  {{ include('@PrestaShop/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig', {
++    index: prototype_name,
++    position: prototype_name,
++    address: prototype,
++  }) }}
++{% endmacro %}
++
++{% block business_entity_form %}
++  {{ form_start(businessEntityForm, {attr: {novalidate: 'novalidate'}}) }}
++  {{ form_errors(businessEntityForm) }}
++  <div class="card">
++    <h3 class="card-header">
++      {{ 'General information'|trans({}, 'Admin.Global') }}
++    </h3>
++    <div class="card-body">
++      <div class="form-wrapper">
++        <div class="row">
++          <div class="col-md-6">{{ form_row(businessEntityForm.general_information.name) }}</div>
++          <div class="col-md-6">{{ form_row(businessEntityForm.general_information.legal_name) }}</div>
++        </div>
++
++        <hr>
++        <div class="row">
++          <div class="col-md-4">
++            <div class="form-group">
++              <label class="form-control-label">{{ 'VAT number'|trans({}, 'Admin.Global') }}</label>
++              <input type="text" class="form-control" placeholder="FR12345678901" disabled>
++            </div>
++          </div>
++          <div class="col-md-4">
++            <div class="form-group">
++              <label class="form-control-label">{{ 'SIREN / SIRET'|trans({}, 'Admin.Global') }}</label>
++              <input type="text" class="form-control" placeholder="123 456 789 00012" disabled>
++            </div>
++          </div>
++          <div class="col-md-4">
++            <div class="form-group">
++              <label class="form-control-label">{{ 'DUNS number'|trans({}, 'Admin.Global') }}</label>
++              <input type="text" class="form-control" placeholder="12-345-6789" disabled>
++            </div>
++          </div>
++        </div>
++
++        <hr>
++        <div class="row">
++          <div class="col-md-6">{{ form_row(businessEntityForm.general_information.external_ref) }}</div>
++        </div>
++        <div class="row">
++          <div class="col-md-6">{{ form_row(businessEntityForm.general_information.status) }}</div>
++          <div class="col-md-6">{{ form_row(businessEntityForm.general_information.customer_group_id) }}</div>
++        </div>
++        {{ form_row(businessEntityForm.general_information.delivery_authorized) }}
++      </div>
++    </div>
++  </div>
++
++  <div class="card">
++    <h3 class="card-header d-flex justify-content-between">
++      <span>
++        <i class="material-icons">place</i>
++        {{ 'Billing address'|trans({}, 'Admin.Global') }}
++      </span>
++
++      <button type="button" id="add_business_entity_billing_address" class="btn btn-outline-secondary"
++              data-collection-holder-class="billing_addresses"><i
++          class="material-icons">add</i>{{ 'Add address'|trans({}, 'Admin.Global') }}
++      </button>
++    </h3>
++    <div class="card-body">
++      <div class="form-wrapper">
++        <ul class="billing_addresses list-unstyled"
++            {% set billingAddressIndex = businessEntityForm.billing_address|length > 0 ? businessEntityForm.billing_address|last.vars.name + 1 : 1 %}
++            data-index="{{ billingAddressIndex }}"
++            data-address-label-template="{{ 'Address #%position%'|trans({}, 'Admin.Global') }}"
++            data-prototype="{{ _self.customAddressPrototype(businessEntityForm.billing_address.vars.prototype, businessEntityForm.billing_address.vars.prototype.vars.name)|e('html_attr') }}"
++        >
++          {% for address in businessEntityForm.billing_address %}
++            <li>
++              {{ include('@PrestaShop/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig', {
++                index: address.vars.name,
++                position: loop.index,
++                address: address,
++              }) }}
++            </li>
++          {% endfor %}
++        </ul>
++      </div>
++    </div>
++  </div>
++
++  <div class="card">
++    {% set shippingHiddenClass = businessEntityForm.billing_address_as_shipping_address.vars.data ? ' d-none' : '' %}
++    <h3 class="card-header d-flex justify-content-between">
++      <span>
++        <i class="material-icons">place</i>
++        {{ 'Shipping address'|trans({}, 'Admin.Global') }}
++      </span>
++
++      <button type="button" id="add_business_entity_shipping_address"
++              class="btn btn-outline-secondary js-business-entity-shipping-form{{ shippingHiddenClass }}"
++              data-collection-holder-class="shipping_addresses"><i
++          class="material-icons">add</i>{{ 'Add address'|trans({}, 'Admin.Global') }}
++      </button>
++    </h3>
++    <div class="card-body">
++      <div class="form-wrapper">
++        {{ form_row(businessEntityForm.billing_address_as_shipping_address) }}
++        <ul class="shipping_addresses list-unstyled js-business-entity-shipping-form{{ shippingHiddenClass }}"
++            {% set shippingAddressIndex = businessEntityForm.shipping_address|length > 0 ? businessEntityForm.shipping_address|last.vars.name + 1 : 1 %}
++            data-index="{{ shippingAddressIndex }}"
++            data-address-label-template="{{ 'Address #%position%'|trans({}, 'Admin.Global') }}"
++            data-prototype="{{ _self.customAddressPrototype(businessEntityForm.shipping_address.vars.prototype, businessEntityForm.shipping_address.vars.prototype.vars.name)|e('html_attr') }}"
++        >
++          {% for address in businessEntityForm.shipping_address %}
++            <li>
++              {{ include('@PrestaShop/Admin/Sell/BusinessEntity/Blocks/address_card.html.twig', {
++                index: address.vars.name,
++                position: loop.index,
++                address: address,
++              }) }}
++            </li>
++          {% endfor %}
++        </ul>
++      </div>
++    </div>
++  </div>
++  <div class="d-flex justify-content-end">
++    <a href="{{ path('admin_business_entities_list') }}" class="btn btn-outline-secondary mr-3">{{ 'Cancel'|trans({}, 'Admin.Actions') }}</a>
++    <button type="submit" class="btn btn-primary">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++  </div>
++  {{ form_widget(businessEntityForm._token) }}
++  {{ form_widget(businessEntityForm.default_billing_address) }}
++  {{ form_widget(businessEntityForm.default_shipping_address) }}
++  {{ form_widget(businessEntityForm.shop_id) }}
++  {{ form_end(businessEntityForm, {render_rest: false}) }}
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/create.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/create.html.twig
+new file mode 100644
+index 0000000000000..a3d77a510eb1e
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/BusinessEntity/create.html.twig
+@@ -0,0 +1,21 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Sell/BusinessEntity/Blocks/form.html.twig') }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++
++  <script src="{{ asset('themes/new-theme/public/business_entity_form.bundle.js') }}"></script>
++{% endblock %}
++
++{% set js_translatable = {
++  'Set as default': 'Set as default'|trans({}, 'Admin.Actions'),
++}|merge(js_translatable)
++%}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/BusinessEntityFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/BusinessEntityFeatureContext.php
+new file mode 100644
+index 0000000000000..c28bd6735956f
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/BusinessEntityFeatureContext.php
+@@ -0,0 +1,227 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain;
++
++use Address;
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command\AddBusinessEntityCommand;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityException;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityBillingAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityId;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityShippingAddress;
++use PrestaShopBundle\Entity\B2B\BusinessEntity;
++use PrestaShopBundle\Entity\B2B\BusinessEntityAddress;
++use PrestaShopBundle\Entity\Enum\AddressTypeEnum;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++use Validate;
++
++class BusinessEntityFeatureContext extends AbstractDomainFeatureContext
++{
++    private array $businessEntityDetails = [];
++    private array $billingAddresses = [];
++    private array $shippingAddresses = [];
++    private ?BusinessEntityId $lastBusinessEntityId;
++
++    /**
++     * @Given there is a business entity with the following details:
++     */
++    public function thereIsABusinessEntityWithFollowingDetails(TableNode $table)
++    {
++        $this->businessEntityDetails = $table->getRowsHash();
++    }
++
++    /**
++     * @Given the business entity has the following billing addresses:
++     */
++    public function businessEntityHasFollowingBillingAddresses(TableNode $table)
++    {
++        foreach ($table->getHash() as $row) {
++            $this->billingAddresses[] = new BusinessEntityBillingAddress(
++                $row['alias'],
++                $row['address1'],
++                $row['address2'] ?? null,
++                $row['city'],
++                $row['postcode'],
++                (int) $row['country_id'],
++                (bool) $row['is_default'],
++                isset($row['state_id']) ? (int) $row['state_id'] : null,
++                $row['phone'] ?? null,
++                $row['phone_mobile'] ?? null
++            );
++        }
++    }
++
++    /**
++     * @Given the business entity has the following shipping addresses:
++     */
++    public function businessEntityHasFollowingShippingAddresses(TableNode $table)
++    {
++        foreach ($table->getHash() as $row) {
++            $this->shippingAddresses[] = new BusinessEntityShippingAddress(
++                $row['alias'],
++                $row['address1'],
++                $row['address2'] ?? null,
++                $row['city'],
++                $row['postcode'],
++                (int) $row['country_id'],
++                (bool) $row['is_default'],
++                isset($row['state_id']) ? (int) $row['state_id'] : null,
++                $row['phone'] ?? null,
++                $row['phone_mobile'] ?? null
++            );
++        }
++    }
++
++    /**
++     * @When I add the business entity
++     */
++    public function iAddTheBusinessEntity()
++    {
++        $command = new AddBusinessEntityCommand(
++            $this->businessEntityDetails['name'],
++            $this->businessEntityDetails['legal_name'],
++            $this->businessEntityDetails['external_ref'] ?? null,
++            (bool) ($this->businessEntityDetails['delivery_authorized'] ?? true),
++            BusinessEntityStatus::from($this->businessEntityDetails['status']),
++            (int) ($this->businessEntityDetails['shop_id'] ?? 1),
++            (int) ($this->businessEntityDetails['customer_group_id'] ?? 3),
++            (bool) ($this->businessEntityDetails['billing_as_shipping'] ?? false),
++            $this->billingAddresses,
++            $this->shippingAddresses
++        );
++
++        try {
++            $this->lastBusinessEntityId = $this->getCommandBus()->handle($command);
++        } catch (BusinessEntityException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then the business entity should be successfully created
++     */
++    public function businessEntityShouldBeSuccessfullyCreated()
++    {
++        Assert::assertNotNull($this->lastBusinessEntityId, 'Business entity was not created');
++    }
++
++    /**
++     * @Then the business entity :name should exist in the database
++     */
++    public function businessEntityShouldExistInDatabase(string $name)
++    {
++        // TODO: use CQRS when it will be available
++        $entityManager = $this->getContainer()->get('doctrine.orm.entity_manager');
++        $repository = $entityManager->getRepository(BusinessEntity::class);
++
++        /** @var BusinessEntity|null $businessEntity */
++        $businessEntity = $repository->findOneBy(['name' => $name]);
++
++        Assert::assertNotNull($businessEntity, sprintf('Business entity with name "%s" not found in database', $name));
++        Assert::assertEquals($name, $businessEntity->getName());
++
++        if (isset($this->businessEntityDetails['legal_name'])) {
++            Assert::assertEquals($this->businessEntityDetails['legal_name'], $businessEntity->getLegalName());
++        }
++    }
++
++    /**
++     * @Then the business entity :name should belong to customer group :groupId
++     */
++    public function businessEntityShouldBelongToCustomerGroup(string $name, int $groupId)
++    {
++        $businessEntity = $this->getBusinessEntityByName($name);
++        Assert::assertSame(
++            $groupId,
++            $businessEntity->getIdCustomerGroup(),
++            sprintf('Business entity "%s" customer group mismatch', $name)
++        );
++    }
++
++    /**
++     * @Then the business entity :name should be attached to shop :shopId
++     */
++    public function businessEntityShouldBeAttachedToShop(string $name, int $shopId)
++    {
++        $businessEntity = $this->getBusinessEntityByName($name);
++        Assert::assertSame(
++            $shopId,
++            $businessEntity->getIdShop(),
++            sprintf('Business entity "%s" shop mismatch', $name)
++        );
++    }
++
++    /**
++     * @Then the business entity :name should have :count address(es)
++     */
++    public function businessEntityShouldHaveCountAddresses(string $name, int $count)
++    {
++        $businessEntity = $this->getBusinessEntityByName($name);
++        Assert::assertCount($count, $businessEntity->getBusinessEntityAddresses());
++    }
++
++    /**
++     * @Then the address with alias :alias for business entity :name should have type :type
++     */
++    public function addressWithAliasShouldHaveType(string $alias, string $name, string $type)
++    {
++        $businessEntityAddress = $this->getBusinessEntityAddressByAlias($name, $alias);
++        Assert::assertEquals(AddressTypeEnum::from($type), $businessEntityAddress->getAddressType());
++    }
++
++    /**
++     * @Then the address with alias :alias for business entity :name should have type :type and be default
++     */
++    public function addressWithAliasShouldHaveTypeAndBeDefault(string $alias, string $name, string $type)
++    {
++        $businessEntityAddress = $this->getBusinessEntityAddressByAlias($name, $alias);
++        Assert::assertEquals(AddressTypeEnum::from($type), $businessEntityAddress->getAddressType());
++        Assert::assertTrue($businessEntityAddress->isDefault());
++    }
++
++    /**
++     * @Then the address with alias :alias for business entity :name should have phone :phone and mobile phone :mobile
++     */
++    public function addressWithAliasShouldHavePhones(string $alias, string $name, string $phone, string $mobile): void
++    {
++        $businessEntityAddress = $this->getBusinessEntityAddressByAlias($name, $alias);
++        $address = new Address($businessEntityAddress->getAddressId());
++        Assert::assertEquals($phone, $address->phone);
++        Assert::assertEquals($mobile, $address->phone_mobile);
++    }
++
++    private function getBusinessEntityByName(string $name): BusinessEntity
++    {
++        $entityManager = $this->getContainer()->get('doctrine.orm.entity_manager');
++        $repository = $entityManager->getRepository(BusinessEntity::class);
++
++        /** @var BusinessEntity|null $businessEntity */
++        $businessEntity = $repository->findOneBy(['name' => $name]);
++
++        Assert::assertNotNull($businessEntity, sprintf('Business entity with name "%s" not found', $name));
++
++        return $businessEntity;
++    }
++
++    private function getBusinessEntityAddressByAlias(string $businessEntityName, string $alias): BusinessEntityAddress
++    {
++        $businessEntity = $this->getBusinessEntityByName($businessEntityName);
++
++        foreach ($businessEntity->getBusinessEntityAddresses() as $businessEntityAddress) {
++            /** @var BusinessEntityAddress $businessEntityAddress */
++            $address = new Address($businessEntityAddress->getAddressId());
++            if (Validate::isLoadedObject($address) && $address->alias === $alias) {
++                return $businessEntityAddress;
++            }
++        }
++
++        Assert::fail(sprintf('Address with alias "%s" not found for business entity "%s"', $alias, $businessEntityName));
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/BusinessEntity/business_entity_management.feature b/tests/Integration/Behaviour/Features/Scenario/BusinessEntity/business_entity_management.feature
+new file mode 100644
+index 0000000000000..d67bd9fad3271
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/BusinessEntity/business_entity_management.feature
+@@ -0,0 +1,81 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s business_entity --tags business-entity-management
++@restore-all-tables-before-feature
++@business-entity-management
++Feature: Add business entity
++  In order to manage B2B entities
++  As a BO user
++  I need to be able to add a new business entity
++
++  Scenario: Add a new business entity with billing address used as shipping address
++    Given there is a business entity with the following details:
++      | name                         | Test Business Entity |
++      | legal_name                   | Test Legal Name      |
++      | external_ref                 | EXT-001              |
++      | delivery_authorized          | 1                    |
++      | status                       | active               |
++      | billing_as_shipping          | 1                    |
++    And the business entity has the following billing addresses:
++      | alias   | address1      | city  | postcode | country_id | is_default |
++      | Billing | 123 Main St   | Paris | 75001    | 8          | 1          |
++    When I add the business entity
++    Then the business entity should be successfully created
++    And the business entity "Test Business Entity" should exist in the database
++    And the business entity "Test Business Entity" should have 1 address
++    And the address with alias "Billing" for business entity "Test Business Entity" should have type "both" and be default
++
++  Scenario: Add a new business entity with separate billing and shipping addresses
++    Given there is a business entity with the following details:
++      | name                         | Separate Addresses Entity |
++      | legal_name                   | Separate Legal Name       |
++      | external_ref                 | EXT-002                   |
++      | delivery_authorized          | 1                         |
++      | status                       | active                    |
++      | billing_as_shipping          | 0                         |
++    And the business entity has the following billing addresses:
++      | alias   | address1      | city  | postcode | country_id | is_default |
++      | Billing | 456 Invoice St| Lyon  | 69001    | 8          | 1          |
++    And the business entity has the following shipping addresses:
++      | alias    | address1       | city      | postcode | country_id | is_default | phone      | phone_mobile |
++      | Shipping | 789 Delivery Rd| Marseille | 13001    | 8          | 1          | 0499887766 | 0655443322   |
++    When I add the business entity
++    Then the business entity should be successfully created
++    And the business entity "Separate Addresses Entity" should exist in the database
++    And the business entity "Separate Addresses Entity" should have 2 addresses
++    And the address with alias "Billing" for business entity "Separate Addresses Entity" should have type "invoice"
++    And the address with alias "Shipping" for business entity "Separate Addresses Entity" should have type "delivery"
++    And the address with alias "Shipping" for business entity "Separate Addresses Entity" should have phone "0499887766" and mobile phone "0655443322"
++
++  Scenario: Add a new business entity with a non-default customer group and shop
++    Given there is a business entity with the following details:
++      | name                         | Non Default Scope Entity |
++      | legal_name                   | Non Default Legal        |
++      | external_ref                 | EXT-003                  |
++      | delivery_authorized          | 1                        |
++      | status                       | active                   |
++      | billing_as_shipping          | 1                        |
++      | shop_id                      | 1                        |
++      | customer_group_id            | 1                        |
++    And the business entity has the following billing addresses:
++      | alias   | address1      | city     | postcode | country_id | is_default |
++      | Billing | 1 Scope Rd    | Toulouse | 31000    | 8          | 1          |
++    When I add the business entity
++    Then the business entity should be successfully created
++    And the business entity "Non Default Scope Entity" should exist in the database
++    And the business entity "Non Default Scope Entity" should belong to customer group 1
++    And the business entity "Non Default Scope Entity" should be attached to shop 1
++
++  Scenario: Add a new business entity with phone numbers on the billing address
++    Given there is a business entity with the following details:
++      | name                         | Phone Entity     |
++      | legal_name                   | Phone Legal Name |
++      | external_ref                 | EXT-004          |
++      | delivery_authorized          | 1                |
++      | status                       | active           |
++      | billing_as_shipping          | 1                |
++    And the business entity has the following billing addresses:
++      | alias   | address1    | city  | postcode | country_id | is_default | phone      | phone_mobile |
++      | Billing | 12 Phone St | Paris | 75001    | 8          | 1          | 0102030405 | 0611223344   |
++    When I add the business entity
++    Then the business entity should be successfully created
++    And the business entity "Phone Entity" should exist in the database
++    And the address with alias "Billing" for business entity "Phone Entity" should have phone "0102030405" and mobile phone "0611223344"
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index a9ab6c39e5fce..267bbc0aca74b 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -798,3 +798,9 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+         - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    business_entity:
++      paths:
++        - "%paths.base%/Features/Scenario/BusinessEntity"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\BusinessEntityFeatureContext
+diff --git a/tests/Unit/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommandTest.php b/tests/Unit/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommandTest.php
+new file mode 100644
+index 0000000000000..fd133419eeb18
+--- /dev/null
++++ b/tests/Unit/Core/Domain/BusinessEntity/Command/AddBusinessEntityCommandTest.php
+@@ -0,0 +1,352 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\BusinessEntity\Command;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Command\AddBusinessEntityCommand;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityBillingAddressConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityBillingAddress;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityShippingAddress;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++
++class AddBusinessEntityCommandTest extends TestCase
++{
++    public const DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF = 'EXT-001';
++    public const DEFAULT_BUSINESS_ENTITY_CITY = 'City';
++    public const DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING = 'Billing';
++    public const DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING = 'Shipping';
++    public const DEFAULT_BUSINESS_ENTITY_POSTCODE = '00000';
++    public const DEFAULT_BUSINESS_ENTITY_ADDRESS1 = 'a';
++    public const DEFAULT_BUSINESS_ENTITY_LEGAL_NAME = 'b';
++    public const DEFAULT_BUSINESS_ENTITY_NAME = 'NAME';
++    public const DEFAULT_BUSINESS_ENTITY_SHOP_ID = 1;
++    public const DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID = 3;
++
++    public function testItWorksWhenBillingAddressIsShippingAddress(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            true,
++            [$billingAddress]
++        );
++
++        $this->assertTrue(true);
++    }
++
++    public function testItExposesAllConstructorParamsViaGetters(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++        $shippingAddress = new BusinessEntityShippingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $command = new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            false,
++            [$billingAddress],
++            [$shippingAddress]
++        );
++
++        $this->assertSame(self::DEFAULT_BUSINESS_ENTITY_NAME, $command->getName());
++        $this->assertSame(self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME, $command->getLegalName());
++        $this->assertSame(self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF, $command->getExternalRef());
++        $this->assertTrue($command->isDeliveryAuthorized());
++        $this->assertSame(BusinessEntityStatus::ACTIVE, $command->getStatus());
++        $this->assertSame(self::DEFAULT_BUSINESS_ENTITY_SHOP_ID, $command->getShopId());
++        $this->assertSame(self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID, $command->getCustomerGroupId());
++        $this->assertFalse($command->isBillingAddressAsShippingAddress());
++        $this->assertSame([$billingAddress], $command->getBillingAddresses());
++        $this->assertSame([$shippingAddress], $command->getShippingAddresses());
++    }
++
++    public function testItWorksWithSeparateAddresses(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $shippingAddress = new BusinessEntityShippingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            false,
++            [$billingAddress],
++            [$shippingAddress]
++        );
++
++        $this->assertTrue(true);
++    }
++
++    public function testItThrowsExceptionWhenBillingAddressIsMissing(): void
++    {
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MISSING_BILLING_ADDRESS);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            true,
++            []
++        );
++    }
++
++    public function testItThrowsExceptionWhenDefaultBillingAddressIsMissing(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            false,
++            null
++        );
++
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_BILLING_ADDRESS);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            true,
++            [$billingAddress]
++        );
++    }
++
++    public function testItThrowsExceptionWhenShippingAddressIsMissingAndNotBillingAsShipping(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MISSING_SHIPPING_ADDRESS);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            false,
++            [$billingAddress],
++            []
++        );
++    }
++
++    public function testItThrowsExceptionWhenDefaultShippingAddressIsMissing(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $shippingAddress = new BusinessEntityShippingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            false,
++            null
++        );
++
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MISSING_DEFAULT_SHIPPING_ADDRESS);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            false,
++            [$billingAddress],
++            [$shippingAddress]
++        );
++    }
++
++    public function testItThrowsExceptionWhenMultipleDefaultBillingAddresses(): void
++    {
++        $firstDefaultBillingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++        $secondDefaultBillingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_BILLING_ADDRESSES);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            true,
++            [$firstDefaultBillingAddress, $secondDefaultBillingAddress]
++        );
++    }
++
++    public function testItThrowsExceptionWhenMultipleDefaultShippingAddresses(): void
++    {
++        $billingAddress = new BusinessEntityBillingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_BILLING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++        $firstDefaultShippingAddress = new BusinessEntityShippingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++        $secondDefaultShippingAddress = new BusinessEntityShippingAddress(
++            self::DEFAULT_BUSINESS_ENTITY_ALIAS_SHIPPING,
++            self::DEFAULT_BUSINESS_ENTITY_ADDRESS1,
++            null,
++            self::DEFAULT_BUSINESS_ENTITY_CITY,
++            self::DEFAULT_BUSINESS_ENTITY_POSTCODE,
++            8,
++            true,
++            null
++        );
++
++        $this->expectException(BusinessEntityBillingAddressConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityBillingAddressConstraintException::MULTIPLE_DEFAULT_SHIPPING_ADDRESSES);
++
++        new AddBusinessEntityCommand(
++            self::DEFAULT_BUSINESS_ENTITY_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_LEGAL_NAME,
++            self::DEFAULT_BUSINESS_ENTITY_EXTERNAL_REF,
++            true,
++            BusinessEntityStatus::ACTIVE,
++            self::DEFAULT_BUSINESS_ENTITY_SHOP_ID,
++            self::DEFAULT_BUSINESS_ENTITY_CUSTOMER_GROUP_ID,
++            false,
++            [$billingAddress],
++            [$firstDefaultShippingAddress, $secondDefaultShippingAddress]
++        );
++    }
++}
+diff --git a/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformationTest.php b/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformationTest.php
+new file mode 100644
+index 0000000000000..d3877239a80d0
+--- /dev/null
++++ b/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityGeneralInformationTest.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\BusinessEntity\ValueObject;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityGeneralInformation;
++use PrestaShopBundle\Entity\Enum\BusinessEntityStatus;
++
++class BusinessEntityGeneralInformationTest extends TestCase
++{
++    public function testItExposesAllConstructorParamsViaGetters(): void
++    {
++        $generalInformation = new BusinessEntityGeneralInformation(
++            'My Business Entity',
++            'Legal Name SAS',
++            'EXT-007',
++            true,
++            BusinessEntityStatus::ACTIVE,
++            42,
++            5,
++        );
++
++        $this->assertSame('My Business Entity', $generalInformation->getName());
++        $this->assertSame('Legal Name SAS', $generalInformation->getLegalName());
++        $this->assertSame('EXT-007', $generalInformation->getExternalRef());
++        $this->assertTrue($generalInformation->isDeliveryAuthorized());
++        $this->assertSame(BusinessEntityStatus::ACTIVE, $generalInformation->getStatus());
++        $this->assertSame(42, $generalInformation->getShopId());
++        $this->assertSame(5, $generalInformation->getCustomerGroupId());
++    }
++
++    public function testItAcceptsNullableExternalRef(): void
++    {
++        $generalInformation = new BusinessEntityGeneralInformation(
++            'Name',
++            'Legal',
++            null,
++            false,
++            BusinessEntityStatus::PENDING,
++            1,
++            3,
++        );
++
++        $this->assertNull($generalInformation->getExternalRef());
++        $this->assertFalse($generalInformation->isDeliveryAuthorized());
++    }
++}
+diff --git a/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityIdTest.php b/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityIdTest.php
+new file mode 100644
+index 0000000000000..445397eaaba05
+--- /dev/null
++++ b/tests/Unit/Core/Domain/BusinessEntity/ValueObject/BusinessEntityIdTest.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\BusinessEntity\ValueObject;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\Exception\BusinessEntityConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\BusinessEntity\ValueObject\BusinessEntityId;
++
++class BusinessEntityIdTest extends TestCase
++{
++    public function testItExposesTheValue(): void
++    {
++        $businessEntityId = new BusinessEntityId(42);
++
++        $this->assertSame(42, $businessEntityId->getValue());
++    }
++
++    /**
++     * @dataProvider provideInvalidIds
++     */
++    public function testItRejectsIdsLowerThanOrEqualToZero(int $invalidId): void
++    {
++        $this->expectException(BusinessEntityConstraintException::class);
++        $this->expectExceptionCode(BusinessEntityConstraintException::INVALID_ID);
++
++        new BusinessEntityId($invalidId);
++    }
++
++    /**
++     * @return array<int, array{int}>
++     */
++    public function provideInvalidIds(): array
++    {
++        return [
++            [0],
++            [-1],
++        ];
++    }
++}

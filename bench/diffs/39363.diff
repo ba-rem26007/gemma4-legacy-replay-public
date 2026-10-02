@@ -1,0 +1,887 @@
+diff --git a/admin-dev/themes/new-theme/js/components/form/toggle-children-choice.ts b/admin-dev/themes/new-theme/js/components/form/toggle-children-choice.ts
+index 7c6202b792715..aa33861998065 100644
+--- a/admin-dev/themes/new-theme/js/components/form/toggle-children-choice.ts
++++ b/admin-dev/themes/new-theme/js/components/form/toggle-children-choice.ts
+@@ -65,6 +65,8 @@ export default class ToggleChildrenChoice {
+               selectedChild.classList.remove('d-none');
+             }
+           }
++          const {eventEmitter} = window.prestashop.instance;
++          eventEmitter.emit('ToggleChildrenChoice:toggled', radio);
+         });
+       });
+     });
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+index e8dcf63e29a30..d8bd4d7a66b38 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+@@ -40,4 +40,7 @@ export default {
+   specificProductId: '.specific-product-id',
+   specificProductType: '.specific-product-type',
+   specificCombinationId: '.specific-combination-choice',
++  carriersSelect: '#discount_conditions_delivery_conditions_carriers',
++  countriesSelect: '#discount_conditions_delivery_conditions_country',
++  categoryTree: '#discount_conditions_cart_conditions_product_segment_category',
+ };
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index 5ab4190176f58..3764233040fb9 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -35,21 +35,62 @@ $(() => {
+       'ToggleChildrenChoice',
+       'GeneratableInput',
+       'ChoiceTree',
++      'EventEmitter',
+     ],
+   );
+ 
+   new CreateFreeGiftDiscount();
+   new SpecificProducts();
+ 
+-  new PriceReductionManager(
+-    DiscountMap.reductionTypeSelect,
+-    DiscountMap.includeTaxInput,
+-    DiscountMap.currencySelect,
+-    DiscountMap.reductionValueSymbol,
+-    DiscountMap.currencySelectContainer,
+-  );
+-  toggleCurrency();
+-  document.querySelector(DiscountMap.reductionTypeSelect)?.addEventListener('change', toggleCurrency);
++  const reductionTypeSelect = document.querySelector(DiscountMap.reductionTypeSelect);
++
++  if (reductionTypeSelect) {
++    reductionTypeSelect.addEventListener('change', toggleCurrency);
++    new PriceReductionManager(
++      DiscountMap.reductionTypeSelect,
++      DiscountMap.includeTaxInput,
++      DiscountMap.currencySelect,
++      DiscountMap.reductionValueSymbol,
++      DiscountMap.currencySelectContainer,
++    );
++    toggleCurrency();
++  }
++
++  const {eventEmitter} = window.prestashop.instance;
++
++  eventEmitter.on('ToggleChildrenChoice:toggled', (radio: HTMLInputElement) => {
++    // We need to trigger change those select2 elements because the component is not loaded when the page is displayed
++    // if we don't trigger change them, the placeholder cannot be loaded correctly.
++    if (radio.value === 'country') {
++      $(DiscountMap.countriesSelect).trigger('change');
++    }
++    if (radio.value === 'carriers') {
++      $(DiscountMap.carriersSelect).trigger('change');
++    }
++  });
++
++  $(DiscountMap.countriesSelect).select2({
++    templateResult: formatOption,
++    templateSelection: formatOption,
++    theme: 'bootstrap4',
++  });
++
++  $(DiscountMap.carriersSelect).select2({
++    templateResult: formatOption,
++    templateSelection: formatOption,
++    theme: 'bootstrap4',
++  });
++
++  function formatOption(option: any) {
++    if (!option.element || !option.element.dataset.logo) {
++      return option.text;
++    }
++    const imageUrl = option.element.dataset.logo;
++
++    return $(
++      `<span><img src="${imageUrl}"/> ${option.text} </span>`,
++    );
++  }
+ 
+   function toggleCurrency(): void {
+     if ($(DiscountMap.reductionTypeSelect).val() === 'percentage') {
+@@ -59,5 +100,5 @@ $(() => {
+     }
+   }
+ 
+-  new window.prestashop.component.ChoiceTree('#discount_conditions_cart_conditions_product_segment_category');
++  new window.prestashop.component.ChoiceTree(DiscountMap.categoryTree);
+ });
+diff --git a/bin/console b/bin/console
+index ac9f394386329..90561080c6e7c 100755
+--- a/bin/console
++++ b/bin/console
+@@ -16,8 +16,20 @@ set_time_limit(0);
+ 
+ try {
+     require_once __DIR__ . '/../config/config.inc.php';
+-} catch (PrestaShopException) {
+-    // Prevent breaking all CLI command when the shop is not installed
++} catch (PrestaShopException $e) {
++    // Prevent breaking all CLI command when the shop is not installed, define fallback values
++    if (!defined('__PS_BASE_URI__')) {
++      define('__PS_BASE_URI__', '/');
++    }
++    if (!defined('_THEME_NAME_')) {
++      define('_THEME_NAME_', 'classic');
++    }
++    if (!defined('_PARENT_THEME_NAME_')) {
++      define('_PARENT_THEME_NAME_', '');
++    }
++
++    // Define all the URI base constants
++    require_once __DIR__ . '/../config/defines_uri.inc.php';
+ }
+ 
+ $input = new ArgvInput();
+diff --git a/install-dev/init.php b/install-dev/init.php
+index 7a2e69833665b..92a216b4176fe 100644
+--- a/install-dev/init.php
++++ b/install-dev/init.php
+@@ -91,29 +91,6 @@
+ 
+ if (file_exists(_PS_CORE_DIR_ . '/app/config/parameters.php')) {
+     require_once _PS_CORE_DIR_ . '/config/bootstrap.php';
+-    require_once _PS_CORE_DIR_ . '/app/AdminKernel.php';
+-
+-    global $kernel;
+-    try {
+-        $kernel = new AdminKernel(_PS_ENV_, _PS_MODE_DEV_);
+-        $kernel->boot();
+-    } catch (DBALException $e) {
+-        /*
+-         * Doctrine couldn't be loaded because database settings point to a
+-         * non existence database
+-         */
+-        if (strpos($e->getMessage(), 'You can circumvent this by setting a \'server_version\' configuration value') === false) {
+-            throw $e;
+-        }
+-    } catch (\Symfony\Component\DependencyInjection\Exception\RuntimeException $e) {
+-        if (strpos($e->getMessage(), 'You have requested a non-existent parameter') === 0) {
+-            die(sprintf('Error: %s', $e->getMessage())
+-                . PHP_EOL . 'A missing parameter was detected, which may be caused by old configuration files.'
+-                . PHP_EOL . 'Try clearing the /var/cache directory and deleting parameters.php and parameters.yml in the /app/config/ directory.'
+-            );
+-        }
+-        throw $e;
+-    }
+ }
+ 
+ if (!defined('_THEME_NAME_')) {
+@@ -149,6 +126,34 @@
+ 
+ require_once _PS_CORE_DIR_ . '/config/defines_uri.inc.php';
+ 
++// Delay kernel instantiation after all the configuration const have been defined, or they won't be usable in the service definitions,
++// especially all the URLs constants
++if (file_exists(_PS_CORE_DIR_ . '/app/config/parameters.php')) {
++    require_once _PS_CORE_DIR_ . '/app/AdminKernel.php';
++
++    global $kernel;
++    try {
++        $kernel = new AdminKernel(_PS_ENV_, _PS_MODE_DEV_);
++        $kernel->boot();
++    } catch (DBALException $e) {
++        /*
++         * Doctrine couldn't be loaded because database settings point to a
++         * non existence database
++         */
++        if (strpos($e->getMessage(), 'You can circumvent this by setting a \'server_version\' configuration value') === false) {
++            throw $e;
++        }
++    } catch (\Symfony\Component\DependencyInjection\Exception\RuntimeException $e) {
++        if (strpos($e->getMessage(), 'You have requested a non-existent parameter') === 0) {
++            die(sprintf('Error: %s', $e->getMessage())
++                . PHP_EOL . 'A missing parameter was detected, which may be caused by old configuration files.'
++                . PHP_EOL . 'Try clearing the /var/cache directory and deleting parameters.php and parameters.yml in the /app/config/ directory.'
++            );
++        }
++        throw $e;
++    }
++}
++
+ // Generate common constants
+ define('PS_INSTALLATION_IN_PROGRESS', true);
+ define('PS_INSTALLATION_LOCK_FILE', _PS_CORE_DIR_ . '/var/.install.prestashop');
+diff --git a/src/Adapter/Cart/CommandHandler/UpdateCartCarrierHandler.php b/src/Adapter/Cart/CommandHandler/UpdateCartCarrierHandler.php
+index a5959e243a54e..b3e99f0a94675 100644
+--- a/src/Adapter/Cart/CommandHandler/UpdateCartCarrierHandler.php
++++ b/src/Adapter/Cart/CommandHandler/UpdateCartCarrierHandler.php
+@@ -68,6 +68,7 @@ public function handle(UpdateCartCarrierCommand $command)
+             $cart->setDeliveryOption([
+                 (int) $cart->id_address_delivery => $this->formatLegacyDeliveryOptionFromCarrierId($command->getNewCarrierId()),
+             ]);
++            $cart->id_carrier = $command->getNewCarrierId();
+             $cart->update();
+         } finally {
+             $this->contextStateManager->restorePreviousContext();
+diff --git a/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php b/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php
+index 8cd277a93e3f2..e99dc4738367e 100644
+--- a/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php
++++ b/src/Adapter/Discount/CommandHandler/UpdateDiscountConditionsHandler.php
+@@ -29,6 +29,7 @@
+ use PrestaShop\PrestaShop\Adapter\Discount\Update\DiscountConditionsUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\UpdateDiscountConditionsCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\UpdateDiscountConditionsHandlerInterface;
+ 
+@@ -49,6 +50,7 @@ public function handle(UpdateDiscountConditionsCommand $command): void
+             $command->getMinimumAmount(),
+             $command->getMinimumAmountShippingIncluded(),
+             $command->getCarrierIds() ? array_map(fn (CarrierId $carrierId) => $carrierId->getValue(), $command->getCarrierIds()) : null,
++            $command->getCountryIds() ? array_map(fn (CountryId $countryId) => $countryId->getValue(), $command->getCountryIds()) : null,
+         );
+     }
+ }
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index 5a5627f205ac1..f11897b3976da 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -51,6 +51,7 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+         $cartRule = $this->discountRepository->get($query->getDiscountId());
+         $discountConditions = $this->discountRepository->getProductRulesGroup($query->getDiscountId());
+         $carrierIds = $this->discountRepository->getCarriers($query->getDiscountId());
++        $countryIds = $this->discountRepository->getCountries($query->getDiscountId());
+ 
+         return new DiscountForEditing(
+             $query->getDiscountId()->getValue(),
+@@ -80,7 +81,8 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+             $cartRule->minimum_amount_currency,
+             $cartRule->minimum_amount_tax,
+             $cartRule->minimum_amount_shipping,
+-            $carrierIds
++            $carrierIds,
++            $countryIds,
+         );
+     }
+ }
+diff --git a/src/Adapter/Discount/Repository/DiscountRepository.php b/src/Adapter/Discount/Repository/DiscountRepository.php
+index 41bc3d5a1bf89..7001618092c95 100644
+--- a/src/Adapter/Discount/Repository/DiscountRepository.php
++++ b/src/Adapter/Discount/Repository/DiscountRepository.php
+@@ -156,6 +156,19 @@ public function getCarriers(DiscountId $discountId): array
+         return array_map(fn (array $row) => (int) $row['id_carrier'], $qb->executeQuery()->fetchAllAssociative());
+     }
+ 
++    public function getCountries(DiscountId $discountId)
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('*')
++            ->from($this->dbPrefix . 'cart_rule_country', 'crc')
++            ->where('crc.id_cart_rule = :discountId')
++            ->setparameter('discountId', $discountId->getValue())
++        ;
++
++        return array_map(fn (array $row) => (int) $row['id_country'], $qb->executeQuery()->fetchAllAssociative());
++    }
++
+     /**
+      * Returns the ID of a discount by its code.
+      * null is returned if the discount does not exist.
+diff --git a/src/Adapter/Discount/Update/DiscountConditionsUpdater.php b/src/Adapter/Discount/Update/DiscountConditionsUpdater.php
+index 2fa9496533353..8970f1ad5a49e 100644
+--- a/src/Adapter/Discount/Update/DiscountConditionsUpdater.php
++++ b/src/Adapter/Discount/Update/DiscountConditionsUpdater.php
+@@ -60,6 +60,7 @@ public function update(
+         ?Money $minimumAmount = null,
+         ?bool $minimumShippingIncluded = null,
+         ?array $carrierIds = null,
++        ?array $countryIds = null,
+     ): void {
+         // todo: when other conditions are added we check that only one is provided
+         $discount = $this->discountRepository->get($discountId);
+@@ -81,6 +82,10 @@ public function update(
+             $updatableProperties = array_merge($updatableProperties, $this->applyCarrierConditions($discount, $carrierIds));
+         }
+ 
++        if (null !== $countryIds) {
++            $updatableProperties = array_merge($updatableProperties, $this->applyCountryConditions($discount, $countryIds));
++        }
++
+         $updatableProperties = array_unique($updatableProperties);
+         if (!empty($updatableProperties)) {
+             $this->discountRepository->partialUpdate($discount, $updatableProperties, CannotUpdateDiscountException::FAILED_UPDATE_CONDITIONS);
+@@ -193,6 +198,27 @@ private function applyCarrierConditions(CartRule $discount, array $carrierIds):
+         return ['carrier_restriction'];
+     }
+ 
++    private function applyCountryConditions(CartRule $discount, array $countryIds): array
++    {
++        if (empty($countryIds)) {
++            return [];
++        }
++
++        $discount->country_restriction = true;
++        foreach ($countryIds as $countryId) {
++            $this->connection->createQueryBuilder()
++                ->insert($this->dbPrefix . 'cart_rule_country')
++                ->values([
++                    'id_cart_rule' => (int) $discount->id,
++                    'id_country' => $countryId,
++                ])
++                ->executeStatement()
++            ;
++        }
++
++        return ['country_restriction'];
++    }
++
+     private function cleanAllConditions(CartRule $discount): array
+     {
+         $discount->minimum_product_quantity = 0;
+@@ -204,6 +230,7 @@ private function cleanAllConditions(CartRule $discount): array
+         return array_merge(
+             $this->cleanDiscountProductRules($discount),
+             $this->cleanDiscountCarriers($discount),
++            $this->cleanDiscountCountries($discount),
+             [
+                 'minimum_product_quantity',
+                 'minimum_amount',
+@@ -257,4 +284,19 @@ private function cleanDiscountCarriers(CartRule $discount): array
+ 
+         return ['carrier_restriction'];
+     }
++
++    private function cleanDiscountCountries(CartRule $discount): array
++    {
++        // Disable country restriction
++        $discount->country_restriction = false;
++
++        $this->connection->createQueryBuilder()
++            ->delete($this->dbPrefix . 'cart_rule_country', 'crc')
++            ->where('crc.id_cart_rule = :discountId')
++            ->setParameter('discountId', (int) $discount->id)
++            ->executeStatement()
++        ;
++
++        return ['country_restriction'];
++    }
+ }
+diff --git a/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+index 954152ba15ef6..1f5accd2d34cb 100644
+--- a/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
++++ b/src/Core/Domain/Discount/Command/UpdateDiscountConditionsCommand.php
+@@ -28,6 +28,7 @@
+ 
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleGroup;
+@@ -51,6 +52,8 @@ class UpdateDiscountConditionsCommand
+      */
+     private ?array $carrierIds = null;
+ 
++    private ?array $countryIds = null;
++
+     public function __construct(int $discountId)
+     {
+         $this->discountId = new DiscountId($discountId);
+@@ -168,4 +171,16 @@ public function setCarrierIds(?array $carrierIds): self
+ 
+         return $this;
+     }
++
++    public function getCountryIds(): ?array
++    {
++        return $this->countryIds;
++    }
++
++    public function setCountryIds(?array $countryIds): self
++    {
++        $this->countryIds = array_map(fn (int $countryId) => new CountryId($countryId), $countryIds);
++
++        return $this;
++    }
+ }
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index b869e6cc9d111..8b1040eb9a797 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -62,6 +62,7 @@ public function __construct(
+         private readonly ?bool $minimumAmountTaxIncluded,
+         private readonly ?bool $minimumAmountShippingIncluded,
+         private readonly array $carrierIds,
++        private readonly array $countryIds,
+     ) {
+     }
+ 
+@@ -210,4 +211,9 @@ public function getCarrierIds(): array
+     {
+         return $this->carrierIds;
+     }
++
++    public function getCountryIds(): array
++    {
++        return $this->countryIds;
++    }
+ }
+diff --git a/src/Core/Form/ChoiceProvider/CountryByIdChoiceProvider.php b/src/Core/Form/ChoiceProvider/CountryByIdChoiceProvider.php
+index 6464d69c8ed88..64817c555166b 100644
+--- a/src/Core/Form/ChoiceProvider/CountryByIdChoiceProvider.php
++++ b/src/Core/Form/ChoiceProvider/CountryByIdChoiceProvider.php
+@@ -67,7 +67,9 @@ final class CountryByIdChoiceProvider implements FormChoiceProviderInterface, Fo
+      */
+     public function __construct(
+         $langId,
+-        CountryDataProvider $countryDataProvider
++        CountryDataProvider $countryDataProvider,
++        private string $psImageDir,
++        private string $psImageBaseUrl
+     ) {
+         $this->langId = $langId;
+         $this->countryDataProvider = $countryDataProvider;
+@@ -104,6 +106,12 @@ public function getChoicesAttributes()
+             if (in_array($country['id_country'], $postcodeCountriesId)) {
+                 $choicesAttributes[$country['name']]['need_postcode'] = 1;
+             }
++
++            $flagPath = 'flags/' . strtolower($country['iso_code']) . '.jpg';
++
++            if (file_exists($this->psImageDir . $flagPath)) {
++                $choicesAttributes[$country['name']]['data-logo'] = $this->psImageBaseUrl . $flagPath;
++            }
+         }
+ 
+         return $choicesAttributes;
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index f49f05bbe76e5..18f334f87b72c 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -243,6 +243,9 @@ private function updateDiscountConditions(int $discountId, array $data): void
+             if ($data['conditions'][DiscountConditionsType::DELIVERY_CONDITIONS]['children_selector'] === DeliveryConditionsType::CARRIERS) {
+                 $conditionsCommand->setCarrierIds($data['conditions'][DiscountConditionsType::DELIVERY_CONDITIONS][DeliveryConditionsType::CARRIERS]);
+             }
++            if ($data['conditions'][DiscountConditionsType::DELIVERY_CONDITIONS]['children_selector'] === DeliveryConditionsType::COUNTRY) {
++                $conditionsCommand->setCountryIds($data['conditions'][DiscountConditionsType::DELIVERY_CONDITIONS][DeliveryConditionsType::COUNTRY]);
++            }
+         }
+ 
+         $this->commandBus->handle($conditionsCommand);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 90ea992361d7a..a9deb2af36ac5 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -114,6 +114,9 @@ public function getData($id)
+         } elseif (!empty($discountForEditing->getCarrierIds())) {
+             $selectedCondition = DiscountConditionsType::DELIVERY_CONDITIONS;
+             $selectedDeliveryCondition = DeliveryConditionsType::CARRIERS;
++        } elseif (!empty($discountForEditing->getCountryIds())) {
++            $selectedCondition = DiscountConditionsType::DELIVERY_CONDITIONS;
++            $selectedDeliveryCondition = DeliveryConditionsType::COUNTRY;
+         }
+ 
+         return [
+@@ -156,6 +159,7 @@ public function getData($id)
+                 DiscountConditionsType::DELIVERY_CONDITIONS => [
+                     'children_selector' => $selectedDeliveryCondition,
+                     DeliveryConditionsType::CARRIERS => $discountForEditing->getCarrierIds(),
++                    DeliveryConditionsType::COUNTRY => $discountForEditing->getCountryIds(),
+                 ],
+             ],
+             'usability' => [
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DeliveryConditionsType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DeliveryConditionsType.php
+index b9416a3acf577..0b48f0420623f 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DeliveryConditionsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DeliveryConditionsType.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+ 
+ use PrestaShopBundle\Form\Admin\Type\CarrierChoiceType;
++use PrestaShopBundle\Form\Admin\Type\CountryChoiceType;
+ use PrestaShopBundle\Form\Admin\Type\ToggleChildrenChoiceType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\FormBuilderInterface;
+@@ -37,6 +38,7 @@
+ class DeliveryConditionsType extends TranslatorAwareType
+ {
+     public const CARRIERS = 'carriers';
++    public const COUNTRY = 'country';
+ 
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+@@ -44,7 +46,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ->add(self::CARRIERS, CarrierChoiceType::class, [
+                 'label' => $this->trans('Specific carriers', 'Admin.Catalog.Feature'),
+                 'multiple' => true,
+-                'expanded' => true,
++                'attr' => [
++                    'data-placeholder' => $this->trans('Select carriers', 'Admin.Catalog.Feature'),
++                ],
+                 'constraints' => [
+                     new When(
+                         expression: sprintf(
+@@ -56,6 +60,25 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ),
+                 ],
+             ])
++            ->add(self::COUNTRY, CountryChoiceType::class, [
++                'label' => $this->trans('Specific countries', 'Admin.Catalog.Feature'),
++                'multiple' => true,
++                'expanded' => false,
++                'with_logo_attr' => true,
++                'attr' => [
++                    'data-placeholder' => $this->trans('Select countries', 'Admin.Catalog.Feature'),
++                ],
++                'constraints' => [
++                    new When(
++                        expression: sprintf(
++                            'this.getParent().getParent().get("children_selector").getData() === "%s" && this.getParent().get("children_selector").getData() === "%s"',
++                            DiscountConditionsType::DELIVERY_CONDITIONS,
++                            self::COUNTRY
++                        ),
++                        constraints: new NotBlank(),
++                    ),
++                ],
++            ])
+         ;
+     }
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/CarrierChoiceType.php b/src/PrestaShopBundle/Form/Admin/Type/CarrierChoiceType.php
+index 34e088e900e1d..a89cab8a1debf 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/CarrierChoiceType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/CarrierChoiceType.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Form\Admin\Type;
+ 
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
++use PrestaShop\PrestaShop\Core\Image\ImageProviderInterface;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+@@ -35,6 +36,7 @@ class CarrierChoiceType extends AbstractType
+ {
+     public function __construct(
+         private readonly FormChoiceProviderInterface $carrierChoiceProvider,
++        private readonly ImageProviderInterface $carrierLogoProvider,
+     ) {
+     }
+ 
+@@ -43,11 +45,25 @@ public function __construct(
+      */
+     public function configureOptions(OptionsResolver $resolver): void
+     {
++        $carriers = $this->carrierChoiceProvider->getChoices();
+         $resolver->setDefaults([
+-            'choices' => $this->carrierChoiceProvider->getChoices(),
++            'choices' => $carriers,
++            'choice_attr' => $this->formatChoicesAttr($carriers),
+         ]);
+     }
+ 
++    private function formatChoicesAttr(array $carriers): array
++    {
++        $choicesAttr = [];
++        foreach ($carriers as $name => $id) {
++            $choicesAttr[$name] = [
++                'data-logo' => $this->carrierLogoProvider->getPath($id),
++            ];
++        }
++
++        return $choicesAttr;
++    }
++
+     /**
+      * {@inheritdoc}
+      */
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/CountryChoiceType.php b/src/PrestaShopBundle/Form/Admin/Type/CountryChoiceType.php
+index c5b28a8ecf813..8978c68c8e147 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/CountryChoiceType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/CountryChoiceType.php
+@@ -44,6 +44,8 @@ class CountryChoiceType extends AbstractType
+     private bool $needDni = false;
+     private bool $needPostcode = false;
+ 
++    private bool $needLogo = false;
++
+     public function __construct(
+         private readonly FormChoiceProviderInterface&FormChoiceAttributeProviderInterface $countriesChoiceProvider,
+         private readonly TranslatorInterface $translator,
+@@ -52,9 +54,10 @@ public function __construct(
+ 
+     public function buildForm(FormBuilderInterface $builder, array $options): void
+     {
+-        if ($options['with_dni_attr'] || $options['with_postcode_attr']) {
++        if ($options['with_dni_attr'] || $options['with_postcode_attr'] || $options['with_logo_attr']) {
+             $this->needDni = $options['with_dni_attr'];
+             $this->needPostcode = $options['with_postcode_attr'];
++            $this->needLogo = $options['with_logo_attr'];
+             $this->countriesAttr = $this->countriesChoiceProvider->getChoicesAttributes();
+         }
+         parent::buildForm($builder, $options);
+@@ -72,6 +75,7 @@ public function configureOptions(OptionsResolver $resolver): void
+             'add_all_countries_option' => false,
+             'with_dni_attr' => false,
+             'with_postcode_attr' => false,
++            'with_logo_attr' => false,
+         ]);
+ 
+         $resolver->addNormalizer('choices', function (Options $options) {
+@@ -89,7 +93,8 @@ public function configureOptions(OptionsResolver $resolver): void
+ 
+         $resolver
+             ->setAllowedTypes('with_dni_attr', 'boolean')
+-            ->setAllowedTypes('with_postcode_attr', 'boolean');
++            ->setAllowedTypes('with_postcode_attr', 'boolean')
++            ->setAllowedTypes('with_logo_attr', 'boolean');
+     }
+ 
+     public function getChoiceAttr($value, $key)
+@@ -101,6 +106,9 @@ public function getChoiceAttr($value, $key)
+         if ($this->needPostcode && isset($this->countriesAttr[$key], $this->countriesAttr[$key]['need_postcode'])) {
+             $attr['need_postcode'] = 1;
+         }
++        if ($this->needLogo && isset($this->countriesAttr[$key], $this->countriesAttr[$key]['data-logo'])) {
++            $attr['data-logo'] = $this->countriesAttr[$key]['data-logo'];
++        }
+ 
+         return $attr;
+     }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 9812f47477919..d96d50eba4e42 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -565,6 +565,7 @@ services:
+   PrestaShopBundle\Form\Admin\Type\CarrierChoiceType:
+     arguments:
+       $carrierChoiceProvider: '@prestashop.core.form.choice_provider.carrier_by_reference_id'
++      $carrierLogoProvider: '@prestashop.adapter.carrier.carrier_thumbnail_logo_provider'
+ 
+   PrestaShopBundle\Form\Admin\Type\ZoneChoiceType:
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+index fb7ff8e100e03..1b2481732b4d4 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+@@ -138,3 +138,8 @@ services:
+ 
+   PrestaShop\PrestaShop\Core\Form\ChoiceProvider\ImageTypeChoiceProvider:
+     autowire: true
++
++  PrestaShop\PrestaShop\Core\Form\ChoiceProvider\CountryByIdChoiceProvider:
++    arguments:
++      $psImageDir: !php/const _PS_IMG_DIR_
++      $psImageBaseUrl: !php/const _PS_IMG_
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php
+index 57d14dc7333ee..1e823e560eb11 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountConditionsFeatureContext.php
+@@ -127,6 +127,21 @@ public function updateDiscountCarrierConditions(string $discountReference, strin
+         $this->getCommandBus()->handle($command);
+     }
+ 
++    /**
++     * @When I update discount :discountReference with conditions based on countries :countryReferences
++     *
++     * @param string $discountReference
++     * @param string $countryReferences
++     *
++     * @return void
++     */
++    public function updateDiscountCountryConditions(string $discountReference, string $countryReferences): void
++    {
++        $command = new UpdateDiscountConditionsCommand($this->referenceToId($discountReference));
++        $command->setCountryIds($this->referencesToIds($countryReferences));
++        $this->getCommandBus()->handle($command);
++    }
++
+     /**
+      * @Then discount :discountReference should have the following product conditions matching at least :quantity products:
+      *
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index ab3b3dd717e94..bd06682e98672 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -410,6 +410,9 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+         if (isset($expectedData['carriers'])) {
+             Assert::assertSame($this->referencesToIds($expectedData['carriers']), $discountForEditing->getCarrierIds(), 'Unexpected carriers');
+         }
++        if (isset($expectedData['countries'])) {
++            Assert::assertSame($this->referencesToIds($expectedData['countries']), $discountForEditing->getCountryIds(), 'Unexpected countries');
++        }
+     }
+ 
+     protected function getDiscountForEditing(string $discountReference): DiscountForEditing
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_country_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_country_trigger.feature
+new file mode 100644
+index 0000000000000..05068fcb4656f
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_country_trigger.feature
+@@ -0,0 +1,30 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount-with-country-trigger
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-discount-with-country-trigger
++Feature: Add discount with country trigger
++  PrestaShop allows BO users to update discounts conditions
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given language with iso code "en" is the default one
++    And country "france" with iso code "FR" exists
++    And country "spain" with iso code "ES" exists
++
++  Scenario: Create discount with country trigger
++    When I create a "free_shipping" discount "discount_with_country_trigger" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_country_trigger" with conditions based on countries "france,spain"
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | condition_type | items        |
++      | countries      | spain,france |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_country_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_country_trigger.feature
+new file mode 100644
+index 0000000000000..f5c6be4f3bdf4
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_country_trigger.feature
+@@ -0,0 +1,125 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-with-country-trigger
++@restore-all-tables-before-feature
++@discount-with-country-trigger
++Feature: Add discount with country trigger on FO
++  PrestaShop allows discounts with restricted products as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    Given country "France" with iso code "FR" exists
++    And group "customer" named "Customer" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++
++  Scenario: I create a zone and a carrier for europe
++    Given there is a zone "europe" named "Europe"
++    And I create carrier "nice_carrier" with specified properties:
++      | name             | Nice carrier                       |
++      | grade            | 1                                  |
++      | trackingUrl      | http://example.com/track.php?num=@ |
++      | active           | true                               |
++      | group_access     | customer                           |
++      | delay[en-US]     | Shipping delay                     |
++      | delay[fr-FR]     | Délai de livraison                 |
++      | shippingHandling | false                              |
++      | isFree           | false                              |
++      | shippingMethod   | price                              |
++      | zones            | europe                             |
++      | rangeBehavior    | highest_range                      |
++    And I set ranges for carrier "nice_carrier" with specified properties for all shops:
++      | id_zone | range_from | range_to | range_price |
++      | europe  | 0          | 100      | 7           |
++
++  Scenario: I create a customer in france
++    Given I create customer "testFrenchCustomer" with following details:
++      | firstName | testFirstName               |
++      | lastName  | testLastName                |
++      | email     | test.davidsonas@invertus.eu |
++      | password  | secret                      |
++    When I add new address to customer "testFrenchCustomer" with following details:
++      | Address alias | test-customer-address       |
++      | First name    | testFirstName               |
++      | Last name     | testLastName                |
++      | Address       | Work address st. 1234567890 |
++      | City          | Valence                     |
++      | Country       | France                      |
++      | Postal code   | 26000                       |
++    Then customer "testFrenchCustomer" should have address "test-customer-address" with following details:
++      | Address alias | test-customer-address       |
++      | First name    | testFirstName               |
++      | Last name     | testLastName                |
++      | Address       | Work address st. 1234567890 |
++      | City          | Valence                     |
++      | Country       | France                      |
++      | Postal code   | 26000                       |
++
++  Scenario: First create products and the discount that will be used in following scenarios
++    Given I add product "product1" with following information:
++      | name[en-US] | eastern european tracksuit |
++      | type        | standard                   |
++    And I update product "product1" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "product1"
++    And I update product "product1" with following values:
++      | price | 5.00 |
++    When I create a "free_shipping" discount "discount_with_country_trigger" with following properties:
++      | name[en-US] | Promotion                  |
++      | name[fr-FR] | Promotion                  |
++      | code        | CART_LEVEL_COUNTRY_TRIGGER |
++      | active      | true                       |
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | name[en-US] | Promotion                  |
++      | name[fr-FR] | Promotion                  |
++      | type        | free_shipping              |
++      | code        | CART_LEVEL_COUNTRY_TRIGGER |
++      | active      | true                       |
++    When I update discount "discount_with_country_trigger" with conditions based on countries "France"
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | minimum_product_quantity | 0 |
++    Then discount "discount_with_country_trigger" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | name[fr-FR]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++
++  Scenario: Reduction with country trigger on FO
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I select carrier "nice_carrier" for cart "dummy_cart"
++    Then cart "dummy_cart" should have "nice_carrier" as a carrier
++    When I add 1 product "eastern european tracksuit" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$12.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $5.00  |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $12.00 |
++    When I use a voucher "discount_with_country_trigger" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$12.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $5.00  |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $12.00 |
++    When I assign customer "testCustomer" to cart "dummy_cart"
++    When I select "FR" address as delivery and invoice address for customer "testFrenchCustomer" in cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$12.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $5.00  |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $12.00 |
++    When I use a voucher "discount_with_country_trigger" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$5.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $5.00  |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $5.00  |
++    And my cart "dummy_cart" should have the following details, without hiding auto discounts:
++      | total_products | $5.00  |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $5.00  |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 46506adc9fad4..211f13d81a737 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -333,6 +333,8 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
+ 
+     catalog_price_rule:
+       paths:

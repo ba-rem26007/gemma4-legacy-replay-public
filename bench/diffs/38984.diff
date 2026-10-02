@@ -1,0 +1,769 @@
+diff --git a/src/Adapter/Address/Repository/AddressRepository.php b/src/Adapter/Address/Repository/AddressRepository.php
+new file mode 100644
+index 0000000000000..c66b6c9b459c0
+--- /dev/null
++++ b/src/Adapter/Address/Repository/AddressRepository.php
+@@ -0,0 +1,62 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Address\Repository;
++
++use Address;
++use PrestaShop\PrestaShop\Core\Domain\Address\Exception\AddressNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\AttributeGroup\Attribute\Exception\AttributeNotFoundException;
++use PrestaShop\PrestaShop\Core\Exception\CoreException;
++use PrestaShop\PrestaShop\Core\Repository\AbstractMultiShopObjectModelRepository;
++
++/**
++ * Provides access to address data source
++ */
++class AddressRepository extends AbstractMultiShopObjectModelRepository
++{
++    /**
++     * @param AddressId $addressId
++     *
++     * @return Address
++     *
++     * @throws AttributeNotFoundException
++     * @throws CoreException
++     */
++    public function get(AddressId $addressId): Address
++    {
++        /** @var Address $address */
++        $address = $this->getObjectModel(
++            $addressId->getValue(),
++            Address::class,
++            AddressNotFoundException::class
++        );
++
++        return $address;
++    }
++}
+diff --git a/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php b/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php
+new file mode 100644
+index 0000000000000..7fa1479f859c6
+--- /dev/null
++++ b/src/Adapter/Shipment/QueryHandler/GetShipmentForViewingHandler.php
+@@ -0,0 +1,104 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository;
++use PrestaShop\PrestaShop\Adapter\Carrier\Repository\CarrierRepository;
++use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
++use PrestaShop\PrestaShop\Adapter\Order\Repository\OrderRepository;
++use PrestaShop\PrestaShop\Adapter\State\Repository\StateRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Address\QueryResult\ShippingAdressSummary;
++use PrestaShop\PrestaShop\Core\Domain\Address\ValueObject\AddressId;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\CarrierSummary;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
++use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\GetShipmentForViewingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentForViewing;
++use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\StateId;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use PrestaShopBundle\Entity\Shipment;
++
++#[AsQueryHandler]
++class GetShipmentForViewingHandler implements GetShipmentForViewingHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $shipmentRepository,
++        private readonly OrderRepository $orderRepository,
++        private readonly CarrierRepository $carrierRepository,
++        private readonly CountryRepository $countryRepository,
++        private readonly AddressRepository $addressRepository,
++        private readonly StateRepository $stateRepository
++    ) {
++    }
++
++    /**
++     * @param GetShipmentForViewing $query
++     *
++     * @return ShipmentForViewing
++     */
++    public function handle(GetShipmentForViewing $query)
++    {
++        $id = $query->getShipmentId()->getValue();
++        /** @var Shipment $shipment */
++        $shipment = $this->shipmentRepository->find($id);
++
++        if ($shipment === null) {
++            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $id));
++        }
++        $order = $this->orderRepository->get(new OrderId($shipment->getOrderId()));
++        $carrier = $this->carrierRepository->get(new CarrierId($shipment->getCarrierId()));
++        $address = $this->addressRepository->get(new AddressId($shipment->getAddressId()));
++        $state = $this->stateRepository->get(new StateId($address->id_state));
++        $country = $this->countryRepository->get(new CountryId($address->id_country));
++
++        $carrierSummary = new CarrierSummary($carrier->id, $carrier->name);
++        $shippingAdressSummary = new ShippingAdressSummary(
++            $address->firstname,
++            $address->lastname,
++            $address->company,
++            $address->vat_number,
++            $address->address1,
++            $address->address2,
++            $address->city,
++            $address->postcode,
++            $state->name,
++            $country->name[(int) $order->getAssociatedLanguage()->getId()],
++            $address->phone,
++        );
++
++        return new ShipmentForViewing(
++            $id,
++            $shipment->getTrackingNumber(),
++            $carrierSummary,
++            $shippingAdressSummary,
++        );
++    }
++}
+diff --git a/src/Adapter/State/Repository/StateRepository.php b/src/Adapter/State/Repository/StateRepository.php
+new file mode 100644
+index 0000000000000..3dfa80d89c114
+--- /dev/null
++++ b/src/Adapter/State/Repository/StateRepository.php
+@@ -0,0 +1,62 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\State\Repository;
++
++use PrestaShop\PrestaShop\Core\Domain\AttributeGroup\Attribute\Exception\AttributeNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\State\Exception\StateNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\State\ValueObject\StateId;
++use PrestaShop\PrestaShop\Core\Exception\CoreException;
++use PrestaShop\PrestaShop\Core\Repository\AbstractMultiShopObjectModelRepository;
++use State;
++
++/**
++ * Provides access to state data source
++ */
++class StateRepository extends AbstractMultiShopObjectModelRepository
++{
++    /**
++     * @param StateId $stateId
++     *
++     * @return State
++     *
++     * @throws AttributeNotFoundException
++     * @throws CoreException
++     */
++    public function get(StateId $stateId): State
++    {
++        /** @var State $state */
++        $state = $this->getObjectModel(
++            $stateId->getValue(),
++            State::class,
++            StateNotFoundException::class
++        );
++
++        return $state;
++    }
++}
+diff --git a/src/Core/Domain/Address/QueryResult/ShippingAdressSummary.php b/src/Core/Domain/Address/QueryResult/ShippingAdressSummary.php
+new file mode 100644
+index 0000000000000..8a945f3664b52
+--- /dev/null
++++ b/src/Core/Domain/Address/QueryResult/ShippingAdressSummary.php
+@@ -0,0 +1,215 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Address\QueryResult;
++
++class ShippingAdressSummary
++{
++    /**
++     * @var string
++     */
++    private $firstName;
++
++    /**
++     * @var string
++     */
++    private $lastName;
++
++    /**
++     * @var string
++     */
++    private $address1;
++
++    /**
++     * @var string
++     */
++    private $address2;
++
++    /**
++     * @var string
++     */
++    private $city;
++
++    /**
++     * @var string
++     */
++    private $country;
++
++    /**
++     * @var string
++     */
++    private $phone;
++
++    /**
++     * @var string
++     */
++    private $postalCode;
++
++    /**
++     * @var string|null
++     */
++    private $stateName;
++
++    /**
++     * @var string|null
++     */
++    private $company;
++
++    /**
++     * @var string|null
++     */
++    private $vatNumber;
++
++    /**
++     * InvoiceDetails constructor.
++     *
++     * @param string $firstName
++     * @param string $lastName
++     * @param string|null $company
++     * @param string|null $vatNumber
++     * @param string $address1
++     * @param string $address2
++     * @param string $city
++     * @param string $postalCode
++     * @param string|null $stateName
++     * @param string $country
++     * @param string $phone
++     */
++    public function __construct(
++        string $firstName,
++        string $lastName,
++        ?string $company,
++        ?string $vatNumber,
++        string $address1,
++        string $address2,
++        string $city,
++        string $postalCode,
++        ?string $stateName,
++        string $country,
++        string $phone,
++    ) {
++        $this->firstName = $firstName;
++        $this->lastName = $lastName;
++        $this->address1 = $address1;
++        $this->address2 = $address2;
++        $this->city = $city;
++        $this->country = $country;
++        $this->phone = $phone;
++        $this->postalCode = $postalCode;
++        $this->stateName = $stateName;
++        $this->company = $company;
++        $this->vatNumber = $vatNumber;
++    }
++
++    /**
++     * @return string
++     */
++    public function getFirstName(): string
++    {
++        return $this->firstName;
++    }
++
++    /**
++     * @return string
++     */
++    public function getLastName(): string
++    {
++        return $this->lastName;
++    }
++
++    /**
++     * @return string|null
++     */
++    public function getCompany(): ?string
++    {
++        return $this->company;
++    }
++
++    /**
++     * @return string|null
++     */
++    public function getVatNumber(): ?string
++    {
++        return $this->vatNumber;
++    }
++
++    /**
++     * @return string
++     */
++    public function getAddress1(): string
++    {
++        return $this->address1;
++    }
++
++    /**
++     * @return string
++     */
++    public function getCity(): string
++    {
++        return $this->city;
++    }
++
++    /**
++     * @return string
++     */
++    public function getPostalCode(): string
++    {
++        return $this->postalCode;
++    }
++
++    /**
++     * @return string|null
++     */
++    public function getStateName(): ?string
++    {
++        return $this->stateName;
++    }
++
++    /**
++     * @return string
++     */
++    public function getCountry(): string
++    {
++        return $this->country;
++    }
++
++    /**
++     * @return string
++     */
++    public function getPhone(): string
++    {
++        return $this->phone;
++    }
++
++    /**
++     * @return string
++     */
++    public function getAddress2(): string
++    {
++        return $this->address2;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Query/GetShipmentForViewing.php b/src/Core/Domain/Shipment/Query/GetShipmentForViewing.php
+new file mode 100644
+index 0000000000000..16a35cae7e7f4
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Query/GetShipmentForViewing.php
+@@ -0,0 +1,47 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\ShipmentId;
++
++/**
++ * Get shipments for viewing.
++ */
++class GetShipmentForViewing
++{
++    /**
++     * @var ShipmentId
++     */
++    private $shipmentId;
++
++    public function __construct(int $shipmentId)
++    {
++        $this->shipmentId = new ShipmentId($shipmentId);
++    }
++
++    public function getShipmentId(): ShipmentId
++    {
++        return $this->shipmentId;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/QueryHandler/GetShipmentForViewingHandlerInterface.php b/src/Core/Domain/Shipment/QueryHandler/GetShipmentForViewingHandlerInterface.php
+new file mode 100644
+index 0000000000000..7c0e823557abf
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryHandler/GetShipmentForViewingHandlerInterface.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentForViewing;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentForViewing;
++
++/**
++ * Defines contract for GetShipmentForViewingHandler.
++ */
++interface GetShipmentForViewingHandlerInterface
++{
++    /**
++     * @param GetShipmentForViewing $query
++     *
++     * @return ShipmentForViewing
++     */
++    public function handle(GetShipmentForViewing $query);
++}
+diff --git a/src/Core/Domain/Shipment/QueryResult/ShipmentForViewing.php b/src/Core/Domain/Shipment/QueryResult/ShipmentForViewing.php
+new file mode 100644
+index 0000000000000..6244add6eecb3
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryResult/ShipmentForViewing.php
+@@ -0,0 +1,90 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult;
++
++use PrestaShop\PrestaShop\Core\Domain\Address\QueryResult\ShippingAdressSummary;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\CarrierSummary;
++
++class ShipmentForViewing
++{
++    private int $id;
++    private ?string $trackingNumber;
++    private CarrierSummary $carrierSummary;
++    private ShippingAdressSummary $shippingAdressSummary;
++
++    public function __construct(
++        int $id,
++        ?string $trackingNumber,
++        CarrierSummary $carrierSummary,
++        ShippingAdressSummary $shippingAdressSummary
++    ) {
++        $this->id = $id;
++        $this->trackingNumber = $trackingNumber;
++        $this->carrierSummary = $carrierSummary;
++        $this->shippingAdressSummary = $shippingAdressSummary;
++    }
++
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    public function setId(int $id): void
++    {
++        $this->id = $id;
++    }
++
++    public function getTrackingNumber(): ?string
++    {
++        return $this->trackingNumber;
++    }
++
++    public function setTrackingNumber(?string $trackingNumber): void
++    {
++        $this->trackingNumber = $trackingNumber;
++    }
++
++    public function getCarrierSummary(): CarrierSummary
++    {
++        return $this->carrierSummary;
++    }
++
++    public function setCarrierSummary(CarrierSummary $carrierSummary): void
++    {
++        $this->carrierSummary = $carrierSummary;
++    }
++
++    public function getShippingAdressSummary(): ShippingAdressSummary
++    {
++        return $this->shippingAdressSummary;
++    }
++
++    public function setShippingAdressSummary(ShippingAdressSummary $shippingAdressSummary): void
++    {
++        $this->shippingAdressSummary = $shippingAdressSummary;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/address.yml b/src/PrestaShopBundle/Resources/config/services/adapter/address.yml
+index 34910b8166726..d020afa2d13cb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/address.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/address.yml
+@@ -60,3 +60,8 @@ services:
+ 
+   prestashop.adapter.address.formatter:
+     class: 'PrestaShop\PrestaShop\Adapter\Address\AddressFormatter'
++
++  PrestaShop\PrestaShop\Adapter\Address\Repository\AddressRepository:
++    arguments:
++      - '@doctrine.dbal.default_connection'
++      - '%database_prefix%'
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+index 95b5e1b99ecdf..a43b85c933287 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+@@ -13,3 +13,5 @@ services:
+   PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\MergeProductsToShipmentHandler:
+ 
+   PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\ListAvailableShipmentsHandler:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\GetShipmentForViewingHandler:
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/state.yml b/src/PrestaShopBundle/Resources/config/services/adapter/state.yml
+index 63311e7be8b86..097e575903aa8 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/state.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/state.yml
+@@ -29,3 +29,8 @@ services:
+   prestashop.adapter.state.command_handler.bulk_toggle_state_status_handler:
+     class: 'PrestaShop\PrestaShop\Adapter\State\CommandHandler\BulkToggleStateStatusHandler'
+     autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\State\Repository\StateRepository:
++    arguments:
++      - '@doctrine.dbal.default_connection'
++      - '%database_prefix%'
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index 4f52c2e805731..4bbbcddfddc38 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -37,8 +37,10 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SwitchShipmentCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentForViewing;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\ListAvailableShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\ShipmentForViewing;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\SharedStorage;
+ 
+@@ -196,4 +198,29 @@ public function orderShouldGetAvailableShipmentsForSpecificProduct(string $order
+             Assert::assertEquals($testAvailableShipmentForProduct[$i]->getHandleProduct(), (bool) $data[$i]['can_handle_merge']);
+         }
+     }
++
++    /**
++     * @Then the shipment view :shipmentReference should contain:
++     */
++    public function assertShipmentForViewing(string $shipmentReference, TableNode $table): void
++    {
++        $expected = $table->getRowsHash();
++
++        /** @var ShipmentForViewing $shipment */
++        $shipment = $this->getQueryBus()->handle(
++            new GetShipmentForViewing(SharedStorage::getStorage()->get($shipmentReference))
++        );
++
++        Assert::assertEquals($expected['tracking_number'], $shipment->getTrackingNumber(), 'Tracking number mismatch');
++        Assert::assertEquals($expected['carrier_name'], $shipment->getCarrierSummary()->getName(), 'Carrier name mismatch');
++
++        $address = $shipment->getShippingAdressSummary();
++        Assert::assertEquals($expected['firstname'], $address->getFirstname(), 'Firstname mismatch');
++        Assert::assertEquals($expected['lastname'], $address->getLastname(), 'Lastname mismatch');
++        Assert::assertEquals($expected['address1'], $address->getAddress1(), 'Address1 mismatch');
++        Assert::assertEquals($expected['postcode'], $address->getPostalCode(), 'Postcode mismatch');
++        Assert::assertEquals($expected['city'], $address->getCity(), 'City mismatch');
++        Assert::assertEquals($expected['state'], $address->getStateName(), 'State mismatch');
++        Assert::assertEquals($expected['country'], $address->getCountry(), 'Country mismatch');
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+index 043fb31bab976..e778ec7e0db2d 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+@@ -65,3 +65,18 @@ Feature: Retrieving shipment for orders
+     Then the order "bo_order1" should have the following shipments:
+       | shipment  | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
+       | shipment1 | new_carrier     |                 | US      |                    7.0 |                   7.42 |
++
++  Scenario: Retrieve shipment for viewing
++    Given the order "bo_order1" should have the following shipments:
++      | shipment  | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | default_carrier |                 | US      |                    7.0 |                   7.42 |
++    Then the shipment view "shipment1" should contain:
++      | tracking_number |                 |
++      | carrier_name    | My carrier      |
++      | firstname       | John            |
++      | lastname        | DOE             |
++      | address1        | 16, Main street |
++      | postcode        | 33133           |
++      | city            | Miami           |
++      | state           | Florida         |
++      | country         | United States   |

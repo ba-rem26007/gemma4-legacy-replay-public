@@ -1,0 +1,634 @@
+diff --git a/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php b/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
+index 13c0097efcf15..830e7b83b9826 100644
+--- a/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
++++ b/src/Core/Domain/Discount/Command/UpdateDiscountCommand.php
+@@ -122,6 +122,21 @@ public function setValidTo(DateTimeImmutable $validTo): self
+         return $this;
+     }
+ 
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setValidityDateRange(DateTimeImmutable $from, DateTimeImmutable $to): self
++    {
++        if ($from > $to) {
++            throw new DiscountConstraintException('Date from cannot be greater than date to.', DiscountConstraintException::DATE_FROM_GREATER_THAN_DATE_TO);
++        }
++
++        $this->validFrom = $from;
++        $this->validTo = $to;
++
++        return $this;
++    }
++
+     public function getPriority(): ?int
+     {
+         return $this->priority;
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index a873435dd2d16..3883039b716a6 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -26,6 +26,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler;
+ 
++use DateTime;
++use DateTimeImmutable;
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+@@ -128,6 +130,23 @@ public function create(array $data)
+             $command->setCode('');
+         }
+ 
++        if (!empty($data['usability']['valid_date_range'])) {
++            $dateRange = $data['usability']['valid_date_range'];
++            $validFrom = $this->parseDateWithDefaultTime($dateRange['from'] ?? null, '00:00');
++
++            $neverExpires = !empty($data['usability']['period_never_expires']);
++            if ($neverExpires) {
++                $validTo = (new DateTime())->modify('+100 years')->setTime(23, 59, 59);
++                $validTo = DateTimeImmutable::createFromMutable($validTo);
++            } else {
++                $validTo = $this->parseDateWithDefaultTime($dateRange['to'] ?? null, '23:59');
++            }
++
++            if ($validFrom && $validTo) {
++                $command->setValidityDateRange($validFrom, $validTo);
++            }
++        }
++
+         $this->handleCustomerEligibility($command, $data);
+         $command->setTotalQuantity(100);
+ 
+@@ -200,6 +219,25 @@ public function update($id, array $data): void
+             $command->setCode('');
+         }
+ 
++        if (!empty($data['usability']['valid_date_range'])) {
++            $dateRange = $data['usability']['valid_date_range'];
++            $validFrom = $this->parseDateWithDefaultTime($dateRange['from'] ?? null, '00:00');
++
++            // Check if "never expires" checkbox is checked
++            $neverExpires = !empty($data['usability']['period_never_expires']);
++            if ($neverExpires) {
++                // Set expiration date to 100 years in the future
++                $validTo = (new DateTime())->modify('+100 years')->setTime(23, 59, 59);
++                $validTo = DateTimeImmutable::createFromMutable($validTo);
++            } else {
++                $validTo = $this->parseDateWithDefaultTime($dateRange['to'] ?? null, '23:59');
++            }
++
++            if ($validFrom && $validTo) {
++                $command->setValidityDateRange($validFrom, $validTo);
++            }
++        }
++
+         $this->handleCustomerEligibility($command, $data);
+ 
+         $this->commandBus->handle($command);
+@@ -329,6 +367,35 @@ private function updateDiscountCompatibility(int $discountId, array $data): void
+         $this->discountTypeRepository->setCompatibleTypesForDiscount($discountId, $compatibleTypeIds);
+     }
+ 
++    private function parseDateWithDefaultTime(?string $dateString, string $defaultTime): ?DateTimeImmutable
++    {
++        if (empty($dateString)) {
++            return null;
++        }
++
++        $dateString = trim($dateString);
++
++        $formats = [
++            'Y-m-d H:i:s',
++            'Y-m-d H:i',
++            'Y-m-d',
++        ];
++
++        foreach ($formats as $format) {
++            $date = DateTime::createFromFormat($format, $dateString);
++            if ($date !== false) {
++                // If the format doesn't include time, add the default time
++                if (!str_contains($format, 'H:i')) {
++                    $date->setTime((int) substr($defaultTime, 0, 2), (int) substr($defaultTime, 3, 2));
++                }
++
++                return DateTimeImmutable::createFromMutable($date);
++            }
++        }
++
++        return null;
++    }
++
+     /**
+      * Handle customer eligibility and set customer ID on the command if needed.
+      *
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 7f520ac163373..e1c5d8723d1f0 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -26,6 +26,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
++use DateTime;
++use DateTimeInterface;
+ use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
+ use PrestaShop\PrestaShop\Adapter\Customer\Repository\CustomerRepository;
+ use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
+@@ -53,6 +55,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Product\Combination\NameBuilder\CombinationNameBuilder;
++use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\CartConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DeliveryConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountConditionsType;
+@@ -82,6 +85,10 @@ public function __construct(
+ 
+     public function getDefaultData()
+     {
++        $now = new DateTime();
++        $startDate = (clone $now)->setTime(0, 0);
++        $endDate = (clone $now)->modify('+1 month')->setTime(23, 59);
++
+         return [
+             'usability' => [
+                 'mode' => [
+@@ -92,6 +99,11 @@ public function getDefaultData()
+                     'children_selector' => DiscountCustomerEligibilityType::ALL_CUSTOMERS,
+                     DiscountCustomerEligibilityType::SINGLE_CUSTOMER => [],
+                 ],
++                'valid_date_range' => [
++                    'from' => $startDate->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT),
++                    'to' => $endDate->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT),
++                ],
++                'period_never_expires' => false,
+             ],
+             'compatibility' => $this->getCompatibilityData(),
+         ];
+@@ -191,6 +203,11 @@ public function getData($id)
+                     'code' => $discountForEditing->getCode(),
+                 ],
+                 'customer_eligibility' => $this->getCustomerEligibilityData($discountForEditing),
++                'valid_date_range' => [
++                    'from' => $discountForEditing->getValidFrom() ? $discountForEditing->getValidFrom()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT) : null,
++                    'to' => $discountForEditing->getValidTo() ? $discountForEditing->getValidTo()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT) : null,
++                ],
++                'period_never_expires' => $this->isPeriodNeverExpires($discountForEditing->getValidFrom(), $discountForEditing->getValidTo()),
+             ],
+             'compatibility' => $this->getCompatibilityData($id),
+         ];
+@@ -441,4 +458,19 @@ private function getCustomerEligibilityData(DiscountForEditing $discountForEditi
+             ],
+         ];
+     }
++
++    /**
++     * Check if the discount period is set to "never expires" (>= 100 years duration).
++     */
++    private function isPeriodNeverExpires(?DateTimeInterface $validFrom, ?DateTimeInterface $validTo): bool
++    {
++        if ($validFrom === null || $validTo === null) {
++            return false;
++        }
++
++        $diff = $validFrom->diff($validTo);
++        $years = $diff->y + ($diff->m / 12) + ($diff->d / 365);
++
++        return $years >= 100;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+index 6393366f03e0c..3917772fb5d86 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+@@ -24,10 +24,17 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
++declare(strict_types=1);
++
+ namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+ 
++use DateTime;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DateRange;
++use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
+ use PrestaShopBundle\Form\Admin\Type\CardType;
++use PrestaShopBundle\Form\Admin\Type\DateRangeType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ 
+ class DiscountUsabilityType extends TranslatorAwareType
+@@ -45,6 +52,34 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label_tag_name' => 'h3',
+                 'required' => false,
+             ])
++            ->add('valid_date_range', DateRangeType::class, [
++                'label' => $this->trans('Select a Period', 'Admin.Catalog.Feature'),
++                'label_tag_name' => 'h3',
++                'label_from' => $this->trans('Start date', 'Admin.Catalog.Feature'),
++                'label_to' => $this->trans('Expiry date', 'Admin.Catalog.Feature'),
++                'required' => false,
++                'date_format' => DateRangeType::DEFAULT_DATE_TIME_FORMAT,
++                'placeholder' => DateRangeType::DEFAULT_DATE_TIME_FORMAT,
++                'default_end_value' => (new DateTime())->modify('+1 month')->setTime(23, 59, 59)->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT),
++                'constraints' => [
++                    new DateRange([
++                        'message' => $this->trans(
++                            'The expiration date must be after start date',
++                            'Admin.Notifications.Error'
++                        ),
++                    ]),
++                ],
++            ])
++            ->add('period_never_expires', CheckboxType::class, [
++                'label' => $this->trans('Period never expires', 'Admin.Catalog.Feature'),
++                'required' => false,
++                'label_attr' => [
++                    'class' => 'form-check-label',
++                ],
++                'attr' => [
++                    'class' => 'form-check-input',
++                ],
++            ])
+         ;
+     }
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index ea91d717e4c9e..0d9d3e8d0d1e7 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -29,7 +29,9 @@
+ use Behat\Gherkin\Node\TableNode;
+ use Cart;
+ use CartRule;
++use DateTime;
+ use DateTimeImmutable;
++use DateTimeInterface;
+ use Exception;
+ use PHPUnit\Framework\Assert;
+ use PrestaShop\Decimal\DecimalNumber;
+@@ -82,6 +84,14 @@ public function assertDiscountIsInvalid(): void
+         $this->assertLastErrorIs(CartRuleValidityException::class);
+     }
+ 
++    /**
++     * @Then I should get an error that start date cannot be after expiry date
++     */
++    public function assertStartDateCannotBeAfterExpiryDate(): void
++    {
++        $this->assertLastErrorIs(DiscountConstraintException::class, DiscountConstraintException::DATE_FROM_GREATER_THAN_DATE_TO);
++    }
++
+     /**
+      * @Then discount :discountReference should have the following properties:
+      *
+@@ -131,13 +141,24 @@ public function createDiscount(string $discountReference, string $discountType,
+             $command->setActive(PrimitiveUtils::castStringBooleanIntoBoolean($data['active']));
+         }
+         if (isset($data['valid_from'])) {
+-            if (empty($data['valid_to'])) {
+-                throw new RuntimeException('When setting cart rule range "valid_from" and "valid_to" must be provided');
++            $validFrom = new DateTimeImmutable($data['valid_from']);
++
++            // Check if "never expires" is set
++            if (isset($data['period_never_expires']) && PrimitiveUtils::castStringBooleanIntoBoolean($data['period_never_expires'])) {
++                // Set expiration date to 100 years in the future
++                $validTo = (new DateTime())->modify('+100 years')->setTime(23, 59, 59);
++                $validTo = DateTimeImmutable::createFromMutable($validTo);
++            } elseif (!empty($data['valid_to'])) {
++                $validTo = new DateTimeImmutable($data['valid_to']);
++            } else {
++                throw new RuntimeException('When setting cart rule range "valid_from" and "valid_to" must be provided, or "period_never_expires" must be set');
++            }
++
++            try {
++                $command->setValidityDateRange($validFrom, $validTo);
++            } catch (DiscountConstraintException $e) {
++                $this->setLastException($e);
+             }
+-            $command->setValidityDateRange(
+-                new DateTimeImmutable($data['valid_from']),
+-                new DateTimeImmutable($data['valid_to']),
+-            );
+         }
+         if (isset($data['total_quantity'])) {
+             $command->setTotalQuantity((int) $data['total_quantity']);
+@@ -207,7 +228,7 @@ public function createDiscount(string $discountReference, string $discountType,
+     }
+ 
+     /**
+-     * @When I update discount :discountType with the following properties:
++     * @When I update discount :discountReference with the following properties:
+      */
+     public function editDiscount(string $discountReference, TableNode $node): void
+     {
+@@ -230,10 +251,33 @@ public function editDiscount(string $discountReference, TableNode $node): void
+         if (isset($data['active'])) {
+             $command->setActive(PrimitiveUtils::castStringBooleanIntoBoolean($data['active']));
+         }
+-        if (isset($data['valid_from'])) {
++        if (isset($data['period_never_expires']) && PrimitiveUtils::castStringBooleanIntoBoolean($data['period_never_expires'])) {
++            // When "never expires" is set, use 100 years in the future
++            if (isset($data['valid_from'])) {
++                $validFrom = new DateTimeImmutable($data['valid_from']);
++            } else {
++                $validFrom = new DateTimeImmutable();
++            }
++            $validTo = (new DateTime())->modify('+100 years')->setTime(23, 59, 59);
++            $validTo = DateTimeImmutable::createFromMutable($validTo);
++
++            try {
++                $command->setValidityDateRange($validFrom, $validTo);
++            } catch (DiscountConstraintException $e) {
++                $this->setLastException($e);
++            }
++        } elseif (isset($data['valid_from'], $data['valid_to'])) {
++            try {
++                $command->setValidityDateRange(
++                    new DateTimeImmutable($data['valid_from']),
++                    new DateTimeImmutable($data['valid_to']),
++                );
++            } catch (DiscountConstraintException $e) {
++                $this->setLastException($e);
++            }
++        } elseif (isset($data['valid_from'])) {
+             $command->setValidFrom(new DateTimeImmutable($data['valid_from']));
+-        }
+-        if (isset($data['valid_to'])) {
++        } elseif (isset($data['valid_to'])) {
+             $command->setValidTo(new DateTimeImmutable($data['valid_to']));
+         }
+         if (isset($data['total_quantity'])) {
+@@ -431,6 +475,51 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+         if (isset($expectedData['countries'])) {
+             Assert::assertSame($this->referencesToIds($expectedData['countries']), $discountForEditing->getCountryIds(), 'Unexpected countries');
+         }
++        if (isset($expectedData['period_never_expires'])) {
++            $neverExpires = $this->isPeriodNeverExpires($discountForEditing->getValidTo());
++            Assert::assertSame(
++                PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['period_never_expires']),
++                $neverExpires,
++                'Unexpected period_never_expires value'
++            );
++        }
++    }
++
++    /**
++     * @Then discount :discountReference expiration date should be more than :years years in the future
++     */
++    public function assertExpirationDateIsFarInFuture(string $discountReference, int $years = 50): void
++    {
++        $discountForEditing = $this->getDiscountForEditing($discountReference);
++        $validTo = $discountForEditing->getValidTo();
++
++        Assert::assertNotNull($validTo, 'Expiration date should not be null');
++
++        $now = new DateTime();
++        $threshold = $now->modify('+' . $years . ' years');
++
++        Assert::assertGreaterThan(
++            $threshold,
++            $validTo,
++            sprintf('Expiration date should be more than %d years in the future', $years)
++        );
++    }
++
++    /**
++     * Check if the discount period is set to "never expires" (100 years in the future).
++     */
++    private function isPeriodNeverExpires(?DateTimeInterface $validTo): bool
++    {
++        if ($validTo === null) {
++            return false;
++        }
++
++        // Check if the expiration date is more than 50 years in the future
++        // (we use 50 years as a threshold to detect "never expires" dates set to 100 years)
++        $now = new DateTime();
++        $threshold = $now->modify('+50 years');
++
++        return $validTo > $threshold;
+     }
+ 
+     protected function getDiscountForEditing(string $discountReference): DiscountForEditing
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_validity_dates.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_validity_dates.feature
+new file mode 100644
+index 0000000000000..aa68a9c02f2e9
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/update_discount_validity_dates.feature
+@@ -0,0 +1,212 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags update-discount-validity-dates
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@update-discount-validity-dates
++Feature: Update discount validity dates
++    PrestaShop allows BO users to set and update validity date ranges for discounts
++    As a BO user
++    I must be able to set a start date and expiry date for discounts
++    And the system should validate that the start date is before the expiry date
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given language with iso code "en" is the default one
++
++  Scenario: Create discount with valid date range
++    When I create a "free_shipping" discount "discount_with_date_range" with following properties:
++      | name[en-US] | Time Limited Promotion |
++      | valid_from  | 2024-01-01 00:00:00    |
++      | valid_to    | 2024-12-31 23:59:00    |
++    Then discount "discount_with_date_range" should have the following properties:
++      | name[en-US] | Time Limited Promotion |
++      | type        | free_shipping          |
++      | valid_from  | 2024-01-01 00:00:00    |
++      | valid_to    | 2024-12-31 23:59:00    |
++
++  Scenario: Update discount with new valid date range
++    When I create a "free_shipping" discount "discount_to_update" with following properties:
++      | name[en-US] | Promotion to Update |
++      | valid_from  | 2024-01-01 00:00:00 |
++      | valid_to    | 2024-06-30 23:59:00 |
++    Then discount "discount_to_update" should have the following properties:
++      | name[en-US] | Promotion to Update |
++      | type        | free_shipping       |
++      | valid_from  | 2024-01-01 00:00:00 |
++      | valid_to    | 2024-06-30 23:59:00 |
++    When I update discount "discount_to_update" with the following properties:
++      | valid_from | 2024-07-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++    Then discount "discount_to_update" should have the following properties:
++      | name[en-US] | Promotion to Update |
++      | type        | free_shipping       |
++      | valid_from  | 2024-07-01 00:00:00 |
++      | valid_to    | 2024-12-31 23:59:00 |
++
++  Scenario: Create discount with start date equal to expiry date
++    When I create a "free_shipping" discount "same_day_discount" with following properties:
++      | name[en-US] | Same Day Promotion  |
++      | valid_from  | 2024-06-15 00:00:00 |
++      | valid_to    | 2024-06-15 23:59:00 |
++    Then discount "same_day_discount" should have the following properties:
++      | name[en-US] | Same Day Promotion  |
++      | type        | free_shipping       |
++      | valid_from  | 2024-06-15 00:00:00 |
++      | valid_to    | 2024-06-15 23:59:00 |
++
++  Scenario: Create discount with invalid date range
++    When I create a "free_shipping" discount "invalid_date_discount" with following properties:
++      | name[en-US] | Invalid Date Promotion |
++      | valid_from  | 2024-12-31 23:59:00    |
++      | valid_to    | 2024-01-01 00:00:00    |
++    Then I should get an error that start date cannot be after expiry date
++
++  Scenario: Update discount with invalid date range
++    When I create a "free_shipping" discount "discount_invalid_update" with following properties:
++      | name[en-US] | Promotion with Invalid Update |
++      | valid_from  | 2024-01-01 00:00:00           |
++      | valid_to    | 2024-06-30 23:59:00           |
++    Then discount "discount_invalid_update" should have the following properties:
++      | valid_from | 2024-01-01 00:00:00 |
++      | valid_to   | 2024-06-30 23:59:00 |
++    When I update discount "discount_invalid_update" with the following properties:
++      | valid_from | 2024-12-31 23:59:00 |
++      | valid_to   | 2024-01-01 00:00:00 |
++    Then I should get an error that start date cannot be after expiry date
++
++  Scenario: Create discount with date range using different time formats
++    When I create a "cart_level" discount "discount_with_time_formats" with following properties:
++      | name[en-US]       | Discount with Time  |
++      | valid_from        | 2024-03-15 08:30:00 |
++      | valid_to          | 2024-03-15 18:00:00 |
++      | reduction_percent | 15.0                |
++    Then discount "discount_with_time_formats" should have the following properties:
++      | name[en-US]       | Discount with Time  |
++      | type              | cart_level          |
++      | valid_from        | 2024-03-15 08:30:00 |
++      | valid_to          | 2024-03-15 18:00:00 |
++      | reduction_percent | 15.0                |
++
++  Scenario: Create discount with long-term validity
++    When I create a "cart_level" discount "long_term_discount" with following properties:
++      | name[en-US]       | Long Term Promotion |
++      | valid_from        | 2024-01-01 00:00:00 |
++      | valid_to          | 2026-12-31 23:59:00 |
++      | reduction_percent | 20.0                |
++    Then discount "long_term_discount" should have the following properties:
++      | name[en-US]       | Long Term Promotion |
++      | type              | cart_level          |
++      | valid_from        | 2024-01-01 00:00:00 |
++      | valid_to          | 2026-12-31 23:59:00 |
++      | reduction_percent | 20.0                |
++
++  Scenario: Update only start date while keeping expiry date unchanged
++    When I create a "free_shipping" discount "discount_update_start_only" with following properties:
++      | name[en-US] | Promotion Update Start |
++      | valid_from  | 2024-01-01 00:00:00    |
++      | valid_to    | 2024-12-31 23:59:00    |
++    Then discount "discount_update_start_only" should have the following properties:
++      | valid_from | 2024-01-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++    When I update discount "discount_update_start_only" with the following properties:
++      | valid_from | 2024-02-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++    Then discount "discount_update_start_only" should have the following properties:
++      | valid_from | 2024-02-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++
++  Scenario: Update only expiry date while keeping start date unchanged
++    When I create a "free_shipping" discount "discount_update_end_only" with following properties:
++      | name[en-US] | Promotion Update End |
++      | valid_from  | 2024-01-01 00:00:00  |
++      | valid_to    | 2024-06-30 23:59:00  |
++    Then discount "discount_update_end_only" should have the following properties:
++      | valid_from | 2024-01-01 00:00:00 |
++      | valid_to   | 2024-06-30 23:59:00 |
++    When I update discount "discount_update_end_only" with the following properties:
++      | valid_from | 2024-01-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++    Then discount "discount_update_end_only" should have the following properties:
++      | valid_from | 2024-01-01 00:00:00 |
++      | valid_to   | 2024-12-31 23:59:00 |
++
++  Scenario: Create discount with precise minute-level timing
++    When I create a "cart_level" discount "precise_timing_discount" with following properties:
++      | name[en-US]       | Flash Sale          |
++      | valid_from        | 2024-11-25 14:00:00 |
++      | valid_to          | 2024-11-25 16:30:00 |
++      | reduction_percent | 50.0                |
++    Then discount "precise_timing_discount" should have the following properties:
++      | name[en-US]       | Flash Sale          |
++      | type              | cart_level          |
++      | valid_from        | 2024-11-25 14:00:00 |
++      | valid_to          | 2024-11-25 16:30:00 |
++      | reduction_percent | 50.0                |
++
++  Scenario: Create discount that never expires
++    When I create a "cart_level" discount "never_expires_discount" with following properties:
++      | name[en-US]          | Never Expires Promotion |
++      | valid_from           | 2024-01-01 00:00:00     |
++      | period_never_expires | true                    |
++      | reduction_percent    | 10.0                    |
++    Then discount "never_expires_discount" should have the following properties:
++      | name[en-US]          | Never Expires Promotion |
++      | type                 | cart_level              |
++      | valid_from           | 2024-01-01 00:00:00     |
++      | period_never_expires | true                    |
++      | reduction_percent    | 10.0                    |
++
++  Scenario: Update discount to never expire
++    When I create a "free_shipping" discount "discount_to_make_permanent" with following properties:
++      | name[en-US] | Temporary Promotion |
++      | valid_from  | 2024-01-01 00:00:00 |
++      | valid_to    | 2024-12-31 23:59:00 |
++    Then discount "discount_to_make_permanent" should have the following properties:
++      | name[en-US]          | Temporary Promotion |
++      | type                 | free_shipping       |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | valid_to             | 2024-12-31 23:59:00 |
++      | period_never_expires | false               |
++    When I update discount "discount_to_make_permanent" with the following properties:
++      | valid_from           | 2024-01-01 00:00:00 |
++      | period_never_expires | true                |
++    Then discount "discount_to_make_permanent" should have the following properties:
++      | name[en-US]          | Temporary Promotion |
++      | type                 | free_shipping       |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | period_never_expires | true                |
++
++  Scenario: Update never-expiring discount to have expiration date
++    When I create a "cart_level" discount "permanent_to_temporary" with following properties:
++      | name[en-US]          | Permanent Discount  |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | period_never_expires | true                |
++      | reduction_percent    | 15.0                |
++    Then discount "permanent_to_temporary" should have the following properties:
++      | name[en-US]          | Permanent Discount  |
++      | type                 | cart_level          |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | period_never_expires | true                |
++      | reduction_percent    | 15.0                |
++    When I update discount "permanent_to_temporary" with the following properties:
++      | valid_from           | 2024-01-01 00:00:00 |
++      | valid_to             | 2024-12-31 23:59:00 |
++      | period_never_expires | false               |
++    Then discount "permanent_to_temporary" should have the following properties:
++      | name[en-US]          | Permanent Discount  |
++      | type                 | cart_level          |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | valid_to             | 2024-12-31 23:59:00 |
++      | period_never_expires | false               |
++      | reduction_percent    | 15.0                |
++
++  Scenario: Verify never-expiring discount has expiration far in the future
++    When I create a "cart_level" discount "verify_never_expires" with following properties:
++      | name[en-US]          | Long Term Discount  |
++      | valid_from           | 2024-01-01 00:00:00 |
++      | period_never_expires | true                |
++      | reduction_percent    | 20.0                |
++    Then discount "verify_never_expires" should have the following properties:
++      | period_never_expires | true |
++    And discount "verify_never_expires" expiration date should be more than 50 years in the future
++

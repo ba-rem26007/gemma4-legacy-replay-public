@@ -1,0 +1,57 @@
+diff --git a/classes/Search.php b/classes/Search.php
+index 3be983f12683c..3c578e2080095 100644
+--- a/classes/Search.php
++++ b/classes/Search.php
+@@ -110,6 +110,9 @@ class SearchCore
+     public const PS_SEARCH_ABSCISSA_MAX = 2;
+     public const PS_DISTANCE_MAX = 5;
+ 
++    /* Block-level tags whose boundaries act as a word separator when stripping HTML for the index */
++    private const HTML_BLOCK_TAGS_REGEX = '#</?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>#i';
++
+     /**
+      * Method that takes a raw string (sentence) and extract all keywords it can find.
+      *
+@@ -173,6 +176,14 @@ public static function sanitize($string, $id_lang, $indexation = false, $iso_cod
+ 
+         // The string gets into this method in a raw form of, like "Prestashop Tést A-1000".
+         // This get rid of all tags, special characters and convert everything to lowercase.
++        // Separate block-level tag boundaries with a space so words on adjacent lines or list
++        // items do not merge (e.g. "in</li><li>File" -> "in File", not "infile"), while inline
++        // tags are stripped without a separator so a styled word stays whole
++        // (e.g. "<b>bio</b><span>logic</span>" -> "biologic"). The regex is skipped for tag-free
++        // input, which is the common case for a front-office search query.
++        if (strpos($string, '<') !== false) {
++            $string = preg_replace(self::HTML_BLOCK_TAGS_REGEX, ' ', $string) ?? $string;
++        }
+         $string = Tools::strtolower(strip_tags($string));
+         $string = html_entity_decode($string, ENT_NOQUOTES, 'utf-8');
+         $string = preg_replace('/([' . PREG_CLASS_NUMBERS . ']+)[' . PREG_CLASS_PUNCTUATION . ']+(?=[' . PREG_CLASS_NUMBERS . '])/u', '\1', $string);
+diff --git a/tests/Integration/Classes/SearchTest.php b/tests/Integration/Classes/SearchTest.php
+index 33e9274d8825b..c822749a06f14 100644
+--- a/tests/Integration/Classes/SearchTest.php
++++ b/tests/Integration/Classes/SearchTest.php
+@@ -102,6 +102,23 @@ public function providerSearchString(): array
+                 'langId' => 1,
+                 'expected' => ['test1', '-', 'test2'],
+             ],
++            // Block-level tags separate words so list items do not merge (#40244 search index pollution).
++            'with html list items' => [
++                'input' => '<ul><li>red</li><li>shirt</li></ul>',
++                'langId' => 1,
++                'expected' => ['red', 'shirt'],
++            ],
++            'with adjacent block paragraphs' => [
++                'input' => '<p>hello</p><p>world</p>',
++                'langId' => 1,
++                'expected' => ['hello', 'world'],
++            ],
++            // Inline tags are stripped without a separator so a word styled mid-way stays whole.
++            'with mixed inline styling inside a word' => [
++                'input' => '<b>bio</b><span>logic</span>',
++                'langId' => 1,
++                'expected' => ['biologic'],
++            ],
+         ];
+     }
+ 

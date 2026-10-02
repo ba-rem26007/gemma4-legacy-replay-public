@@ -1,0 +1,127 @@
+diff --git a/app/AppKernel.php b/app/AppKernel.php
+index 672766a1b0521..16602a6f19e5c 100644
+--- a/app/AppKernel.php
++++ b/app/AppKernel.php
+@@ -182,14 +182,6 @@ public function getRootDir()
+         return __DIR__;
+     }
+ 
+-    /**
+-     * {@inheritdoc}
+-     */
+-    public function getCacheDir()
+-    {
+-        return _PS_CACHE_DIR_;
+-    }
+-
+     /**
+      * {@inheritdoc}
+      */
+diff --git a/install-dev/controllers/console/process.php b/install-dev/controllers/console/process.php
+index 260ac7940dc67..c41d83e03060b 100644
+--- a/install-dev/controllers/console/process.php
++++ b/install-dev/controllers/console/process.php
+@@ -377,7 +377,7 @@ private function initKernel()
+     private function rebootWithoutTranslationsCache()
+     {
+         global $kernel;
+-        (new Filesystem())->remove($kernel->getCacheDir() . 'translations');
++        (new Filesystem())->remove($kernel->getCacheDir() . DIRECTORY_SEPARATOR . 'translations');
+         $kernel->reboot($kernel->getCacheDir());
+     }
+ }
+diff --git a/src/Adapter/Cache/Clearer/SymfonyCacheClearer.php b/src/Adapter/Cache/Clearer/SymfonyCacheClearer.php
+index e82a3b776c7c5..9dad499445fed 100644
+--- a/src/Adapter/Cache/Clearer/SymfonyCacheClearer.php
++++ b/src/Adapter/Cache/Clearer/SymfonyCacheClearer.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Cache\Clearer;
+ 
+ use AppKernel;
++use Exception;
+ use Hook;
+ use PrestaShop\PrestaShop\Core\Cache\Clearer\CacheClearerInterface;
+ use Symfony\Bundle\FrameworkBundle\Console\Application;
+@@ -60,30 +61,50 @@ public function clear()
+         // If we reach here it means the clear lock file is locked, we register a shutdown function that will clear the cache once
+         // the current process is over.
+         register_shutdown_function(function () use ($kernel) {
+-            $cacheDir = $kernel->getCacheDir();
+-            if (!file_exists($cacheDir)) {
+-                return;
+-            }
++            try {
++                $cacheDir = $kernel->getCacheDir();
++                if (!file_exists($cacheDir)) {
++                    $kernel->unlocksCacheClear();
+ 
+-            $application = new Application($kernel);
+-            $application->setAutoExit(false);
++                    return;
++                }
+ 
+-            // Clear cache
+-            $input = new ArrayInput([
+-                'command' => 'cache:clear',
+-                '--no-optional-warmers' => true,
+-                '--env' => $kernel->getEnvironment(),
+-            ]);
++                $environments = ['prod', 'dev'];
++                foreach ($environments as $environment) {
++                    try {
++                        $application = new Application($kernel);
++                        $application->setAutoExit(false);
+ 
+-            $output = new NullOutput();
+-            $application->run($input, $output);
++                        // Clear cache without warmup to be fast
++                        $input = new ArrayInput([
++                            'command' => 'cache:clear',
++                            '--no-warmup' => true,
++                            '--env' => $environment,
++                        ]);
+ 
+-            Hook::exec('actionClearSf2Cache');
+-        });
++                        $output = new NullOutput();
++                        $application->doRun($input, $output);
++                    } catch (Exception $e) {
++                        // Do nothing but at least does not break the loop nor function
++                    }
++                }
+ 
+-        // Unlock is registered in another separate function to make sure it will be called no matter what
+-        register_shutdown_function(function () use ($kernel) {
+-            $kernel->unlocksCacheClear();
++                // Warmup prod environment only (not needed for dev since many things are dynamic)
++                $application = new Application($kernel);
++                $application->setAutoExit(false);
++                $input = new ArrayInput([
++                    'command' => 'cache:warmup',
++                    '--no-optional-warmers' => true,
++                    '--env' => 'prod',
++                    '--no-debug' => true,
++                ]);
++
++                $output = new NullOutput();
++                $application->doRun($input, $output);
++            } finally {
++                Hook::exec('actionClearSf2Cache');
++                $kernel->unlocksCacheClear();
++            }
+         });
+     }
+ }
+diff --git a/src/Adapter/ContainerBuilder.php b/src/Adapter/ContainerBuilder.php
+index eddaa26f3f65b..60d551492de44 100644
+--- a/src/Adapter/ContainerBuilder.php
++++ b/src/Adapter/ContainerBuilder.php
+@@ -125,7 +125,7 @@ public function buildContainer($containerName)
+     {
+         $this->containerName = $containerName;
+         $this->containerClassName = ucfirst($this->containerName) . 'Container';
+-        $this->dumpFile = $this->environment->getCacheDir() . $this->containerClassName . '.php';
++        $this->dumpFile = $this->environment->getCacheDir() . DIRECTORY_SEPARATOR . $this->containerClassName . '.php';
+         $this->containerConfigCache = new ConfigCache($this->dumpFile, $this->environment->isDebug());
+ 
+         //These methods load required files like autoload or annotation metadata so we need to load

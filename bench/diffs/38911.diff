@@ -1,0 +1,722 @@
+diff --git a/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php b/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php
+new file mode 100644
+index 0000000000000..c9088edab0af3
+--- /dev/null
++++ b/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php
+@@ -0,0 +1,176 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Carrier\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\Carrier\Repository\CarrierRepository;
++use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\Query\GetAvailableCarriers;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryHandler\GetAvailableCarriersHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\CarrierSummary;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\FilteredCarrier;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\GetCarriersResult;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\ProductSummary;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
++use Product;
++use RuntimeException;
++
++#[AsQueryHandler]
++class GetAvailableCarriersHandler implements GetAvailableCarriersHandlerInterface
++{
++    public function __construct(
++        private readonly CarrierRepository $carrierRepository,
++        private readonly ProductRepository $productRepository,
++        private readonly LanguageContext $languageContext,
++        private readonly ShopContext $shopContext,
++    ) {
++    }
++
++    public function handle(GetAvailableCarriers $query): GetCarriersResult
++    {
++        $products = [];
++        foreach ($query->getProductsIds() as $productId) {
++            $product = $this->productRepository->get(new ProductId($productId), new ShopId($this->shopContext->getId()));
++            $products[$product->id] = $product;
++        }
++
++        $carriersMapping = $this->carrierRepository->findCarriersByProductIds($query->getProductsIds(), new ShopId($this->shopContext->getId()));
++
++        // Compute common carriers across all products
++        $commonCarriers = $this->getCommonCarriers($carriersMapping);
++
++        // Index carriers for fast access
++        $carriersIndex = $this->indexCarriers($carriersMapping);
++
++        $availableCarriers = [];
++        if (!empty($commonCarriers)) {
++            foreach ($commonCarriers as $carrierId) {
++                $carrier = $carriersIndex[$carrierId];
++                $availableCarriers[] = new CarrierSummary($carrier['id_carrier'], $carrier['name']);
++            }
++        }
++
++        // Compute filtered carriers (carriers not available for all products)
++        $removedCarriers = [];
++        $allCarrierIds = $this->mapCarrierToProducts($carriersMapping);
++
++        foreach ($allCarrierIds as $carrierId => $productIds) {
++            if (!in_array($carrierId, $commonCarriers, true)) {
++                $carrier = $carriersIndex[$carrierId];
++                $productPreviews = array_map(function (int $pid) use ($products) {
++                    $product = $products[$pid];
++
++                    return new ProductSummary($product->id, $this->getProductName($product));
++                }, array_keys($productIds));
++
++                $removedCarriers[] = new FilteredCarrier(
++                    $productPreviews,
++                    new CarrierSummary($carrier['id_carrier'], $carrier['name'])
++                );
++            }
++        }
++
++        return new GetCarriersResult($availableCarriers, $removedCarriers);
++    }
++
++    /**
++     * Compute intersection of carriers across all products.
++     *
++     * @return int[]
++     */
++    private function getCommonCarriers(array $carriersMapping): array
++    {
++        $commonCarriers = null;
++
++        foreach ($carriersMapping as $carriers) {
++            $carrierIds = array_column($carriers, 'id_carrier');
++
++            $commonCarriers = is_null($commonCarriers)
++                ? $carrierIds
++                : array_intersect($commonCarriers, $carrierIds);
++        }
++
++        return $commonCarriers ?? [];
++    }
++
++    /**
++     * Build a fast-access index of carriers by ID.
++     *
++     * @return array<int, array{id_carrier: int, name: string}>
++     */
++    private function indexCarriers(array $carriersMapping): array
++    {
++        $index = [];
++        foreach ($carriersMapping as $carriers) {
++            foreach ($carriers as $carrier) {
++                $index[$carrier['id_carrier']] = $carrier;
++            }
++        }
++
++        return $index;
++    }
++
++    /**
++     * Map carriers to the list of products they are associated with.
++     *
++     * @return array<int, array<int, true>>
++     */
++    private function mapCarrierToProducts(array $carriersMapping): array
++    {
++        $map = [];
++        foreach ($carriersMapping as $productId => $carriers) {
++            foreach ($carriers as $carrier) {
++                $map[$carrier['id_carrier']][$productId] = true;
++            }
++        }
++
++        return $map;
++    }
++
++    /**
++     * Retrieve the product name for the current language. Throws exception if not found.
++     *
++     * @throws RuntimeException
++     */
++    private function getProductName(Product $product): string
++    {
++        if (is_array($product->name)) {
++            $languageId = $this->languageContext->getId();
++
++            if (!isset($product->name[$languageId])) {
++                throw new RuntimeException(sprintf('Product name not found for product ID %d and language ID %d.', $product->id, $languageId));
++            }
++
++            return $product->name[$languageId];
++        }
++
++        return $product->name;
++    }
++}
+diff --git a/src/Adapter/Carrier/Repository/CarrierRepository.php b/src/Adapter/Carrier/Repository/CarrierRepository.php
+index 3a5e3d8c5a84a..b558cb1b5558e 100644
+--- a/src/Adapter/Carrier/Repository/CarrierRepository.php
++++ b/src/Adapter/Carrier/Repository/CarrierRepository.php
+@@ -353,4 +353,40 @@ public function getLastPosition(): int
+             ->fetchOne()
+         ;
+     }
++
++    /**
++     * Returns a mapping of product IDs to their available carriers.
++     *
++     * @param int[] $productIds list of product IDs
++     *
++     * @return array<int, array<int, array{id_carrier: int, name: string}>>
++     *
++     * An associative array where the key is the product ID and the value is an array of carriers.
++     * Each carrier is represented as an associative array with keys:
++     *  - id_carrier: The carrier ID.
++     *  - name: The carrier name.
++     */
++    public function findCarriersByProductIds(array $productIds, ShopId $shopId): array
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb->select('pc.id_product as product_id, c.id_carrier AS id_carrier, c.name')
++            ->from($this->prefix . 'product_carrier', 'pc')
++            ->innerJoin('pc', $this->prefix . 'carrier', 'c', 'c.id_reference = pc.id_carrier_reference AND c.deleted = 0')
++            ->where($qb->expr()->in('pc.id_product', ':product_ids'))
++            ->andWhere('pc.id_shop = :shop_id')
++            ->setParameter('product_ids', $productIds, ArrayParameterType::INTEGER)
++            ->setParameter('shop_id', $shopId->getValue());
++
++        $results = $qb->executeQuery()->fetchAllAssociative();
++
++        $mapping = [];
++        foreach ($results as $row) {
++            $mapping[$row['product_id']][] = [
++                'id_carrier' => $row['id_carrier'],
++                'name' => $row['name'],
++            ];
++        }
++
++        return $mapping;
++    }
+ }
+diff --git a/src/Core/Domain/Carrier/Query/GetAvailableCarriers.php b/src/Core/Domain/Carrier/Query/GetAvailableCarriers.php
+new file mode 100644
+index 0000000000000..1951078d1ad4e
+--- /dev/null
++++ b/src/Core/Domain/Carrier/Query/GetAvailableCarriers.php
+@@ -0,0 +1,45 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\Query;
++
++/**
++ * Get available carriers for a product list.
++ */
++class GetAvailableCarriers
++{
++    /**
++     * @var array
++     */
++    private $productsIds;
++
++    public function __construct(array $productsIds)
++    {
++        $this->productsIds = $productsIds;
++    }
++
++    public function getProductsIds(): array
++    {
++        return $this->productsIds;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/QueryHandler/GetAvailableCarriersHandlerInterface.php b/src/Core/Domain/Carrier/QueryHandler/GetAvailableCarriersHandlerInterface.php
+new file mode 100644
+index 0000000000000..a89e0d01ee0aa
+--- /dev/null
++++ b/src/Core/Domain/Carrier/QueryHandler/GetAvailableCarriersHandlerInterface.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Carrier\Query\GetAvailableCarriers;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\GetCarriersResult;
++
++/**
++ * Defines contract for GetAvailableCarriersHandler.
++ */
++interface GetAvailableCarriersHandlerInterface
++{
++    /**
++     * @param GetAvailableCarriers $query
++     *
++     * @return GetCarriersResult
++     */
++    public function handle(GetAvailableCarriers $query);
++}
+diff --git a/src/Core/Domain/Carrier/QueryResult/CarrierSummary.php b/src/Core/Domain/Carrier/QueryResult/CarrierSummary.php
+new file mode 100644
+index 0000000000000..53b0f817efaa7
+--- /dev/null
++++ b/src/Core/Domain/Carrier/QueryResult/CarrierSummary.php
+@@ -0,0 +1,49 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult;
++
++class CarrierSummary
++{
++    private int $id;
++    private string $name;
++
++    public function __construct(int $id, string $name)
++    {
++        $this->id = $id;
++        $this->name = $name;
++    }
++
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    public function getName(): string
++    {
++        return $this->name;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/QueryResult/FilteredCarrier.php b/src/Core/Domain/Carrier/QueryResult/FilteredCarrier.php
+new file mode 100644
+index 0000000000000..c2e948f2b3e4c
+--- /dev/null
++++ b/src/Core/Domain/Carrier/QueryResult/FilteredCarrier.php
+@@ -0,0 +1,59 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult;
++
++/**
++ * Model representing carriers that have been removed, along with the products responsible for their removal.
++ */
++class FilteredCarrier
++{
++    /**
++     * @var ProductSummary[]
++     */
++    private array $products;
++
++    private CarrierSummary $carrier;
++
++    public function __construct(array $products, CarrierSummary $carrier)
++    {
++        $this->products = $products;
++        $this->carrier = $carrier;
++    }
++
++    /**
++     * @return ProductSummary[]
++     */
++    public function getProducts(): array
++    {
++        return $this->products;
++    }
++
++    public function getCarrier(): CarrierSummary
++    {
++        return $this->carrier;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/QueryResult/GetCarriersResult.php b/src/Core/Domain/Carrier/QueryResult/GetCarriersResult.php
+new file mode 100644
+index 0000000000000..d5e7e6f4f0ee2
+--- /dev/null
++++ b/src/Core/Domain/Carrier/QueryResult/GetCarriersResult.php
+@@ -0,0 +1,65 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult;
++
++/**
++ * Model returning available carriers as well as carriers that have been removed.
++ */
++class GetCarriersResult
++{
++    /**
++     * @var CarrierSummary[]
++     */
++    private array $availableCarriers;
++
++    /**
++     * @var FilteredCarrier[]
++     */
++    private array $filteredCarrier;
++
++    public function __construct(array $availableCarriers, array $filteredCarrier)
++    {
++        $this->availableCarriers = $availableCarriers;
++        $this->filteredCarrier = $filteredCarrier;
++    }
++
++    /**
++     * @return CarrierSummary[]
++     */
++    public function getAvailableCarriers(): array
++    {
++        return $this->availableCarriers;
++    }
++
++    /**
++     * @return FilteredCarrier[]
++     */
++    public function getFilteredOutCarriers(): array
++    {
++        return $this->filteredCarrier;
++    }
++}
+diff --git a/src/Core/Domain/Carrier/QueryResult/ProductSummary.php b/src/Core/Domain/Carrier/QueryResult/ProductSummary.php
+new file mode 100644
+index 0000000000000..a9768b6f7bb51
+--- /dev/null
++++ b/src/Core/Domain/Carrier/QueryResult/ProductSummary.php
+@@ -0,0 +1,49 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult;
++
++class ProductSummary
++{
++    private int $id;
++    private string $name;
++
++    public function __construct(int $id, string $name)
++    {
++        $this->id = $id;
++        $this->name = $name;
++    }
++
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    public function getName(): string
++    {
++        return $this->name;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/carrier.yml b/src/PrestaShopBundle/Resources/config/services/adapter/carrier.yml
+index ce47631d6fd25..1df6d926a0769 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/carrier.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/carrier.yml
+@@ -52,3 +52,5 @@ services:
+   PrestaShop\PrestaShop\Adapter\Carrier\QueryHandler\GetCarrierRangesHandler:
+ 
+   PrestaShop\PrestaShop\Adapter\Carrier\CommandHandler\SetCarrierRangesHandler:
++
++  PrestaShop\PrestaShop\Adapter\Carrier\QueryHandler\GetAvailableCarriersHandler:
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierFeatureContext.php
+index 05e7a1a037ac2..f92bf337931e7 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierFeatureContext.php
+@@ -36,6 +36,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\AddCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\EditCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Exception\CarrierConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\Query\GetAvailableCarriers;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Query\GetCarrierForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\QueryResult\EditableCarrier;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
+@@ -406,6 +407,65 @@ public function saveCarrierShouldThrowAnError(string $errorCode)
+         );
+     }
+ 
++    /**
++     * @Then the products :products should have the following carriers:
++     *
++     * @param string $products
++     * @param TableNode $table
++     */
++    public function assertCarriersWithState(string $products, TableNode $table)
++    {
++        $expectedRows = $table->getColumnsHash();
++
++        $expectedAvailable = [];
++        $expectedFiltered = [];
++
++        foreach ($expectedRows as $row) {
++            $carrier = ['name' => $row['carrier']];
++
++            if (strtolower($row['state']) === 'available') {
++                $expectedAvailable[] = $carrier;
++            } elseif (strtolower($row['state']) === 'filtered') {
++                $expectedFiltered[] = [
++                    'carrier' => $row['carrier'],
++                    'products' => $row['products'] ?? '',
++                ];
++            }
++        }
++
++        $productNames = explode(',', $products);
++        $productIds = [];
++
++        foreach ($productNames as $productName) {
++            $productIds[] = $this->referenceToId(trim($productName));
++        }
++
++        $carriersResult = $this->getQueryBus()->handle(
++            new GetAvailableCarriers($productIds)
++        );
++
++        $actualAvailable = array_map(function ($carrierSummary) {
++            return ['name' => $carrierSummary->getName()];
++        }, $carriersResult->getAvailableCarriers());
++
++        $actualFiltered = [];
++
++        foreach ($carriersResult->getFilteredOutCarriers() as $removedCarrier) {
++            $carrierName = $removedCarrier->getCarrier()->getName();
++            $productNames = array_map(function ($productSummary) {
++                return $productSummary->getName();
++            }, $removedCarrier->getProducts());
++
++            $actualFiltered[] = [
++                'carrier' => $carrierName,
++                'products' => implode(', ', $productNames),
++            ];
++        }
++
++        Assert::assertEquals($expectedAvailable, $actualAvailable, 'Available carriers do not match expected.');
++        Assert::assertEquals($expectedFiltered, $actualFiltered, 'Filtered carriers do not match expected.');
++    }
++
+     private function createCarrierUsingCommand(
+         string $name,
+         array $delay,
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature
+new file mode 100644
+index 0000000000000..8b3b9de462d62
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature
+@@ -0,0 +1,38 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s carrier --tags carrier-available
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@carrier-available
++Feature: Carrier available
++  As a BO user i want to recover the common carriers of different products, as well as those filtered
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    And I set up shop context to single shop shop1
++    And language "language1" with locale "en-US" exists
++    And language "language2" with locale "fr-FR" exists
++    And I add product "product1" with following information:
++      | name[en-US] | bottle of beer |
++      | type        | standard       |
++    And I add product "product2" with following information:
++      | name[fr-FR] | bouteille de rhum |
++      | type        | standard       |
++    And I create carrier "standard_carrier" with specified properties:
++      | name | Standard |
++    And I create carrier "express_carrier" with specified properties:
++      | name | Express |
++    And I create carrier "pickup_carrier" with specified properties:
++      | name | Pickup |
++
++  Scenario: Get available carriers for existing order
++    Given I assign product "product1" with following carriers:
++      | standard_carrier |
++      | pickup_carrier |
++      | express_carrier |
++    And I assign product "product2" with following carriers:
++      | standard_carrier |
++      | pickup_carrier |
++    Then the products "product1, product2" should have the following carriers:
++      | carrier  | state     | products       |
++      | Standard | available |                |
++      | Pickup   | available |                |
++      | Express  | filtered  | bottle of beer |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index d9317f6d794dc..bf146ab7b8f32 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -665,9 +665,12 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateShippingFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext

@@ -1,0 +1,1806 @@
+diff --git a/.ai/CONTAINERS.md b/.ai/CONTAINERS.md
+new file mode 100644
+index 0000000000000..02be3af6b082e
+--- /dev/null
++++ b/.ai/CONTAINERS.md
+@@ -0,0 +1,69 @@
++# Service Containers & Kernels
++
++> Cross-cutting guide. PrestaShop 9 runs **four** distinct service containers. Which one serves a request — and which
++> service-definition files it loads — determines whether a given service (e.g. `validator`, `translator`) even exists.
++> Getting this wrong is easy and the failures are confusing (a service "missing" in one context, a 500 only in BO, …).
++
++## The four containers
++
++| Container | Class / built by | Serves | FrameworkBundle? |
++|-----------|------------------|--------|------------------|
++| **AdminKernel** | `app/AdminKernel.php` (Symfony kernel) | Back office — **including legacy `index.php?controller=Admin*`** (it boots the kernel, then dispatches/redirects) | ✅ full |
++| **FrontKernel** | `app/FrontKernel.php` (Symfony kernel) | Front-office Symfony routes | ✅ full |
++| **AdminAPIKernel** | `app/AdminAPIKernel.php` (Symfony kernel) | Admin API (`/admin-api/*`) | ✅ full |
++| **FO legacy** | `src/Adapter/ContainerBuilder.php` → `LegacyContainerBuilder` (hand-built) | Front-office **legacy** dispatch (`FrontController`) + a compile-time bootstrap bridge (see gotchas) | ❌ none |
++
++The three Symfony kernels all extend `app/AppKernel.php`; each loads `app/config/<appId>/config_<env>.yml` (appId =
++`admin` / `front` / `admin-api`). They get `validator`, `translator`, the serializer, the full Context services and all
++`validator.constraint_validator`-tagged validators from FrameworkBundle + the bundle config glob.
++
++The **FO legacy container is NOT a Symfony/FrameworkBundle container** — it is assembled by hand. Anything Symfony
++normally provides (Doctrine, `validator`, `translator`, full Context) is **absent unless explicitly wired**, via:
++- `ContainerBuilderExtensionInterface` implementations run before compile — `DoctrineBuilderExtension` (Doctrine),
++  `ValidatorBuilderExtension` (the `validator`, see [Component/ExtraProperty](Component/ExtraProperty/CONTEXT.md));
++- the YAML it loads (below).
++`ContainerBuilder::getContainer('admin')` **throws** — the BO never uses this container directly.
++
++## Service-definition file split (where to put a service)
++
++| Files | Loaded by | Scope |
++|-------|-----------|-------|
++| `src/PrestaShopBundle/Resources/config/services/**` (bundle) | The **SF kernels** load the full tree. The **FO legacy container loads only a hand-picked subset** — the files explicitly listed in the `imports:` of `config/services/common.yml` (by convention the `common.yml` of each subfolder, e.g. `core/common.yml`, `bundle/common.yml`, `extra_property/common.yml`). It is **not** an automatic glob; most files here are SF-kernel-only. | **SF kernels**; FO only for the explicitly-imported files |
++| `config/services/common.yml` | FO legacy container only (imported by the per-context entry below) | **FO-only**, shared across FO entries |
++| `config/services/{front,webservice}/services_<env>.yml` | FO legacy container, per entry point (`front`, `webservice`) | FO/legacy entry-specific |
++| `app/config/{admin,front,admin-api}/{config,services}_<env>.yml` | One Symfony kernel each | **Per-kernel (SF only)** |
++
++**Rules of thumb:**
++- A service in a **bundle** config is loaded into **every SF kernel**. It is available in the **FO legacy container
++  only if its file is explicitly imported by `config/services/common.yml`** (the convention: put FO-needed
++  definitions in a `common.yml` and add it to that import list). Once a bundle service IS imported into the FO
++  container, **its dependencies must resolve there too** — do **not** hard-depend on a FrameworkBundle-only service
++  (e.g. `@validator`, `@translator`) from such a service unless that dependency is also provided in the FO container
++  (e.g. wired by a `ContainerBuilderExtensionInterface`).
++- **FO-only** service definitions belong in `config/services/*` — never in bundle configs the SF kernels load (that
++  would leak them into / conflict with the SF kernels).
++- **SF-kernel-only** definitions belong under `app/config/<kernel>/`.
++
++## Gotchas
++
++- **BO uses the full container.** Even legacy `AdminXxxController` runs under AdminKernel. So a service is fully
++  available in BO. The "lightweight" FO legacy container is **front-office only**.
++- **…but the FO legacy container is also built transiently during *any* kernel's container compilation.**
++  `LegacyHookSubscriber::getSubscribedEvents()` (read by `RegisterListenersPass` at compile time, before any kernel
++  container exists) calls `Hook::getHookModuleFilter()`, which — finding `SymfonyContainer::getInstance()` null at that
++  moment — falls back to building the FO legacy container to read hook-module data. **Consequence:** a service that
++  **fails to compile in the FO container breaks the boot of *every* kernel, including BO.** (This is exactly what a
++  hard `@validator` dependency on an ExtraProperty service did before `ValidatorBuilderExtension` provided a FO
++  `validator`.) Do not "fix" this by guarding the fallback on front-office context — it legitimately runs at
++  compile time in all contexts, where `isFrontOfficeContext()` is false.
++- **`ObjectModel::findContainer()`** resolves through `ContainerFinder` (`Context->container` → controller container →
++  `SymfonyContainer::getInstance()`) and returns `null` if none — it has **no** hard FO-container fallback. So
++  ObjectModel features (e.g. extra-property validation) use whichever container is resolved; ensure the services they
++  need exist in all of them.
++- A FrameworkBundle service id like `validator` does **not** exist in the FO legacy container by default; reference it
++  only where it is guaranteed (SF kernels) or where it has been hand-wired (FO via `ValidatorBuilderExtension`).
++
++## Related
++- [Component/ExtraProperty/CONTEXT.md](Component/ExtraProperty/CONTEXT.md) — the validator is wired into the FO container by `ValidatorBuilderExtension` (graceful per-constraint skip for validators whose deps are FO-absent).
++- [MULTISTORE.md](MULTISTORE.md) — Context/ShopConstraint resolution.
++- [GOTCHAS.md](GOTCHAS.md) — other cross-cutting traps.
+diff --git a/.ai/CONTEXT.md b/.ai/CONTEXT.md
+index abc6c7dd8c512..4d0e8511bc53e 100644
+--- a/.ai/CONTEXT.md
++++ b/.ai/CONTEXT.md
+@@ -3,6 +3,7 @@
+ > For folder structure and navigation, see [STRUCTURE.md](STRUCTURE.md).
+ > For cross-domain naming traps and identity gotchas, see [GOTCHAS.md](GOTCHAS.md).
+ > For multi-store scoping (ShopConstraint, AbstractMultistoreConfiguration), see [MULTISTORE.md](MULTISTORE.md).
++> For the service-container / kernel topology (3 Symfony kernels vs the hand-built FO legacy container, and where service definitions live), see [CONTAINERS.md](CONTAINERS.md).
+ 
+ ## Project overview
+ 
+diff --git a/.ai/Component/ExtraProperty/CONTEXT.md b/.ai/Component/ExtraProperty/CONTEXT.md
+index d4cdcb8d13501..bb238ea1fe56c 100644
+--- a/.ai/Component/ExtraProperty/CONTEXT.md
++++ b/.ai/Component/ExtraProperty/CONTEXT.md
+@@ -24,7 +24,7 @@ Lets any module register **typed extra fields** on existing PrestaShop entities
+ 
+ ## Database structure
+ 
+-**Central registry — `ps_extra_property_definition`** (created at install). One row per registered property. Real columns: `entity_name`, `module_name` (NULL = core field, no module owner), `property_name`, `type` ENUM(`int,bool,string,float,date,html,json,choice`), `scope` ENUM(`common,lang,shop`), `sql_index` ENUM(`none,key,unique`), `size`, `default_value`, `validator`, `display_front`, `associated_grids`/`associated_forms`/`associated_apis` (JSON placement & API-targeting DSL), `form_field_type`, `form_required`, `form_options`, and `label_*`/`description_*` wording+domain pairs. Unique key: `(entity_name, module_name, property_name)`.
++**Central registry — `ps_extra_property_definition`** (created at install). One row per registered property. Real columns: `entity_name`, `module_name` (NULL = core field, no module owner), `property_name`, `type` ENUM(`int,bool,string,float,date,html,json,choice`), `scope` ENUM(`common,lang,shop`), `sql_index` ENUM(`none,key,unique`), `size`, `default_value`, `constraints` (PHP-serialized Symfony `Constraint[]`), `display_front`, `associated_grids`/`associated_forms`/`associated_apis` (JSON placement & API-targeting DSL), `form_field_type`, `required`, `form_options`, and `label_*`/`description_*` wording+domain pairs. Unique key: `(entity_name, module_name, property_name)`.
+ 
+ **Dynamic per-entity value tables**, created lazily by `ExtraPropertySchemaManager` on first registration for an entity, one per scope:
+ 
+@@ -70,7 +70,7 @@ The Smarty/array index key is `extra_properties` (snake_case), and only present
+ - `associatedGrids`: `"gridId[:columnId[:before|after]]"` (e.g. `"product:reference:after"`). Empty → placed before the grid `actions` column.
+ 
+ **Rendering** (derived from the logical type, not the override):
+-- BO form field = `form_field_type` FQCN if set, else **`TextType`**; LANG scope wrapped in `TranslatableType`; `form_required` adds a `NotBlank`, `validator` adds a `Callback` constraint. (There is no per-type form-type map — `TextType` is the default for every untyped field.)
++- BO form field = `form_field_type` FQCN if set, else **`TextType`**; LANG scope wrapped in `TranslatableType`; the definition's `constraints` (real Symfony `Constraint` objects) are attached to the field as-is so the form runs them natively (multiple errors per field). Requiredness is opt-in — the module passes `NotBlank`; the `required` flag (`isRequired()`) only drives the HTML required attribute on the BO form **and** the field's entry in the Admin API (OpenAPI) `required` list — it never adds a server-side `NotBlank`. (There is no per-type form-type map — `TextType` is the default for every untyped field.)
+ - Grid column: BOOL → `ToggleColumn` (route `admin_common_extra_properties_toggle`, shop resolved server-side), DATE → `DateTimeColumn`, JSON → skipped, everything else → `DataColumn`.
+ - Form field name, grid column id, grid SELECT alias and the inline key in API list responses all share `getFieldName()` = `extra_{module}_{property}`. The scope is intentionally not part of it — a property is unique per module + name.
+ 
+@@ -89,6 +89,7 @@ Module-declared extra properties are exposed and managed on the Admin API, wired
+ 
+ - **`nullable` and `enumValues` are NOT stored in the registry** — the live storage column schema is their source of truth. `ExtraPropertyDefinitionRepository::enrichRowsWithColumnMetadata()` runs `SHOW COLUMNS` and injects synthetic `nullable`/`enum_values` keys consumed by `ExtraPropertyDefinition::fromRow()`.
+ - **Two-tier service wiring.** `common.yml` (FO+BO): repository, cached read decorator, reader, writer, validator. `backend.yml` (BO-only): schema manager (DDL, needs logger), registry, form services — registration/DDL only happen back-office. The Admin API bridge is wired separately in `app/config/admin-api/services.yml` (Admin API kernel only). In FO the `WriterInterface` aliases the plain repository (no writes, no cache invalidation).
++- **Constraint-based validation, available in every container.** `ExtraPropertyValidator` requires the Symfony `validator`. The three Symfony kernels have it; the **hand-built FO legacy container does not**, so it is wired there by `src/Adapter/Container/ValidatorBuilderExtension.php` — a `ContainerConstraintValidatorFactory` that resolves the PS validators whose deps exist in FO (`TypedRegex`, `CleanHtml`) and **gracefully skips + `error_log`s** the rest (`DefaultLanguage` needs `LanguageContext`, absent in FO). Per-language rules are declared with `Assert\All`; whole-array rules (e.g. `DefaultLanguage`) are bare. **Edge case:** an ObjectModel loaded with a `langId` exposes a LANG value as a *scalar* — `validateValue()` then applies only the unwrapped `All` rules and skips whole-array constraints. See [CONTAINERS.md](../../CONTAINERS.md) (esp. why this validator must compile in the FO container: it is built even during BO boot).
+ - **`CachedExtraPropertyDefinitionRepository` implements BOTH read and write interfaces** over one filesystem cache pool; every write invalidates. The registry itself is uncached and gets the cached repo injected as its writer.
+ - **The registry refuses destructive schema changes** on an already-registered property (type/scope change, STRING size decrease, NULL→NOT NULL, ENUM value removal) — those require unregister + re-register. Non-destructive drift (default change, size increase, nullable relax, enum addition) is reconciled onto the live column via `ALTER TABLE … MODIFY COLUMN`.
+ - **Grouped value shape everywhere.** Reader returns / writer accepts `[moduleKey => [propertyName => value]]` (`'_core'` for core fields). For lang scope, `langId = null` yields `[id_lang => value]` arrays (BO/API edit-all-langs), an int yields a scalar (FO).
+diff --git a/classes/Hook.php b/classes/Hook.php
+index 5a6aae8e51c26..50c58e6b56f91 100644
+--- a/classes/Hook.php
++++ b/classes/Hook.php
+@@ -1254,12 +1254,16 @@ private static function getHookRegistry()
+      *
+      * @throws PrestaShop\PrestaShop\Core\Exception\ContainerNotFoundException
+      * @throws ServiceNotFoundException
+-     * @throws PrestaShop\PrestaShop\Core\Exception\ContainerNotFoundException
+      */
+     private static function getHookModuleFilter(): HookModuleFilter
+     {
+         $serviceContainer = SymfonyContainer::getInstance();
+ 
++        // The fallback below only triggers when NO Symfony kernel container is booted yet — which happens during
++        // container compilation (LegacyHookSubscriber::getSubscribedEvents() is read by RegisterListenersPass before
++        // any kernel container exists), in BO, FO and CLI alike. In a normal request the kernel container is present,
++        // so the FO container is never used here. The hand-built front container is the only source of
++        // HookModuleFilter available at that bootstrap moment.
+         if (is_null($serviceContainer)) {
+             $serviceContainer = ContainerBuilder::getContainer(
+                 'front',
+diff --git a/classes/ObjectModel.php b/classes/ObjectModel.php
+index 3a0488982d8b0..bf0ad907afd78 100644
+--- a/classes/ObjectModel.php
++++ b/classes/ObjectModel.php
+@@ -1104,16 +1104,23 @@ public function validateExtraProperties(bool $die = true, bool $errorReturn = fa
+             return true;
+         }
+ 
+-        $result = $validator->validate($bag->getModifiedValues(), $collection);
+-        if (true !== $result) {
+-            if ($die) {
+-                throw new PrestaShopException($result);
+-            }
++        $violations = $validator->validate($bag->getModifiedValues(), $collection);
++        if (0 === count($violations)) {
++            return true;
++        }
+ 
+-            return $errorReturn ? $result : false;
++        // Flatten every violation into one human-readable message ("<path>: <message>" per line).
++        $messages = [];
++        foreach ($violations as $violation) {
++            $messages[] = sprintf('%s: %s', $violation->getPropertyPath(), (string) $violation->getMessage());
+         }
++        $message = implode("\n", $messages);
+ 
+-        return true;
++        if ($die) {
++            throw new PrestaShopException($message);
++        }
++
++        return $errorReturn ? $message : false;
+     }
+ 
+     /**
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 3be3253a1048c..37645dfea57e9 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -888,13 +888,13 @@ CREATE TABLE `PREFIX_extra_property_definition` (
+   `sql_index` ENUM ('none','key','unique') NOT NULL DEFAULT 'none',
+   `size` smallint(5) unsigned DEFAULT NULL,
+   `default_value` varchar(255) DEFAULT NULL,
+-  `validator` varchar(255) DEFAULT NULL,
++  `required` tinyint(1) unsigned NOT NULL DEFAULT '0',
++  `constraints` longtext DEFAULT NULL,
+   `display_front` tinyint(1) unsigned NOT NULL DEFAULT 1,
+   `associated_apis` text DEFAULT NULL,
+   `associated_grids` text DEFAULT NULL,
+   `associated_forms` text DEFAULT NULL,
+   `form_field_type` varchar(255) DEFAULT NULL,
+-  `form_required` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `form_options` text DEFAULT NULL,
+   `label_wording` varchar(191) DEFAULT NULL,
+   `label_domain` varchar(255) DEFAULT NULL,
+diff --git a/src/Adapter/Container/ValidatorBuilderExtension.php b/src/Adapter/Container/ValidatorBuilderExtension.php
+new file mode 100644
+index 0000000000000..066a59b1d0752
+--- /dev/null
++++ b/src/Adapter/Container/ValidatorBuilderExtension.php
+@@ -0,0 +1,58 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Container;
++
++use PrestaShop\PrestaShop\Adapter\Validator\LegacyValidatorFactory;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\CleanHtmlValidator;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\TypedRegexValidator;
++use Symfony\Component\DependencyInjection\ContainerBuilder;
++use Symfony\Component\DependencyInjection\Reference;
++use Symfony\Component\Validator\Validator\ValidatorInterface;
++
++/**
++ * Registers a Symfony `validator` in the hand-built front-office legacy container.
++ *
++ * The three Symfony kernels get `validator` from FrameworkBundle, but the FO legacy container
++ * (PrestaShop\PrestaShop\Adapter\ContainerBuilder) does not — so ExtraProperty (and any other) validation would have
++ * no validator there. We assemble one with a container-backed, failure-tolerant constraint-validator factory
++ * (GracefulConstraintValidatorFactory): Symfony built-in validators resolve via `new`, the PS validators whose
++ * dependencies exist in this container are registered under their FQCN (what Constraint::validatedBy() returns), and
++ * validators that cannot be built here (e.g. DefaultLanguageValidator → LanguageContext) are skipped + logged.
++ *
++ * Note: this can't be a CompilerPass — extensions must run before compilation (same reason as DoctrineBuilderExtension).
++ */
++final class ValidatorBuilderExtension implements ContainerBuilderExtensionInterface
++{
++    public function build(ContainerBuilder $container)
++    {
++        // PS constraint validators whose dependencies are available in the FO container, registered under their FQCN
++        // id so GracefulConstraintValidatorFactory resolves them from the container (must be public, otherwise they
++        // are pruned as unused since nothing references them at compile time — only the factory `get()`s them).
++        $container->register(TypedRegexValidator::class, TypedRegexValidator::class)
++            ->setPublic(true)
++            ->setArguments([new Reference('prestashop.adapter.legacy.configuration')]);
++
++        $container->register(CleanHtmlValidator::class, CleanHtmlValidator::class)
++            ->setPublic(true)
++            ->setFactory([LegacyValidatorFactory::class, 'createCleanHtmlValidator'])
++            ->setArguments([new Reference('prestashop.adapter.legacy.configuration')]);
++
++        // The validator itself, assembled by LegacyValidatorFactory from the container (for the constraint-validator
++        // factory). No logger is injected: skipped constraints fall back to error_log() (the FO container has no
++        // Monolog logger, and the legacy logger fires hooks from inside validation — see GracefulConstraintValidatorFactory).
++        $container->register('validator', ValidatorInterface::class)
++            ->setPublic(true)
++            ->setFactory([LegacyValidatorFactory::class, 'create'])
++            ->setArguments([new Reference('service_container')]);
++
++        // So both `@validator` and a ValidatorInterface type-hint resolve, like in the Symfony kernels.
++        $container->setAlias(ValidatorInterface::class, 'validator')->setPublic(true);
++    }
++}
+diff --git a/src/Adapter/ContainerBuilder.php b/src/Adapter/ContainerBuilder.php
+index ddcd838e12568..f8983852ebf3a 100644
+--- a/src/Adapter/ContainerBuilder.php
++++ b/src/Adapter/ContainerBuilder.php
+@@ -15,6 +15,7 @@
+ use PrestaShop\PrestaShop\Adapter\Container\DoctrineBuilderExtension;
+ use PrestaShop\PrestaShop\Adapter\Container\LegacyContainer;
+ use PrestaShop\PrestaShop\Adapter\Container\LegacyContainerBuilder;
++use PrestaShop\PrestaShop\Adapter\Container\ValidatorBuilderExtension;
+ use PrestaShop\PrestaShop\Adapter\Doctrine\FrontDoctrineProxyWarmer;
+ use PrestaShop\PrestaShop\Adapter\Module\Repository\CachedModuleRepository;
+ use PrestaShop\PrestaShop\Adapter\Module\Repository\ModuleRepository;
+@@ -171,6 +172,8 @@ private function compileContainer()
+         $builderExtensions = [
+             new ContainerParametersExtension($this->environment),
+             new DoctrineBuilderExtension($this->environment),
++            // The FO legacy container has no FrameworkBundle, so the Symfony `validator` is wired manually here.
++            new ValidatorBuilderExtension(),
+         ];
+         /** @var ContainerBuilderExtensionInterface $builderExtension */
+         foreach ($builderExtensions as $builderExtension) {
+diff --git a/src/Adapter/Validator/GracefulConstraintValidatorFactory.php b/src/Adapter/Validator/GracefulConstraintValidatorFactory.php
+new file mode 100644
+index 0000000000000..84b3b9dd67aff
+--- /dev/null
++++ b/src/Adapter/Validator/GracefulConstraintValidatorFactory.php
+@@ -0,0 +1,70 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Validator;
++
++use Psr\Container\ContainerInterface;
++use Psr\Log\LoggerInterface;
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\ConstraintValidatorInterface;
++use Symfony\Component\Validator\ContainerConstraintValidatorFactory;
++use Throwable;
++
++/**
++ * A container-backed constraint-validator factory that tolerates validators it cannot build.
++ *
++ * The front-office legacy container (PrestaShop\PrestaShop\Adapter\ContainerBuilder) is hand-built and does not
++ * register every service the full Symfony kernels do. Symfony built-in validators and the PS validators registered
++ * for the FO container (TypedRegex, CleanHtml) resolve normally; a validator whose dependencies are absent here
++ * (e.g. DefaultLanguageValidator → LanguageContext) would otherwise throw when the parent factory does `new $class()`.
++ * Instead of fataling, we log a warning and return a no-op: the constraint is still fully enforced wherever the full
++ * container runs (back-office Symfony pages and the Admin API).
++ */
++final class GracefulConstraintValidatorFactory extends ContainerConstraintValidatorFactory
++{
++    /** @var array<string, NoOpConstraintValidator> no-op validators for un-buildable constraints, keyed by validator FQCN */
++    private array $skipped = [];
++
++    public function __construct(
++        ContainerInterface $container,
++        private readonly ?LoggerInterface $logger = null,
++    ) {
++        parent::__construct($container);
++    }
++
++    public function getInstance(Constraint $constraint): ConstraintValidatorInterface
++    {
++        $name = $constraint->validatedBy();
++        if (isset($this->skipped[$name])) {
++            return $this->skipped[$name];
++        }
++
++        try {
++            return parent::getInstance($constraint);
++        } catch (Throwable $exception) {
++            $message = sprintf(
++                'ExtraProperty: constraint "%s" cannot be validated in the front-office legacy container and was '
++                . 'skipped (it is still enforced on Symfony pages and the Admin API): %s',
++                $name,
++                $exception->getMessage(),
++            );
++
++            // Log once per validator (the no-op is cached below). A PSR logger is used when one is injected (e.g.
++            // tests); the FO container has none, and PrestaShop's legacy logger must NOT be used here — it fires hooks
++            // from inside validation (PrestaShopLogger::addLog → Hook::exec). error_log() has no such side effects.
++            if (null !== $this->logger) {
++                $this->logger->warning($message);
++            } else {
++                error_log($message);
++            }
++
++            return $this->skipped[$name] = new NoOpConstraintValidator();
++        }
++    }
++}
+diff --git a/src/Adapter/Validator/LegacyValidatorFactory.php b/src/Adapter/Validator/LegacyValidatorFactory.php
+new file mode 100644
+index 0000000000000..43ee27a476dee
+--- /dev/null
++++ b/src/Adapter/Validator/LegacyValidatorFactory.php
+@@ -0,0 +1,44 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Validator;
++
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\CleanHtmlValidator;
++use Psr\Container\ContainerInterface;
++use Psr\Log\LoggerInterface;
++use Symfony\Component\Validator\Validation;
++use Symfony\Component\Validator\Validator\ValidatorInterface;
++
++/**
++ * Service factories used to assemble the Symfony validator inside the hand-built front-office legacy container, which
++ * (unlike the Symfony kernels) does not get a `validator` from FrameworkBundle.
++ *
++ * Raw-value validation (`validate($value, $constraints)`) needs no class metadata, so a plain ValidatorBuilder with a
++ * container-backed, failure-tolerant constraint-validator factory is enough. No translator is set: messages fall back
++ * to their (untranslated) templates, which is acceptable for the FO path where they surface in exceptions/logs.
++ */
++final class LegacyValidatorFactory
++{
++    public static function create(ContainerInterface $container, ?LoggerInterface $logger = null): ValidatorInterface
++    {
++        return Validation::createValidatorBuilder()
++            ->setConstraintValidatorFactory(new GracefulConstraintValidatorFactory($container, $logger))
++            ->getValidator();
++    }
++
++    /**
++     * Builds CleanHtmlValidator, whose constructor needs the resolved PS_ALLOW_HTML_IFRAME flag (the SF kernels wire
++     * this through a DI expression, which is awkward to express in the hand-built container — a factory is simpler).
++     */
++    public static function createCleanHtmlValidator(ConfigurationInterface $configuration): CleanHtmlValidator
++    {
++        return new CleanHtmlValidator((bool) $configuration->get('PS_ALLOW_HTML_IFRAME'));
++    }
++}
+diff --git a/src/Adapter/Validator/NoOpConstraintValidator.php b/src/Adapter/Validator/NoOpConstraintValidator.php
+new file mode 100644
+index 0000000000000..d6929962a88a3
+--- /dev/null
++++ b/src/Adapter/Validator/NoOpConstraintValidator.php
+@@ -0,0 +1,28 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Validator;
++
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\ConstraintValidator;
++
++/**
++ * A constraint validator that does nothing.
++ *
++ * Returned by GracefulConstraintValidatorFactory when a constraint's real validator cannot be built in the current
++ * (front-office legacy) container — so an un-buildable constraint is skipped rather than fataling. The constraint is
++ * still fully enforced wherever the full Symfony container runs (back-office Symfony pages and the Admin API).
++ */
++final class NoOpConstraintValidator extends ConstraintValidator
++{
++    public function validate(mixed $value, Constraint $constraint)
++    {
++        // Intentionally a no-op.
++    }
++}
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+index 8ad814936e5da..112f1b2ac0f18 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+@@ -13,6 +13,7 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyValueCaster;
+ use PrestaShop\PrestaShop\Core\Util\Inflector;
++use Symfony\Component\Validator\Constraint;
+ 
+ /**
+  * Immutable value object representing an extra property definition.
+@@ -75,7 +76,7 @@ final class ExtraPropertyDefinition
+      * @param list<string>|null $enumValues For CHOICE type: SQL ENUM allowed values. Not persisted — schema creation only.
+      * @param scalar|null $defaultValue Adds a DEFAULT clause in DDL. Also persisted in registry.
+      * @param bool $nullable Controls NULL vs NOT NULL in DDL. Not persisted — schema creation only.
+-     * @param bool $formRequired when true, marks the BO form field as required
++     * @param bool $required when true, marks the field as required in BO forms and in the Admin API (OpenAPI) schema
+      * @param int|null $size for STRING type: varchar column length (defaults to 255)
+      * @param ExtraPropertySqlIndex $sqlIndex SQL index strategy on the storage column
+      * @param bool $displayFront allow this field to be exposed in front-office presenters
+@@ -84,7 +85,7 @@ final class ExtraPropertyDefinition
+      * @param list<string>|null $associatedApis Admin API placement entries: "uriPath[:METHOD[,METHOD...]]", matched against the operation URI template (+ optional HTTP methods). No method modifier matches every method.
+      * @param string|null $formFieldType fully-qualified Symfony Form type FQCN override for BO forms
+      * @param array<string, mixed>|null $formOptions extra options passed verbatim to the Symfony form type constructor
+-     * @param string|null $validator prestaShop Validate method name applied before persistence
++     * @param list<Constraint>|null $constraints Symfony validation constraints applied to each value before persistence. Null/empty means no validation. Must be serializable (no Callback with a closure).
+      * @param string|null $labelWording Translation wording key shown in BO. Required when associatedForms or associatedGrids is set.
+      * @param string|null $labelDomain translation domain for label wording
+      * @param string|null $descriptionWording translation wording key shown as BO help text
+@@ -101,7 +102,7 @@ public function __construct(
+         protected readonly ?array $enumValues = null,
+         protected readonly int|float|string|bool|null $defaultValue = null,
+         protected readonly bool $nullable = true,
+-        protected readonly bool $formRequired = false,
++        protected readonly bool $required = false,
+         protected readonly ?int $size = null,
+         protected readonly ExtraPropertySqlIndex $sqlIndex = ExtraPropertySqlIndex::NONE,
+         protected readonly bool $displayFront = true,
+@@ -110,7 +111,7 @@ public function __construct(
+         protected readonly ?array $associatedApis = null,
+         protected readonly ?string $formFieldType = null,
+         protected readonly ?array $formOptions = null,
+-        protected readonly ?string $validator = null,
++        protected readonly ?array $constraints = null,
+         protected readonly ?string $labelWording = null,
+         protected readonly ?string $labelDomain = null,
+         protected readonly ?string $descriptionWording = null,
+@@ -227,6 +228,20 @@ public function __construct(
+             }
+         }
+ 
++        if (null !== $constraints) {
++            foreach ($constraints as $constraint) {
++                if (!$constraint instanceof Constraint) {
++                    throw new InvalidExtraPropertyDefinitionException(sprintf(
++                        'ExtraPropertyDefinition: every constraint must be a %s instance, got "%s" (entity "%s", property "%s").',
++                        Constraint::class,
++                        get_debug_type($constraint),
++                        $entityName,
++                        $propertyName
++                    ));
++                }
++            }
++        }
++
+         if ((!empty($associatedForms) || !empty($associatedGrids)) && (null === $labelWording || '' === trim($labelWording))) {
+             throw new InvalidExtraPropertyDefinitionException(sprintf(
+                 'ExtraPropertyDefinition: labelWording is required when associatedForms or associatedGrids is set (entity "%s", property "%s").',
+@@ -286,7 +301,7 @@ public static function fromRow(array $row): self
+             enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !== $row['enum_values'] ? array_values($row['enum_values']) : null,
+             defaultValue: null !== $rawDefaultValue ? ExtraPropertyValueCaster::castFromDb($type, $rawDefaultValue) : null,
+             nullable: !array_key_exists('nullable', $row) || (bool) $row['nullable'],
+-            formRequired: !empty($row['form_required']),
++            required: !empty($row['required']),
+             size: isset($row['size']) && '' !== $row['size'] ? (int) $row['size'] : null,
+             sqlIndex: ExtraPropertySqlIndex::from((string) ($row['sql_index'] ?? ExtraPropertySqlIndex::NONE->value)),
+             displayFront: !empty($row['display_front']),
+@@ -295,7 +310,7 @@ enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !=
+             associatedApis: is_array($associatedApis) ? $associatedApis : null,
+             formFieldType: isset($row['form_field_type']) && '' !== $row['form_field_type'] ? (string) $row['form_field_type'] : null,
+             formOptions: is_array($formOptions) ? $formOptions : null,
+-            validator: isset($row['validator']) && '' !== $row['validator'] ? (string) $row['validator'] : null,
++            constraints: self::decodeConstraints($row['constraints'] ?? null),
+             labelWording: isset($row['label_wording']) && '' !== $row['label_wording'] ? (string) $row['label_wording'] : null,
+             labelDomain: isset($row['label_domain']) && '' !== $row['label_domain'] ? (string) $row['label_domain'] : null,
+             descriptionWording: isset($row['description_wording']) && '' !== $row['description_wording'] ? (string) $row['description_wording'] : null,
+@@ -303,6 +318,49 @@ enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !=
+         );
+     }
+ 
++    /**
++     * Normalizes the registry "constraints" cell into a list of Constraint objects.
++     *
++     * Accepts both shapes so fromRow() works for an in-memory row (constraints already given as
++     * Constraint objects) and a DB row (constraints serialized to a string):
++     *  - array  → already-decoded constraints; filtered and returned as-is (no unserialize).
++     *  - string → a serialized blob written by trusted module install code (registerExtraProperty);
++     *             unserialized then filtered.
++     * Anything that is not a Symfony Constraint is discarded. Returns null when nothing usable
++     * remains, mirroring the "no validation" default.
++     *
++     * @return list<Constraint>|null
++     */
++    private static function decodeConstraints(mixed $raw): ?array
++    {
++        if (is_array($raw)) {
++            return self::filterConstraints($raw);
++        }
++
++        if (!is_string($raw) || '' === $raw) {
++            return null;
++        }
++
++        $decoded = @unserialize($raw, ['allowed_classes' => true]);
++
++        return is_array($decoded) ? self::filterConstraints($decoded) : null;
++    }
++
++    /**
++     * @param array<mixed> $candidates
++     *
++     * @return list<Constraint>|null
++     */
++    private static function filterConstraints(array $candidates): ?array
++    {
++        $constraints = array_values(array_filter(
++            $candidates,
++            static fn (mixed $constraint): bool => $constraint instanceof Constraint
++        ));
++
++        return [] !== $constraints ? $constraints : null;
++    }
++
+     // -------------------------------------------------------------------------
+     // Copy-with methods
+     // -------------------------------------------------------------------------
+@@ -324,7 +382,7 @@ public function withModuleName(string $moduleName): self
+             enumValues: $this->enumValues,
+             defaultValue: $this->defaultValue,
+             nullable: $this->nullable,
+-            formRequired: $this->formRequired,
++            required: $this->required,
+             size: $this->size,
+             sqlIndex: $this->sqlIndex,
+             displayFront: $this->displayFront,
+@@ -333,7 +391,7 @@ enumValues: $this->enumValues,
+             associatedApis: $this->associatedApis,
+             formFieldType: $this->formFieldType,
+             formOptions: $this->formOptions,
+-            validator: $this->validator,
++            constraints: $this->constraints,
+             labelWording: $this->labelWording,
+             labelDomain: $this->labelDomain,
+             descriptionWording: $this->descriptionWording,
+@@ -440,9 +498,9 @@ public function isDisplayFront(): bool
+         return $this->displayFront;
+     }
+ 
+-    public function isFormRequired(): bool
++    public function isRequired(): bool
+     {
+-        return $this->formRequired;
++        return $this->required;
+     }
+ 
+     public function isNullable(): bool
+@@ -450,9 +508,12 @@ public function isNullable(): bool
+         return $this->nullable;
+     }
+ 
+-    public function getValidator(): ?string
++    /**
++     * @return list<Constraint>|null
++     */
++    public function getConstraints(): ?array
+     {
+-        return $this->validator;
++        return $this->constraints;
+     }
+ 
+     public function getFormFieldType(): ?string
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+index ec742ec3c423d..646fd7689f300 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+@@ -88,12 +88,12 @@ public function save(ExtraPropertyDefinition $definition): int|false
+             'scope' => $definition->getScope()->value,
+             'type' => $definition->getType()->value,
+             'size' => $definition->getSize(),
+-            'form_required' => (int) $definition->isFormRequired(),
++            'required' => (int) $definition->isRequired(),
+             'default_value' => null !== $definition->getDefaultValue() ? (string) $definition->getDefaultValue() : null,
+             'form_field_type' => $definition->getFormFieldType(),
+             'form_options' => null !== $definition->getFormOptions() ? json_encode($definition->getFormOptions()) : null,
+             'sql_index' => $definition->getSqlIndex()->value,
+-            'validator' => $definition->getValidator(),
++            'constraints' => !empty($definition->getConstraints()) ? serialize($definition->getConstraints()) : null,
+             'associated_forms' => !empty($definition->getAssociatedForms()) ? json_encode(array_values($definition->getAssociatedForms())) : null,
+             'associated_grids' => !empty($definition->getAssociatedGrids()) ? json_encode(array_values($definition->getAssociatedGrids())) : null,
+             'associated_apis' => !empty($definition->getAssociatedApis()) ? json_encode(array_values($definition->getAssociatedApis())) : null,
+diff --git a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+index 5343585721b70..4351da11aae3c 100644
+--- a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
++++ b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+@@ -14,7 +14,6 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
+ use PrestaShopBundle\Form\Admin\Type\NavigationTabType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+@@ -24,8 +23,6 @@
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\Form\FormTypeInterface;
+ use Symfony\Component\Form\ResolvedFormTypeInterface;
+-use Symfony\Component\Validator\Constraints as Assert;
+-use Symfony\Component\Validator\Context\ExecutionContextInterface;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ /**
+@@ -56,7 +53,6 @@ public function __construct(
+         protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
+         protected readonly ExtraPropertyReaderInterface $reader,
+         protected readonly TranslatorInterface $translator,
+-        protected readonly ExtraPropertyValidatorInterface $validatorAdapter,
+         protected readonly ShopContext $shopContext,
+         protected readonly FormBuilderModifier $formBuilderModifier,
+     ) {
+@@ -115,34 +111,23 @@ public function apply(FormBuilderInterface $formBuilder, string $formId, ?int $e
+     protected function resolveFieldTypeAndOptions(ExtraPropertyDefinition $definition): array
+     {
+         $declaredType = $definition->getFormFieldType();
+-        $validator = $definition->getValidator();
+         $extraOptions = $definition->getFormOptions() ?? [];
+-        $constraints = [];
+ 
+         $baseType = (null !== $declaredType && class_exists($declaredType)) ? $declaredType : TextType::class;
+ 
+-        // formRequired: true → automatically add NotBlank for real server-side enforcement.
+-        // The HTML required attribute alone is bypassed by AJAX form submissions in the BO.
+-        if ($definition->isFormRequired()) {
+-            $constraints[] = new Assert\NotBlank();
+-        }
+-
+-        if (null !== $validator) {
+-            $message = $this->translator->trans('The field is invalid.', domain: 'Admin.Notifications.Error');
+-            $constraints[] = new Assert\Callback(
+-                function ($value, ExecutionContextInterface $context) use ($definition, $message): void {
+-                    if (true !== $this->validatorAdapter->validateValue($definition, $value)) {
+-                        $context->addViolation($message);
+-                    }
+-                }
+-            );
+-        }
++        // Validation is fully constraint-based: attach the definition's Symfony constraints to the field so the
++        // form's own validation runs them and surfaces one error per failing constraint. Requiredness is the
++        // module's responsibility — it passes Assert\NotBlank when a value must be provided (no auto NotBlank).
++        $constraints = $definition->getConstraints() ?? [];
+ 
+         $label = $this->translateLabel($definition->getLabelWording(), $definition->getLabelDomain());
+         $help = $this->translateLabel($definition->getDescriptionWording(), $definition->getDescriptionDomain());
+ 
+         if (ExtraPropertyScope::LANG === $definition->getScope()) {
+-            // In BO, use TranslatableType (keys are id_lang) for lang-scoped fields.
++            // In BO, use TranslatableType (data keyed by id_lang). Constraints are attached to the OUTER field so
++            // they validate the whole [id_lang => value] array — consistent with ExtraPropertyValidator: whole-array
++            // constraints (e.g. DefaultLanguage) see the array, per-language rules use Assert\All. The per-language
++            // children carry only $extraOptions (no constraints of their own).
+             return [
+                 TranslatableType::class,
+                 [
+@@ -150,11 +135,9 @@ function ($value, ExecutionContextInterface $context) use ($definition, $message
+                     'label' => $label,
+                     'help' => $help,
+                     'mapped' => false,
+-                    'required' => $definition->isFormRequired(),
+-                    'options' => array_merge($extraOptions, [
+-                        'required' => $definition->isFormRequired(),
+-                        'constraints' => $constraints,
+-                    ]),
++                    'required' => $definition->isRequired(),
++                    'constraints' => $constraints,
++                    'options' => $extraOptions,
+                 ],
+             ];
+         }
+@@ -164,7 +147,7 @@ function ($value, ExecutionContextInterface $context) use ($definition, $message
+             array_merge(
+                 [
+                     'mapped' => false,
+-                    'required' => $definition->isFormRequired(),
++                    'required' => $definition->isRequired(),
+                     'label' => $label,
+                     'help' => $help,
+                     'constraints' => $constraints,
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php b/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
+index addc8cd0cad0d..a4726c89c9157 100644
+--- a/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
+@@ -11,24 +11,35 @@
+ 
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
+-use Symfony\Contracts\Translation\TranslatorInterface;
+-use Validate;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use Symfony\Component\Validator\Constraints\All;
++use Symfony\Component\Validator\ConstraintViolation;
++use Symfony\Component\Validator\ConstraintViolationList;
++use Symfony\Component\Validator\ConstraintViolationListInterface;
++use Symfony\Component\Validator\Validator\ValidatorInterface;
+ 
+ /**
+- * Validates extra property values against their registered definitions.
++ * Validates extra property values against the Symfony constraints declared on their definitions.
+  *
+- * Centralizes validation so that ObjectModel, BO form handlers and API integrations
+- * all use the same rules. Structural checks (isTableOrIdentifier, isModuleName) use
+- * pure regex. Value validation dispatches dynamically to Validate::xxx methods.
++ * Centralizes validation so that ObjectModel, BO form handlers and API integrations all use the same rules.
++ * Value validation delegates to the Symfony Validator ($validator->validate($value, $constraints)). For the array
++ * shape forms/API always use (LANG = [id_lang|locale => value], SHOP = [id_shop => value]) the value is validated
++ * AS-IS: whole-array constraints (e.g. DefaultLanguage) see the array, per-language rules use Symfony's Assert\All.
++ * The exception is an ObjectModel loaded WITH a langId, which exposes a LANG value as a single scalar — handled in
++ * validateValue(). The batch validate() re-bases each definition's violation paths under "<module>.<property>" so
++ * the result is unambiguous. Structural checks (isTableOrIdentifier, isModuleName) use pure regex.
+  *
+- * Note: isRequiredWhenActive and defaultLanguageRequiredWhenActive require access to
+- * the ObjectModel instance and are therefore intentionally skipped by validateValue().
+- * ObjectModel-level validation handles those two cases directly.
++ * Validation is opt-in: a definition with no constraints yields no violations (the storage column type is then the
++ * only guard, like any optional field). Requiredness is a constraint too — a module passes Assert\NotBlank when it
++ * wants a value to be mandatory.
++ *
++ * The Symfony validator is a required dependency, available in every container that runs this service: the three
++ * Symfony kernels, and the front-office legacy container where it is hand-wired by ValidatorBuilderExtension.
+  */
+ class ExtraPropertyValidator implements ExtraPropertyValidatorInterface
+ {
+     public function __construct(
+-        protected readonly ?TranslatorInterface $translator = null,
++        protected readonly ValidatorInterface $validator,
+     ) {
+     }
+ 
+@@ -58,56 +69,41 @@ public static function isModuleName(string $value): bool
+     /**
+      * {@inheritdoc}
+      */
+-    public function validateValue(ExtraPropertyDefinition $definition, mixed $value): bool|string
++    public function validateValue(ExtraPropertyDefinition $definition, mixed $value): ConstraintViolationListInterface
+     {
+-        $validator = $definition->getValidator() ?? '';
+-        if ('' === $validator || !$this->hasValidatorMethod($validator)) {
+-            return true;
++        $constraints = $definition->getConstraints() ?? [];
++        if ([] === $constraints) {
++            return new ConstraintViolationList();
+         }
+ 
+-        // isRequiredWhenActive / defaultLanguageRequiredWhenActive require the ObjectModel instance; skip here.
+-        $isEmptyValidationMethod = 'isrequiredwhenactive' === strtolower($validator)
+-            || 'defaultlanguagerequiredwhenactive' === strtolower($validator);
+-
+-        $label = $definition->getPropertyName();
+-        $errorMessage = null !== $this->translator
+-            ? $this->translator->trans('The %s field is invalid.', [$label], 'Admin.Notifications.Error')
+-            : sprintf('The %s field is invalid.', $label);
+-
+-        if (is_array($value)) {
+-            foreach ($value as $langValue) {
+-                if (('' === (string) $langValue || null === $langValue) && !$isEmptyValidationMethod) {
+-                    continue;
+-                }
+-                if (!(bool) call_user_func([Validate::class, $validator], $langValue)) {
+-                    return $errorMessage;
++        // Edge case: an ObjectModel loaded WITH a langId exposes a LANG value as a single scalar (one language),
++        // not the [id_lang => value] array forms/API always pass. Validate that scalar against the PER-LANGUAGE
++        // rules only — unwrap Assert\All (its nested constraints are the per-language rules) and skip whole-array
++        // constraints (e.g. DefaultLanguage, which is meaningless for a single language and whose validator expects
++        // an array). For the array shape (no langId / form / API), fall through and validate as-is.
++        if (ExtraPropertyScope::LANG === $definition->getScope() && !is_array($value)) {
++            $perLanguage = [];
++            foreach ($constraints as $constraint) {
++                if ($constraint instanceof All) {
++                    $perLanguage = array_merge($perLanguage, array_values($constraint->constraints));
+                 }
+             }
+ 
+-            return true;
++            return $this->validator->validate($value, $perLanguage);
+         }
+ 
+-        if (('' === (string) $value || null === $value) && !$isEmptyValidationMethod) {
+-            return true;
+-        }
+-
+-        return (bool) call_user_func([Validate::class, $validator], $value) ? true : $errorMessage;
++        // Value validated as-is: for the LANG/SHOP array shape, whole-array constraints (e.g. DefaultLanguage) see
++        // the array while Assert\All applies per-element rules (tagging each violation with a "[<key>]" path); for
++        // scalars (COMMON, and SHOP) the bare constraints apply directly.
++        return $this->validator->validate($value, $constraints);
+     }
+ 
+     /**
+-     * Validates a set of extra property values against a list of definitions.
+-     *
+-     * Values are grouped by module then property name, like the reader output and the
+-     * writer input: [moduleKey => [propertyName => value_or_lang_array]].
+-     * Returns true on success, or the first error message string on failure.
+-     *
+-     * @param array<string, array<string, mixed>> $valuesByModule [moduleKey => [propertyName => value]]
+-     * @param ExtraPropertyDefinitionCollection $definitions
+-     *
+-     * @return true|string
++     * {@inheritdoc}
+      */
+-    public function validate(array $valuesByModule, ExtraPropertyDefinitionCollection $definitions): bool|string
++    public function validate(array $valuesByModule, ExtraPropertyDefinitionCollection $definitions): ConstraintViolationListInterface
+     {
++        $violations = new ConstraintViolationList();
+         foreach ($definitions as $definition) {
+             $moduleKey = $definition->getNormalizedModuleKey();
+             $propertyName = $definition->getPropertyName();
+@@ -118,17 +114,45 @@ public function validate(array $valuesByModule, ExtraPropertyDefinitionCollectio
+                 continue;
+             }
+ 
+-            $result = $this->validateValue($definition, $valuesByModule[$moduleKey][$propertyName]);
+-            if (true !== $result) {
+-                return $result;
+-            }
++            $violations->addAll($this->rebase(
++                $this->validateValue($definition, $valuesByModule[$moduleKey][$propertyName]),
++                $moduleKey . '.' . $propertyName
++            ));
+         }
+ 
+-        return true;
++        return $violations;
+     }
+ 
+-    protected function hasValidatorMethod(string $validator): bool
++    /**
++     * Re-bases every violation's property path under $prefix, preserving message, template, parameters, root,
++     * invalid value, plural and code. Symfony violation paths are immutable, so each violation is reconstructed.
++     */
++    protected function rebase(ConstraintViolationListInterface $violations, string $prefix): ConstraintViolationListInterface
+     {
+-        return '' !== $validator && method_exists(Validate::class, $validator);
++        $rebased = new ConstraintViolationList();
++        foreach ($violations as $violation) {
++            $path = $violation->getPropertyPath();
++            if ('' === $path) {
++                $fullPath = $prefix;
++            } elseif (str_starts_with($path, '[')) {
++                // Array-key sub-path ("[fr-FR]") attaches directly, no separator.
++                $fullPath = $prefix . $path;
++            } else {
++                $fullPath = $prefix . '.' . $path;
++            }
++
++            $rebased->add(new ConstraintViolation(
++                $violation->getMessage(),
++                $violation->getMessageTemplate(),
++                $violation->getParameters(),
++                $violation->getRoot(),
++                $fullPath,
++                $violation->getInvalidValue(),
++                $violation->getPlural(),
++                $violation->getCode(),
++            ));
++        }
++
++        return $rebased;
+     }
+ }
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyValidatorInterface.php b/src/Core/ExtraProperty/Validation/ExtraPropertyValidatorInterface.php
+index 61c00bae269ee..ff895aa23fb3c 100644
+--- a/src/Core/ExtraProperty/Validation/ExtraPropertyValidatorInterface.php
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyValidatorInterface.php
+@@ -11,45 +11,44 @@
+ 
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use Symfony\Component\Validator\ConstraintViolationListInterface;
+ 
+ /**
+  * Validation contract for the ExtraProperty feature.
+  *
+- * Value validation (validateValue / validate) is used by forms, API, and ObjectModel.
+- * The structural static helpers (isTableOrIdentifier, isModuleName) live only on the
+- * concrete ExtraPropertyValidator: statics cannot be called through an injected
+- * interface, so declaring them here would serve no caller.
++ * Value validation (validateValue / validate) is used by forms, API, and ObjectModel. It runs the Symfony
++ * constraints declared on each definition through the Symfony Validator and returns the resulting violations
++ * (never throws, never returns a boolean): callers decide how to surface them.
+  *
+- * This interface is kept as a DI alias contract (→ ExtraPropertyValidator) so that
+- * callers can depend on the interface rather than the concrete class.
++ * The structural static helpers (isTableOrIdentifier, isModuleName) live only on the concrete
++ * ExtraPropertyValidator: statics cannot be called through an injected interface, so declaring them here would
++ * serve no caller.
++ *
++ * This interface is kept as a DI alias contract (→ ExtraPropertyValidator) so that callers can depend on the
++ * interface rather than the concrete class.
+  */
+ interface ExtraPropertyValidatorInterface
+ {
+     /**
+-     * Validates one extra property value against its definition's validator.
++     * Validates one extra property value against its definition's constraints.
+      *
+-     * For lang-scoped fields the value may be an array keyed by id_lang;
+-     * each language value is validated individually.
+-     * Returns true on success, or an error message string on failure.
++     * For lang/shop-scoped fields the value may be an array keyed by id_lang / id_shop; each sub-value is
++     * validated individually and its violations carry a "[<key>]" property-path suffix. Returns an empty list
++     * when the value is valid, or when the definition declares no constraints (validation is opt-in).
+      *
+      * @param mixed $value
+-     *
+-     * @return true|string
+      */
+-    public function validateValue(ExtraPropertyDefinition $definition, mixed $value): bool|string;
++    public function validateValue(ExtraPropertyDefinition $definition, mixed $value): ConstraintViolationListInterface;
+ 
+     /**
+      * Validates a batch of extra property values against their definitions.
+      *
+      * $valuesByModule is grouped like the reader output / writer input:
+      * [moduleKey => [propertyName => value_or_lang_array]].
+-     * Definitions not present in $valuesByModule are skipped.
+-     * Returns true on success, or the first error message string encountered.
++     * Definitions not present in $valuesByModule are skipped. Returns ALL violations across every definition,
++     * each property path prefixed with "<moduleKey>.<propertyName>[.<key>]".
+      *
+      * @param array<string, array<string, mixed>> $valuesByModule [moduleKey => [propertyName => value]]
+-     * @param ExtraPropertyDefinitionCollection $definitions
+-     *
+-     * @return true|string
+      */
+-    public function validate(array $valuesByModule, ExtraPropertyDefinitionCollection $definitions): bool|string;
++    public function validate(array $valuesByModule, ExtraPropertyDefinitionCollection $definitions): ConstraintViolationListInterface;
+ }
+diff --git a/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php b/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php
+index f7b9ab7c9030b..390873971ee20 100644
+--- a/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php
++++ b/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php
+@@ -129,6 +129,11 @@ protected function buildExtraPropertiesSchema(ExtraPropertyDefinitionCollection
+                 $moduleProperties[$moduleKey] = ['type' => 'object', 'properties' => []];
+             }
+             $moduleProperties[$moduleKey]['properties'][$definition->getPropertyName()] = $this->buildFieldSchema($definition);
++            // A definition flagged required is reported in its module object's OpenAPI "required" list — the same
++            // flag that marks the BO form field required (ExtraPropertyDefinition::isRequired()).
++            if ($definition->isRequired()) {
++                $moduleProperties[$moduleKey]['required'][] = $definition->getPropertyName();
++            }
+         }
+ 
+         return new ArrayObject([
+diff --git a/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php b/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php
+index e75db08ac18c1..8256b16bee3af 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php
++++ b/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php
+@@ -13,7 +13,6 @@
+ use ApiPlatform\Metadata\Operation;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Validator\Exception\ValidationException;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface;
+@@ -48,9 +47,9 @@ public function __construct(
+     }
+ 
+     /**
+-     * Returns true when the decorated validator reports constraints OR when an extra property definition targets
+-     * one of the resource's operations — so extra-property validation runs even for resources with no core
+-     * constraints.
++     * Returns true when the decorated validator reports constraints OR when an extra property definition that
++     * declares constraints targets one of the resource's operations — so extra-property validation runs even for
++     * resources with no core constraints, and is skipped entirely when no targeted definition has anything to enforce.
+      */
+     public function hasConstraints(string $resourceClass): bool
+     {
+@@ -104,8 +103,12 @@ protected function resourceHasExtraProperties(string $resourceClass): bool
+                 if ('' === $uriTemplate) {
+                     continue;
+                 }
+-                if (!$definitions->filterByApi($uriTemplate, (string) $operation->getMethod())->isEmpty()) {
+-                    return true;
++                // Only definitions that actually declare constraints make validation worthwhile: a matching
++                // definition with no constraints has nothing to enforce, so it does not warrant running validation.
++                foreach ($definitions->filterByApi($uriTemplate, (string) $operation->getMethod()) as $definition) {
++                    if (!empty($definition->getConstraints())) {
++                        return true;
++                    }
+                 }
+             }
+         }
+@@ -128,50 +131,46 @@ protected function validateExtraProperties(array $extraPropertiesByModule, strin
+         }
+ 
+         $definitions = $this->repository->getAllDefinitions()->filterByApi($uriTemplate, $method);
+-        foreach ($definitions as $definition) {
+-            $moduleKey = $definition->getNormalizedModuleKey();
+-            $fieldName = $definition->getPropertyName();
+-            if (!isset($extraPropertiesByModule[$moduleKey]) || !array_key_exists($fieldName, $extraPropertiesByModule[$moduleKey])) {
+-                continue;
+-            }
+ 
+-            $value = $extraPropertiesByModule[$moduleKey][$fieldName];
+-            $basePath = sprintf('extraProperties.%s.%s', $moduleKey, $fieldName);
++        // The payload is already grouped [module => [property => value]] — exactly the shape
++        // ExtraPropertyValidator::validate() expects. Run it once, then re-base each "<module>.<property>[.<locale>]"
++        // path under "extraProperties." (turning Symfony's "[key]" array sub-paths into dotted ".key") so the
++        // extra-property violations merge cleanly with the resource constraint violations.
++        foreach ($this->validatorAdapter->validate($extraPropertiesByModule, $definitions) as $violation) {
++            $path = 'extraProperties.' . str_replace(['[', ']'], ['.', ''], $violation->getPropertyPath());
++            $violations->add(new ConstraintViolation(
++                $violation->getMessage(),
++                $violation->getMessageTemplate(),
++                $violation->getParameters(),
++                $violation->getRoot(),
++                $path,
++                $violation->getInvalidValue(),
++                $violation->getPlural(),
++                $violation->getCode(),
++            ));
++        }
+ 
+-            if (ExtraPropertyScope::LANG === $definition->getScope() && is_array($value)) {
+-                foreach ($value as $locale => $localeValue) {
+-                    $this->validateOneValue($violations, $definition, $localeValue, $basePath . '.' . (string) $locale);
+-                }
+-                $this->assertKnownLocales($violations, $value, $fieldName, $basePath);
++        // Defensive, key-aware check: a LANG payload may reference a locale that does not exist. Value validation
++        // above is key-agnostic, so assert known locales here to return a clean 422 at the extraProperties path
++        // rather than failing later during denormalization.
++        foreach ($definitions as $definition) {
++            if (ExtraPropertyScope::LANG !== $definition->getScope()) {
+                 continue;
+             }
+-
+-            if (ExtraPropertyScope::SHOP === $definition->getScope() && is_array($value)) {
+-                foreach ($value as $shopId => $shopValue) {
+-                    $this->validateOneValue($violations, $definition, $shopValue, $basePath . '.' . (string) $shopId);
+-                }
+-                continue;
++            $value = $extraPropertiesByModule[$definition->getNormalizedModuleKey()][$definition->getPropertyName()] ?? null;
++            if (is_array($value)) {
++                $this->assertKnownLocales(
++                    $violations,
++                    $value,
++                    $definition->getPropertyName(),
++                    sprintf('extraProperties.%s.%s', $definition->getNormalizedModuleKey(), $definition->getPropertyName()),
++                );
+             }
+-
+-            $this->validateOneValue($violations, $definition, $value, $basePath);
+         }
+ 
+         return $violations;
+     }
+ 
+-    protected function validateOneValue(ConstraintViolationListInterface $violations, ExtraPropertyDefinition $definition, mixed $value, string $propertyPath): void
+-    {
+-        if (null === $definition->getValidator()) {
+-            return;
+-        }
+-
+-        $result = $this->validatorAdapter->validateValue($definition, $value);
+-        if (true !== $result) {
+-            $message = is_string($result) && '' !== $result ? $result : 'This value is not valid.';
+-            $violations->add(new ConstraintViolation($message, $message, [], null, $propertyPath, $value));
+-        }
+-    }
+-
+     /**
+      * Adds a violation when a LANG-scope payload uses a locale that does not exist in the shop.
+      *
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+index 05710ac6b68c2..a20d703723524 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+@@ -44,7 +44,6 @@ services:
+       $repository: '@PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface'
+       $reader: '@PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface'
+       $translator: '@translator'
+-      $validatorAdapter: '@PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface'
+       $shopContext: '@PrestaShop\PrestaShop\Core\Context\ShopContext'
+       $formBuilderModifier: '@PrestaShopBundle\Form\FormBuilderModifier'
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+index 3fd879dc1b273..2e325c3e2f920 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+@@ -38,7 +38,11 @@ services:
+ 
+   # ─── Validation ──────────────────────────────────────────────────────────────
+ 
+-  PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator: ~
++  PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator:
++    arguments:
++      # Required. Present in every container that runs this service: the three Symfony kernels, and the FO legacy
++      # container where it is hand-wired by PrestaShop\PrestaShop\Adapter\Container\ValidatorBuilderExtension.
++      $validator: '@validator'
+ 
+   PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface:
+     alias: 'PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator'
+diff --git a/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php b/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php
+index 7b2142056fbea..bd7704ddec8fb 100644
+--- a/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php
++++ b/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php
+@@ -246,17 +246,23 @@ public function testListInjectsExtraProperties(): void
+     }
+ 
+     /**
+-     * A value that fails the registered validator (isBool) must produce a 422 whose violation points at the merged
+-     * extraProperties.<module>.<field> path AND carries a non-empty message.
++     * Per-field constraint validation: a single PATCH with several bad values must produce ONE 422 listing every
++     * violation, each at its precise merged path (`extraProperties.<module>.<field>[.<locale>]`) with the real
++     * constraint message — including one violation PER language for a localized (Assert\All) field. Asserted with
++     * assertValidationErrors so both the messages and the exact set of paths are checked (no missing/extra error).
+      */
+-    public function testValidationErrorReturns422(): void
++    public function testValidationErrorsReturn422WithPerFieldMessages(): void
+     {
+         $response = $this->partialUpdateItem(
+             '/products/' . self::PRODUCT_ID,
+             [
+                 'extraProperties' => [
+                     self::MODULE_NAME => [
+-                        'api_flag' => 'not-a-bool',
++                        'api_flag' => 'not-a-bool',                                       // Assert\Type('bool')
++                        'api_note' => ['en-US' => 'bad<tag>', 'fr-FR' => 'also<bad>'],     // Assert\All([TypedRegex]) per locale
++                    ],
++                    self::MODULE_2_NAME => [
++                        'extra_tag' => 'has<angle>brackets',                              // TypedRegex (generic_name)
+                     ],
+                 ],
+             ],
+@@ -264,12 +270,30 @@ public function testValidationErrorReturns422(): void
+             Response::HTTP_UNPROCESSABLE_ENTITY
+         );
+ 
+-        // The 422 body decodes to a flat list of violations ({propertyPath, message, code}). Assert exactly one,
+-        // at the merged path, with a non-empty message.
+-        $this->assertIsArray($response);
+-        $this->assertCount(1, $response);
+-        $this->assertSame('extraProperties.' . self::MODULE_NAME . '.api_flag', $response[0]['propertyPath']);
+-        $this->assertNotEmpty($response[0]['message']);
++        $this->assertValidationErrors(
++            [
++                [
++                    'propertyPath' => 'extraProperties.' . self::MODULE_NAME . '.api_flag',
++                    'message' => 'This value should be of type bool.',
++                ],
++                // One violation per language for the localized field (per-locale path), each carrying the
++                // per-locale value in the TypedRegex message.
++                [
++                    'propertyPath' => 'extraProperties.' . self::MODULE_NAME . '.api_note.en-US',
++                    'message' => '"bad<tag>" is invalid',
++                ],
++                [
++                    'propertyPath' => 'extraProperties.' . self::MODULE_NAME . '.api_note.fr-FR',
++                    'message' => '"also<bad>" is invalid',
++                ],
++                // A field declared by the other module on the same entity, kept under its own module key.
++                [
++                    'propertyPath' => 'extraProperties.' . self::MODULE_2_NAME . '.extra_tag',
++                    'message' => '"has<angle>brackets" is invalid',
++                ],
++            ],
++            $response
++        );
+     }
+ 
+     /**
+diff --git a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+index 9566598ee5db2..8172d8c1c7722 100644
+--- a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
++++ b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+@@ -17,7 +17,6 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertiesFormBuilderModifier;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertiesFormDataPersister;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface;
+ use PrestaShopBundle\Form\Admin\Type\NavigationTabType;
+@@ -46,6 +45,58 @@ public function testBareFormIdOnSimpleFormAppendsAtRoot(): void
+         $this->assertTrue($builder->has(self::FIELD_NAME), 'Field should be appended at root on a simple form.');
+     }
+ 
++    public function testDefinitionConstraintsAreAttachedToTheFieldWithoutAutoNotBlank(): void
++    {
++        $url = new \Symfony\Component\Validator\Constraints\Url();
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            required: true,
++            associatedForms: ['product'],
++            formFieldType: TextType::class,
++            constraints: [$url],
++            labelWording: 'Dangerous product',
++        );
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($definition)->apply($builder, 'product', null);
++
++        $constraints = $builder->get(self::FIELD_NAME)->getOption('constraints');
++
++        // The definition's constraints are attached verbatim to the field …
++        $this->assertSame([$url], $constraints);
++        // … and required no longer injects a server-side NotBlank — requiredness is the module's job.
++        foreach ($constraints as $constraint) {
++            $this->assertNotInstanceOf(\Symfony\Component\Validator\Constraints\NotBlank::class, $constraint);
++        }
++    }
++
++    public function testLangConstraintsAttachToOuterTranslatableType(): void
++    {
++        $all = new \Symfony\Component\Validator\Constraints\All([new \Symfony\Component\Validator\Constraints\Url()]);
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::LANG,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formFieldType: TextType::class,
++            constraints: [$all],
++            labelWording: 'Video link',
++        );
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($definition)->apply($builder, 'product', null);
++
++        $field = $builder->get(self::FIELD_NAME);
++        // LANG constraints validate the whole [id_lang => value] array, so they attach to the OUTER TranslatableType
++        // — NOT nested per-language under the children's options (which is where per-element rules used to live).
++        $this->assertSame([$all], $field->getOption('constraints'));
++        $this->assertArrayNotHasKey('constraints', (array) $field->getOption('options'));
++    }
++
+     public function testBareFormIdOnNavigationTabFormCreatesExtraFieldsSection(): void
+     {
+         $builder = $this->createNavigationTabFormBuilder();
+@@ -185,7 +236,6 @@ private function makeModifier(ExtraPropertyDefinition $definition): ExtraPropert
+             $this->repositoryReturning($definition),
+             $this->createMock(ExtraPropertyReaderInterface::class),
+             $translator,
+-            $this->createMock(ExtraPropertyValidatorInterface::class),
+             $this->shopContext(),
+             new FormBuilderModifier(),
+         );
+diff --git a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+index d851c9682c648..9242317ba07c6 100644
+--- a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
++++ b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+@@ -12,6 +12,11 @@
+ use ApiPlatform\OpenApi\Model\Server;
+ use ApiPlatform\OpenApi\OpenApi;
+ use ArrayObject;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionWriterInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
+ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+ 
+ class CQRSOpenApiFactoryTest extends KernelTestCase
+@@ -852,4 +857,76 @@ public function testApiPropertyOpenApiContextApplied(): void
+         $this->assertEquals(['type' => 'integer'], $shopIdsProperty['items']);
+         $this->assertEquals([1, 3], $shopIdsProperty['example']);
+     }
++
++    /**
++     * Module-declared extra properties are documented in the generated OpenAPI schema: grouped under their module
++     * technical name inside a synthetic "extraProperties" object on every resource whose operations they target,
++     * and a definition flagged required (ExtraPropertyDefinition::isRequired()) is listed in that module object's
++     * OpenAPI "required" array. The definitions are persisted directly (no module install needed) and removed
++     * afterwards so the shared test database stays clean.
++     */
++    public function testExtraPropertiesAreDocumentedInGeneratedSchema(): void
++    {
++        $repository = $this->getContainer()->get(ExtraPropertyDefinitionRepositoryInterface::class);
++        // The shared cache decorator also implements the writer interface (and invalidates the cache on write),
++        // so we can persist definitions directly and have them surface in the very next schema generation.
++        self::assertInstanceOf(ExtraPropertyDefinitionWriterInterface::class, $repository);
++
++        $productApis = ['/products', '/products/{productId}'];
++        $requiredDefinition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'oa_required_url',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'openapitest',
++            required: true,
++            associatedApis: $productApis,
++        );
++        $optionalDefinition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'oa_optional_flag',
++            type: ExtraPropertyType::BOOL,
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'openapitest',
++            required: false,
++            associatedApis: $productApis,
++        );
++
++        $requiredId = $repository->save($requiredDefinition);
++        $optionalId = $repository->save($optionalDefinition);
++        $moduleKey = $requiredDefinition->getNormalizedModuleKey();
++
++        try {
++            /** @var OpenApiFactoryInterface $openApiFactory */
++            $openApiFactory = $this->getContainer()->get(OpenApiFactoryInterface::class);
++            /** @var OpenApi $openApi */
++            $openApi = $openApiFactory->__invoke();
++
++            $schemas = $openApi->getComponents()->getSchemas();
++            $this->assertArrayHasKey('Product', $schemas);
++
++            /** @var ArrayObject $productSchema */
++            $productSchema = $schemas['Product'];
++            $this->assertArrayHasKey('extraProperties', $productSchema['properties']);
++
++            // The synthetic object is an object grouped by module technical name.
++            $extraProperties = $productSchema['properties']['extraProperties'];
++            $this->assertSame('object', $extraProperties['type']);
++            $this->assertArrayHasKey($moduleKey, $extraProperties['properties']);
++
++            $module = $extraProperties['properties'][$moduleKey];
++            // Both fields are documented under the module object …
++            $this->assertArrayHasKey('oa_required_url', $module['properties']);
++            $this->assertArrayHasKey('oa_optional_flag', $module['properties']);
++            // … but only the required one is reported in the module object's OpenAPI "required" list.
++            $this->assertSame(['oa_required_url'], $module['required']);
++        } finally {
++            if (!empty($requiredId)) {
++                $repository->delete((int) $requiredId);
++            }
++            if (!empty($optionalId)) {
++                $repository->delete((int) $optionalId);
++            }
++        }
++    }
+ }
+diff --git a/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php b/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php
+index 30cee3c1ed72f..526f8cc6e002f 100644
+--- a/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php
++++ b/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php
+@@ -23,9 +23,11 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use Symfony\Component\Validator\Constraints as Assert;
+ 
+ if (!defined('_PS_VERSION_')) {
+     exit;
+@@ -59,7 +61,7 @@ public function install()
+             propertyName: 'api_flag',
+             type: ExtraPropertyType::BOOL,
+             scope: ExtraPropertyScope::COMMON,
+-            validator: 'isBool',
++            constraints: [new Assert\Type('bool')],
+             associatedGrids: ['product'],
+             associatedApis: ['/products', '/products/{productId}'],
+             labelWording: 'API flag',
+@@ -74,7 +76,7 @@ public function install()
+             propertyName: 'api_note',
+             type: ExtraPropertyType::STRING,
+             scope: ExtraPropertyScope::LANG,
+-            validator: 'isGenericName',
++            constraints: [new Assert\All([new TypedRegex(['type' => TypedRegex::TYPE_GENERIC_NAME])])],
+             associatedGrids: ['product'],
+             associatedApis: ['/products', '/products/{productId}'],
+             labelWording: 'API note',
+@@ -88,7 +90,7 @@ public function install()
+             propertyName: 'api_score',
+             type: ExtraPropertyType::INT,
+             scope: ExtraPropertyScope::COMMON,
+-            validator: 'isUnsignedInt',
++            constraints: [new Assert\PositiveOrZero()],
+             associatedApis: ['/customers', '/customers/{customerId}'],
+         ))) {
+             return false;
+diff --git a/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php b/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php
+index d7340794a91c0..dc59861aa03ff 100644
+--- a/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php
++++ b/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php
+@@ -23,9 +23,11 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use Symfony\Component\Validator\Constraints as Assert;
+ 
+ if (!defined('_PS_VERSION_')) {
+     exit;
+@@ -62,7 +64,7 @@ public function install()
+             propertyName: 'extra_tag',
+             type: ExtraPropertyType::STRING,
+             scope: ExtraPropertyScope::COMMON,
+-            validator: 'isGenericName',
++            constraints: [new TypedRegex(['type' => TypedRegex::TYPE_GENERIC_NAME])],
+             associatedGrids: ['product'],
+             associatedApis: ['/products', '/products/{productId}'],
+             labelWording: 'API extra tag',
+@@ -78,7 +80,7 @@ public function install()
+             propertyName: 'api_only_note',
+             type: ExtraPropertyType::STRING,
+             scope: ExtraPropertyScope::LANG,
+-            validator: 'isGenericName',
++            constraints: [new Assert\All([new TypedRegex(['type' => TypedRegex::TYPE_GENERIC_NAME])])],
+             associatedApis: ['/products', '/products/{productId}'],
+             labelWording: 'API only note',
+         ))) {
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
+index f9fceb981c028..9fc802adc3a5f 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
+@@ -12,6 +12,7 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyDefinitionException;
++use stdClass;
+ 
+ /**
+  * Verifies that ExtraPropertyDefinition constructor rejects invalid inputs.
+@@ -51,6 +52,34 @@ public function testInvalidPropertyNameThrows(string $invalidValue): void
+         new ExtraPropertyDefinition(entityName: 'product', propertyName: $invalidValue);
+     }
+ 
++    // -------------------------------------------------------------------------
++    // constraints validation
++    // -------------------------------------------------------------------------
++
++    public function testNonConstraintEntryInConstraintsThrows(): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/constraint/');
++
++        new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            constraints: [new stdClass()], // @phpstan-ignore-line intentionally invalid: must be a Symfony Constraint
++        );
++    }
++
++    public function testValidConstraintsAreAccepted(): void
++    {
++        $url = new \Symfony\Component\Validator\Constraints\Url();
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            constraints: [$url],
++        );
++
++        $this->assertSame([$url], $definition->getConstraints());
++    }
++
+     // -------------------------------------------------------------------------
+     // Valid identifiers must be accepted
+     // -------------------------------------------------------------------------
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
+index c12a9ba08cd7a..2ba8eecd69e93 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionFromRowTest.php
+@@ -13,6 +13,7 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Schema\ColumnDefinitionMapper;
++use Symfony\Component\Validator\Constraints as Assert;
+ 
+ /**
+  * Covers the schema-deduced attributes flowing through ExtraPropertyDefinition::fromRow():
+@@ -63,6 +64,26 @@ public function testEmptyOrInvalidEnumValuesFallBackToNull(): void
+         $this->assertNull($invalid->getEnumValues());
+     }
+ 
++    public function testConstraintsRoundTripFromSerializedRow(): void
++    {
++        $row = self::BASE_ROW + ['constraints' => serialize([new Assert\Url(), new Assert\Length(['max' => 50])])];
++
++        $constraints = ExtraPropertyDefinition::fromRow($row)->getConstraints();
++
++        $this->assertIsArray($constraints);
++        $this->assertCount(2, $constraints);
++        $this->assertInstanceOf(Assert\Url::class, $constraints[0]);
++        $this->assertInstanceOf(Assert\Length::class, $constraints[1]);
++    }
++
++    public function testConstraintsAbsentOrUnusableFallBackToNull(): void
++    {
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW)->getConstraints(), 'No constraints key → null.');
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => ''])->getConstraints(), 'Empty string → null.');
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => 'not-serialized'])->getConstraints(), 'Unserializable garbage → null.');
++        $this->assertNull(ExtraPropertyDefinition::fromRow(self::BASE_ROW + ['constraints' => serialize(['x', 123])])->getConstraints(), 'Non-Constraint entries are filtered out → null.');
++    }
++
+     /**
+      * @dataProvider enumColumnTypeProvider
+      */
+diff --git a/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyValidatorTest.php b/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyValidatorTest.php
+new file mode 100644
+index 0000000000000..7a046da07fff2
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Validation/ExtraPropertyValidatorTest.php
+@@ -0,0 +1,158 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Validation;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
++use Symfony\Component\Validator\Constraints as Assert;
++use Symfony\Component\Validator\Validation;
++
++/**
++ * Unit tests for the constraint-based ExtraPropertyValidator.
++ *
++ * Uses a standalone Symfony validator (Validation::createValidator()) with plain, dependency-free constraints
++ * (Length, Regex, NotBlank): container-backed constraints such as TypedRegex are exercised by the integration
++ * tests instead. The focus here is the facade behaviour — constraint resolution, scope walking and property-path
++ * re-basing — not the individual constraint rules.
++ */
++class ExtraPropertyValidatorTest extends TestCase
++{
++    private function validator(): ExtraPropertyValidator
++    {
++        return new ExtraPropertyValidator(Validation::createValidator());
++    }
++
++    /**
++     * @param list<\Symfony\Component\Validator\Constraint> $constraints
++     */
++    private function definition(ExtraPropertyScope $scope, array $constraints): ExtraPropertyDefinition
++    {
++        return new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            type: ExtraPropertyType::STRING,
++            scope: $scope,
++            moduleName: 'demoextrafield',
++            constraints: $constraints,
++        );
++    }
++
++    public function testNoConstraintsYieldsNoViolations(): void
++    {
++        $violations = $this->validator()->validateValue($this->definition(ExtraPropertyScope::COMMON, []), 'anything');
++
++        $this->assertCount(0, $violations);
++    }
++
++    public function testValidScalarValueYieldsNoViolations(): void
++    {
++        $definition = $this->definition(ExtraPropertyScope::COMMON, [new Assert\Length(['max' => 10])]);
++
++        $this->assertCount(0, $this->validator()->validateValue($definition, 'short'));
++    }
++
++    public function testFailingScalarKeepsTheConstraintMessage(): void
++    {
++        $definition = $this->definition(ExtraPropertyScope::COMMON, [new Assert\Length(['max' => 3])]);
++
++        $violations = $this->validator()->validateValue($definition, 'toolong');
++
++        $this->assertCount(1, $violations);
++        $this->assertNotEmpty((string) $violations->get(0)->getMessage());
++    }
++
++    public function testMultipleFailingConstraintsProduceMultipleViolations(): void
++    {
++        $definition = $this->definition(ExtraPropertyScope::COMMON, [
++            new Assert\Length(['min' => 5]),
++            new Assert\Regex(['pattern' => '/^\d+$/']),
++        ]);
++
++        // "ab" is both too short (< 5) and not all-digits → one violation per failing constraint.
++        $this->assertCount(2, $this->validator()->validateValue($definition, 'ab'));
++    }
++
++    public function testBatchValidationPrefixesPathWithModuleAndProperty(): void
++    {
++        $definition = $this->definition(ExtraPropertyScope::COMMON, [new Assert\Length(['max' => 3])]);
++        $collection = new ExtraPropertyDefinitionCollection([$definition]);
++
++        $violations = $this->validator()->validate(
++            ['demoextrafield' => ['video_link' => 'toolong']],
++            $collection
++        );
++
++        $this->assertCount(1, $violations);
++        $this->assertSame('demoextrafield.video_link', $violations->get(0)->getPropertyPath());
++    }
++
++    public function testPerLanguageConstraintWithAllTagsTheOffendingLanguage(): void
++    {
++        // Per-language validation is expressed with Symfony's Assert\All (the value is the whole [id_lang=>value]
++        // array). All tags each failing element with a "[<key>]" path → re-based to "<module>.<property>[<key>]".
++        $definition = $this->definition(ExtraPropertyScope::LANG, [new Assert\All([new Assert\Length(['max' => 3])])]);
++        $collection = new ExtraPropertyDefinitionCollection([$definition]);
++
++        // id_lang 1 is valid ("ok"); id_lang 2 is too long → only the latter must produce a violation, path-tagged.
++        $violations = $this->validator()->validate(
++            ['demoextrafield' => ['video_link' => [1 => 'ok', 2 => 'toolong']]],
++            $collection
++        );
++
++        $this->assertCount(1, $violations);
++        $this->assertSame('demoextrafield.video_link[2]', $violations->get(0)->getPropertyPath());
++    }
++
++    public function testWholeArrayConstraintValidatesTheArrayItself(): void
++    {
++        // A bare (non-All) constraint validates the whole array — the mechanism that lets DefaultLanguage work on a
++        // localized field. Assert\Count is used here as a dependency-free stand-in (DefaultLanguage's validator needs
++        // the container). The violation lands on the field itself, not a language key.
++        $definition = $this->definition(ExtraPropertyScope::LANG, [new Assert\Count(['min' => 2])]);
++        $collection = new ExtraPropertyDefinitionCollection([$definition]);
++
++        $violations = $this->validator()->validate(
++            ['demoextrafield' => ['video_link' => [1 => 'only-one-language']]],
++            $collection
++        );
++
++        $this->assertCount(1, $violations);
++        $this->assertSame('demoextrafield.video_link', $violations->get(0)->getPropertyPath());
++    }
++
++    public function testObjectModelLangIdScalarValidatesUnwrappedAllAndSkipsWholeArrayConstraints(): void
++    {
++        // An ObjectModel loaded WITH a langId exposes a LANG value as a single SCALAR, not the [id_lang=>value] array.
++        // The per-language rules (unwrapped from Assert\All) must apply to the scalar; whole-array constraints must be
++        // skipped (Assert\Count stands in for DefaultLanguage here — it would otherwise hard-error on a scalar value).
++        $definition = $this->definition(ExtraPropertyScope::LANG, [
++            new Assert\All([new Assert\Length(['max' => 3])]),
++            new Assert\Count(['min' => 2]),
++        ]);
++
++        // Invalid per-language scalar → exactly one violation, from the unwrapped Length (Count is skipped, no error).
++        $this->assertCount(1, $this->validator()->validateValue($definition, 'toolong'));
++        // Valid per-language scalar → no violation.
++        $this->assertCount(0, $this->validator()->validateValue($definition, 'ok'));
++    }
++
++    public function testDefinitionAbsentFromPayloadIsSkipped(): void
++    {
++        $definition = $this->definition(ExtraPropertyScope::COMMON, [new Assert\NotBlank()]);
++        $collection = new ExtraPropertyDefinitionCollection([$definition]);
++
++        // The property is not in the payload at all → it must not be validated (no spurious NotBlank violation).
++        $this->assertCount(0, $this->validator()->validate(['demoextrafield' => []], $collection));
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapterTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapterTest.php
+new file mode 100644
+index 0000000000000..7bdd524344c91
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapterTest.php
+@@ -0,0 +1,80 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\ApiPlatform\OpenApi\Adapter;
++
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ArrayObject;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use PrestaShopBundle\ApiPlatform\OpenApi\Adapter\ExtraPropertiesSchemaAdapter;
++
++class ExtraPropertiesSchemaAdapterTest extends TestCase
++{
++    /**
++     * A definition flagged required (the same isRequired() flag that drives the BO form) must appear in its
++     * module object's OpenAPI "required" list; a module with no required field carries no "required" key at all
++     * (an empty required array is invalid in OpenAPI/JSON Schema).
++     */
++    public function testRequiredDefinitionsAreListedPerModuleObject(): void
++    {
++        $required = $this->definition('demoextrafield', 'theme_color', required: true);
++        $optional = $this->definition('demoextrafield', 'video_link', scope: ExtraPropertyScope::LANG);
++        $otherModule = $this->definition('othermodule', 'note');
++
++        $schema = $this->buildSchema(new ExtraPropertyDefinitionCollection([$required, $optional, $otherModule]));
++        $modules = $schema['properties'];
++
++        $demoKey = $required->getNormalizedModuleKey();
++        $otherKey = $otherModule->getNormalizedModuleKey();
++
++        // Only the required field is listed, while both fields stay documented under "properties".
++        self::assertSame(['theme_color'], $modules[$demoKey]['required']);
++        self::assertArrayHasKey('theme_color', $modules[$demoKey]['properties']);
++        self::assertArrayHasKey('video_link', $modules[$demoKey]['properties']);
++
++        // A module without any required field must not emit a "required" key.
++        self::assertArrayNotHasKey('required', $modules[$otherKey]);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function buildSchema(ExtraPropertyDefinitionCollection $definitions): array
++    {
++        $adapter = new class($this->createMock(ExtraPropertyDefinitionRepositoryInterface::class), $this->createMock(ResourceMetadataCollectionFactoryInterface::class)) extends ExtraPropertiesSchemaAdapter {
++            public function expose(ExtraPropertyDefinitionCollection $definitions): ArrayObject
++            {
++                return $this->buildExtraPropertiesSchema($definitions);
++            }
++        };
++
++        return $adapter->expose($definitions)->getArrayCopy();
++    }
++
++    private function definition(
++        string $moduleName,
++        string $propertyName,
++        ExtraPropertyScope $scope = ExtraPropertyScope::COMMON,
++        bool $required = false,
++    ): ExtraPropertyDefinition {
++        return new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: $propertyName,
++            type: ExtraPropertyType::STRING,
++            scope: $scope,
++            moduleName: $moduleName,
++            required: $required,
++        );
++    }
++}

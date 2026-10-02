@@ -1,0 +1,1006 @@
+diff --git a/.github/actions/version-branch-bootstrap/action.yml b/.github/actions/version-branch-bootstrap/action.yml
+new file mode 100644
+index 0000000000000..24c597bbcb6fb
+--- /dev/null
++++ b/.github/actions/version-branch-bootstrap/action.yml
+@@ -0,0 +1,212 @@
++# Composite action for "Version-branch bootstrap": bootstraps ONE repository.
++# Checks out the target repo, runs its transform script (fetched from the
++# orchestrator repo), and — if the transform produced a diff — opens or updates
++# a single idempotent PR. Closed PRs are ignored (gh pr list --state open), so a
++# fresh one is created when none is open. Emits a pr-result-<id> artifact for the
++# orchestrator's report job. Never merges: humans review & merge.
++name: 'Version-branch bootstrap (single repo)'
++description: 'Run a repo''s version-branch transform and open/update an idempotent bootstrap PR.'
++
++inputs:
++  repository:
++    description: 'Production repo (org/name), e.g. PrestaShop/test-scenarios'
++    required: true
++  base:
++    description: 'Branch the PR targets (develop / master / dev / main)'
++    required: true
++  version_branch:
++    description: 'New version branch, e.g. 9.2.x'
++    required: true
++  new_version:
++    description: 'New version, e.g. 9.2.0 (for PR title/body)'
++    required: true
++  release_type:
++    description: 'minor | major'
++    required: true
++  transform_id:
++    description: 'Selects .github/release-bootstrap/transform-<id>.sh'
++    required: true
++  target_owner:
++    description: 'Test override: when set, operate on <target_owner>/<name> instead of the production owner'
++    required: false
++    default: ''
++  reviewers:
++    description: 'Comma-separated users/teams to request review from (optional)'
++    required: false
++    default: ''
++  dry_run:
++    description: 'Compute the diff but do not push or open/update a PR'
++    required: false
++    default: 'true'
++  token:
++    description: 'Token with write access to the target repo (and the test forks). The orchestrator passes secrets.JARVIS_TOKEN.'
++    required: true
++
++runs:
++  using: composite
++  steps:
++    - name: Resolve target repo & head branch
++      id: meta
++      shell: bash
++      run: |
++        NAME="${{ inputs.repository }}"
++        BASENAME="${NAME##*/}"
++        if [ -n "${{ inputs.target_owner }}" ]; then
++          REPO="${{ inputs.target_owner }}/${BASENAME}"
++        else
++          REPO="${NAME}"
++        fi
++        # Dotless head branch (9.2.x -> 92x): a "bootstrap/9.2.x" name matches the
++        # "9.[1-9].x" protected-branch ruleset on the official repo and is then
++        # hard to delete. The real version branch (9.2.x) keeps its dots — only
++        # this transient PR head branch is slugified.
++        VB="${{ inputs.version_branch }}"
++        {
++          echo "repo=${REPO}"
++          echo "head=bootstrap/${VB//./}"
++        } >> "$GITHUB_OUTPUT"
++        echo "Target repo: ${REPO} (base ${{ inputs.base }}), head bootstrap/${VB//./}"
++
++    - name: Checkout target repo
++      uses: actions/checkout@v5
++      with:
++        repository: ${{ steps.meta.outputs.repo }}
++        ref: ${{ inputs.base }}
++        fetch-depth: 1
++        token: ${{ inputs.token }}
++        path: target
++
++    - name: Checkout transform scripts
++      uses: actions/checkout@v5
++      with:
++        repository: ${{ github.repository }}
++        ref: ${{ github.sha }}
++        sparse-checkout: .github/release-bootstrap
++        path: _scripts
++
++    - name: Apply transform & detect changes
++      id: tf
++      working-directory: target
++      shell: bash
++      env:
++        VERSION_BRANCH: ${{ inputs.version_branch }}
++        NEW_VERSION: ${{ inputs.new_version }}
++        BASE: ${{ inputs.base }}
++        RELEASE_TYPE: ${{ inputs.release_type }}
++      run: |
++        set -euo pipefail
++        bash "${GITHUB_WORKSPACE}/_scripts/.github/release-bootstrap/transform-${{ inputs.transform_id }}.sh"
++        git add -A
++        if git diff --staged --quiet; then
++          echo "changed=false" >> "$GITHUB_OUTPUT"
++          echo "ℹ️ ${{ steps.meta.outputs.repo }}: \`${{ inputs.version_branch }}\` already present — no PR." >> "$GITHUB_STEP_SUMMARY"
++        else
++          echo "changed=true" >> "$GITHUB_OUTPUT"
++          {
++            echo "<details><summary>${{ steps.meta.outputs.repo }} — changes</summary>"
++            echo ""
++            echo '```'
++            git --no-pager diff --staged --stat
++            echo '```'
++            echo "</details>"
++          } >> "$GITHUB_STEP_SUMMARY"
++        fi
++
++    - name: Commit, push & open/update PR
++      id: pr
++      if: steps.tf.outputs.changed == 'true'
++      working-directory: target
++      shell: bash
++      env:
++        GH_TOKEN: ${{ inputs.token }}
++        REPO: ${{ steps.meta.outputs.repo }}
++        HEAD: ${{ steps.meta.outputs.head }}
++        BASE: ${{ inputs.base }}
++        VB: ${{ inputs.version_branch }}
++        NEW_VERSION: ${{ inputs.new_version }}
++        REVIEWERS: ${{ inputs.reviewers }}
++        DRY_RUN: ${{ inputs.dry_run }}
++      run: |
++        set -euo pipefail
++        git config user.name "github-actions[bot]"
++        git config user.email "github-actions[bot]@users.noreply.github.com"
++        git commit -q -m "Bootstrap CI for ${VB}"
++
++        if [ "${DRY_RUN}" = "true" ]; then
++          echo "::notice::[dry_run] ${REPO}: would push ${HEAD} and open/update a PR onto ${BASE}."
++          echo "action=dry-run" >> "$GITHUB_OUTPUT"
++          echo "url=" >> "$GITHUB_OUTPUT"
++          exit 0
++        fi
++
++        git push --force origin "HEAD:${HEAD}"
++
++        TITLE="Bootstrap CI for ${VB}"
++        BODY=$(cat <<EOF
++        | Questions         | Answers
++        | ----------------- | -------------------------------------------------------
++        | Branch?           | ${BASE}
++        | Description?      | Add the new version branch \`${VB}\` (opened for ${NEW_VERSION}) to this repository's CI matrices / branch lists.
++        | Type?             | improvement
++        | Category?         | PM
++        | BC breaks?        | no
++        | Deprecations?     | no
++        | How to test?      | Review the diff: \`${VB}\` is added wherever active version branches are enumerated.
++        | UI Tests          | N/A
++        | Fixed issue or discussion? | N/A
++        | Related PRs       | Companion PRs opened by the same "Version-branch bootstrap" run.
++        | Sponsor company   | N/A
++
++        > 🤖 Opened automatically by the **Version-branch bootstrap** workflow. Idempotent: re-running updates this PR; if it was closed, a new one is created.
++        EOF
++        )
++
++        EXISTING=$(gh pr list --repo "${REPO}" --state open --head "${HEAD}" --base "${BASE}" --json number -q '.[0].number' 2>/dev/null || true)
++        if [ -n "${EXISTING}" ]; then
++          gh pr edit "${EXISTING}" --repo "${REPO}" --title "${TITLE}" --body "${BODY}" >/dev/null 2>&1 || true
++          URL=$(gh pr view "${EXISTING}" --repo "${REPO}" --json url -q .url)
++          echo "action=updated" >> "$GITHUB_OUTPUT"
++        else
++          URL=$(gh pr create --repo "${REPO}" --base "${BASE}" --head "${HEAD}" --title "${TITLE}" --body "${BODY}")
++          echo "action=created" >> "$GITHUB_OUTPUT"
++        fi
++        echo "url=${URL}" >> "$GITHUB_OUTPUT"
++
++        if [ -n "${REVIEWERS}" ]; then
++          gh pr edit "${URL}" --repo "${REPO}" --add-reviewer "${REVIEWERS}" 2>/dev/null \
++            || echo "::warning::could not request review from ${REVIEWERS} on ${REPO}"
++        fi
++
++    - name: Record result
++      if: always()
++      shell: bash
++      env:
++        REPO: ${{ steps.meta.outputs.repo }}
++        TF_OUTCOME: ${{ steps.tf.outcome }}
++        PR_OUTCOME: ${{ steps.pr.outcome }}
++        CHANGED: ${{ steps.tf.outputs.changed }}
++        ACTION_IN: ${{ steps.pr.outputs.action }}
++        URL_IN: ${{ steps.pr.outputs.url }}
++        TRANSFORM_ID: ${{ inputs.transform_id }}
++      run: |
++        if [ "${TF_OUTCOME}" != "success" ]; then
++          ACTION="failed"
++        elif [ "${CHANGED}" != "true" ]; then
++          ACTION="skipped"
++        elif [ "${PR_OUTCOME}" != "success" ]; then
++          ACTION="failed"
++        else
++          ACTION="${ACTION_IN:-skipped}"
++        fi
++        jq -n --arg repo "${REPO}" --arg action "${ACTION}" --arg url "${URL_IN}" \
++          --arg transform "${TRANSFORM_ID}" \
++          '{repo:$repo, action:$action, url:$url, transform:$transform}' > pr-result.json
++        cat pr-result.json
++
++    - name: Upload result artifact
++      if: always()
++      uses: actions/upload-artifact@v7
++      with:
++        name: pr-result-${{ inputs.transform_id }}
++        path: pr-result.json
++        retention-days: 5
+diff --git a/.github/release-bootstrap/lib.sh b/.github/release-bootstrap/lib.sh
+new file mode 100755
+index 0000000000000..12fbccbd76ab5
+--- /dev/null
++++ b/.github/release-bootstrap/lib.sh
+@@ -0,0 +1,130 @@
++#!/usr/bin/env bash
++#
++# Shared helpers for the version-branch bootstrap transforms.
++#
++# Each transform-<repo>.sh sources this file and edits files IN PLACE in the
++# current working directory (the checked-out target repo). Every edit MUST be
++# idempotent: running it again once the new branch is already present must
++# leave the tree unchanged (empty `git diff`). That empty-diff property is what
++# lets the workflow decide "modification already done -> no PR".
++#
++# YAML list edits use surgical text insertion (awk, literal-substring anchors)
++# rather than `yq`: this preserves the file byte-for-byte except the inserted
++# lines (reviewer-friendly diffs) and avoids `yq -i` re-serializing GitHub
++# Actions workflows (which can rewrite the `on:` key or reflow comments).
++#
++set -euo pipefail
++
++: "${VERSION_BRANCH:?VERSION_BRANCH must be set (e.g. 9.2.x)}"
++
++# --- Derivations from the version branch (e.g. 9.2.x) ------------------------
++NEW="${VERSION_BRANCH}"          # 9.2.x
++NEW_JOB="${NEW//./_}"            # 9_2_x   (workflow job ids / generated file names)
++NEW_MAJOR="${NEW%%.*}"           # 9
++_tail="${NEW#*.}"
++NEW_MINOR="${_tail%%.*}"         # 2
++BASE="${BASE:-develop}"          # branch the bootstrap PRs target / merge-up target
++RELEASE_TYPE="${RELEASE_TYPE:-minor}"
++export NEW NEW_JOB NEW_MAJOR NEW_MINOR BASE RELEASE_TYPE
++
++log() { printf '  %s\n' "$*" >&2; }
++
++# present FILE LITERAL  -> true when LITERAL appears anywhere in FILE
++#   `--` ends option parsing so a LITERAL starting with '-' (e.g. "- 9.2.x")
++#   is treated as a pattern, not as grep flags.
++present() { grep -qF -- "$2" "$1" 2>/dev/null; }
++
++# line_has FILE LINE_REGEX LITERAL -> true when a line matching LINE_REGEX
++#   (grep -E) already contains the literal LITERAL.
++line_has() { grep -E -- "$2" "$1" 2>/dev/null | grep -qF -- "$3"; }
++
++# insert_block_after FILE ANCHOR_LITERAL GUARD_LITERAL   (block read from stdin)
++#   Insert the multi-line block from stdin immediately after the FIRST line that
++#   CONTAINS the literal substring ANCHOR_LITERAL, unless GUARD_LITERAL already
++#   appears in the file. Literal (awk index) matching avoids regex-escaping
++#   pitfalls. No-op when GUARD is present (idempotent). Fails loudly if the
++#   anchor is not found or the guard is still absent afterwards.
++insert_block_after() {
++  local file="$1" anchor="$2" guard="$3"
++  local blk; blk="$(mktemp)"; cat > "${blk}"
++  if [ ! -f "${file}" ]; then rm -f "${blk}"; log "skip (missing): ${file}"; return 0; fi
++  if present "${file}" "${guard}"; then rm -f "${blk}"; return 0; fi
++  if awk -v bf="${blk}" -v anchor="${anchor}" '
++        { print }
++        !ins && index($0, anchor) { while ((getline l < bf) > 0) print l; close(bf); ins = 1 }
++        END { if (!ins) exit 3 }
++      ' "${file}" > "${file}.tmp"; then
++    mv "${file}.tmp" "${file}"; rm -f "${blk}"
++  else
++    rm -f "${file}.tmp" "${blk}"
++    echo "::error::insert anchor '${anchor}' not found in ${file}" >&2
++    return 1
++  fi
++  if ! present "${file}" "${guard}"; then
++    echo "::error::guard '${guard}' still absent after insert in ${file}" >&2
++    return 1
++  fi
++  log "inserted after '${anchor}' in ${file}"
++}
++
++# insert_block_before FILE ANCHOR_LITERAL GUARD_LITERAL   (block read from stdin)
++#   Like insert_block_after, but inserts the block immediately BEFORE the first
++#   line containing ANCHOR_LITERAL. Used to anchor on a stable, always-present
++#   line (e.g. develop / the previous stable) and keep the new entry ordered
++#   ahead of it.
++insert_block_before() {
++  local file="$1" anchor="$2" guard="$3"
++  local blk; blk="$(mktemp)"; cat > "${blk}"
++  if [ ! -f "${file}" ]; then rm -f "${blk}"; log "skip (missing): ${file}"; return 0; fi
++  if present "${file}" "${guard}"; then rm -f "${blk}"; return 0; fi
++  if awk -v bf="${blk}" -v anchor="${anchor}" '
++        !ins && index($0, anchor) { while ((getline l < bf) > 0) print l; close(bf); ins = 1 }
++        { print }
++        END { if (!ins) exit 3 }
++      ' "${file}" > "${file}.tmp"; then
++    mv "${file}.tmp" "${file}"; rm -f "${blk}"
++  else
++    rm -f "${file}.tmp" "${blk}"
++    echo "::error::insert anchor '${anchor}' not found in ${file}" >&2
++    return 1
++  fi
++  if ! present "${file}" "${guard}"; then
++    echo "::error::guard '${guard}' still absent after insert in ${file}" >&2
++    return 1
++  fi
++  log "inserted before '${anchor}' in ${file}"
++}
++
++# insert_block_after_entry FILE ANCHOR_LITERAL TRAILING GUARD   (block from stdin)
++#   Insert the block immediately AFTER a multi-line entry: the first line
++#   containing ANCHOR_LITERAL plus its next TRAILING lines (e.g. a "- BRANCH:
++#   develop" / "node: 20" pair → TRAILING=1). Lets us anchor on the stable
++#   develop entry and drop the new entry right after it. No-op when GUARD is
++#   present; fails loudly if the anchor is not found.
++insert_block_after_entry() {
++  local file="$1" anchor="$2" trailing="$3" guard="$4"
++  local blk; blk="$(mktemp)"; cat > "${blk}"
++  if [ ! -f "${file}" ]; then rm -f "${blk}"; log "skip (missing): ${file}"; return 0; fi
++  if present "${file}" "${guard}"; then rm -f "${blk}"; return 0; fi
++  if awk -v bf="${blk}" -v anchor="${anchor}" -v trailing="${trailing}" '
++        !ins && index($0, anchor) {
++          print
++          for (i = 0; i < trailing; i++) { if ((getline nl) > 0) print nl }
++          while ((getline l < bf) > 0) print l
++          close(bf); ins = 1; next
++        }
++        { print }
++        END { if (!ins) exit 3 }
++      ' "${file}" > "${file}.tmp"; then
++    mv "${file}.tmp" "${file}"; rm -f "${blk}"
++  else
++    rm -f "${file}.tmp" "${blk}"
++    echo "::error::insert anchor '${anchor}' not found in ${file}" >&2
++    return 1
++  fi
++  if ! present "${file}" "${guard}"; then
++    echo "::error::guard '${guard}' still absent after insert in ${file}" >&2
++    return 1
++  fi
++  log "inserted after entry '${anchor}' (+${trailing}) in ${file}"
++}
+diff --git a/.github/release-bootstrap/templates/cron_nightly_tests_DB.yml.tmpl b/.github/release-bootstrap/templates/cron_nightly_tests_DB.yml.tmpl
+new file mode 100644
+index 0000000000000..fbad6155ff5ae
+--- /dev/null
++++ b/.github/release-bootstrap/templates/cron_nightly_tests_DB.yml.tmpl
+@@ -0,0 +1,21 @@
++# This workflow aim to run all UI tests on active branches
++# and upload the report on Google cloud platform storage
++name: Nightly tests and report - @BRANCH@ (@DB@)
++
++on:
++  workflow_run:
++    workflows: [ 'Nightly Build' ]
++    types:
++      - requested
++
++jobs:
++  test_@JOB@:
++    uses: ./.github/workflows/cron_nightly_tests_reusable.yml
++    with:
++      BRANCH: @BRANCH@
++      PHP_VERSION: '@PHP@'
++      NODE_VERSION: '@NODE@'
++      DB_SERVER: '@DB@'
++    secrets:
++      GC_PROJECT_ID: ${{ secrets.GC_PROJECT_ID }}
++      GC_SERVICE_KEY: ${{ secrets.GC_SERVICE_KEY }}
+diff --git a/.github/release-bootstrap/transform-core.sh b/.github/release-bootstrap/transform-core.sh
+new file mode 100755
+index 0000000000000..12b127b7c7add
+--- /dev/null
++++ b/.github/release-bootstrap/transform-core.sh
+@@ -0,0 +1,104 @@
++#!/usr/bin/env bash
++#
++# Core repo (PrestaShop/PrestaShop) version-branch bootstrap transform.
++# Adds the new version branch to the CI matrices / branch lists. ADD-only and
++# idempotent: nothing is removed, re-running once NEW is present is a no-op.
++# Run with cwd = the checked-out core repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++WF=".github/workflows"
++
++# 1 & 2) cron_js_routing.yml + cron_nightly_build.yml:
++#        add NEW right after the develop entry in matrix.BRANCH and in include
++#        (anchored on develop — the stable entry — so order is develop, NEW, …).
++for f in cron_js_routing.yml cron_nightly_build.yml; do
++  insert_block_after "${WF}/${f}" "- develop" "- ${NEW}" <<EOF
++          - ${NEW}
++EOF
++  insert_block_after_entry "${WF}/${f}" "- BRANCH: develop" 1 "BRANCH: ${NEW}" <<EOF
++          - BRANCH: ${NEW}
++            node: 20
++EOF
++done
++
++# 3) cron_php_update_modules.yml: add NEW, keep the previous stable (cohabitation)
++insert_block_after "${WF}/cron_php_update_modules.yml" "- develop" "- ${NEW}" <<EOF
++          - ${NEW}
++EOF
++
++# 4) cron_nightly_tests_reports.yml: add {branch: NEW, database: mysql|mariadb}
++#    just before the develop entries (anchored on develop).
++insert_block_before "${WF}/cron_nightly_tests_reports.yml" "- branch: develop" "branch: ${NEW}" <<EOF
++          - branch: ${NEW}
++            database: mysql
++          - branch: ${NEW}
++            database: mariadb
++EOF
++
++# 5) cron_nightly_tests_reusable.yml: mirror the previous 9.x exclude set for NEW,
++#    placed just before the develop excludes (anchored on the "## develop" header),
++#    with its own "## NEW" comment header like the other branches.
++insert_block_before "${WF}/cron_nightly_tests_reusable.yml" "## develop" "BRANCH: ${NEW}" <<EOF
++          ## ${NEW}
++          - BRANCH: ${NEW}
++            CAMPAIGN: 'sanity:productV2'
++          - BRANCH: ${NEW}
++            CAMPAIGN: 'functional:productV2'
++          - BRANCH: ${NEW}
++            CAMPAIGN: 'modules'
++EOF
++
++# 6) Create the per-version nightly caller files from the template.
++#    PHP 8.2 / Node 20 inherited from develop (9.1.x used PHP 8.1).
++tmpl="${SCRIPT_DIR}/templates/cron_nightly_tests_DB.yml.tmpl"
++PHP_VERSION="8.2"
++NODE_VERSION="20"
++for db in mysql mariadb; do
++  out="${WF}/cron_nightly_tests_${NEW}_${db}.yml"
++  if [ ! -f "${out}" ]; then
++    sed -e "s/@BRANCH@/${NEW}/g" \
++        -e "s/@DB@/${db}/g" \
++        -e "s/@JOB@/${NEW_JOB}/g" \
++        -e "s/@PHP@/${PHP_VERSION}/g" \
++        -e "s/@NODE@/${NODE_VERSION}/g" \
++        "${tmpl}" > "${out}"
++    log "created ${out}"
++  fi
++done
++
++# 7) cron_create_merge_prs.yml: insert NEW into the merge-up CHAIN. Each stable
++#    branch merges into the one just above it, not straight into develop:
++#    the pair that currently targets develop is retargeted to NEW, then a new
++#    NEW -> develop pair is added. e.g. {9.1.x -> develop} becomes
++#    {9.1.x -> 9.2.x} + {9.2.x -> develop}. Generalises for later releases.
++#    Guard/anchor on the matrix line ("- source: NEW", anchored) so neither the
++#    retarget nor the guard is fooled by the "{source:…, target: develop}"
++#    example in the file's header comment.
++merge="${WF}/cron_create_merge_prs.yml"
++if [ -f "${merge}" ] && ! grep -qE "^[[:space:]]*- source: ${NEW//./\\.}\$" "${merge}"; then
++  # Retarget the single matrix "target: develop" line (anchored; the comment's
++  # "target: develop})" does not match) to point at NEW.
++  sed -i.bak -E "s/^([[:space:]]*)target: develop\$/\1target: ${NEW}/" "${merge}"
++  rm -f "${merge}.bak"
++  # Add the new NEW -> develop pair.
++  insert_block_after "${merge}" "pair:" "- source: ${NEW}" <<EOF
++          - source: ${NEW}
++            target: develop
++EOF
++  log "merge-up chain: retargeted -> develop to -> ${NEW}, added ${NEW} -> develop"
++fi
++
++# 8) PULL_REQUEST_TEMPLATE.md: add NEW to the "| Branch?" choice line
++prt=".github/PULL_REQUEST_TEMPLATE.md"
++if [ -f "${prt}" ] && ! line_has "${prt}" '^\| Branch\?' "${NEW}"; then
++  sed -i.bak -E "/Branch\?/ s#(develop / )#\\1${NEW} / #" "${prt}"
++  rm -f "${prt}.bak"
++  line_has "${prt}" '^\| Branch\?' "${NEW}" || { echo "::error::core: failed to add ${NEW} to PR template" >&2; exit 1; }
++  log "added ${NEW} to ${prt} Branch line"
++fi
++
++log "core transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-ga-tests-ui-pr.sh b/.github/release-bootstrap/transform-ga-tests-ui-pr.sh
+new file mode 100755
+index 0000000000000..70b67d81e1c3c
+--- /dev/null
++++ b/.github/release-bootstrap/transform-ga-tests-ui-pr.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++#
++# PrestaShop/ga.tests.ui.pr version-branch bootstrap transform (QA-team owned).
++# Adds the new version branch to the base_branch dropdowns and mirrors the
++# previous 9.x "modules" long-campaign exclusion. The other workflows derive the
++# branch at runtime (startsWith('9.') / 9.${PS_MINOR}.x) and need no change.
++# ADD-only, idempotent. cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++WF=".github/workflows"
++
++# pr_test.yml: add NEW to the base_branch choice options ...
++insert_block_after "${WF}/pr_test.yml" "- 'develop'" "'${NEW}'" <<EOF
++          - '${NEW}'
++EOF
++# ... and mirror the 9.1.x "modules" exclusion in test-long-campaigns, placed
++# just before the develop excludes (anchored on "## develop") with a "## NEW"
++# comment header like the other branches.
++insert_block_before "${WF}/pr_test.yml" "## develop" "BASE_BRANCH: ${NEW}" <<EOF
++          ## ${NEW}
++          - BASE_BRANCH: ${NEW}
++            TEST_COMMAND: 'modules'
++EOF
++
++# pr_test_single_campaign.yml: add NEW to the base_branch choice options
++insert_block_after "${WF}/pr_test_single_campaign.yml" "- 'develop'" "'${NEW}'" <<EOF
++          - '${NEW}'
++EOF
++
++log "ga.tests.ui.pr transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-kanbanbot.sh b/.github/release-bootstrap/transform-kanbanbot.sh
+new file mode 100755
+index 0000000000000..fd263c34531e8
+--- /dev/null
++++ b/.github/release-bootstrap/transform-kanbanbot.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++#
++# PrestaShop/kanbanbot version-branch bootstrap transform.
++# Adds the new version branch to the enumerated target-branch lists so kanbanbot
++# accepts PRs targeting it (needed for every release, minor included). The
++# security-window constants (CheckSecurityBranchCommandHandler) are version_compare
++# based and only move on a MAJOR — flagged for manual review, never auto-edited.
++# Test fixtures are likewise flagged for the maintainer. ADD-only, idempotent.
++# cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++DESC="src/PullRequest/Domain/Aggregate/PullRequest/PullRequestDescription.php"
++PR="src/PullRequest/Domain/Aggregate/PullRequest/PullRequest.php"
++
++# 1) TARGET_BRANCH_AVAILABLE (single-line array): add NEW right after 'develop'
++#    (always present) so the script keeps working once 9.1.x is removed.
++if [ -f "${DESC}" ] && ! line_has "${DESC}" 'TARGET_BRANCH_AVAILABLE' "'${NEW}'"; then
++  sed -i.bak -E "s/(TARGET_BRANCH_AVAILABLE = \\['develop')/\\1, '${NEW}'/" "${DESC}"
++  rm -f "${DESC}.bak"
++  line_has "${DESC}" 'TARGET_BRANCH_AVAILABLE' "'${NEW}'" \
++    || { echo "::error::kanbanbot: failed to add ${NEW} to TARGET_BRANCH_AVAILABLE" >&2; exit 1; }
++  log "TARGET_BRANCH_AVAILABLE += ${NEW}"
++fi
++
++# 2) PullRequest.php array_diff stale-label list (multi-line): add NEW after
++#    'develop' (always present) rather than the transient 9.1.x.
++insert_block_after "${PR}" "'develop'," "'${NEW}'," <<EOF
++            '${NEW}',
++EOF
++
++# 3) Manual follow-ups (no auto-edit): summary notes for the reviewer.
++summary="${GITHUB_STEP_SUMMARY:-/dev/stderr}"
++{
++  echo "### kanbanbot — manual follow-ups for ${NEW}"
++  echo "- Add a \`${NEW}\` case to \`TranslationsCatalogProviderTest\` and \`CheckTableDescriptionCommandHandlerTest\` (test coverage — not auto-generated)."
++  if [ "${RELEASE_TYPE}" = "major" ]; then
++    echo "- MAJOR release: review \`CheckSecurityBranchCommandHandler::MIN_MAINTAINED_VERSION\` / \`MIN_SECURITY_VERSION\` for the new maintenance window."
++  fi
++} >> "${summary}"
++
++log "kanbanbot transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-presthubot.sh b/.github/release-bootstrap/transform-presthubot.sh
+new file mode 100755
+index 0000000000000..7a224f3c97cd5
+--- /dev/null
++++ b/.github/release-bootstrap/transform-presthubot.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++#
++# PrestaShop/presthubot version-branch bootstrap transform.
++# Adds the new version branch to the SlackNotifierCommand support lists,
++# anchored on the always-present 'develop' entry (so the script keeps working
++# once 9.1.x is removed). ADD-only and idempotent. cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++f="src/App/Command/SlackNotifierCommand.php"
++[ -f "${f}" ] || { log "skip (missing): ${f}"; exit 0; }
++
++# 1) BRANCH_SUPPORT: add NEW just before the 'develop' entry.
++insert_block_before "${f}" "'develop'," "'${NEW}'," <<EOF
++        '${NEW}',
++EOF
++
++# 2) CAMPAIGN_SUPPORT['functional']: add NEW (mysql + mariadb) before develop's.
++insert_block_before "${f}" "'develop' => " "'${NEW}' => ['mysql', 'mariadb']," <<EOF
++            '${NEW}' => ['mysql', 'mariadb'],
++EOF
++
++log "presthubot transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-ps-apiresources.sh b/.github/release-bootstrap/transform-ps-apiresources.sh
+new file mode 100644
+index 0000000000000..60c11c6fd355e
+--- /dev/null
++++ b/.github/release-bootstrap/transform-ps-apiresources.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++#
++# PrestaShop/ps_apiresources version-branch bootstrap transform.
++# Adds the new version branch to the test matrices in php.yml and integration.yml.
++# Both list versions as an INLINE flow array (e.g. ['9.0.3', '9.1.x', 'develop']);
++# we insert NEW right after the stable 'develop' entry, scoped to the matrix line
++# only (integration.yml also references 'develop' in `if:` conditions, which must
++# not be touched). ADD-only, idempotent. cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++WF=".github/workflows"
++
++# add_to_inline_matrix FILE VERSION_KEY_REGEX
++#   Insert 'NEW' right after 'develop' in the inline array on the matrix line
++#   identified by "<key>: [" (only that line). Idempotent + fails loudly.
++add_to_inline_matrix() {
++  local file="$1" key="$2"
++  [ -f "${file}" ] || { log "skip (missing): ${file}"; return 0; }
++  if line_has "${file}" "${key}: \\[" "'${NEW}'"; then return 0; fi
++  sed -i.bak -E "/${key}: \\[/ s/'develop'/'develop', '${NEW}'/" "${file}"
++  rm -f "${file}.bak"
++  if ! line_has "${file}" "${key}: \\[" "'${NEW}'"; then
++    echo "::error::ps_apiresources: failed to add ${NEW} to ${file} (${key})" >&2
++    return 1
++  fi
++  log "${file}: ${key} += ${NEW}"
++}
++
++# php.yml uses the key `presta_version`, integration.yml uses `prestashop_version`.
++add_to_inline_matrix "${WF}/php.yml" "presta_version"
++add_to_inline_matrix "${WF}/integration.yml" "prestashop_version"
++
++log "ps_apiresources transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-test-scenarios.sh b/.github/release-bootstrap/transform-test-scenarios.sh
+new file mode 100755
+index 0000000000000..40a2afe662477
+--- /dev/null
++++ b/.github/release-bootstrap/transform-test-scenarios.sh
+@@ -0,0 +1,53 @@
++#!/usr/bin/env bash
++#
++# PrestaShop/test-scenarios version-branch bootstrap transform.
++# Adds the new version branch as a "core" entry in config.json and a matching
++# checkout step in gh-pages.yml. ADD-only and idempotent. cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++SLUG="prestashop_${NEW//./}"   # 9.2.x -> prestashop_92x
++
++# 1) config.json: insert a core item for NEW right after the 'develop' entry
++#    (always present), so the script keeps working once 9.1.x is removed.
++cfg="config.json"
++if [ -f "${cfg}" ] && [ "$(jq --arg b "${NEW}" 'any(.items[]; .branch == $b)' "${cfg}")" != "true" ]; then
++  obj="$(jq -n --arg p "./${SLUG}/" --arg b "${NEW}" \
++    '{repository:"PrestaShop/PrestaShop", path:$p, branch:$b, title:$b, type:"core"}')"
++  jq --argjson obj "${obj}" '
++    .items as $a
++    | (.items | map(.branch == "develop") | index(true)) as $d
++    | .items = (if $d != null then $a[0:($d+1)] + [$obj] + $a[($d+1):] else [$obj] + $a end)
++  ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
++  if [ "$(jq --arg b "${NEW}" 'any(.items[]; .branch == $b)' "${cfg}")" != "true" ]; then
++    echo "::error::test-scenarios: failed to insert ${NEW} into config.json items" >&2
++    exit 1
++  fi
++  log "config.json: inserted core item ${NEW}"
++fi
++
++# 2) gh-pages.yml: insert a Checkout step for NEW before the first 9.x checkout
++ghp=".github/workflows/gh-pages.yml"
++if [ -f "${ghp}" ] && ! grep -qF -- "path: ${SLUG}" "${ghp}"; then
++  block="$(mktemp)"
++  printf '      - name: Checkout PrestaShop repository (%s)\n        uses: actions/checkout@v4\n        with:\n          repository: PrestaShop/PrestaShop\n          fetch-depth: 1\n          path: %s\n          ref: %s\n\n' \
++    "${NEW}" "${SLUG}" "${NEW}" > "${block}"
++  awk -v f="${block}" '
++    !done && /^      - name: Checkout PrestaShop repository \(9\.[0-9]+\.x\)/ {
++      while ((getline line < f) > 0) print line
++      done = 1
++    }
++    { print }
++  ' "${ghp}" > "${ghp}.tmp" && mv "${ghp}.tmp" "${ghp}"
++  rm -f "${block}"
++  if ! grep -qF -- "path: ${SLUG}" "${ghp}"; then
++    echo "::error::test-scenarios: gh-pages.yml anchor (9.x checkout step) not found, nothing inserted" >&2
++    exit 1
++  fi
++  log "gh-pages.yml: inserted checkout step ${NEW}"
++fi
++
++log "test-scenarios transform done for ${NEW}"
+diff --git a/.github/release-bootstrap/transform-translationtool.sh b/.github/release-bootstrap/transform-translationtool.sh
+new file mode 100755
+index 0000000000000..fe1a96e880bd2
+--- /dev/null
++++ b/.github/release-bootstrap/transform-translationtool.sh
+@@ -0,0 +1,31 @@
++#!/usr/bin/env bash
++#
++# PrestaShopCorp/TranslationTool version-branch bootstrap transform.
++# Adds the new version branch to the package-update version lists (keeps the
++# previous stable — cohabitation). The two catalog workflows take a free-form
++# branch input and need no change. ADD-only, idempotent. cwd = checked-out repo.
++#
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++source "${SCRIPT_DIR}/lib.sh"
++
++WF=".github/workflows"
++
++# These lists have no 'develop' entry, so anchor on the stable list key and add
++# NEW as the first item — keeps working once 9.1.x is removed.
++
++# manual_update_translation_files_packages.yml: prestashop_version is the first
++# choice input, so the first 'options:' is its option list.
++insert_block_after "${WF}/manual_update_translation_files_packages.yml" "options:" "'${NEW}'" <<EOF
++                    - '${NEW}'
++EOF
++
++# automatic_*_{preproduction,integration,production}.yml: matrix.prestashop_version
++for env in preproduction integration production; do
++  insert_block_after "${WF}/automatic_update_translation_files_packages_${env}.yml" "prestashop_version:" "'${NEW}'" <<EOF
++                    - '${NEW}'
++EOF
++done
++
++log "translationtool transform done for ${NEW}"
+diff --git a/.github/workflows/version-branch-bootstrap.yml b/.github/workflows/version-branch-bootstrap.yml
+new file mode 100644
+index 0000000000000..b133d200b0904
+--- /dev/null
++++ b/.github/workflows/version-branch-bootstrap.yml
+@@ -0,0 +1,247 @@
++# Version-branch bootstrap (issue #41818)
++#
++# When a new version branch is opened (e.g. develop -> 9.2.x), this manually
++# dispatched, prestashop-sa-gated workflow:
++#   1. creates the version branch on core if it does not exist yet (idempotent),
++#   2. opens/updates ONE idempotent PR per repository adding that branch to each
++#      repo's CI matrices / branch lists.
++# Everything (version, X.Y.x branch, minor/major) is derived from
++# src/Core/Version.php on develop — there are no release inputs. Re-runnable:
++# already-merged changes open no PR; an open PR is updated; a closed one is
++# ignored and a fresh PR is created. Humans review & merge (never auto-merged).
++name: Version-branch bootstrap
++
++on:
++  workflow_dispatch:
++    inputs:
++      dry_run:
++        description: 'Compute diffs and log, but do not push branches or open/update PRs'
++        required: false
++        type: boolean
++        default: true
++
++permissions:
++  contents: write
++  pull-requests: write
++
++concurrency:
++  group: version-branch-bootstrap
++  cancel-in-progress: false
++
++jobs:
++  # 1) Gate: only members of the prestashop-sa team may run this.
++  #    Copied verbatim from create-build-branch.yml.
++  check-membership:
++    name: Check team membership
++    runs-on: ubuntu-latest
++    env:
++      TEAM_SLUG: prestashop-sa
++    steps:
++      - name: Verify actor belongs to ${{ env.TEAM_SLUG }}
++        env:
++          TOKEN: ${{ secrets.JARVIS_TOKEN }}
++          ACTOR: ${{ github.actor }}
++        run: |
++          if [ -z "$TOKEN" ]; then
++            echo "::error::JARVIS_TOKEN secret is empty. Configure a token with read:org scope before running this workflow."
++            exit 1
++          fi
++
++          API_URL="https://api.github.com/orgs/PrestaShop/teams/${TEAM_SLUG}/memberships/${ACTOR}"
++          echo "Checking membership: ${API_URL}"
++
++          RESPONSE=$(curl -s -w "\n%{http_code}" \
++            -H "Authorization: Bearer $TOKEN" \
++            -H "Accept: application/vnd.github+json" \
++            "$API_URL")
++          STATUS=$(echo "$RESPONSE" | tail -1)
++          BODY=$(echo "$RESPONSE" | sed '$d')
++
++          if [ "$STATUS" = "200" ]; then
++            ROLE=$(echo "$BODY" | jq -r '.role // "unknown"')
++            STATE=$(echo "$BODY" | jq -r '.state // "unknown"')
++            echo "✅ ${ACTOR} is a member of ${TEAM_SLUG} (role=${ROLE}, state=${STATE})." >> "$GITHUB_STEP_SUMMARY"
++          else
++            echo "::error::${ACTOR} is not a member of ${TEAM_SLUG} (HTTP ${STATUS}). Only members of this team can run version-branch bootstrap."
++            echo "⛔ ${ACTOR} is not a member of ${TEAM_SLUG} (HTTP ${STATUS})." >> "$GITHUB_STEP_SUMMARY"
++            exit 1
++          fi
++
++  # 2) Derive version_branch / new_version / release_type from Version.php on develop.
++  derive:
++    name: Derive version branch
++    runs-on: ubuntu-latest
++    needs: check-membership
++    outputs:
++      version_branch: ${{ steps.d.outputs.version_branch }}
++      new_version: ${{ steps.d.outputs.new_version }}
++      release_type: ${{ steps.d.outputs.release_type }}
++      target_owner: ${{ steps.owner.outputs.target_owner }}
++    steps:
++      - name: Checkout develop
++        uses: actions/checkout@v5
++        with:
++          ref: develop
++          sparse-checkout: src/Core/Version.php
++          sparse-checkout-cone-mode: false
++      - name: Read Version.php
++        id: d
++        run: |
++          set -euo pipefail
++          f="src/Core/Version.php"
++          maj=$(sed -nE "s/.*const MAJOR_VERSION = ([0-9]+);.*/\1/p" "$f")
++          min=$(sed -nE "s/.*const MINOR_VERSION = ([0-9]+);.*/\1/p" "$f")
++          rel=$(sed -nE "s/.*const RELEASE_VERSION = ([0-9]+);.*/\1/p" "$f")
++          if [ -z "$maj" ] || [ -z "$min" ] || [ -z "$rel" ]; then
++            echo "::error::Could not parse MAJOR/MINOR/RELEASE from ${f}."; exit 1
++          fi
++          version_branch="${maj}.${min}.x"
++          new_version="${maj}.${min}.${rel}"
++          if [ "$min" = "0" ] && [ "$rel" = "0" ]; then rt="major"; else rt="minor"; fi
++          {
++            echo "version_branch=${version_branch}"
++            echo "new_version=${new_version}"
++            echo "release_type=${rt}"
++          } >> "$GITHUB_OUTPUT"
++          echo "Derived ${version_branch} (version ${new_version}, ${rt} release)" >> "$GITHUB_STEP_SUMMARY"
++
++      - name: Resolve target owner (forks vs production)
++        id: owner
++        run: |
++          # Targeting is driven by WHERE the workflow runs, not a manual flag:
++          # running on PrestaShop/* (upstream) targets the official repos; running
++          # on any fork targets that fork owner's repos and never the official ones.
++          owner="${{ github.repository_owner }}"
++          if [ "${owner}" = "PrestaShop" ]; then
++            echo "target_owner=" >> "$GITHUB_OUTPUT"
++            echo "🎯 Production mode: targeting the official PrestaShop / PrestaShopCorp repositories." >> "$GITHUB_STEP_SUMMARY"
++          else
++            echo "target_owner=${owner}" >> "$GITHUB_OUTPUT"
++            echo "🧪 Fork mode: targeting forks under \`${owner}\` only — the official repositories are never touched." >> "$GITHUB_STEP_SUMMARY"
++          fi
++
++  # 3) Create the version branch on core (idempotent) before the per-repo PRs.
++  create-version-branch:
++    name: Create ${{ needs.derive.outputs.version_branch }} on core
++    runs-on: ubuntu-latest
++    needs: derive
++    steps:
++      # github.repository is already the repo the workflow runs in: a fork when
++      # triggered on a fork, PrestaShop/PrestaShop when triggered upstream.
++      - name: Checkout core (develop)
++        uses: actions/checkout@v5
++        with:
++          repository: ${{ github.repository }}
++          ref: develop
++          fetch-depth: 1
++          token: ${{ secrets.JARVIS_TOKEN }}
++      - name: Create version branch if missing
++        env:
++          VB: ${{ needs.derive.outputs.version_branch }}
++          DRY_RUN: ${{ inputs.dry_run }}
++          REPO: ${{ github.repository }}
++        run: |
++          set -euo pipefail
++          if git ls-remote --exit-code --heads origin "${VB}" >/dev/null 2>&1; then
++            echo "::notice::Branch '${VB}' already exists on ${REPO} — skipping creation."
++            echo "✅ Version branch \`${VB}\` already exists on \`${REPO}\`." >> "$GITHUB_STEP_SUMMARY"
++            exit 0
++          fi
++          git checkout -b "${VB}"
++          if [ "${DRY_RUN}" = "true" ]; then
++            echo "::notice::[dry_run] would create '${VB}' from develop on ${REPO}."
++            echo "🧪 [dry_run] would create \`${VB}\` from \`develop\` on \`${REPO}\`." >> "$GITHUB_STEP_SUMMARY"
++            exit 0
++          fi
++          git push origin "${VB}"
++          echo "🌱 Created \`${VB}\` from \`develop\` on \`${REPO}\`." >> "$GITHUB_STEP_SUMMARY"
++
++  # 4) Per-repo fan-out. Each leg runs its transform and opens/updates one PR.
++  #    kanbanbot is included for every release (its TARGET_BRANCH_AVAILABLE list
++  #    must learn the new branch even for a minor); its security-window constants
++  #    are flagged for manual review on majors by the transform itself.
++  bootstrap-repo:
++    name: Bootstrap ${{ matrix.transform_id }}
++    needs: [ derive, create-version-branch ]
++    runs-on: ubuntu-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - repo: PrestaShop/PrestaShop
++            base: develop
++            transform_id: core
++            reviewers: ""
++          - repo: PrestaShop/test-scenarios
++            base: master
++            transform_id: test-scenarios
++            reviewers: ""
++          - repo: PrestaShop/presthubot
++            base: master
++            transform_id: presthubot
++            reviewers: ""
++          - repo: PrestaShop/kanbanbot
++            base: main
++            transform_id: kanbanbot
++            reviewers: ""
++          - repo: PrestaShopCorp/TranslationTool
++            base: dev
++            transform_id: translationtool
++            reviewers: ""
++          - repo: PrestaShop/ga.tests.ui.pr
++            base: main
++            transform_id: ga-tests-ui-pr
++            reviewers: PrestaShop/qa-automation
++          - repo: PrestaShop/ps_apiresources
++            base: dev
++            transform_id: ps-apiresources
++            reviewers: ""
++    steps:
++      - name: Checkout bootstrap action
++        uses: actions/checkout@v5
++        with:
++          sparse-checkout: .github/actions/version-branch-bootstrap
++      - name: Bootstrap ${{ matrix.repo }}
++        uses: ./.github/actions/version-branch-bootstrap
++        with:
++          repository: ${{ matrix.repo }}
++          base: ${{ matrix.base }}
++          version_branch: ${{ needs.derive.outputs.version_branch }}
++          new_version: ${{ needs.derive.outputs.new_version }}
++          release_type: ${{ needs.derive.outputs.release_type }}
++          transform_id: ${{ matrix.transform_id }}
++          target_owner: ${{ needs.derive.outputs.target_owner }}
++          reviewers: ${{ matrix.reviewers }}
++          dry_run: ${{ inputs.dry_run }}
++          token: ${{ secrets.JARVIS_TOKEN }}
++
++  # 5) Consolidated report: one table of every PR for the maintainers to review.
++  report:
++    name: PR report
++    runs-on: ubuntu-latest
++    needs: [ derive, bootstrap-repo ]
++    if: always()
++    steps:
++      - name: Download result artifacts
++        uses: actions/download-artifact@v7
++        with:
++          pattern: pr-result-*
++          path: results
++      - name: Build report
++        run: |
++          set -euo pipefail
++          {
++            echo "## Version-branch bootstrap — ${{ needs.derive.outputs.version_branch }}"
++            echo ""
++            if [ "${{ inputs.dry_run }}" = "true" ]; then echo "_dry run — no branches pushed, no PRs opened._"; echo ""; fi
++            echo "| Repository | Action | Pull request |"
++            echo "| --- | --- | --- |"
++          } >> "$GITHUB_STEP_SUMMARY"
++          shopt -s nullglob
++          for f in results/*/pr-result.json; do
++            repo=$(jq -r '.repo' "$f")
++            action=$(jq -r '.action' "$f")
++            url=$(jq -r '.url' "$f")
++            if [ -n "$url" ] && [ "$url" != "null" ]; then link="[link]($url)"; else link="—"; fi
++            echo "| ${repo} | ${action} | ${link} |" >> "$GITHUB_STEP_SUMMARY"
++          done

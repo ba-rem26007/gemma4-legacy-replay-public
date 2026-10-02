@@ -1,0 +1,357 @@
+diff --git a/.docker/Dockerfile b/.docker/Dockerfile
+index d11d4187944ed..5ca86992a61ea 100644
+--- a/.docker/Dockerfile
++++ b/.docker/Dockerfile
+@@ -1,8 +1,12 @@
+ # To run files with the same group as your primary user
+-ARG VERSION
++ARG VERSION="8.1-apache"
+ 
+ FROM prestashop/base:$VERSION
+ 
++# Declare a new time the ARG VERSION
++## Because "An ARG declared before a FROM is outside of a build stage, so it can't be used in any instruction after a FROM."
++ARG VERSION
++
+ EXPOSE 443
+ 
+ ARG GROUP_ID
+diff --git a/CONTRIBUTORS.md b/CONTRIBUTORS.md
+index a1a84b7a65688..e6d96be696a69 100644
+--- a/CONTRIBUTORS.md
++++ b/CONTRIBUTORS.md
+@@ -12,7 +12,7 @@ GitHub contributors:
+ - Adam
+ - Adib Aroui
+ - Adonis Karavokyros
+-- adrianllopis
++- Adrianllopis
+ - Adrien
+ - Adrien Astier
+ - Adrien Foulon
+@@ -128,6 +128,7 @@ GitHub contributors:
+ - BigZ
+ - BluTiGeS
+ - BMS-fenaille
++- Boki
+ - Boris Hermans
+ - Boubker Bribri
+ - Brais Pato
+diff --git a/admin-dev/themes/new-theme/js/pages/order/OrderViewPageMap.ts b/admin-dev/themes/new-theme/js/pages/order/OrderViewPageMap.ts
+index 837338235f706..1e12d38e57bc4 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/OrderViewPageMap.ts
++++ b/admin-dev/themes/new-theme/js/pages/order/OrderViewPageMap.ts
+@@ -52,6 +52,7 @@ export default {
+   showOrderShippingUpdateModalBtn: '.js-update-shipping-btn',
+   updateOrderShippingTrackingNumberInput: '#update_order_shipping_tracking_number',
+   updateOrderShippingCurrentOrderCarrierIdInput: '#update_order_shipping_current_order_carrier_id',
++  updateOrderShippingNewCarrierIdSelect: '#update_order_shipping_new_carrier_id',
+   updateCustomerAddressModal: '#updateCustomerAddressModal',
+   openOrderAddressUpdateModalBtn: '.js-update-customer-address-modal-btn',
+   updateOrderAddressTypeInput: '#change_order_address_address_type',
+diff --git a/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.ts b/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.ts
+index 1e452a169d949..d80e07f5ed7e7 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.ts
++++ b/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.ts
+@@ -29,6 +29,7 @@ const {$} = window;
+ export default class OrderShippingManager {
+   constructor() {
+     this.initOrderShippingUpdateEventHandler();
++    this.overrideNewCarrierSelect2();
+   }
+ 
+   initOrderShippingUpdateEventHandler(): void {
+@@ -39,4 +40,15 @@ export default class OrderShippingManager {
+       $(OrderViewPageMap.updateOrderShippingCurrentOrderCarrierIdInput).val($btn.data('order-carrier-id'));
+     });
+   }
++
++  overrideNewCarrierSelect2(): void {
++    // Reinitialize Select2 to specify the dropdown container.
++    // Required to avoid display issues inside the modal.
++    const $select = $(OrderViewPageMap.updateOrderShippingNewCarrierIdSelect);
++    const $modal = $select.closest('.modal');
++
++    $select.select2('destroy').select2({
++      dropdownParent: $modal,
++    });
++  }
+ }
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 6bb92468ab424..731946e87c694 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -1313,20 +1313,12 @@ protected function recoverCart()
+             return false;
+         }
+ 
+-        // Initialize this data into cookie, FrontController will use it later
+-        $customer->logged = true;
+-        $this->context->customer = $customer;
+-        $this->context->cookie->id_customer = (int) $customer->id;
+-        $this->context->cookie->customer_lastname = $customer->lastname;
+-        $this->context->cookie->customer_firstname = $customer->firstname;
+-        $this->context->cookie->logged = true;
+         $this->context->cookie->check_cgv = 1;
+-        $this->context->cookie->is_guest = $customer->isGuest();
+-        $this->context->cookie->passwd = $customer->passwd;
+-        $this->context->cookie->email = $customer->email;
+-        $this->context->cookie->id_guest = (int) $cart->id_guest;
+         $this->context->cookie->id_cart = $id_cart;
+ 
++        // Restore customer session and authentication state (cookie + CustomerSession)
++        $this->context->updateCustomer($customer);
++
+         // Return the value for backward compatibility
+         return $id_cart;
+     }
+diff --git a/classes/order/Order.php b/classes/order/Order.php
+index a2e1f63be4e46..cf4aeb9f6625e 100644
+--- a/classes/order/Order.php
++++ b/classes/order/Order.php
+@@ -900,6 +900,21 @@ public function getCurrentStateFull($id_lang)
+ 
+     public function hasBeenDelivered()
+     {
++        $hasBeenDelivered = Hook::exec(
++            'actionOrderHasBeenDelivered',
++            ['order' => $this],
++            null,
++            false,
++            true,
++            false,
++            null,
++            true
++        );
++
++        if (is_bool($hasBeenDelivered)) {
++            return $hasBeenDelivered;
++        }
++
+         return count($this->getHistory((int) $this->id_lang, false, false, OrderState::FLAG_DELIVERY));
+     }
+ 
+@@ -925,6 +940,21 @@ public function hasBeenPaid()
+ 
+     public function hasBeenShipped()
+     {
++        $hasBeenShipped = Hook::exec(
++            'actionOrderHasBeenShipped',
++            ['order' => $this],
++            null,
++            false,
++            true,
++            false,
++            null,
++            true
++        );
++
++        if (is_bool($hasBeenShipped)) {
++            return $hasBeenShipped;
++        }
++
+         return count($this->getHistory((int) $this->id_lang, false, false, OrderState::FLAG_SHIPPED));
+     }
+ 
+diff --git a/docs/CHANGELOG.txt b/docs/CHANGELOG.txt
+index 7d57f266fd551..adfa21674a53c 100644
+--- a/docs/CHANGELOG.txt
++++ b/docs/CHANGELOG.txt
+@@ -1953,6 +1953,89 @@ Changelog for PrestaShop 9
+     - #31461: Add guest customer edit test (by @Hlavtox)
+     - #31386: Add test for mismatching groups, fix the check in handler (by @Hlavtox)
+ 
++####################################
++#   v8.2.2 - (2025-07-28)
++####################################
++
++- Back Office:
++  - New feature:
++    - #38408: Add new hook `actionProductGetAttributesGroupsAfter` (by @gwojcik7)
++  - Improvement:
++    - #39162: Add new hooks: actionOrderHasBeenShipped and actionOrderHasBeenDelivered (by @Codencode)
++    - #38717: Use v8 documentation in HelperCard (by @PrestaEdit)
++    - #38634: Improved regex in StringModifier (by @nicosomb)
++    - #38773: Disable autofill of password for edit customer in BO (by @ShaiMagal)
++    - #38073: Check mail template directory before reading (by @matthieu-rolland)
++  - Bug fix:
++    - #38810: Support for brand named as numbers (by @borjagarciab)
++    - #38549: Fix: Misleading maximum attachment upload size in configure/advanced/administration (by @Codencode)
++    - #37933: Price final critical error fix (by @jf-viguier)
++    - #38982: BO : Product Form : Use the correct configuration for the Max Filesize (by @Progi1984)
++    - #37928: Fix datacollector caster for reference object property including smarty cache_locking fatal error (by @jf-viguier)
++    - #38593: Fix query builder to find translations by key in Backoffice during the translations saving process (by @mcaldex)
++    - #38532: Fix: Multistore: CMS page error on new empty store creation (by @Codencode)
++    - #38337: Fix: Max password length allowed in the password policy is longer than bcrypt can handle and hardcoded max pass length for customer (by @Codencode)
++    - #38581: Allow refund on an order of a deleted customer  (by @jf-viguier)
++    - #38251: Fix: Query to select most used tax rule is simply ridicoulous (by @Codencode)
++    - #38703: Revert modification in OrderLazyArray that breaks the UI tests (by @jolelievre)
++    - #38323: Fix: Webservice link_rewrite validation error on Product creation due to Tools::str2url in PS8 (by @Codencode)
++    - #38254: Fix: Migration - Product V2 - tab name not the same - Product creation (by @Codencode)
++    - #38319: Fix: Edit country taxe rules (by @Codencode)
++    - #36792: Event "OrderCreateProductSearched" not managed in custom modules (related #35970) (by @mattgoud)
++    - #38381: Bug fix copyFromPost that remove overrided object model definitions in ps8.2 (by @jf-viguier)
++    - #38350: Problem with decimal separator and eco-tax on Combination Form (by @djbuch)
++    - #38355: Fix: It is not possible to view a cart in the admin if it contains customized items (by @Codencode)
++    - #38234: Update product indexation after each update when it is needed (by @jolelievre)
++    - #38243: Fixed FI taxes in localization files (by @nicosomb)
++    - #38136: Fix: Issue with JS and CSS cache clearing in multishop context (by @Codencode)
++    - #38168: Category::getParentsCategories fix with multiple root categories (by @jolelievre)
++    - #37877: Fix: BO - Product Page - Redirection type - Category without image generate 404 call (by @Codencode)
++    - #37970: Fix: [Bug] Missing attributes autoplay, loop, muted, and playsinline in the video tag within Tools::purifyHTML() (by @Codencode)
++    - #37985: Fix: display... hooks duplicated on module transplant list (by @Codencode)
++    - #37958: Fix product filters for csv export (by @boherm)
++    - #37982: Empty the labels "totalPriceText" and "availableText". (by @Codencode)
++- Front Office:
++  - New feature:
++    - #38691: Add hook displayCartExtraProductInfo to display cart extra product information (by @jf-viguier)
++    - #38371: Feat - Add hook actionCartDuplicate (by @unlocomqx)
++  - Improvement:
++    - #38480: New Hook: actionPaymentModuleProductVarTplAfter (by @gwojcik7)
++  - Bug fix:
++    - #38679: Filter out modules that return empty payment options (by @jolelievre)
++    - #38552: Use id_customization for matching cart and order products (by @unlocomqx)
++    - #38257: Fix: Address Fields Disappear After Changing Country on Checkout Page (by @Codencode)
++    - #38157: Fix: Issue with multilingual translations (by @Codencode)
++    - #38037: Fix: Use 'active' from 'product_shop' instead of 'product' in Product::searchByName() (by @Codencode)
++    - #37955: Fix: prestashop don't display Title of product, category meta title, meta description (by @Codencode)
++- Core:
++  - Improvement:
++    - #39135: Updated PrestaShop Packages (by @github-actions[bot])
++    - #38952: Add 2 hooks in getImageLink (by @ludoviccardinale)
++    - #38924: Backport improved profiler from v9 (by @Hlavtox)
++    - #38772: New hook at TOP of customer my account section - displayCustomerAccountTop (by @ShaiMagal)
++    - #38195: Updated PrestaShop Packages (by @github-actions[bot])
++    - #37635: Updated PrestaShop Packages (by @github-actions[bot])
++  - Bug fix:
++    - #37925: Fix: round calcul in calculator (by @Midoclas)
++    - #38327: Fix actionFilterDeliveryOptionList hook Cart Param (by @adrianllopis)
++    - #38104: Fixed SK tax in all localization files (by @nicosomb)
++  - Refactoring:
++    - #38761: Refactor Warehouse::getProductLocation() (by @ShaiMagal)
++- Installer:
++  - Improvement:
++    - #38077: Add demo product env parameter for cli install via docker (by @matthieu-rolland)
++- Web Services:
++  - Bug fix:
++    - #38417: Fix webservice sql error (by @thersane-john)
++    - #38341: Fix: product carrier delete (by @fox-john)
++- Tests:
++  - Improvement:
++    - #38447: Functional Tests : Allow override URL_FO for PS Entreprise UI Tests (by @Progi1984)
++    - #38169: Add setup log export action (by @jolelievre)
++  - Bug fix:
++    - #39139: Docker 7.2-apache : Fixed use of archive Debian repo  (by @Progi1984)
++    - #39049: BO : Theme : Export current theme > Protect directories (by @Progi1984)
++
+ ####################################
+ #   v8.2.1 - (2025-02-10)
+ ####################################
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index e99e49ad09f71..70805aac4a593 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -5463,5 +5463,15 @@
+       <title>Adapt product image link</title>
+       <description>Allows to dynamically modify the final image URL generated by getImageLink(), using a reference to the final value.</description>
+     </hook>
++    <hook id="actionOrderHasBeenShipped">
++        <name>actionOrderHasBeenShipped</name>
++        <title>Called when checking if an order has been shipped</title>
++        <description>Allows modules to override or react to the hasBeenShipped() method of the Order class.</description>
++    </hook>
++    <hook id="actionOrderHasBeenDelivered">
++        <name>actionOrderHasBeenDelivered</name>
++        <title>Called when checking if an order has been delivered</title>
++        <description>Allows modules to override or react to the hasBeenDelivered() method of the Order class.</description>
++    </hook>
+   </entities>
+ </entity_hook>
+diff --git a/src/Core/Addon/Theme/ThemeExporter.php b/src/Core/Addon/Theme/ThemeExporter.php
+index 22f0b1f41ee1d..f44156cf2df78 100644
+--- a/src/Core/Addon/Theme/ThemeExporter.php
++++ b/src/Core/Addon/Theme/ThemeExporter.php
+@@ -76,6 +76,7 @@ public function export(Theme $theme)
+         $this->copyTheme($theme->getDirectory(), $cacheDir);
+         $this->copyModuleDependencies((array) $theme->get('dependencies.modules'), $cacheDir);
+         $this->copyTranslations($theme, $cacheDir);
++        $this->protectDirectory($cacheDir);
+ 
+         $finalFile = $this->configuration->get('_PS_ALL_THEMES_DIR_') . DIRECTORY_SEPARATOR . $theme->getName() . '.zip';
+         $this->createZip($cacheDir, $finalFile);
+@@ -89,7 +90,7 @@ public function export(Theme $theme)
+      * @param string $themeDir
+      * @param string $cacheDir
+      */
+-    private function copyTheme($themeDir, $cacheDir)
++    private function copyTheme(string $themeDir, string $cacheDir): void
+     {
+         $fileList = Finder::create()
+             ->files()
+@@ -152,7 +153,7 @@ protected function copyTranslations(Theme $theme, $cacheDir)
+      *
+      * @return bool
+      */
+-    private function createZip($sourceDir, $destinationFileName)
++    private function createZip(string $sourceDir, string $destinationFileName): bool
+     {
+         $zip = new ZipArchive();
+         $zip->open($destinationFileName, ZipArchive::CREATE);
+@@ -168,4 +169,21 @@ private function createZip($sourceDir, $destinationFileName)
+ 
+         return $zip->close();
+     }
++
++    protected function protectDirectory(string $cacheDir): void
++    {
++        $dirs = Finder::create()
++            ->directories()
++            ->in($cacheDir)
++            ->exclude(['node_modules']);
++
++        $fs = new Filesystem();
++        foreach ($dirs as $dir) {
++            // Copy file
++            $fs->copy(
++                $this->configuration->get('_PS_ALL_THEMES_DIR_') . DIRECTORY_SEPARATOR . 'index.php',
++                $dir->getRealPath() . DIRECTORY_SEPARATOR . 'index.php'
++            );
++        }
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/ManufacturerType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/ManufacturerType.php
+index 74b2d08429768..e38d0a7f378e8 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/ManufacturerType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/ManufacturerType.php
+@@ -70,9 +70,9 @@ public function getParent(): string
+     public function configureOptions(OptionsResolver $resolver): void
+     {
+         $manufacturers = $this->manufacturerChoiceProvider->getChoices();
+-        $choices = array_merge([
++        $choices = [
+             $this->trans('No brand', 'Admin.Catalog.Feature') => NoManufacturerId::NO_MANUFACTURER_ID,
+-        ], $manufacturers);
++        ] + $manufacturers;
+ 
+         $resolver->setDefaults([
+             'label' => $this->trans('Brand', 'Admin.Catalog.Feature'),
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Categories/Blocks/delete_categories_modal.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Categories/Blocks/delete_categories_modal.html.twig
+index f90bf454df8b8..8ff86852b7f14 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Categories/Blocks/delete_categories_modal.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Categories/Blocks/delete_categories_modal.html.twig
+@@ -37,7 +37,6 @@
+   {% block content %}
+     <div class="modal-body">
+       {{ form_start(deleteCategoriesForm, {action: path('admin_categories_delete')}) }}
+-
+       <div class="form-group mb-0">
+         {{ form_widget(deleteCategoriesForm.delete_mode) }}
+       </div>
+@@ -50,6 +49,7 @@
+       <div class="d-none">
+         {{ form_widget(deleteCategoriesForm.categories_to_delete_parent) }}
+       </div>
++      {{ form_end(deleteCategoriesForm) }}
+     </div>
+   {% endblock %}
+ {% endembed %}

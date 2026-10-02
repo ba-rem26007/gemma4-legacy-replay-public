@@ -1,0 +1,87 @@
+diff --git a/classes/PrestaShopAutoload.php b/classes/PrestaShopAutoload.php
+index dd1b1584aee9a..c515f978227eb 100644
+--- a/classes/PrestaShopAutoload.php
++++ b/classes/PrestaShopAutoload.php
+@@ -155,13 +155,37 @@ public function generateIndex()
+         $filename = PrestaShopAutoload::getCacheFileIndex();
+         @mkdir(_PS_CACHE_DIR_);
+ 
+-        if (!file_put_contents($filename, $content) !== false) {
++        if (!$this->dumpFile($filename, $content)) {
+             Tools::error_log('Cannot write temporary file '.$filename);
+         }
+ 
+         $this->index = $classes;
+     }
+ 
++    /**
++     * @param $filename
++     * @param $content
++     * @return bool
++     *
++     * @see http://api.symfony.com/3.0/Symfony/Component/Filesystem/Filesystem.html#method_dumpFile
++     */
++    public function dumpFile($filename, $content)
++    {
++        $dir = dirname($filename);
++
++        // Will create a temp file with 0600 access rights
++        // when the filesystem supports chmod.
++        $tmpFile = tempnam($dir, basename($filename));
++        if (false === @file_put_contents($tmpFile, $content)) {
++            return false;
++        }
++        // Ignore for filesystems that do not support umask
++        @chmod($tmpFile, 0666);
++        rename($tmpFile, $filename);
++
++        return true;
++    }
++
+     /**
+      * Retrieve recursively all classes in a directory and its subdirectories
+      *
+diff --git a/config/bootstrap.php b/config/bootstrap.php
+index 87268ba85de7a..f7afd054240d3 100644
+--- a/config/bootstrap.php
++++ b/config/bootstrap.php
+@@ -28,6 +28,7 @@
+ use PrestaShop\PrestaShop\Core\ContainerBuilder;
+ use Symfony\Component\HttpKernel\CacheWarmer\CacheWarmerAggregate;
+ use Symfony\Component\Yaml\Yaml;
++use Symfony\Component\Filesystem\Filesystem;
+ 
+ $container_builder = new ContainerBuilder();
+ $container = $container_builder->build();
+@@ -45,15 +46,17 @@
+ $phpParametersFilepath = $configDirectory . '/parameters.php';
+ $yamlParametersFilepath = $configDirectory . '/parameters.yml';
+ 
+-function exportPhpConfigFile($config, $destination) {
+-    return file_put_contents($destination, '<?php return ' . var_export($config, true). ';' . "\n");
+-}
++$filesystem = new Filesystem();
++
++$exportPhpConfigFile = function ($config, $destination) use ($filesystem) {
++    return $filesystem->dumpFile($destination, '<?php return ' . var_export($config, true). ';' . "\n");
++};
+ 
+ // Bootstrap an application with parameters.yml, which has been installed before PHP parameters file support
+ if (!file_exists($phpParametersFilepath) && file_exists($yamlParametersFilepath)) {
+     $parameters = Yaml::parse($yamlParametersFilepath);
+-    if (exportPhpConfigFile($parameters, $phpParametersFilepath)) {
+-        file_put_contents($yamlParametersFilepath, 'parameters:' . "\n");
++    if ($exportPhpConfigFile($parameters, $phpParametersFilepath)) {
++        $filesystem->dumpFile($yamlParametersFilepath, 'parameters:' . "\n");
+     }
+ }
+ 
+@@ -65,7 +68,7 @@ function exportPhpConfigFile($config, $destination) {
+         // When parameters file is available, update its cache if it is stale.
+         if (file_exists($phpParametersFilepath)) {
+             $config = require($phpParametersFilepath);
+-            exportPhpConfigFile($config, _PS_CACHE_DIR_ .'appParameters.php');
++            $exportPhpConfigFile($config, _PS_CACHE_DIR_ .'appParameters.php');
+         }
+     }
+ 

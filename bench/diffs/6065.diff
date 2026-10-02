@@ -1,0 +1,141 @@
+diff --git a/classes/Product.php b/classes/Product.php
+index f0198d069cca0..b3669d485b10a 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -5647,7 +5647,7 @@ public static function getAttributesParams($id_product, $id_product_attribute)
+ 
+         if (!Cache::isStored($cache_id)) {
+             $result = Db::getInstance()->executeS('
+-			SELECT a.`id_attribute`, a.`id_attribute_group`, al.`name`, agl.`name` as `group`
++			SELECT a.`id_attribute`, a.`id_attribute_group`, al.`name`, agl.`name` as `group`, pa.`reference`, pa.`ean13`, pa.`isbn`,pa.`upc`
+ 			FROM `'._DB_PREFIX_.'attribute` a
+ 			LEFT JOIN `'._DB_PREFIX_.'attribute_lang` al
+ 				ON (al.`id_attribute` = a.`id_attribute` AND al.`id_lang` = '.(int)$id_lang.')
+@@ -5674,7 +5674,7 @@ public static function getAttributesParams($id_product, $id_product_attribute)
+     public static function getAttributesInformationsByProduct($id_product)
+     {
+         $result = Db::getInstance()->executeS('
+-        SELECT DISTINCT a.`id_attribute`, a.`id_attribute_group`, al.`name` as `attribute`, agl.`name` as `group`
++        SELECT DISTINCT a.`id_attribute`, a.`id_attribute_group`, al.`name` as `attribute`, agl.`name` as `group`,pa.`reference`, pa.`ean13`, pa.`isbn`,pa.`upc`
+         FROM `'._DB_PREFIX_.'attribute` a
+         LEFT JOIN `'._DB_PREFIX_.'attribute_lang` al
+             ON (a.`id_attribute` = al.`id_attribute` AND al.`id_lang` = '.(int)Context::getContext()->language->id.')
+diff --git a/src/Core/Product/ProductPresenter.php b/src/Core/Product/ProductPresenter.php
+index 3c3017330c297..6f10c4a8f0e91 100644
+--- a/src/Core/Product/ProductPresenter.php
++++ b/src/Core/Product/ProductPresenter.php
+@@ -395,6 +395,57 @@ public function addQuantityInformation(
+         return $presentedProduct;
+     }
+ 
++    /**
++     * Add new attribute reference_to_display if the product reference or the selected combinations reference is set
++     * @param array $product
++     * @param array $presentedProduct
++     * @return array
++     */
++    public function addReferenceToDisplay(array $product, array $presentedProduct)
++    {
++        foreach ($product['attributes'] as $attribute) {
++            if (isset($attribute['reference']) && $attribute['reference'] != null) {
++                $presentedProduct['reference_to_display'] = $attribute['reference'];
++            } else {
++                $presentedProduct['reference_to_display'] = $product['reference'];
++            }
++        }
++
++        return $presentedProduct;
++    }
++
++    /**
++     * Add all specific references to product
++     * @param array $product
++     * @param array $presentedProduct
++     * @return array
++     */
++    public function addAttributesSpecificReferences(array $product, array $presentedProduct)
++    {
++        $presentedProduct['specific_references'] = array_slice($product['attributes'], 0)[0];
++        //this attributes should not be displayed in FO
++        unset(
++            $presentedProduct['specific_references']['id_attribute'],
++            $presentedProduct['specific_references']['id_attribute_group'],
++            $presentedProduct['specific_references']['name'],
++            $presentedProduct['specific_references']['group'],
++            $presentedProduct['specific_references']['reference']
++        );
++
++        //if the attribute's references doesn't exist then get the product's references or unset it
++        foreach ($presentedProduct['specific_references'] as $key => $value) {
++            if (null === $value) {
++                if (null !== $product[$key]) {
++                    $presentedProduct['specific_references'][$key] = $product[$key];
++                } else {
++                    unset($presentedProduct['specific_references'][$key]);
++                }
++            }
++        }
++
++        return $presentedProduct;
++    }
++
+     public function present(
+         ProductPresentationSettings $settings,
+         array $product,
+@@ -484,6 +535,18 @@ public function present(
+             $product
+         );
+ 
++        // If product has attributes and it's no added to card
++        if (isset($product['attributes']) && !isset($product['cart_quantity'])) {
++            $presentedProduct = $this->addReferenceToDisplay(
++                $product,
++                $presentedProduct
++            );
++
++            $presentedProduct = $this->addAttributesSpecificReferences(
++                $product,
++                $presentedProduct
++            );
++        }
+         return $presentedProduct;
+     }
+ }
+diff --git a/themes/classic/templates/catalog/_partials/product-details.tpl b/themes/classic/templates/catalog/_partials/product-details.tpl
+index 1d2659b8b1db1..04bba59c5c37c 100644
+--- a/themes/classic/templates/catalog/_partials/product-details.tpl
++++ b/themes/classic/templates/catalog/_partials/product-details.tpl
+@@ -1,9 +1,9 @@
+ <div class="tab-pane fade{if !$product.description} in active{/if}" id="product-details">
+   {block name='product_reference'}
+-    {if $product.reference}
++    {if isset($product.reference_to_display)}
+       <div class="product-reference">
+         <label class="label">{l s='Reference' d='Shop.Theme.Catalog'} </label>
+-        <span itemprop="sku">{$product.reference}</span>
++        <span itemprop="sku">{$product.reference_to_display}</span>
+       </div>
+     {/if}
+     {/block}
+@@ -43,6 +43,21 @@
+       {/if}
+     {/block}
+ 
++    {* if product have specific references, a table will be added to product details section *}
++    {block name='product_specific_references'}
++      {if isset($product.specific_references)}
++        <section class="product-features">
++          <h3 class="h6">{l s='Specific References' d='Shop.Theme.Catalog'}</h3>
++            <dl class="data-sheet">
++              {foreach from=$product.specific_references item=reference key=key}
++                <dt class="name">{l s=$key|ucfirst d='Shop.Theme.Catalog'}</dt>
++                <dd class="value">{$reference}</dd>
++              {/foreach}
++            </dl>
++        </section>
++      {/if}
++    {/block}
++
+     {block name='product_condition'}
+       {if $product.condition}
+         <div class="product-condition">

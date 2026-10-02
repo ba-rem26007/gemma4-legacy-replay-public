@@ -1,0 +1,34 @@
+diff --git a/.ai/Component/Controller/CONTEXT.md b/.ai/Component/Controller/CONTEXT.md
+index b20795569e330..0381575b7ab77 100644
+--- a/.ai/Component/Controller/CONTEXT.md
++++ b/.ai/Component/Controller/CONTEXT.md
+@@ -24,7 +24,8 @@ Symfony admin controllers for the back-office. Controllers are the thinnest laye
+ - **Form handling:** controllers never instantiate commands directly. They use `FormBuilder` to build forms and `FormHandler` to process submissions. `FormHandler` internally calls `FormDataHandler::create()` / `FormDataHandler::update()` which dispatch commands
+ - **Atomic commit:** controller, routing YAML, and feature flag XML must always be committed together. A route with `_legacy_feature_flag` referencing an unregistered flag causes a 500
+ - **Feature flag lifecycle:** flags start at `stability="beta"` (opt-in) and are promoted to `stability="stable"` (General Availability — GA) in a dedicated PR. The `_legacy_feature_flag` value is **case-sensitive** and must match exactly between the routing YAML and `feature_flag.xml`. Once a page is fully released and the legacy controller is no longer used as a fallback, `_legacy_feature_flag` should be removed from the route — it is migration scaffolding, not permanent metadata
+-- **`_legacy_controller` is permanent:** unlike `_legacy_feature_flag`, the `_legacy_controller` route attribute stays on the route for the lifetime of the page even after full migration. It is used for (1) permission checks — admin permission rules are keyed by the legacy controller name (`is_granted('read', request.get('_legacy_controller'))`), and (2) automatic legacy link conversion — third-party modules and old code paths still call `Link::getAdminLink('AdminFoo')` and rely on this attribute to resolve to the Symfony route. Removing it breaks both
++- **`_legacy_controller` is permanent — but only for pages actually migrated from a legacy `AdminXController`:** unlike `_legacy_feature_flag`, it stays on the route for the lifetime of the page even after full migration, because it's used for (1) permission checks — admin permission rules are keyed by the legacy controller name (`is_granted('read', request.get('_legacy_controller'))`), and (2) automatic legacy link conversion — third-party modules and old code paths still call `Link::getAdminLink('AdminFoo')` and rely on this attribute to resolve to the Symfony route. Removing it from a migrated page breaks both
++- **Never add `_legacy_controller` to a fully-native route (no legacy heritage) just to make navigation work.** It used to be misused this way — declaring a `_legacy_controller` with no real legacy PHP controller behind it, purely so the sidebar/breadcrumb could resolve a `Tab` for the page. That gap is now filled by the `_parent` route attribute (see [Router/CONTEXT.md](../Router/CONTEXT.md)); permission checks on native controllers use hardcoded `is_granted('read', 'AdminFoo')` strings instead of `request.get('_legacy_controller')`
+ - **Toggle action:** toggle status actions return `JsonResponse` for AJAX grid toggle switches
+ - **Bulk actions:** are generic — implement only the ones the grid defines. Not all entities have enable/disable/delete; some have more. Always handle empty selection with an info flash. Catch `BulkCommandExceptionInterface` and flash individual failure messages with failed IDs
+ 
+diff --git a/.ai/Component/Router/CONTEXT.md b/.ai/Component/Router/CONTEXT.md
+index 6aa8143202739..a60a0049da2f6 100644
+--- a/.ai/Component/Router/CONTEXT.md
++++ b/.ai/Component/Router/CONTEXT.md
+@@ -20,12 +20,15 @@ Back-office URL generation with security token injection and legacy route mappin
+ - Routes marked with `_anonymous_controller` attribute skip token injection — used for login and public API endpoints
+ - `_legacy_link` route attribute enables the reverse mapping: `RouterProvider` builds `LegacyRoute` objects from this attribute to support old `Link::getAdminLink()` callers during migration
+ - `_legacy_feature_flag` maps the routing to a specific feature flag. Depending on the feature flag status, the automatic legacy link conversion is enabled/disabled
++- `_parent` route attribute fills a gap that, before it existed, was only fixable by misusing `_legacy_controller`: fully-native routes (no legacy heritage) reached only from a listing page — `create`/`edit`/`view` actions — have no `Tab` of their own, so the sidebar highlight, breadcrumb, and toolbar had nothing to resolve against. `_parent` names another route (typically the listing/index route) whose `Tab` should be borrowed instead. `MenuBuilder::getParentTab()` resolves it to that route's `Tab` via `TabRepository::findOneByRouteName()`; `NavBar`, `Toolbar`, and `MenuBuilder::getBreadcrumbLinks()` all call `getCurrentTab() ?? getParentTab()` so tab-less pages still render as if they belonged to their parent. Unlike `_legacy_controller`, `_parent` has no effect on permissions or `Link::getAdminLink()` — it is purely BO navigation rendering
++- **Do not add `_legacy_controller` to a route just to make navigation (active tab / breadcrumb) work.** That was the only workaround available before `_parent` existed, but `_legacy_controller` is meant for pages actually migrated from a legacy `AdminXController` — see [Controller/CONTEXT.md](../Controller/CONTEXT.md). On a route with no legacy heritage, use `_parent` instead
+ 
+ ## Canonical examples
+ 
+ - `src/PrestaShopBundle/Service/Routing/Router.php`
+ - `src/PrestaShopBundle/Routing/Converter/RouterProvider.php`
+ - `src/Adapter/Routing/AdminLinkBuilder.php`
++- `src/PrestaShopBundle/Twig/Layout/MenuBuilder.php` — `getParentTab()` resolves `_parent` to a `Tab`
+ 
+ ## Related
+ 

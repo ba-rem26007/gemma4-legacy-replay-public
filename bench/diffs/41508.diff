@@ -1,0 +1,3443 @@
+diff --git a/admin-dev/themes/default/js/admin-theme.js b/admin-dev/themes/default/js/admin-theme.js
+index d95ccec9a792c..2a99b485d3d24 100644
+--- a/admin-dev/themes/default/js/admin-theme.js
++++ b/admin-dev/themes/default/js/admin-theme.js
+@@ -127,7 +127,7 @@ $(() => {
+       },
+     );
+ 
+-  $('.nav-bar li.link-levelone.has_submenu > a').on('click', function (e) {
++  $('.nav-bar li.link-levelone.has_submenu > a').off('click').on('click', function (e) {
+     e.preventDefault();
+     e.stopPropagation();
+ 
+@@ -175,7 +175,7 @@ $(() => {
+     $submenu.find('.submenu').css('top', itemOffsetTop);
+   });
+ 
+-  $('.nav-bar').on('click', '.menu-collapse', function () {
++  $('.nav-bar').off('click', '.menu-collapse').on('click', '.menu-collapse', function () {
+     $('body').toggleClass('page-sidebar-closed');
+     $('.main-menu').toggleClass('sidebar-closed');
+ 
+@@ -202,6 +202,68 @@ $(() => {
+       },
+     });
+   });
++  $(document).on('click', '.js-quick-link', (e) => {
++    e.preventDefault();
++
++    const $link = $(e.target).closest('.js-quick-link');
++    const method = $link.data('method');
++    let name = null;
++
++    if (method === 'add') {
++      name = prompt($link.data('prompt-text'), $link.data('link'));
++    }
++
++    if ((method === 'add' && name) || method === 'remove') {
++      $.ajax({
++        type: 'POST',
++        headers: {'cache-control': 'no-cache'},
++        async: true,
++        url: $link.data('post-link'),
++        data: {
++          method,
++          url: $link.data('url'),
++          name,
++          icon: $link.data('icon'),
++          id_quick_access: $link.data('quicklink-id'),
++        },
++        dataType: 'json',
++        success: (data) => {
++          if (typeof data.has_errors !== 'undefined' && data.has_errors) {
++            $.each(data, (index) => {
++              if (typeof data[index] === 'string') {
++                $.growl.error({title: '', message: data[index]});
++              }
++            });
++          } else if (Array.isArray(data)) {
++            let quicklinkList = '';
++            $.each(data, (index, item) => {
++              if (typeof item.name !== 'undefined') {
++                const activeClass = item.active ? ' active' : '';
++                const classAttr = item.class ? ` class="${item.class}"` : '';
++                quicklinkList += `<li class="quick-row-link${activeClass}">`
++                  + `<a${classAttr} href="${item.link}" data-item="${item.name}">${item.name}</a></li>`;
++              }
++            });
++            if (quicklinkList) {
++              $('#header_quick ul.dropdown-menu .divider').prevAll().remove();
++              $('#header_quick ul.dropdown-menu').prepend(quicklinkList);
++              $link.closest('li').remove();
++              window.showSuccessMessage(window.update_success_msg);
++            }
++          }
++        },
++        error: (xhr, textStatus) => {
++          $.growl.error({
++            title: 'Quick access error',
++            message: textStatus === 'parsererror'
++              ? `Server returned non-JSON (status ${xhr.status})`
++              : `${xhr.status} ${xhr.statusText}`,
++          });
++        },
++      });
++    }
++  });
++
+   addMobileBodyClickListener();
+   const MAX_MOBILE_WIDTH = 1023;
+ 
+diff --git a/admin-dev/themes/default/template/header.tpl b/admin-dev/themes/default/template/header.tpl
+index 3089ac95f7e62..4d313b73e2456 100644
+--- a/admin-dev/themes/default/template/header.tpl
++++ b/admin-dev/themes/default/template/header.tpl
+@@ -125,15 +125,32 @@
+             <li class="divider"></li>
+             {if isset($matchQuickLink)}
+               <li>
+-                <a id="quick-remove-link" href="javascript:void(0);" class="ajax-quick-link" data-method="remove"
+-                  data-quicklink-id="{$matchQuickLink|intval}">
++                <a id="quick-remove-link"
++                   href="#"
++                   class="ajax-quick-link js-quick-link"
++                   data-method="remove"
++                   data-quicklink-id="{$matchQuickLink|intval}"
++                   data-post-link="{$quick_access_ajax_delete_url|escape:'html':'UTF-8'}"
++                   data-url=""
++                   data-prompt-text="{l s='Please name this shortcut:' d='Admin.Navigation.Header'}"
++                   data-link=""
++                >
+                   <i class="material-icons">remove_circle</i>
+-                  {l|escape s='Remove from QuickAccess' d='Admin.Navigation.Header'}
++                  {l|escape s='Remove from Quick Access' d='Admin.Navigation.Header'}
+                 </a>
+               </li>
+             {else}
+               <li>
+-                <a id="quick-add-link" href="javascript:void(0);" class="ajax-quick-link" data-method="add">
++                <a id="quick-add-link"
++                   href="#"
++                   class="ajax-quick-link js-quick-link"
++                   data-method="add"
++                   data-url="{$link->getQuickLink($smarty.server.REQUEST_URI)|escape:'html':'UTF-8'}"
++                   data-post-link="{$quick_access_ajax_add_url|escape:'html':'UTF-8'}"
++                   data-prompt-text="{l s='Please name this shortcut:' d='Admin.Navigation.Header'}"
++                   data-link="{$quick_access_current_link_short_name|escape:'html':'UTF-8'|truncate:32}"
++                   data-icon="{$quick_access_current_link_icon|escape:'html':'UTF-8'}"
++                >
+                   <i class="material-icons">add_circle</i>
+                   {l|escape s='Add current page to QuickAccess' d='Admin.Navigation.Header'}
+                 </a>
+@@ -148,56 +165,6 @@
+           </ul>
+         </div>
+       </div>
+-      {$quick_access_current_link_name = " - "|explode:$quick_access_current_link_name}
+-      <script>
+-        $(function() {
+-          $('.ajax-quick-link').on('click', function(e){
+-            e.preventDefault();
+-
+-            var method = $(this).data('method');
+-
+-            if(method == 'add')
+-              var name = prompt('{l|escape s='Please name this shortcut:' js=1 d='Admin.Navigation.Header'}', '{$quick_access_current_link_name.0|escape:"javascript"|truncate:32}}');
+-
+-            if(method == 'add' && name || method == 'remove')
+-            {
+-              $.ajax({
+-                type: 'POST',
+-                headers: { "cache-control": "no-cache" },
+-                async: false,
+-                url: "{$link->getAdminLink('AdminQuickAccesses', true, [], ['action' => 'GetUrl', 'rand' => (1|rand:200), 'ajax' => 1])}" + "&method=" + method + ( $(this).data('quicklink-id') ? "&id_quick_access=" + $(this).data('quicklink-id') : ""),
+-                data: {
+-                  "url": "{$link->getQuickLink($smarty.server['REQUEST_URI']|escape:'javascript')}",
+-                  "name": name,
+-                  "icon": "{$quick_access_current_link_icon|escape:'javascript'}"
+-                },
+-                dataType: "json",
+-                success: function(data) {
+-                  var quicklink_list ='';
+-                  $.each(data, function(index,value){
+-                    if (typeof data[index]['name'] !== 'undefined')
+-                      quicklink_list += '<li><a href="' + data[index]['link'] + '">' + data[index]['name'] + '</a></li>';
+-                  });
+-
+-                  if (typeof data['has_errors'] !== 'undefined' && data['has_errors'])
+-                    $.each(data, function(index, value)
+-                      {
+-                        if (typeof data[index] == 'string')
+-                          $.growl.error({ title: "", message: data[index]});
+-                    });
+-                  else if (quicklink_list)
+-                  {
+-                    $('#header_quick ul.dropdown-menu .divider').prevAll().remove();
+-                    $('#header_quick ul.dropdown-menu').prepend(quicklink_list);
+-                    $(e.target).remove();
+-                    showSuccessMessage(update_success_msg);
+-                  }
+-                }
+-              });
+-            }
+-          });
+-        });
+-      </script>
+ 
+       {* Search *}
+       {include file="search_form.tpl" show_clear_btn=1}
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index d8dfe7225e348..fdc93e2b08322 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -152,6 +152,7 @@ module.exports = {
+     shipping_preferences: './js/pages/shipping-preferences',
+     specific_price_form: './js/pages/product/specific-price/form',
+     sql_manager: './js/pages/sql-manager',
++    quick_access: './js/pages/quick-access',
+     state: './js/pages/state',
+     stock: './js/app/pages/stock',
+     stock_page: './scss/pages/stock/stock_page.scss',
+diff --git a/admin-dev/themes/new-theme/js/header.ts b/admin-dev/themes/new-theme/js/header.ts
+index 240417f3c012b..15c9a4729012e 100644
+--- a/admin-dev/themes/new-theme/js/header.ts
++++ b/admin-dev/themes/new-theme/js/header.ts
+@@ -3,6 +3,7 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ import refreshNotifications from '@js/notifications';
++import ConfirmModal from '@components/modal';
+ 
+ const {$} = window;
+ 
+@@ -18,73 +19,98 @@ export default class Header {
+   }
+ 
+   initQuickAccess(): void {
+-    $('.js-quick-link').on('click', (e) => {
++    $(document).on('click', '.js-quick-link', (e) => {
+       e.preventDefault();
+ 
+-      const method = $(e.target).data('method');
++      const $link = $(e.target).closest('.js-quick-link');
++      const method = $link.data('method');
+       let name = null;
+ 
+       if (method === 'add') {
+-        const text = $(e.target).data('prompt-text');
+-        const link = $(e.target).data('link');
++        const text = $link.data('prompt-text');
++        const link = $link.data('link');
+ 
+         name = prompt(text, link);
+       }
+ 
+-      if ((method === 'add' && name) || method === 'remove') {
+-        const postLink = $(e.target).data('post-link');
+-        const quickLinkId = $(e.target).data('quicklink-id');
+-        const rand = $(e.target).data('rand');
+-        const url = $(e.target).data('url');
+-        const icon = $(e.target).data('icon');
+-
+-        const postUrl = new URL(postLink, window.location.origin);
+-        postUrl.searchParams.append('action', 'GetUrl');
+-        postUrl.searchParams.append('rand', String(rand));
+-        postUrl.searchParams.append('ajax', '1');
+-        postUrl.searchParams.append('method', String(method));
+-        postUrl.searchParams.append('id_quick_access', String(quickLinkId));
+-
+-        $.ajax({
+-          type: 'POST',
+-          headers: {
+-            'cache-control': 'no-cache',
++      if (method === 'remove') {
++        const confirmModal = new ConfirmModal(
++          {
++            id: 'quick-access-remove-confirm-modal',
++            confirmTitle: $link.data('confirm-title'),
++            confirmMessage: $link.data('confirm-message'),
++            confirmButtonLabel: $link.data('confirm-button-label'),
++            closeButtonLabel: $link.data('close-button-label'),
++            confirmButtonClass: 'btn-danger',
+           },
+-          async: true,
+-          url: postUrl.toString(),
+-          data: {
+-            url,
+-            name,
+-            icon,
+-          },
+-          dataType: 'json',
+-          success: (data) => {
+-            let quicklinkList = '';
+-            $.each(data, (index) => {
+-              /* eslint-disable-next-line max-len */
+-              if (typeof data[index].name !== 'undefined') quicklinkList += `<li><a href="${data[index].link}&token=${data[index].token}"><i class="icon-chevron-right"></i> ${data[index].name}</a></li>`;
+-            });
+-
+-            if (typeof data.has_errors !== 'undefined' && data.has_errors) {
+-              $.each(data, (index) => {
+-                if (typeof data[index] === 'string') {
+-                  $.growl.error({
+-                    title: '',
+-                    message: data[index],
+-                  });
+-                }
++          () => this.doQuickLinkAction($link, method, null),
++        );
++        confirmModal.show();
++
++        return;
++      }
++
++      if (method === 'add' && name) {
++        this.doQuickLinkAction($link, method, name);
++      }
++    });
++  }
++
++  private doQuickLinkAction($link: JQuery, method: string, name: string | null): void {
++    const postLink = $link.data('post-link');
++    const quickLinkId = $link.data('quicklink-id');
++    const url = $link.data('url');
++    const icon = $link.data('icon');
++
++    $.ajax({
++      type: 'POST',
++      headers: {
++        'cache-control': 'no-cache',
++      },
++      async: true,
++      url: postLink,
++      data: {
++        method,
++        url,
++        name,
++        icon,
++        id_quick_access: quickLinkId,
++      },
++      dataType: 'json',
++      success: (data) => {
++        if (typeof data.has_errors !== 'undefined' && data.has_errors) {
++          $.each(data, (index) => {
++            if (typeof data[index] === 'string') {
++              $.growl.error({
++                title: '',
++                message: data[index],
+               });
+-            } else if (quicklinkList) {
+-              $('#header_quick ul.dropdown-menu .divider')
+-                .prevAll()
+-                .remove();
+-              $('#header_quick ul.dropdown-menu').prepend(quicklinkList);
+-              $(e.target).remove();
+-              window.showSuccessMessage(window.update_success_msg);
+             }
+-          },
++          });
++        } else if (Array.isArray(data)) {
++          let quicklinkList = '';
++          data.forEach((item) => {
++            const classAttr = item.class ? ` ${item.class}` : '';
++            const activeClass = item.active ? ' active' : '';
++            const target = item.new_window ? ' target="_blank"' : '';
++            quicklinkList += `<a class="dropdown-item quick-row-link${classAttr}${activeClass}"`
++              + ` href="${item.link}"${target} data-item="${item.name}">${item.name}</a>`;
++          });
++          const $menu = $('#quick-access-container .dropdown-menu');
++          $menu.find('.dropdown-divider').prevAll('a.quick-row-link').remove();
++          $menu.prepend(quicklinkList);
++          $link.remove();
++          window.showSuccessMessage(window.update_success_msg);
++        }
++      },
++      error: (xhr, textStatus) => {
++        $.growl.error({
++          title: 'Quick access error',
++          message: textStatus === 'parsererror'
++            ? `Server returned non-JSON (status ${xhr.status})`
++            : `${xhr.status} ${xhr.statusText}`,
+         });
+-      }
++      },
+     });
+   }
+ 
+diff --git a/admin-dev/themes/new-theme/js/nav_bar.ts b/admin-dev/themes/new-theme/js/nav_bar.ts
+index c96b2244b08ff..9a7fa4bfd5795 100644
+--- a/admin-dev/themes/new-theme/js/nav_bar.ts
++++ b/admin-dev/themes/new-theme/js/nav_bar.ts
+@@ -56,7 +56,7 @@ export default class NavBar {
+           },
+         );
+ 
+-        $(GlobalMap.navBar.menuItemLink).on('click', function onNavBarClick(e) {
++        $(GlobalMap.navBar.menuItemLink).off('click').on('click', function onNavBarClick(e) {
+           e.preventDefault();
+           e.stopPropagation();
+ 
+@@ -109,7 +109,7 @@ export default class NavBar {
+           $submenu.find('ul.submenu').css('top', itemOffsetTop);
+         });
+ 
+-        $navBar.on('click', '.menu-collapse', function onNavBarClick() {
++        $navBar.off('click', '.menu-collapse').on('click', '.menu-collapse', function onNavBarClick() {
+           $('body').toggleClass('page-sidebar-closed');
+ 
+           NavBarTransitions.toggle();
+diff --git a/admin-dev/themes/new-theme/js/pages/quick-access/index.ts b/admin-dev/themes/new-theme/js/pages/quick-access/index.ts
+new file mode 100644
+index 0000000000000..29ff8d6305840
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/quick-access/index.ts
+@@ -0,0 +1,42 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++class QuickAccessPage {
++  constructor() {
++    const quickAccessGrid = new window.prestashop.component.Grid('quick_access');
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersResetExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.SortingExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.BulkActionCheckboxExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitBulkActionExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitRowActionExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.LinkRowActionExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
++    quickAccessGrid.addExtension(new window.prestashop.component.GridExtensions.AsyncToggleColumnExtension());
++
++    window.prestashop.component.initComponents(
++      [
++        'TranslatableInput',
++      ],
++    );
++  }
++}
++
++$(() => {
++  new QuickAccessPage();
++
++  $(document).ajaxComplete((_event, xhr, settings) => {
++    if (settings.url && String(settings.url).includes('toggle-new-window')) {
++      try {
++        const response = JSON.parse(xhr.responseText);
++
++        if (response.status) {
++          setTimeout(() => window.location.reload(), 1500);
++        }
++      } catch (_e) {
++        // ignore non-JSON responses
++      }
++    }
++  });
++});
+diff --git a/classes/Link.php b/classes/Link.php
+index 26b111b48813d..1a2a5e3705bf2 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -1478,6 +1478,7 @@ public static function getQuickLink($url)
+         }
+ 
+         $url = preg_replace($patterns, '', $url);
++        $url = (string) preg_replace('/&{2,}/', '&', $url);
+         $url = trim($url, '?&/');
+ 
+         return 'index.php' . (!empty($legacyEnvironment) ? '?' : '/') . $url;
+diff --git a/classes/QuickAccess.php b/classes/QuickAccess.php
+index 4f08dd73a0fc4..4050211dcf370 100644
+--- a/classes/QuickAccess.php
++++ b/classes/QuickAccess.php
+@@ -9,7 +9,7 @@
+  */
+ class QuickAccessCore extends ObjectModel
+ {
+-    /** @var string Name */
++    /** @var string|array<int, string> Name — string when loaded with a specific lang ID, array<langId, name> otherwise */
+     public $name;
+ 
+     /** @var string Link */
+diff --git a/classes/controller/AdminController.php b/classes/controller/AdminController.php
+index ea023940094bf..a3f510be7d086 100644
+--- a/classes/controller/AdminController.php
++++ b/classes/controller/AdminController.php
+@@ -10,6 +10,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Cart\CartStatus;
+ use PrestaShop\PrestaShop\Core\Exception\TypeException;
+ use PrestaShop\PrestaShop\Core\Feature\TokenInUrls;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Localization\Locale;
+ use PrestaShop\PrestaShop\Core\Localization\Specification\Number as NumberSpecification;
+ use PrestaShop\PrestaShop\Core\Localization\Specification\Price as PriceSpecification;
+@@ -656,6 +657,7 @@ public function initBreadcrumbs($tab_id = null, $tabs = null)
+             'breadcrumbs2' => $breadcrumbs2,
+             'quick_access_current_link_name' => Tools::safeOutput($breadcrumbs2['tab']['name'] . ' - ' . $breadcrumbs2['action']['name']),
+             'quick_access_current_link_icon' => $breadcrumbs2['container']['icon'],
++            'quick_access_current_link_short_name' => Tools::safeOutput($breadcrumbs2['tab']['name']),
+         ]);
+ 
+         /* BEGIN - Backward compatibility < 1.6.0.3 */
+@@ -1999,8 +2001,30 @@ public function initHeader()
+         $is_multishop = Shop::isFeatureActive();
+ 
+         // Quick access
++        $quick_access = [];
++        $legacyAjaxUrl = $this->context->link->getAdminLink('AdminQuickAccesses', true, [], ['action' => 'GetUrl', 'ajax' => 1]);
++        $quick_access_ajax_add_url = $legacyAjaxUrl;
++        $quick_access_ajax_delete_url = $legacyAjaxUrl;
+         if ((int) $this->context->employee->id) {
+             $quick_access = QuickAccess::getQuickAccessesWithToken($this->context->language->id, (int) $this->context->employee->id);
++            /** @var FeatureFlagStateCheckerInterface $featureFlagChecker */
++            $featureFlagChecker = $this->get(FeatureFlagStateCheckerInterface::class);
++            if ($featureFlagChecker->isEnabled('quick_access')) {
++                try {
++                    $quick_access_ajax_add_url = $this->context->link->getAdminLink(
++                        'AdminQuickAccesses',
++                        true,
++                        ['route' => 'admin_quick_accesses_ajax_add']
++                    );
++                    $quick_access_ajax_delete_url = $this->context->link->getAdminLink(
++                        'AdminQuickAccesses',
++                        true,
++                        ['route' => 'admin_quick_accesses_ajax_delete']
++                    );
++                } catch (Exception $e) {
++                    // keep legacy fallback URLs
++                }
++            }
+         }
+ 
+         $tabs = $this->getTabs();
+@@ -2031,6 +2055,8 @@ public function initHeader()
+                 'search_type' => Tools::getValue('bo_search_type'),
+                 'bo_query' => Tools::safeOutput(Tools::getValue('bo_query')),
+                 'quick_access' => empty($quick_access) ? [] : $quick_access,
++                'quick_access_ajax_add_url' => $quick_access_ajax_add_url,
++                'quick_access_ajax_delete_url' => $quick_access_ajax_delete_url,
+                 'multi_shop' => Shop::isFeatureActive(),
+                 'shop_list' => $helperShop->getRenderedShopList(),
+                 'current_shop_name' => $helperShop->getCurrentShopName(),
+diff --git a/classes/lang/KeysReference/FeatureFlagLang.php b/classes/lang/KeysReference/FeatureFlagLang.php
+index a1b21ca4596e2..8ea86335b3496 100644
+--- a/classes/lang/KeysReference/FeatureFlagLang.php
++++ b/classes/lang/KeysReference/FeatureFlagLang.php
+@@ -68,3 +68,7 @@
+ // New pricing feature flag
+ trans('New pricing', 'Admin.Advparameters.Feature');
+ trans('Enable / Disable the new pricing system. This feature introduces an improved pricing engine.', 'Admin.Advparameters.Help');
++
++// Quick access feature flag
++trans('Quick access', 'Admin.Advparameters.Feature');
++trans('Enable / Disable the migrated quick access page.', 'Admin.Advparameters.Help');
+diff --git a/controllers/admin/AdminQuickAccessesController.php b/controllers/admin/AdminQuickAccessesController.php
+index 677b4f5ce8054..17ecb16d507ca 100644
+--- a/controllers/admin/AdminQuickAccessesController.php
++++ b/controllers/admin/AdminQuickAccessesController.php
+@@ -19,6 +19,10 @@ public function __construct()
+         $this->addRowAction('edit');
+         $this->addRowAction('delete');
+ 
++        // list_content.tpl uses $tr.link as the row onclick URL when present; quick access links
++        // have no token so row-click would redirect to security/compromised. Use Edit action instead.
++        $this->list_no_link = true;
++
+         parent::__construct();
+ 
+         if (!Tools::getValue('realedit')) {
+diff --git a/install-dev/data/xml/access.xml b/install-dev/data/xml/access.xml
+index d235f370b9e83..c2b1492168953 100644
+--- a/install-dev/data/xml/access.xml
++++ b/install-dev/data/xml/access.xml
+@@ -289,6 +289,10 @@
+     <access id="access_1_307" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINPROFILES_READ"/>
+     <access id="access_1_308" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINPROFILES_UPDATE"/>
+     <access id="access_1_309" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINPROFILES_DELETE"/>
++    <access id="access_1_310" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINQUICKACCESSES_CREATE"/>
++    <access id="access_1_311" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINQUICKACCESSES_READ"/>
++    <access id="access_1_312" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINQUICKACCESSES_UPDATE"/>
++    <access id="access_1_313" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINQUICKACCESSES_DELETE"/>
+     <access id="access_1_314" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINREQUESTSQL_CREATE"/>
+     <access id="access_1_315" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINREQUESTSQL_READ"/>
+     <access id="access_1_316" id_profile="SuperAdmin" id_authorization_role="TAB_ADMINREQUESTSQL_UPDATE"/>
+diff --git a/install-dev/data/xml/authorization_role.xml b/install-dev/data/xml/authorization_role.xml
+index 2a341bf97204b..8ff5a98fe6229 100644
+--- a/install-dev/data/xml/authorization_role.xml
++++ b/install-dev/data/xml/authorization_role.xml
+@@ -326,6 +326,10 @@
+     <authorization_role id="TAB_ADMINPROFILES_READ" slug="ROLE_MOD_TAB_ADMINPROFILES_READ"/>
+     <authorization_role id="TAB_ADMINPROFILES_UPDATE" slug="ROLE_MOD_TAB_ADMINPROFILES_UPDATE"/>
+     <authorization_role id="TAB_ADMINPROFILES_DELETE" slug="ROLE_MOD_TAB_ADMINPROFILES_DELETE"/>
++    <authorization_role id="TAB_ADMINQUICKACCESSES_CREATE" slug="ROLE_MOD_TAB_ADMINQUICKACCESSES_CREATE"/>
++    <authorization_role id="TAB_ADMINQUICKACCESSES_READ" slug="ROLE_MOD_TAB_ADMINQUICKACCESSES_READ"/>
++    <authorization_role id="TAB_ADMINQUICKACCESSES_UPDATE" slug="ROLE_MOD_TAB_ADMINQUICKACCESSES_UPDATE"/>
++    <authorization_role id="TAB_ADMINQUICKACCESSES_DELETE" slug="ROLE_MOD_TAB_ADMINQUICKACCESSES_DELETE"/>
+     <authorization_role id="TAB_ADMINREQUESTSQL_CREATE" slug="ROLE_MOD_TAB_ADMINREQUESTSQL_CREATE"/>
+     <authorization_role id="TAB_ADMINREQUESTSQL_READ" slug="ROLE_MOD_TAB_ADMINREQUESTSQL_READ"/>
+     <authorization_role id="TAB_ADMINREQUESTSQL_UPDATE" slug="ROLE_MOD_TAB_ADMINREQUESTSQL_UPDATE"/>
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index 9ef81e17b66f1..0281014fdac8c 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -31,5 +31,6 @@
+     <feature_flag id="new_pricing" name="new_pricing" type="env,query,dotenv,db" label_wording="New pricing" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the new pricing system. This feature introduces an improved pricing engine." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="email_body_translation" name="email_body_translation" type="env,dotenv,db" label_wording="Email body translations" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated email body translations page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="hook_module_v2" name="hook_module_v2" type="env,dotenv,db" label_wording="Hook a module" label_domain="Admin.Design.Feature" description_wording="Enable / Disable the migrated Hook a module form page." description_domain="Admin.Design.Help" state="0" stability="beta" />
++    <feature_flag id="quick_access" name="quick_access" type="env,dotenv,db" label_wording="Quick access" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated quick access page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+   </entities>
+ </entity_feature_flag>
+diff --git a/install-dev/data/xml/tab.xml b/install-dev/data/xml/tab.xml
+index bd953fe80f3ea..7fd0dc4310aa2 100644
+--- a/install-dev/data/xml/tab.xml
++++ b/install-dev/data/xml/tab.xml
+@@ -608,7 +608,7 @@
+         </tab>
+ 
+         <!--QUICK ACCESS-->
+-        <tab id="Quick_Access" id_parent="-1" active="1" enabled="1">
++        <tab id="Quick_Access" id_parent="Advanced_Parameters" active="0" enabled="1">
+             <class_name>AdminQuickAccesses</class_name>
+             <wording>Quick Access</wording>
+             <wording_domain>Admin.Navigation.Menu</wording_domain>
+diff --git a/src/Adapter/QuickAccess/CommandHandler/AddQuickAccessHandler.php b/src/Adapter/QuickAccess/CommandHandler/AddQuickAccessHandler.php
+new file mode 100644
+index 0000000000000..3ccfd8b2dbe62
+--- /dev/null
++++ b/src/Adapter/QuickAccess/CommandHandler/AddQuickAccessHandler.php
+@@ -0,0 +1,45 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\AddQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler\AddQuickAccessHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++use QuickAccess;
++
++#[AsCommandHandler]
++class AddQuickAccessHandler implements AddQuickAccessHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(AddQuickAccessCommand $command): QuickAccessId
++    {
++        if ($this->repository->hasLink($command->getLink())) {
++            throw new QuickAccessConstraintException(
++                sprintf('A quick access with link "%s" already exists.', $command->getLink()),
++                QuickAccessConstraintException::LINK_ALREADY_EXISTS
++            );
++        }
++
++        $quickAccess = new QuickAccess();
++        // @phpstan-ignore-next-line (ObjectModel multilingual field accepts array at runtime)
++        $quickAccess->name = $command->getLocalizedNames();
++        $quickAccess->link = $command->getLink();
++        $quickAccess->new_window = $command->isNewWindow();
++
++        $this->repository->add($quickAccess);
++
++        return new QuickAccessId((int) $quickAccess->id);
++    }
++}
+diff --git a/src/Adapter/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandler.php b/src/Adapter/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandler.php
+new file mode 100644
+index 0000000000000..38585d813ad1b
+--- /dev/null
++++ b/src/Adapter/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandler.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\AbstractBulkCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\BulkDeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler\BulkDeleteQuickAccessHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\BulkQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++#[AsCommandHandler]
++class BulkDeleteQuickAccessHandler extends AbstractBulkCommandHandler implements BulkDeleteQuickAccessHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(BulkDeleteQuickAccessCommand $command): void
++    {
++        $this->handleBulkAction($command->getQuickAccessIds(), QuickAccessException::class);
++    }
++
++    protected function handleSingleAction(mixed $id, mixed $command): void
++    {
++        $this->repository->delete($id);
++    }
++
++    protected function supports($id): bool
++    {
++        return $id instanceof QuickAccessId;
++    }
++
++    protected function buildBulkException(array $caughtExceptions): BulkCommandExceptionInterface
++    {
++        return new BulkQuickAccessException(
++            $caughtExceptions,
++            'Errors occurred during Quick Access bulk delete action'
++        );
++    }
++}
+diff --git a/src/Adapter/QuickAccess/CommandHandler/DeleteQuickAccessHandler.php b/src/Adapter/QuickAccess/CommandHandler/DeleteQuickAccessHandler.php
+new file mode 100644
+index 0000000000000..4a6e675931441
+--- /dev/null
++++ b/src/Adapter/QuickAccess/CommandHandler/DeleteQuickAccessHandler.php
+@@ -0,0 +1,27 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\DeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler\DeleteQuickAccessHandlerInterface;
++
++#[AsCommandHandler]
++class DeleteQuickAccessHandler implements DeleteQuickAccessHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(DeleteQuickAccessCommand $command): void
++    {
++        $this->repository->delete($command->getQuickAccessId());
++    }
++}
+diff --git a/src/Adapter/QuickAccess/CommandHandler/EditQuickAccessHandler.php b/src/Adapter/QuickAccess/CommandHandler/EditQuickAccessHandler.php
+new file mode 100644
+index 0000000000000..c327f495d9ddd
+--- /dev/null
++++ b/src/Adapter/QuickAccess/CommandHandler/EditQuickAccessHandler.php
+@@ -0,0 +1,42 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\EditQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler\EditQuickAccessHandlerInterface;
++
++#[AsCommandHandler]
++class EditQuickAccessHandler implements EditQuickAccessHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(EditQuickAccessCommand $command): void
++    {
++        $quickAccess = $this->repository->get($command->getQuickAccessId());
++
++        if (null !== $command->getLocalizedNames()) {
++            // @phpstan-ignore-next-line (ObjectModel multilingual field accepts array at runtime)
++            $quickAccess->name = $command->getLocalizedNames();
++        }
++
++        if (null !== $command->getLink()) {
++            $quickAccess->link = $command->getLink();
++        }
++
++        if (null !== $command->getNewWindow()) {
++            $quickAccess->new_window = $command->getNewWindow();
++        }
++
++        $this->repository->update($quickAccess);
++    }
++}
+diff --git a/src/Adapter/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandler.php b/src/Adapter/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandler.php
+new file mode 100644
+index 0000000000000..bf3ea8f7e9f3d
+--- /dev/null
++++ b/src/Adapter/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandler.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\ToggleQuickAccessNewWindowCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler\ToggleQuickAccessNewWindowHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotUpdateQuickAccessException;
++use PrestaShopException;
++
++#[AsCommandHandler]
++class ToggleQuickAccessNewWindowHandler implements ToggleQuickAccessNewWindowHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(ToggleQuickAccessNewWindowCommand $command): void
++    {
++        $quickAccess = $this->repository->get($command->getQuickAccessId());
++
++        try {
++            // Partial update — only the new_window column is written, preserving legacy setFieldsToUpdate semantics
++            if (!$quickAccess->toggleNewWindow()) {
++                throw new CannotUpdateQuickAccessException(
++                    sprintf('Failed to toggle new_window for quick access "%d"', $command->getQuickAccessId()->getValue())
++                );
++            }
++        } catch (PrestaShopException $e) {
++            throw new CannotUpdateQuickAccessException(
++                sprintf('An error occurred when toggling new_window for quick access "%d"', $command->getQuickAccessId()->getValue()),
++                0,
++                $e
++            );
++        }
++    }
++}
+diff --git a/src/Adapter/QuickAccess/QueryHandler/GetQuickAccessForEditingHandler.php b/src/Adapter/QuickAccess/QueryHandler/GetQuickAccessForEditingHandler.php
+new file mode 100644
+index 0000000000000..480aae19df5f9
+--- /dev/null
++++ b/src/Adapter/QuickAccess/QueryHandler/GetQuickAccessForEditingHandler.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\QuickAccess\QueryHandler;
++
++use PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Query\GetQuickAccessForEditing;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryHandler\GetQuickAccessForEditingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryResult\EditableQuickAccess;
++
++#[AsQueryHandler]
++class GetQuickAccessForEditingHandler implements GetQuickAccessForEditingHandlerInterface
++{
++    public function __construct(private readonly QuickAccessRepository $repository)
++    {
++    }
++
++    public function handle(GetQuickAccessForEditing $query): EditableQuickAccess
++    {
++        $quickAccessId = $query->getQuickAccessId();
++        $quickAccess = $this->repository->get($quickAccessId);
++
++        return new EditableQuickAccess(
++            $quickAccessId->getValue(),
++            $quickAccess->name,
++            (string) $quickAccess->link,
++            (bool) $quickAccess->new_window,
++        );
++    }
++}
+diff --git a/src/Adapter/QuickAccess/Repository/QuickAccessRepository.php b/src/Adapter/QuickAccess/Repository/QuickAccessRepository.php
+index 259924805a0d9..56592c22de0e7 100644
+--- a/src/Adapter/QuickAccess/Repository/QuickAccessRepository.php
++++ b/src/Adapter/QuickAccess/Repository/QuickAccessRepository.php
+@@ -10,14 +10,20 @@
+ 
+ use Doctrine\DBAL\Connection;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotAddQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotDeleteQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotUpdateQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
+ use PrestaShop\PrestaShop\Core\QuickAccess\QuickAccessRepositoryInterface;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
++use QuickAccess;
+ 
+ class QuickAccessRepository extends AbstractObjectModelRepository implements QuickAccessRepositoryInterface
+ {
+     public function __construct(
+-        private Connection $connection,
+-        private string $dbPrefix
++        private readonly Connection $connection,
++        private readonly string $dbPrefix
+     ) {
+     }
+ 
+@@ -43,4 +49,51 @@ public function fetchAll(LanguageId $languageId): array
+ 
+         return $qb->execute()->fetchAllAssociative();
+     }
++
++    public function get(QuickAccessId $quickAccessId): QuickAccess
++    {
++        /** @var QuickAccess $quickAccess */
++        $quickAccess = $this->getObjectModel(
++            $quickAccessId->getValue(),
++            QuickAccess::class,
++            QuickAccessNotFoundException::class
++        );
++
++        return $quickAccess;
++    }
++
++    public function add(QuickAccess $quickAccess): QuickAccess
++    {
++        $this->addObjectModel($quickAccess, CannotAddQuickAccessException::class);
++
++        return $quickAccess;
++    }
++
++    public function update(QuickAccess $quickAccess): void
++    {
++        $this->updateObjectModel($quickAccess, CannotUpdateQuickAccessException::class);
++    }
++
++    public function delete(QuickAccessId $quickAccessId): void
++    {
++        $this->deleteObjectModel($this->get($quickAccessId), CannotDeleteQuickAccessException::class);
++    }
++
++    /**
++     * Returns true if a quick access with the given link URL already exists.
++     * The DB has no UNIQUE KEY on `link`, so the duplicate check must be done explicitly.
++     */
++    public function hasLink(string $link): bool
++    {
++        $qb = $this->connection->createQueryBuilder();
++        $qb
++            ->select('q.id_quick_access')
++            ->from($this->dbPrefix . 'quick_access', 'q')
++            ->where('q.link = :link')
++            ->setParameter('link', $link)
++            ->setMaxResults(1)
++        ;
++
++        return (bool) $qb->execute()->fetchOne();
++    }
+ }
+diff --git a/src/Core/Domain/QuickAccess/Command/AddQuickAccessCommand.php b/src/Core/Domain/QuickAccess/Command/AddQuickAccessCommand.php
+new file mode 100644
+index 0000000000000..727ce97d2fecf
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Command/AddQuickAccessCommand.php
+@@ -0,0 +1,50 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command;
++
++/**
++ * Creates a quick access link.
++ *
++ * Handler must enforce uniqueness by link URL since there is no DB UNIQUE KEY on the column.
++ */
++class AddQuickAccessCommand
++{
++    /** @var array<int, string> */
++    private array $localizedNames;
++
++    private string $link;
++
++    private bool $newWindow;
++
++    /**
++     * @param array<int, string> $localizedNames Lang-ID-keyed name translations
++     */
++    public function __construct(array $localizedNames, string $link, bool $newWindow)
++    {
++        $this->localizedNames = $localizedNames;
++        $this->link = $link;
++        $this->newWindow = $newWindow;
++    }
++
++    /** @return array<int, string> */
++    public function getLocalizedNames(): array
++    {
++        return $this->localizedNames;
++    }
++
++    public function getLink(): string
++    {
++        return $this->link;
++    }
++
++    public function isNewWindow(): bool
++    {
++        return $this->newWindow;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/Command/BulkDeleteQuickAccessCommand.php b/src/Core/Domain/QuickAccess/Command/BulkDeleteQuickAccessCommand.php
+new file mode 100644
+index 0000000000000..04c538f83b5c5
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Command/BulkDeleteQuickAccessCommand.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++class BulkDeleteQuickAccessCommand
++{
++    /** @var QuickAccessId[] */
++    private array $quickAccessIds;
++
++    /** @param int[] $quickAccessIds */
++    public function __construct(array $quickAccessIds)
++    {
++        foreach ($quickAccessIds as $id) {
++            $this->quickAccessIds[] = new QuickAccessId((int) $id);
++        }
++    }
++
++    /** @return QuickAccessId[] */
++    public function getQuickAccessIds(): array
++    {
++        return $this->quickAccessIds;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/Command/DeleteQuickAccessCommand.php b/src/Core/Domain/QuickAccess/Command/DeleteQuickAccessCommand.php
+new file mode 100644
+index 0000000000000..8b5c314654a5d
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Command/DeleteQuickAccessCommand.php
+@@ -0,0 +1,26 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++class DeleteQuickAccessCommand
++{
++    private QuickAccessId $quickAccessId;
++
++    public function __construct(int $quickAccessId)
++    {
++        $this->quickAccessId = new QuickAccessId($quickAccessId);
++    }
++
++    public function getQuickAccessId(): QuickAccessId
++    {
++        return $this->quickAccessId;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/Command/EditQuickAccessCommand.php b/src/Core/Domain/QuickAccess/Command/EditQuickAccessCommand.php
+new file mode 100644
+index 0000000000000..344deb1193ee9
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Command/EditQuickAccessCommand.php
+@@ -0,0 +1,75 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++/**
++ * Partial-update command: only fields explicitly set via setters are persisted.
++ * A null getter value means "not changed in this request", not "set to null in DB".
++ */
++class EditQuickAccessCommand
++{
++    private QuickAccessId $quickAccessId;
++
++    /** @var array<int, string>|null */
++    private ?array $localizedNames = null;
++
++    private ?string $link = null;
++
++    private ?bool $newWindow = null;
++
++    public function __construct(int $quickAccessId)
++    {
++        $this->quickAccessId = new QuickAccessId($quickAccessId);
++    }
++
++    public function getQuickAccessId(): QuickAccessId
++    {
++        return $this->quickAccessId;
++    }
++
++    /** @return array<int, string>|null */
++    public function getLocalizedNames(): ?array
++    {
++        return $this->localizedNames;
++    }
++
++    /** @param array<int, string> $localizedNames */
++    public function setLocalizedNames(array $localizedNames): self
++    {
++        $this->localizedNames = $localizedNames;
++
++        return $this;
++    }
++
++    public function getLink(): ?string
++    {
++        return $this->link;
++    }
++
++    public function setLink(string $link): self
++    {
++        $this->link = $link;
++
++        return $this;
++    }
++
++    public function getNewWindow(): ?bool
++    {
++        return $this->newWindow;
++    }
++
++    public function setNewWindow(bool $newWindow): self
++    {
++        $this->newWindow = $newWindow;
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/Command/ToggleQuickAccessNewWindowCommand.php b/src/Core/Domain/QuickAccess/Command/ToggleQuickAccessNewWindowCommand.php
+new file mode 100644
+index 0000000000000..c23934925bb10
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Command/ToggleQuickAccessNewWindowCommand.php
+@@ -0,0 +1,29 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++/**
++ * Toggles the new_window flag. Partial update — only the new_window column is written.
++ */
++class ToggleQuickAccessNewWindowCommand
++{
++    private QuickAccessId $quickAccessId;
++
++    public function __construct(int $quickAccessId)
++    {
++        $this->quickAccessId = new QuickAccessId($quickAccessId);
++    }
++
++    public function getQuickAccessId(): QuickAccessId
++    {
++        return $this->quickAccessId;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/CommandHandler/AddQuickAccessHandlerInterface.php b/src/Core/Domain/QuickAccess/CommandHandler/AddQuickAccessHandlerInterface.php
+new file mode 100644
+index 0000000000000..7487b563138a9
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/CommandHandler/AddQuickAccessHandlerInterface.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\AddQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++interface AddQuickAccessHandlerInterface
++{
++    public function handle(AddQuickAccessCommand $command): QuickAccessId;
++}
+diff --git a/src/Core/Domain/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandlerInterface.php b/src/Core/Domain/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandlerInterface.php
+new file mode 100644
+index 0000000000000..5f09eecc4f269
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/CommandHandler/BulkDeleteQuickAccessHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\BulkDeleteQuickAccessCommand;
++
++interface BulkDeleteQuickAccessHandlerInterface
++{
++    public function handle(BulkDeleteQuickAccessCommand $command): void;
++}
+diff --git a/src/Core/Domain/QuickAccess/CommandHandler/DeleteQuickAccessHandlerInterface.php b/src/Core/Domain/QuickAccess/CommandHandler/DeleteQuickAccessHandlerInterface.php
+new file mode 100644
+index 0000000000000..3f220cda967db
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/CommandHandler/DeleteQuickAccessHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\DeleteQuickAccessCommand;
++
++interface DeleteQuickAccessHandlerInterface
++{
++    public function handle(DeleteQuickAccessCommand $command): void;
++}
+diff --git a/src/Core/Domain/QuickAccess/CommandHandler/EditQuickAccessHandlerInterface.php b/src/Core/Domain/QuickAccess/CommandHandler/EditQuickAccessHandlerInterface.php
+new file mode 100644
+index 0000000000000..20b6f093706bd
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/CommandHandler/EditQuickAccessHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\EditQuickAccessCommand;
++
++interface EditQuickAccessHandlerInterface
++{
++    public function handle(EditQuickAccessCommand $command): void;
++}
+diff --git a/src/Core/Domain/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandlerInterface.php b/src/Core/Domain/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandlerInterface.php
+new file mode 100644
+index 0000000000000..58d888636ffc4
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/CommandHandler/ToggleQuickAccessNewWindowHandlerInterface.php
+@@ -0,0 +1,16 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\ToggleQuickAccessNewWindowCommand;
++
++interface ToggleQuickAccessNewWindowHandlerInterface
++{
++    public function handle(ToggleQuickAccessNewWindowCommand $command): void;
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/BulkQuickAccessException.php b/src/Core/Domain/QuickAccess/Exception/BulkQuickAccessException.php
+new file mode 100644
+index 0000000000000..bea734be7ba8b
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/BulkQuickAccessException.php
+@@ -0,0 +1,30 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\BulkCommandExceptionInterface;
++use Throwable;
++
++class BulkQuickAccessException extends QuickAccessException implements BulkCommandExceptionInterface
++{
++    /** @param Throwable[] $exceptions */
++    public function __construct(
++        private readonly array $exceptions,
++        string $message = 'Errors occurred during Quick Access bulk action',
++        int $code = 0,
++        ?Throwable $previous = null
++    ) {
++        parent::__construct($message, $code, $previous);
++    }
++
++    public function getExceptions(): array
++    {
++        return $this->exceptions;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/CannotAddQuickAccessException.php b/src/Core/Domain/QuickAccess/Exception/CannotAddQuickAccessException.php
+new file mode 100644
+index 0000000000000..9777a195791bf
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/CannotAddQuickAccessException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++class CannotAddQuickAccessException extends QuickAccessException
++{
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/CannotDeleteQuickAccessException.php b/src/Core/Domain/QuickAccess/Exception/CannotDeleteQuickAccessException.php
+new file mode 100644
+index 0000000000000..4474af1a264a9
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/CannotDeleteQuickAccessException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++class CannotDeleteQuickAccessException extends QuickAccessException
++{
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/CannotUpdateQuickAccessException.php b/src/Core/Domain/QuickAccess/Exception/CannotUpdateQuickAccessException.php
+new file mode 100644
+index 0000000000000..ebe2bfe81b1a1
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/CannotUpdateQuickAccessException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++class CannotUpdateQuickAccessException extends QuickAccessException
++{
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/QuickAccessConstraintException.php b/src/Core/Domain/QuickAccess/Exception/QuickAccessConstraintException.php
+new file mode 100644
+index 0000000000000..4b4e7a29c9c7f
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/QuickAccessConstraintException.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++class QuickAccessConstraintException extends QuickAccessException
++{
++    public const INVALID_ID = 1;
++    public const INVALID_NAME = 2;
++    public const INVALID_LINK = 3;
++    public const LINK_ALREADY_EXISTS = 4;
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/QuickAccessException.php b/src/Core/Domain/QuickAccess/Exception/QuickAccessException.php
+new file mode 100644
+index 0000000000000..2574167872acb
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/QuickAccessException.php
+@@ -0,0 +1,15 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainException;
++
++class QuickAccessException extends DomainException
++{
++}
+diff --git a/src/Core/Domain/QuickAccess/Exception/QuickAccessNotFoundException.php b/src/Core/Domain/QuickAccess/Exception/QuickAccessNotFoundException.php
+new file mode 100644
+index 0000000000000..154a16fa865b5
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Exception/QuickAccessNotFoundException.php
+@@ -0,0 +1,13 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception;
++
++class QuickAccessNotFoundException extends QuickAccessException
++{
++}
+diff --git a/src/Core/Domain/QuickAccess/Query/GetQuickAccessForEditing.php b/src/Core/Domain/QuickAccess/Query/GetQuickAccessForEditing.php
+new file mode 100644
+index 0000000000000..65a41b4d1d1a3
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/Query/GetQuickAccessForEditing.php
+@@ -0,0 +1,26 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++class GetQuickAccessForEditing
++{
++    private QuickAccessId $quickAccessId;
++
++    public function __construct(int $quickAccessId)
++    {
++        $this->quickAccessId = new QuickAccessId($quickAccessId);
++    }
++
++    public function getQuickAccessId(): QuickAccessId
++    {
++        return $this->quickAccessId;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/QueryHandler/GetQuickAccessForEditingHandlerInterface.php b/src/Core/Domain/QuickAccess/QueryHandler/GetQuickAccessForEditingHandlerInterface.php
+new file mode 100644
+index 0000000000000..341f386a868d3
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/QueryHandler/GetQuickAccessForEditingHandlerInterface.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Query\GetQuickAccessForEditing;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryResult\EditableQuickAccess;
++
++interface GetQuickAccessForEditingHandlerInterface
++{
++    public function handle(GetQuickAccessForEditing $query): EditableQuickAccess;
++}
+diff --git a/src/Core/Domain/QuickAccess/QueryResult/EditableQuickAccess.php b/src/Core/Domain/QuickAccess/QueryResult/EditableQuickAccess.php
+new file mode 100644
+index 0000000000000..2f98a2d26f2ba
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/QueryResult/EditableQuickAccess.php
+@@ -0,0 +1,46 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryResult;
++
++/**
++ * Immutable DTO carrying quick access data for the edit form.
++ * All properties use scalar types (int, string, bool, array) — no VOs — per CQRS QueryResult convention.
++ */
++class EditableQuickAccess
++{
++    /** @param array<int, string> $localizedNames Lang-ID-keyed name translations */
++    public function __construct(
++        private readonly int $quickAccessId,
++        private readonly array $localizedNames,
++        private readonly string $link,
++        private readonly bool $newWindow,
++    ) {
++    }
++
++    public function getQuickAccessId(): int
++    {
++        return $this->quickAccessId;
++    }
++
++    /** @return array<int, string> */
++    public function getLocalizedNames(): array
++    {
++        return $this->localizedNames;
++    }
++
++    public function getLink(): string
++    {
++        return $this->link;
++    }
++
++    public function isNewWindow(): bool
++    {
++        return $this->newWindow;
++    }
++}
+diff --git a/src/Core/Domain/QuickAccess/ValueObject/QuickAccessId.php b/src/Core/Domain/QuickAccess/ValueObject/QuickAccessId.php
+new file mode 100644
+index 0000000000000..a5e6f3818135d
+--- /dev/null
++++ b/src/Core/Domain/QuickAccess/ValueObject/QuickAccessId.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessConstraintException;
++
++class QuickAccessId
++{
++    private int $id;
++
++    /**
++     * @throws QuickAccessConstraintException
++     */
++    public function __construct(int $id)
++    {
++        if ($id <= 0) {
++            throw new QuickAccessConstraintException(
++                sprintf('Invalid quick access id "%s".', var_export($id, true)),
++                QuickAccessConstraintException::INVALID_ID
++            );
++        }
++        $this->id = $id;
++    }
++
++    public function getValue(): int
++    {
++        return $this->id;
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/QuickAccessFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/QuickAccessFormDataHandler.php
+new file mode 100644
+index 0000000000000..6c39e7bb4bfe7
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataHandler/QuickAccessFormDataHandler.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\AddQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\EditQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++
++final class QuickAccessFormDataHandler implements FormDataHandlerInterface
++{
++    public function __construct(
++        private readonly CommandBusInterface $commandBus
++    ) {
++    }
++
++    public function create(array $data): int
++    {
++        /** @var QuickAccessId $quickAccessId */
++        $quickAccessId = $this->commandBus->handle(new AddQuickAccessCommand(
++            $data['name'],
++            $data['link'],
++            (bool) $data['new_window']
++        ));
++
++        return $quickAccessId->getValue();
++    }
++
++    public function update($id, array $data): void
++    {
++        $command = (new EditQuickAccessCommand((int) $id))
++            ->setLocalizedNames($data['name'])
++            ->setLink($data['link'])
++            ->setNewWindow((bool) $data['new_window']);
++
++        $this->commandBus->handle($command);
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/QuickAccessFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/QuickAccessFormDataProvider.php
+new file mode 100644
+index 0000000000000..06d38ff32fbff
+--- /dev/null
++++ b/src/Core/Form/IdentifiableObject/DataProvider/QuickAccessFormDataProvider.php
+@@ -0,0 +1,40 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
++
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Query\GetQuickAccessForEditing;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryResult\EditableQuickAccess;
++
++final class QuickAccessFormDataProvider implements FormDataProviderInterface
++{
++    public function __construct(
++        private readonly CommandBusInterface $queryBus
++    ) {
++    }
++
++    public function getData($quickAccessId): array
++    {
++        /** @var EditableQuickAccess $quickAccess */
++        $quickAccess = $this->queryBus->handle(new GetQuickAccessForEditing((int) $quickAccessId));
++
++        return [
++            'name' => $quickAccess->getLocalizedNames(),
++            'link' => $quickAccess->getLink(),
++            'new_window' => $quickAccess->isNewWindow(),
++        ];
++    }
++
++    public function getDefaultData(): array
++    {
++        return [
++            'new_window' => true,
++        ];
++    }
++}
+diff --git a/src/Core/Grid/Definition/Factory/QuickAccessGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/QuickAccessGridDefinitionFactory.php
+new file mode 100644
+index 0000000000000..39c8330db950a
+--- /dev/null
++++ b/src/Core/Grid/Definition/Factory/QuickAccessGridDefinitionFactory.php
+@@ -0,0 +1,170 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Grid\Definition\Factory;
++
++use PrestaShop\PrestaShop\Core\Grid\Action\Bulk\BulkActionCollection;
++use PrestaShop\PrestaShop\Core\Grid\Action\GridActionCollection;
++use PrestaShop\PrestaShop\Core\Grid\Action\Row\RowActionCollection;
++use PrestaShop\PrestaShop\Core\Grid\Action\Row\Type\LinkRowAction;
++use PrestaShop\PrestaShop\Core\Grid\Action\Type\SimpleGridAction;
++use PrestaShop\PrestaShop\Core\Grid\Column\ColumnCollection;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ActionColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\BulkActionColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\DataColumn;
++use PrestaShop\PrestaShop\Core\Grid\Column\Type\Common\ToggleColumn;
++use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
++use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
++use PrestaShopBundle\Form\Admin\Type\SearchAndResetType;
++use PrestaShopBundle\Form\Admin\Type\YesAndNoChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++
++final class QuickAccessGridDefinitionFactory extends AbstractGridDefinitionFactory
++{
++    use BulkDeleteActionTrait;
++    use DeleteActionTrait;
++
++    public const GRID_ID = 'quick_access';
++
++    protected function getId(): string
++    {
++        return self::GRID_ID;
++    }
++
++    protected function getName(): string
++    {
++        return $this->trans('Quick Access', [], 'Admin.Navigation.Menu');
++    }
++
++    protected function getColumns(): ColumnCollection
++    {
++        return (new ColumnCollection())
++            ->add(
++                (new BulkActionColumn('bulk'))
++                    ->setOptions(['bulk_field' => 'id_quick_access'])
++            )
++            ->add(
++                (new DataColumn('id_quick_access'))
++                    ->setName($this->trans('ID', [], 'Admin.Global'))
++                    ->setOptions(['field' => 'id_quick_access'])
++            )
++            ->add(
++                (new DataColumn('name'))
++                    ->setName($this->trans('Name', [], 'Admin.Global'))
++                    ->setOptions(['field' => 'name'])
++            )
++            ->add(
++                (new DataColumn('link'))
++                    ->setName($this->trans('URL', [], 'Admin.Global'))
++                    ->setOptions(['field' => 'link'])
++            )
++            ->add(
++                (new ToggleColumn('new_window'))
++                    ->setName($this->trans('New tab', [], 'Admin.Navigation.Header'))
++                    ->setOptions([
++                        'field' => 'new_window',
++                        'primary_field' => 'id_quick_access',
++                        'route' => 'admin_quick_accesses_toggle_new_window',
++                        'route_param_name' => 'quickAccessId',
++                    ])
++            )
++            ->add(
++                (new ActionColumn('actions'))
++                    ->setName($this->trans('Actions', [], 'Admin.Global'))
++                    ->setOptions([
++                        'actions' => (new RowActionCollection())
++                            ->add(
++                                (new LinkRowAction('edit'))
++                                    ->setName($this->trans('Edit', [], 'Admin.Actions'))
++                                    ->setIcon('edit')
++                                    ->setOptions([
++                                        'route' => 'admin_quick_accesses_edit',
++                                        'route_param_name' => 'quickAccessId',
++                                        'route_param_field' => 'id_quick_access',
++                                        'clickable_row' => true,
++                                    ])
++                            )
++                            ->add(
++                                $this->buildDeleteAction(
++                                    'admin_quick_accesses_delete',
++                                    'quickAccessId',
++                                    'id_quick_access'
++                                )
++                            ),
++                    ])
++            );
++    }
++
++    public function getFilters()
++    {
++        return (new FilterCollection())
++            ->add(
++                (new Filter('id_quick_access', TextType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => ['placeholder' => $this->trans('Search ID', [], 'Admin.Actions')],
++                    ])
++                    ->setAssociatedColumn('id_quick_access')
++            )
++            ->add(
++                (new Filter('name', TextType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => ['placeholder' => $this->trans('Search name', [], 'Admin.Actions')],
++                    ])
++                    ->setAssociatedColumn('name')
++            )
++            ->add(
++                (new Filter('link', TextType::class))
++                    ->setTypeOptions([
++                        'required' => false,
++                        'attr' => ['placeholder' => $this->trans('Search URL', [], 'Admin.Actions')],
++                    ])
++                    ->setAssociatedColumn('link')
++            )
++            ->add(
++                (new Filter('new_window', YesAndNoChoiceType::class))
++                    ->setAssociatedColumn('new_window')
++            )
++            ->add(
++                (new Filter('actions', SearchAndResetType::class))
++                    ->setTypeOptions([
++                        'reset_route' => 'admin_common_reset_search_by_filter_id',
++                        'reset_route_params' => ['filterId' => self::GRID_ID],
++                        'redirect_route' => 'admin_quick_accesses_index',
++                    ])
++                    ->setAssociatedColumn('actions')
++            );
++    }
++
++    protected function getGridActions()
++    {
++        return (new GridActionCollection())
++            ->add(
++                (new SimpleGridAction('common_refresh_list'))
++                    ->setName($this->trans('Refresh list', [], 'Admin.Advparameters.Feature'))
++                    ->setIcon('refresh')
++            )
++            ->add(
++                (new SimpleGridAction('common_show_query'))
++                    ->setName($this->trans('Show SQL query', [], 'Admin.Actions'))
++                    ->setIcon('code')
++            )
++            ->add(
++                (new SimpleGridAction('common_export_sql_manager'))
++                    ->setName($this->trans('Export to SQL Manager', [], 'Admin.Actions'))
++                    ->setIcon('storage')
++            );
++    }
++
++    protected function getBulkActions()
++    {
++        return (new BulkActionCollection())
++            ->add($this->buildBulkDeleteAction('admin_quick_accesses_bulk_delete'));
++    }
++}
+diff --git a/src/Core/Grid/Query/QuickAccessQueryBuilder.php b/src/Core/Grid/Query/QuickAccessQueryBuilder.php
+new file mode 100644
+index 0000000000000..c714e8e2e0d0a
+--- /dev/null
++++ b/src/Core/Grid/Query/QuickAccessQueryBuilder.php
+@@ -0,0 +1,96 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Grid\Query;
++
++use Doctrine\DBAL\Connection;
++use Doctrine\DBAL\Query\QueryBuilder;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
++
++/**
++ * Builds search and count query builders for the quick access grid.
++ * Grid is ordered alphabetically by name (ticket requirement).
++ */
++class QuickAccessQueryBuilder extends AbstractDoctrineQueryBuilder
++{
++    private DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator;
++
++    public function __construct(
++        Connection $connection,
++        string $dbPrefix,
++        DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator,
++        private readonly LanguageContext $languageContext
++    ) {
++        parent::__construct($connection, $dbPrefix);
++        $this->searchCriteriaApplicator = $searchCriteriaApplicator;
++    }
++
++    public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
++    {
++        $qb = $this->getBaseQueryBuilder($searchCriteria)
++            ->select('q.id_quick_access, ql.name, q.link, q.new_window');
++
++        $this->searchCriteriaApplicator
++            ->applySorting($searchCriteria, $qb)
++            ->applyPagination($searchCriteria, $qb);
++
++        return $qb;
++    }
++
++    public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
++    {
++        return $this->getBaseQueryBuilder($searchCriteria)
++            ->select('COUNT(DISTINCT q.id_quick_access)');
++    }
++
++    private function getBaseQueryBuilder(SearchCriteriaInterface $searchCriteria): QueryBuilder
++    {
++        $qb = $this->connection->createQueryBuilder()
++            ->from($this->dbPrefix . 'quick_access', 'q')
++            ->innerJoin(
++                'q',
++                $this->dbPrefix . 'quick_access_lang',
++                'ql',
++                'q.id_quick_access = ql.id_quick_access AND ql.id_lang = :contextLangId'
++            )
++            ->setParameter('contextLangId', $this->languageContext->getId());
++
++        $this->applyFilters($qb, $searchCriteria);
++
++        return $qb;
++    }
++
++    private function applyFilters(QueryBuilder $qb, SearchCriteriaInterface $searchCriteria): void
++    {
++        $allowedFilters = ['id_quick_access', 'name', 'link', 'new_window'];
++
++        foreach ($searchCriteria->getFilters() as $filterName => $filterValue) {
++            if (!in_array($filterName, $allowedFilters)) {
++                continue;
++            }
++
++            if (in_array($filterName, ['id_quick_access', 'new_window'])) {
++                $qb->andWhere('q.' . $filterName . ' = :' . $filterName)
++                    ->setParameter($filterName, $filterValue);
++                continue;
++            }
++
++            if ($filterName === 'name') {
++                $qb->andWhere('ql.name LIKE :name')
++                    ->setParameter('name', '%' . $filterValue . '%');
++                continue;
++            }
++
++            if ($filterName === 'link') {
++                $qb->andWhere('q.link LIKE :link')
++                    ->setParameter('link', '%' . $filterValue . '%');
++            }
++        }
++    }
++}
+diff --git a/src/Core/QuickAccess/QuickAccessGenerator.php b/src/Core/QuickAccess/QuickAccessGenerator.php
+index 940c7b2bd5614..d813973c98612 100644
+--- a/src/Core/QuickAccess/QuickAccessGenerator.php
++++ b/src/Core/QuickAccess/QuickAccessGenerator.php
+@@ -71,6 +71,7 @@ public function cleanQuickLink(string $savedUrl): string
+         }
+ 
+         $url = preg_replace($patterns, '', $savedUrl);
++        $url = (string) preg_replace('/&{2,}/', '&', $url);
+         $url = trim($url, '?&/');
+ 
+         return 'index.php' . (!empty($legacyEnvironment) ? '?' : '/') . $url;
+diff --git a/src/Core/Search/Filters/QuickAccessFilters.php b/src/Core/Search/Filters/QuickAccessFilters.php
+new file mode 100644
+index 0000000000000..d5f01c4a37e53
+--- /dev/null
++++ b/src/Core/Search/Filters/QuickAccessFilters.php
+@@ -0,0 +1,28 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Search\Filters;
++
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\QuickAccessGridDefinitionFactory;
++use PrestaShop\PrestaShop\Core\Search\Filters;
++
++final class QuickAccessFilters extends Filters
++{
++    protected $filterId = QuickAccessGridDefinitionFactory::GRID_ID;
++
++    public static function getDefaults(): array
++    {
++        return [
++            'limit' => 50,
++            'offset' => 0,
++            'orderBy' => 'name',
++            'sortOrder' => 'ASC',
++            'filters' => [],
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Command/LegacyLinkLinterCommand.php b/src/PrestaShopBundle/Command/LegacyLinkLinterCommand.php
+index b6e0823581a6b..6a4dc7fd21b25 100644
+--- a/src/PrestaShopBundle/Command/LegacyLinkLinterCommand.php
++++ b/src/PrestaShopBundle/Command/LegacyLinkLinterCommand.php
+@@ -149,6 +149,8 @@ class LegacyLinkLinterCommand extends Command
+         'admin_products_specific_prices_edit',
+         'admin_products_specific_prices_list',
+         'admin_products_toggle_status_for_shop',
++        'admin_quick_accesses_ajax_add',
++        'admin_quick_accesses_ajax_delete',
+         'admin_security_sessions_customer_search',
+         'admin_security_sessions_employee_search',
+         'admin_servers',
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/QuickAccessController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/QuickAccessController.php
+new file mode 100644
+index 0000000000000..a355c6e6a0b4c
+--- /dev/null
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/QuickAccessController.php
+@@ -0,0 +1,291 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters;
++
++use Exception;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\AddQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\BulkDeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\DeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\ToggleQuickAccessNewWindowCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\BulkQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotAddQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotDeleteQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\CannotUpdateQuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
++use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
++use PrestaShop\PrestaShop\Core\QuickAccess\QuickAccessGenerator;
++use PrestaShop\PrestaShop\Core\Search\Filters\QuickAccessFilters;
++use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
++use PrestaShopBundle\Security\Attribute\AdminSecurity;
++use PrestaShopBundle\Security\Attribute\DemoRestricted;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\HttpFoundation\JsonResponse;
++use Symfony\Component\HttpFoundation\RedirectResponse;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++/**
++ * Responsible for "Configure > Advanced Parameters > Quick Access" page.
++ */
++class QuickAccessController extends PrestaShopAdminController
++{
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function indexAction(
++        Request $request,
++        QuickAccessFilters $filters,
++        #[Autowire(service: 'prestashop.core.grid.factory.quick_access')]
++        GridFactoryInterface $quickAccessGridFactory
++    ): Response {
++        $quickAccessGrid = $quickAccessGridFactory->getGrid($filters);
++
++        return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/QuickAccess/index.html.twig', [
++            'quickAccessGrid' => $this->presentGrid($quickAccessGrid),
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++        ]);
++    }
++
++    #[AdminSecurity("is_granted('create', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function createAction(
++        Request $request,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.quick_access_form_builder')]
++        FormBuilderInterface $quickAccessFormBuilder,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.handler.quick_access_form_handler')]
++        FormHandlerInterface $quickAccessFormHandler
++    ): Response {
++        try {
++            $quickAccessForm = $quickAccessFormBuilder->getForm();
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++
++            return $this->redirectToRoute('admin_quick_accesses_index');
++        }
++
++        try {
++            $quickAccessForm->handleRequest($request);
++            $result = $quickAccessFormHandler->handle($quickAccessForm);
++
++            if (null !== $result->getIdentifiableObjectId()) {
++                $this->addFlash('success', $this->trans('Successful creation.', [], 'Admin.Notifications.Success'));
++
++                return $this->redirectToRoute('admin_quick_accesses_index');
++            }
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/QuickAccess/create.html.twig', [
++            'quickAccessForm' => $quickAccessForm->createView(),
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'layoutTitle' => $this->trans('New quick access', [], 'Admin.Navigation.Menu'),
++        ]);
++    }
++
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function editAction(
++        int $quickAccessId,
++        Request $request,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.quick_access_form_builder')]
++        FormBuilderInterface $quickAccessFormBuilder,
++        #[Autowire(service: 'prestashop.core.form.identifiable_object.handler.quick_access_form_handler')]
++        FormHandlerInterface $quickAccessFormHandler
++    ): Response {
++        try {
++            $quickAccessForm = $quickAccessFormBuilder->getFormFor($quickAccessId);
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++
++            return $this->redirectToRoute('admin_quick_accesses_index');
++        }
++
++        try {
++            $quickAccessForm->handleRequest($request);
++            $result = $quickAccessFormHandler->handleFor($quickAccessId, $quickAccessForm);
++
++            if ($result->isSubmitted() && $result->isValid()) {
++                $this->addFlash('success', $this->trans('Successful update.', [], 'Admin.Notifications.Success'));
++
++                return $this->redirectToRoute('admin_quick_accesses_index');
++            }
++        } catch (Exception $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++
++            if ($e instanceof QuickAccessNotFoundException) {
++                return $this->redirectToRoute('admin_quick_accesses_index');
++            }
++        }
++
++        return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/QuickAccess/edit.html.twig', [
++            'quickAccessForm' => $quickAccessForm->createView(),
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
++            'layoutTitle' => $this->trans('Editing quick access', [], 'Admin.Navigation.Menu'),
++        ]);
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_quick_accesses_index')]
++    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function deleteAction(int $quickAccessId): RedirectResponse
++    {
++        try {
++            $this->dispatchCommand(new DeleteQuickAccessCommand($quickAccessId));
++            $this->addFlash('success', $this->trans('Successful deletion', [], 'Admin.Notifications.Success'));
++        } catch (QuickAccessException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->redirectToRoute('admin_quick_accesses_index');
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_quick_accesses_index')]
++    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function bulkDeleteAction(Request $request): RedirectResponse
++    {
++        $quickAccessIds = $request->request->all('quick_access_bulk');
++
++        if (empty($quickAccessIds)) {
++            $this->addFlash('info', $this->trans('You must select at least one element to delete.', [], 'Admin.Notifications.Error'));
++
++            return $this->redirectToRoute('admin_quick_accesses_index');
++        }
++
++        try {
++            $this->dispatchCommand(new BulkDeleteQuickAccessCommand($quickAccessIds));
++            $this->addFlash('success', $this->trans('Successful deletion', [], 'Admin.Notifications.Success'));
++        } catch (BulkQuickAccessException $e) {
++            $this->addFlashErrors($this->getBulkErrorMessages($e));
++        } catch (QuickAccessException $e) {
++            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++        }
++
++        return $this->redirectToRoute('admin_quick_accesses_index');
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_quick_accesses_index')]
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function ajaxAddQuickLinkAction(
++        Request $request,
++        LanguageContext $languageContext,
++        QuickAccessGenerator $quickAccessGenerator,
++    ): JsonResponse {
++        try {
++            /** @var QuickAccessId $createdId */
++            $createdId = $this->dispatchCommand(new AddQuickAccessCommand(
++                [$languageContext->getId() => $request->request->getString('name')],
++                $request->request->getString('url'),
++                false,
++            ));
++        } catch (QuickAccessException $e) {
++            return new JsonResponse([
++                'has_errors' => true,
++                0 => $this->getErrorMessageForException($e, $this->getErrorMessages()),
++            ]);
++        }
++
++        $quickAccesses = $quickAccessGenerator->getTokenizedQuickAccesses();
++        foreach ($quickAccesses as &$row) {
++            $row['active'] = ($row['id_quick_access'] === $createdId->getValue());
++        }
++
++        return new JsonResponse($quickAccesses);
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_quick_accesses_index')]
++    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function ajaxDeleteQuickLinkAction(
++        Request $request,
++        QuickAccessGenerator $quickAccessGenerator,
++    ): JsonResponse {
++        try {
++            $this->dispatchCommand(new DeleteQuickAccessCommand($request->request->getInt('id_quick_access')));
++        } catch (QuickAccessException $e) {
++            return new JsonResponse([
++                'has_errors' => true,
++                0 => $this->getErrorMessageForException($e, $this->getErrorMessages()),
++            ]);
++        }
++
++        $quickAccesses = $quickAccessGenerator->getTokenizedQuickAccesses();
++        foreach ($quickAccesses as &$row) {
++            $row['active'] = false;
++        }
++
++        return new JsonResponse($quickAccesses);
++    }
++
++    #[DemoRestricted(redirectRoute: 'admin_quick_accesses_index')]
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_quick_accesses_index')]
++    public function toggleNewWindowAction(int $quickAccessId): JsonResponse
++    {
++        try {
++            $this->dispatchCommand(new ToggleQuickAccessNewWindowCommand($quickAccessId));
++            $response = [
++                'status' => true,
++                'message' => $this->trans('The status has been successfully updated.', [], 'Admin.Notifications.Success'),
++            ];
++        } catch (QuickAccessException $e) {
++            $response = [
++                'status' => false,
++                'message' => $this->getErrorMessageForException($e, $this->getErrorMessages()),
++            ];
++        }
++
++        return new JsonResponse($response);
++    }
++
++    private function getBulkErrorMessages(BulkQuickAccessException $e): array
++    {
++        $errors = [];
++        foreach ($e->getExceptions() as $exception) {
++            $errors[] = $this->getErrorMessageForException($exception, $this->getErrorMessages());
++        }
++
++        return $errors;
++    }
++
++    private function getErrorMessages(): array
++    {
++        return [
++            QuickAccessNotFoundException::class => $this->trans(
++                'The object cannot be loaded (or found).',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotAddQuickAccessException::class => $this->trans(
++                'An error occurred while creating the object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotUpdateQuickAccessException::class => $this->trans(
++                'An error occurred while updating the object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            CannotDeleteQuickAccessException::class => $this->trans(
++                'An error occurred while deleting the object.',
++                [],
++                'Admin.Notifications.Error'
++            ),
++            QuickAccessConstraintException::class => [
++                QuickAccessConstraintException::LINK_ALREADY_EXISTS => $this->trans(
++                    'A quick access link to this URL already exists.',
++                    [],
++                    'Admin.Advparameters.Notification'
++                ),
++            ],
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/QuickAccess/QuickAccessType.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/QuickAccess/QuickAccessType.php
+new file mode 100644
+index 0000000000000..9360c9dad5fe9
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/QuickAccess/QuickAccessType.php
+@@ -0,0 +1,87 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\QuickAccess;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DefaultLanguage;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
++use PrestaShopBundle\Form\Admin\Type\TranslatableType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Validator\Constraints\Length;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Component\Validator\Constraints\Regex;
++
++class QuickAccessType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder
++            ->add('name', TranslatableType::class, [
++                'label' => $this->trans('Name', 'Admin.Global'),
++                'constraints' => [
++                    new DefaultLanguage(),
++                ],
++                'options' => [
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'The %s field is required.',
++                                'Admin.Notifications.Error',
++                                [sprintf('"%s"', $this->trans('Name', 'Admin.Global'))]
++                            ),
++                        ]),
++                        new Length([
++                            'max' => 32,
++                            'maxMessage' => $this->trans(
++                                'This field cannot be longer than %limit% characters',
++                                'Admin.Notifications.Error',
++                                ['%limit%' => 32]
++                            ),
++                        ]),
++                    ],
++                ],
++            ])
++            ->add('link', TextType::class, [
++                'label' => $this->trans('URL', 'Admin.Global'),
++                'help' => $this->trans(
++                    'The URL must start with "index.php" (e.g. index.php?controller=AdminProducts).',
++                    'Admin.Advparameters.Help'
++                ),
++                'constraints' => [
++                    new NotBlank([
++                        'message' => $this->trans(
++                            'The %s field is required.',
++                            'Admin.Notifications.Error',
++                            [sprintf('"%s"', $this->trans('URL', 'Admin.Global'))]
++                        ),
++                    ]),
++                    new Length([
++                        'max' => 255,
++                        'maxMessage' => $this->trans(
++                            'This field cannot be longer than %limit% characters',
++                            'Admin.Notifications.Error',
++                            ['%limit%' => 255]
++                        ),
++                    ]),
++                    new Regex([
++                        'pattern' => '/^index\.php/',
++                        'message' => $this->trans(
++                            'The URL must point to a back office page (must start with "index.php").',
++                            'Admin.Advparameters.Notification'
++                        ),
++                    ]),
++                ],
++            ])
++            ->add('new_window', SwitchType::class, [
++                'label' => $this->trans('Open in new tab', 'Admin.Navigation.Header'),
++                'required' => false,
++            ]);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/_advanced_parameters.yml b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/_advanced_parameters.yml
+index 996c545dc6c28..6fee46a9bdd81 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/_advanced_parameters.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/_advanced_parameters.yml
+@@ -61,3 +61,7 @@ _security:
+ _permission:
+   resource: "permission.yml"
+   prefix: /permissions
++
++_quick_access:
++  resource: "quick_access.yml"
++  prefix: /quick-accesses
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/quick_access.yml b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/quick_access.yml
+new file mode 100644
+index 0000000000000..cd089bb1187cd
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/quick_access.yml
+@@ -0,0 +1,92 @@
++admin_quick_accesses_index:
++  path: /
++  methods: GET
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::indexAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_search:
++  path: /
++  methods: POST
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\CommonController::searchGridAction
++    gridDefinitionFactoryServiceId: 'PrestaShop\PrestaShop\Core\Grid\Definition\Factory\QuickAccessGridDefinitionFactory'
++    redirectRoute: admin_quick_accesses_index
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:submitFilterquick_access
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_delete:
++  path: /{quickAccessId}/delete
++  methods: [ DELETE, POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::deleteAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:deletequick_access
++    _legacy_feature_flag: quick_access
++    _legacy_parameters:
++      id_quick_access: quickAccessId
++  requirements:
++    quickAccessId: \d+
++
++admin_quick_accesses_bulk_delete:
++  path: /bulk-delete
++  methods: POST
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::bulkDeleteAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:submitBulkdeletequick_access
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_create:
++  path: /new
++  methods: [ GET, POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::createAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:addquick_access
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_edit:
++  path: /{quickAccessId}/edit
++  methods: [ GET, POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::editAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:updatequick_access
++    _legacy_feature_flag: quick_access
++    _legacy_parameters:
++      id_quick_access: quickAccessId
++  requirements:
++    quickAccessId: \d+
++
++admin_quick_accesses_ajax_add:
++  path: /ajax/add
++  methods: POST
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::ajaxAddQuickLinkAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_ajax_delete:
++  path: /ajax/delete
++  methods: POST
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::ajaxDeleteQuickLinkAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_feature_flag: quick_access
++
++admin_quick_accesses_toggle_new_window:
++  path: /{quickAccessId}/toggle-new-window
++  methods: POST
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\QuickAccessController::toggleNewWindowAction'
++    _legacy_controller: AdminQuickAccesses
++    _legacy_link: AdminQuickAccesses:statusquick_access
++    _legacy_feature_flag: quick_access
++    _legacy_parameters:
++      id_quick_access: quickAccessId
++  requirements:
++    quickAccessId: \d+
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/quick_access.yml b/src/PrestaShopBundle/Resources/config/services/adapter/quick_access.yml
+index 55b1fd57e46c9..5f54459061cb7 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/quick_access.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/quick_access.yml
+@@ -9,3 +9,27 @@ services:
+     alias: PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository
+ 
+   PrestaShop\PrestaShop\Adapter\QuickAccess\Repository\QuickAccessRepository: ~
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler\AddQuickAccessHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler\EditQuickAccessHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler\DeleteQuickAccessHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler\BulkDeleteQuickAccessHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\CommandHandler\ToggleQuickAccessNewWindowHandler:
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\QuickAccess\QueryHandler\GetQuickAccessForEditingHandler:
++    autowire: true
++    autoconfigure: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+index ea4549cfd372e..a72e79038d97a 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_builder.yml
+@@ -407,3 +407,10 @@ services:
+     arguments:
+       - 'PrestaShopBundle\Form\Admin\Sell\Order\EditProductRowType'
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\EditProductFormDataProvider'
++
++  prestashop.core.form.identifiable_object.builder.quick_access_form_builder:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilder'
++    factory: [ '@prestashop.core.form.builder.form_builder_factory', 'create' ]
++    arguments:
++      - 'PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\QuickAccess\QuickAccessType'
++      - '@prestashop.core.form.identifiable_object.data_provider.quick_access_form_data_provider'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+index ff8ea05f22493..18d7c14f5ec4b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+@@ -298,6 +298,11 @@ services:
+     autowire: true
+     public: false
+ 
++  prestashop.core.form.identifiable_object.data_handler.quick_access_form_data_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\QuickAccessFormDataHandler'
++    arguments:
++      - '@prestashop.core.command_bus'
++
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\TagFormDataHandler:
+     autowire: true
+     public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+index 04de2778aa2a5..3241129496478 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_provider.yml
+@@ -290,6 +290,11 @@ services:
+     autowire: true
+     public: false
+ 
++  prestashop.core.form.identifiable_object.data_provider.quick_access_form_data_provider:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\QuickAccessFormDataProvider'
++    arguments:
++      - '@prestashop.core.query_bus'
++
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider\EditProductFormDataProvider:
+     autowire: true
+     public: false
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+index 9dbede22fe5c2..7d1cae859e43c 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_handler.yml
+@@ -334,6 +334,12 @@ services:
+     arguments:
+       - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\AliasFormDataHandler'
+ 
++  prestashop.core.form.identifiable_object.handler.quick_access_form_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
++    factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
++    arguments:
++      - '@prestashop.core.form.identifiable_object.data_handler.quick_access_form_data_handler'
++
+   prestashop.core.form.identifiable_object.tag_form_handler:
+     class: 'PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler'
+     factory: [ '@prestashop.core.form.identifiable_object.handler.form_handler_factory', 'create' ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
+index 4fbd40c1aebe8..3cb374e0b805e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
+@@ -557,3 +557,10 @@ services:
+     public: false
+     arguments:
+       $searchCriteriaApplicator: '@prestashop.core.query.doctrine_search_criteria_applicator'
++
++  PrestaShop\PrestaShop\Core\Grid\Query\QuickAccessQueryBuilder:
++    parent: 'prestashop.core.grid.abstract_query_builder'
++    public: false
++    arguments:
++      $searchCriteriaApplicator: '@prestashop.core.query.doctrine_search_criteria_applicator'
++      $languageContext: '@PrestaShop\PrestaShop\Core\Context\LanguageContext'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+index 75545125a1ee8..e324e6737437a 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_data_factory.yml
+@@ -729,3 +729,11 @@ services:
+       - '@prestashop.core.hook.dispatcher'
+       - '@prestashop.core.grid.query.doctrine_query_parser'
+       - 'tag'
++
++  prestashop.core.grid.data_factory.quick_access:
++    class: '%prestashop.core.grid.data.factory.doctrine_grid_data_factory%'
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Grid\Query\QuickAccessQueryBuilder'
++      - '@prestashop.core.hook.dispatcher'
++      - '@prestashop.core.grid.query.doctrine_query_parser'
++      - 'quick_access'
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
+index 59a7937e355a6..32cdbbf5d22df 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_definition_factory.yml
+@@ -499,6 +499,11 @@ services:
+     arguments:
+       - '@prestashop.core.form.choice_provider.language_by_id'
+ 
++  PrestaShop\PrestaShop\Core\Grid\Definition\Factory\QuickAccessGridDefinitionFactory:
++    parent: PrestaShop\PrestaShop\Core\Grid\Definition\Factory\AbstractGridDefinitionFactory
++    autowire: true
++    public: true
++
+   # deprecated services
+   # Alias for this abstract definition causes tests in vendor fail for some reason, so we stick to full definition instead
+   prestashop.core.grid.definition.factory.abstract_grid_definition:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+index 2e2a1489833eb..6bdc2b589ddab 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/grid_factory.yml
+@@ -566,3 +566,11 @@ services:
+       - '@PrestaShop\PrestaShop\Core\Grid\Data\Factory\TagGridDataFactory'
+       - '@prestashop.core.grid.filter.form_factory'
+       - '@prestashop.core.hook.dispatcher'
++
++  prestashop.core.grid.factory.quick_access:
++    class: 'PrestaShop\PrestaShop\Core\Grid\GridFactory'
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Grid\Definition\Factory\QuickAccessGridDefinitionFactory'
++      - '@prestashop.core.grid.data_factory.quick_access'
++      - '@prestashop.core.grid.filter.form_factory'
++      - '@prestashop.core.hook.dispatcher'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/mobile_quick_access.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/mobile_quick_access.html.twig
+index 35809c87ecbb3..a073421a7fb8e 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/mobile_quick_access.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/mobile_quick_access.html.twig
+@@ -22,9 +22,13 @@
+        data-quicklink-id="{{ this.activeQuickAccess.id_quick_access }}"
+        data-rand="{{ random(1, 200) }}"
+        data-url="{{ this.activeQuickAccess.link }}"
+-       data-post-link="{{ legacy_path('AdminQuickAccesses') }}"
++       data-post-link="{{ this.ajaxDeleteUrl }}"
+        data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
+        data-link="{{ this.activeQuickAccess.name }}"
++       data-confirm-title="{{ 'Remove from Quick Access'|trans({}, 'Admin.Navigation.Header') }}"
++       data-confirm-message="{{ 'Are you sure you want to remove "%name%" from Quick Access?'|trans({'%name%': this.activeQuickAccess.name}, 'Admin.Navigation.Header') }}"
++       data-confirm-button-label="{{ 'Remove'|trans({}, 'Admin.Actions') }}"
++       data-close-button-label="{{ 'Cancel'|trans({}, 'Admin.Actions') }}"
+     >
+       <i class="material-icons">remove_circle_outline</i>
+       {{ 'Remove from Quick Access'|trans({}, 'Admin.Navigation.Header') }}
+@@ -37,7 +41,7 @@
+        data-method="add"
+        data-icon="{{ this.currentPageIcon }}"
+        data-url="{{ this.currentPageQuickAccessLink }}"
+-       data-post-link="{{ legacy_path('AdminQuickAccesses') }}"
++       data-post-link="{{ this.ajaxAddUrl }}"
+        data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
+        data-link="{{ this.currentPageTitle }}"
+     >
+@@ -45,7 +49,7 @@
+       {{ 'Add current page to Quick Access'|trans({}, 'Admin.Actions') }}
+     </a>
+   {% endif %}
+-  <a id="quick-manage-link" class="dropdown-item" href="{{ legacy_path('AdminQuickAccesses') }}">
++  <a id="quick-manage-link" class="dropdown-item" href="{{ this.manageUrl }}">
+   <i class="material-icons">settings</i>
+     {{ 'Manage your quick accesses'|trans({}, 'Admin.Navigation.Header') }}
+   </a>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/quick_access.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/quick_access.html.twig
+index df31cf2f3f2b0..963a5cd36ba9a 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/quick_access.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Component/Layout/quick_access.html.twig
+@@ -27,9 +27,13 @@
+            data-rand="{{ random(1, 200) }}"
+            data-icon="{{ this.currentPageIcon }}"
+            data-url="{{ this.activeQuickAccess.link }}"
+-           data-post-link="{{ legacy_path('AdminQuickAccesses') }}"
++           data-post-link="{{ this.ajaxDeleteUrl }}"
+            data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
+            data-link="{{ this.activeQuickAccess.name }}"
++           data-confirm-title="{{ 'Remove from Quick Access'|trans({}, 'Admin.Navigation.Header') }}"
++           data-confirm-message="{{ 'Are you sure you want to remove "%name%" from Quick Access?'|trans({'%name%': this.activeQuickAccess.name}, 'Admin.Navigation.Header') }}"
++           data-confirm-button-label="{{ 'Remove'|trans({}, 'Admin.Actions') }}"
++           data-close-button-label="{{ 'Cancel'|trans({}, 'Admin.Actions') }}"
+         >
+           <i class="material-icons">remove_circle_outline</i>
+           {{ 'Remove from Quick Access'|trans({}, 'Admin.Navigation.Header') }}
+@@ -42,7 +46,7 @@
+            data-method="add"
+            data-icon="{{ this.currentPageIcon }}"
+            data-url="{{ this.currentPageQuickAccessLink }}"
+-           data-post-link="{{ legacy_path('AdminQuickAccesses') }}"
++           data-post-link="{{ this.ajaxAddUrl }}"
+            data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
+            data-link="{{ this.currentPageTitle }}"
+         >
+@@ -50,7 +54,7 @@
+           {{ 'Add current page to Quick Access'|trans({}, 'Admin.Actions') }}
+         </a>
+       {% endif %}
+-      <a id="quick-manage-link" class="dropdown-item" href="{{ legacy_path('AdminQuickAccesses') }}">
++      <a id="quick-manage-link" class="dropdown-item" href="{{ this.manageUrl }}">
+       <i class="material-icons">settings</i>
+       {{ 'Manage your quick accesses'|trans({}, 'Admin.Navigation.Header') }}
+       </a>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Component/LegacyLayout/quick_access.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Component/LegacyLayout/quick_access.html.twig
+index 73904d10e0ddb..4e2527fe579f0 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Component/LegacyLayout/quick_access.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Component/LegacyLayout/quick_access.html.twig
+@@ -24,22 +24,41 @@
+       <li class="divider"></li>
+       {% if this.activeQuickAccess %}
+       <li>
+-        <a id="quick-remove-link" href="javascript:void(0);" class="ajax-quick-link" data-method="remove"
+-           data-quicklink-id="{{ this.activeQuickAccess.id_quick_access }}">
++        <a id="quick-remove-link"
++           href="#"
++           class="ajax-quick-link js-quick-link"
++           data-method="remove"
++           data-quicklink-id="{{ this.activeQuickAccess.id_quick_access }}"
++           data-rand="{{ random(1, 200) }}"
++           data-url="{{ this.activeQuickAccess.link }}"
++           data-post-link="{{ this.ajaxDeleteUrl }}"
++           data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
++           data-link="{{ this.activeQuickAccess.name }}"
++        >
+           <i class="material-icons">remove_circle</i>
+           {{ 'Remove from Quick Access'|trans({}, 'Admin.Navigation.Header') }}
+         </a>
+       </li>
+       {% else %}
+       <li>
+-        <a id="quick-add-link" href="javascript:void(0);" class="ajax-quick-link" data-method="add">
++        <a id="quick-add-link"
++           href="#"
++           class="ajax-quick-link js-quick-link"
++           data-method="add"
++           data-rand="{{ random(1, 200) }}"
++           data-icon="{{ this.currentPageIcon }}"
++           data-url="{{ this.currentPageQuickAccessLink }}"
++           data-post-link="{{ this.ajaxAddUrl }}"
++           data-prompt-text="{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}"
++           data-link="{{ this.currentPageTitle }}"
++        >
+           <i class="material-icons">add_circle</i>
+           {{ 'Add current page to Quick Access'|trans({}, 'Admin.Actions') }}
+         </a>
+       </li>
+       {% endif %}
+       <li>
+-        <a id="quick-manage-link" href="{{ legacy_path('AdminQuickAccesses') }}">
++        <a id="quick-manage-link" href="{{ this.manageUrl }}">
+         <i class="material-icons">settings</i>
+           {{ 'Manage your quick accesses'|trans({}, 'Admin.Navigation.Header') }}
+         </a>
+@@ -47,53 +66,3 @@
+     </ul>
+   </div>
+ </div>
+-
+-<script>
+-  $(function() {
+-    $('.ajax-quick-link').on('click', function(e){
+-      e.preventDefault();
+-
+-      var method = $(this).data('method');
+-
+-      if(method == 'add')
+-        var name = prompt('{{ 'Please name this shortcut:'|trans({}, 'Admin.Navigation.Header') }}', '{{ this.currentPageTitle }}');
+-
+-      if(method == 'add' && name || method == 'remove')
+-      {
+-        $.ajax({
+-          type: 'POST',
+-          headers: { "cache-control": "no-cache" },
+-          async: false,
+-          url: "{{ legacy_path('AdminQuickAccesses', {action: 'GetUrl', rand: random(1, 200), ajax: 1}) }}" + "&method=" + method + ( $(this).data('quicklink-id') ? "&id_quick_access=" + $(this).data('quicklink-id') : ""),
+-          data: {
+-            "url": "{{ this.currentPageQuickAccessLink|raw }}",
+-            "name": name,
+-            "icon": "{{ this.currentPageIcon }}"
+-          },
+-          dataType: "json",
+-          success: function(data) {
+-            var quicklink_list ='';
+-            $.each(data, function(index,value){
+-              if (typeof data[index]['name'] !== 'undefined')
+-                quicklink_list += '<li><a href="' + data[index]['link'] + '">' + data[index]['name'] + '</a></li>';
+-            });
+-
+-            if (typeof data['has_errors'] !== 'undefined' && data['has_errors'])
+-              $.each(data, function(index, value)
+-              {
+-                if (typeof data[index] == 'string')
+-                  $.growl.error({ title: "", message: data[index]});
+-              });
+-            else if (quicklink_list)
+-            {
+-              $('#header_quick ul.dropdown-menu .divider').prevAll().remove();
+-              $('#header_quick ul.dropdown-menu').prepend(quicklink_list);
+-              $(e.target).remove();
+-              showSuccessMessage(update_success_msg);
+-            }
+-          }
+-        });
+-      }
+-    });
+-  });
+-</script>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/Blocks/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/Blocks/form.html.twig
+new file mode 100644
+index 0000000000000..3f67d9690707d
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/Blocks/form.html.twig
+@@ -0,0 +1,32 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{% form_theme quickAccessForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
++
++{{ form_start(quickAccessForm) }}
++<div class="card">
++  <h3 class="card-header">
++    {{ 'Quick access'|trans({}, 'Admin.Navigation.Menu') }}
++  </h3>
++
++  <div class="card-body">
++    <div class="form-wrapper">
++      {{ form_errors(quickAccessForm) }}
++      {{ form_widget(quickAccessForm) }}
++    </div>
++  </div>
++
++  <div class="card-footer">
++    <div class="d-inline-flex">
++      <a href="{{ path('admin_quick_accesses_index') }}" class="btn btn-outline-secondary">
++        {{ 'Cancel'|trans({}, 'Admin.Actions') }}
++      </a>
++    </div>
++    <div class="d-inline-flex float-right">
++      <button class="btn btn-primary" id="save-button">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++    </div>
++  </div>
++</div>
++{{ form_end(quickAccessForm) }}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/create.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/create.html.twig
+new file mode 100644
+index 0000000000000..ec66edf725c8c
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/create.html.twig
+@@ -0,0 +1,15 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++{% trans_default_domain 'Admin.Advparameters.Feature' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Configure/AdvancedParameters/QuickAccess/Blocks/form.html.twig') }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++  <script src="{{ asset('themes/new-theme/public/quick_access.bundle.js') }}"></script>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/edit.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/edit.html.twig
+new file mode 100644
+index 0000000000000..ec66edf725c8c
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/edit.html.twig
+@@ -0,0 +1,15 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++{% trans_default_domain 'Admin.Advparameters.Feature' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Configure/AdvancedParameters/QuickAccess/Blocks/form.html.twig') }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++  <script src="{{ asset('themes/new-theme/public/quick_access.bundle.js') }}"></script>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/index.html.twig
+new file mode 100644
+index 0000000000000..4fce124e194a0
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/QuickAccess/index.html.twig
+@@ -0,0 +1,26 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% set layoutHeaderToolbarBtn = {
++  add: {
++    href: path('admin_quick_accesses_create'),
++    desc: 'Add new quick access'|trans({}, 'Admin.Advparameters.Feature'),
++    icon: 'add_circle_outline',
++  },
++} %}
++
++{% trans_default_domain 'Admin.Advparameters.Feature' %}
++
++{% block content %}
++  {{ include('@PrestaShop/Admin/Common/Grid/grid_panel.html.twig', {grid: quickAccessGrid}) }}
++{% endblock %}
++
++{% block javascripts %}
++  {{ parent() }}
++
++  <script src="{{ asset('themes/new-theme/public/quick_access.bundle.js') }}"></script>
++  <script src="{{ asset('themes/default/js/bundle/pagination.js') }}"></script>
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Twig/Component/QuickAccess.php b/src/PrestaShopBundle/Twig/Component/QuickAccess.php
+index 4f87656cd7419..007be94b29bde 100644
+--- a/src/PrestaShopBundle/Twig/Component/QuickAccess.php
++++ b/src/PrestaShopBundle/Twig/Component/QuickAccess.php
+@@ -8,9 +8,14 @@
+ 
+ namespace PrestaShopBundle\Twig\Component;
+ 
++use PrestaShop\PrestaShop\Adapter\LegacyContext;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\QuickAccess\QuickAccessGenerator;
++use PrestaShopBundle\Security\Admin\UserTokenManager;
+ use PrestaShopBundle\Twig\Layout\MenuBuilder;
+ use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
++use Symfony\Component\Routing\RouterInterface;
+ use Symfony\UX\TwigComponent\Attribute\AsTwigComponent;
+ 
+ #[AsTwigComponent(template: '@PrestaShop/Admin/Component/Layout/quick_access.html.twig')]
+@@ -45,6 +50,10 @@ public function __construct(
+         protected readonly RequestStack $requestStack,
+         protected readonly MenuBuilder $menuBuilder,
+         protected readonly QuickAccessGenerator $quickAccessGenerator,
++        protected readonly RouterInterface $router,
++        protected readonly UserTokenManager $userTokenManager,
++        protected readonly LegacyContext $legacyContext,
++        protected readonly FeatureFlagStateCheckerInterface $featureFlagChecker,
+     ) {
+     }
+ 
+@@ -120,6 +129,49 @@ public function getCurrentPageIcon(): string
+         return $this->currentPageIcon;
+     }
+ 
++    public function getManageUrl(): string
++    {
++        if ($this->featureFlagChecker->isEnabled('quick_access')) {
++            return $this->router->generate(
++                'admin_quick_accesses_index',
++                [],
++                UrlGeneratorInterface::ABSOLUTE_URL
++            );
++        }
++
++        return $this->legacyContext->getContext()->link->getAdminLink('AdminQuickAccesses');
++    }
++
++    public function getAjaxAddUrl(): string
++    {
++        if ($this->featureFlagChecker->isEnabled('quick_access')) {
++            return $this->router->generate(
++                'admin_quick_accesses_ajax_add',
++                ['_token' => $this->userTokenManager->getSymfonyToken()],
++                UrlGeneratorInterface::ABSOLUTE_URL
++            );
++        }
++
++        return $this->legacyContext->getContext()->link->getAdminLink(
++            'AdminQuickAccesses', true, [], ['action' => 'GetUrl', 'ajax' => 1]
++        );
++    }
++
++    public function getAjaxDeleteUrl(): string
++    {
++        if ($this->featureFlagChecker->isEnabled('quick_access')) {
++            return $this->router->generate(
++                'admin_quick_accesses_ajax_delete',
++                ['_token' => $this->userTokenManager->getSymfonyToken()],
++                UrlGeneratorInterface::ABSOLUTE_URL
++            );
++        }
++
++        return $this->legacyContext->getContext()->link->getAdminLink(
++            'AdminQuickAccesses', true, [], ['action' => 'GetUrl', 'ajax' => 1]
++        );
++    }
++
+     protected function fillCurrentUrlFields(): void
+     {
+         $breadcrumbLinks = $this->menuBuilder->getBreadcrumbLinks();
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/QuickAccessFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/QuickAccessFeatureContext.php
+new file mode 100644
+index 0000000000000..b11b8722dfff1
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/QuickAccessFeatureContext.php
+@@ -0,0 +1,205 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain;
++
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\AddQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\BulkDeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\DeleteQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\EditQuickAccessCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Command\ToggleQuickAccessNewWindowCommand;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Exception\QuickAccessNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\Query\GetQuickAccessForEditing;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\QueryResult\EditableQuickAccess;
++use PrestaShop\PrestaShop\Core\Domain\QuickAccess\ValueObject\QuickAccessId;
++use Tests\Integration\Behaviour\Features\Context\Util\NoExceptionAlthoughExpectedException;
++use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
++
++class QuickAccessFeatureContext extends AbstractDomainFeatureContext
++{
++    private const NON_EXISTING_QUICK_ACCESS_ID = 74099901;
++
++    /**
++     * @Given quick access :reference does not exist
++     */
++    public function setNonExistingQuickAccessReference(string $reference): void
++    {
++        $this->getSharedStorage()->set($reference, self::NON_EXISTING_QUICK_ACCESS_ID);
++    }
++
++    /**
++     * @When I add a quick access :reference with the following properties:
++     */
++    public function addQuickAccess(string $reference, TableNode $table): void
++    {
++        $data = $this->localizeByRows($table);
++
++        try {
++            /** @var QuickAccessId $id */
++            $id = $this->getCommandBus()->handle(new AddQuickAccessCommand(
++                $data['localizedNames'],
++                (string) $data['link'],
++                PrimitiveUtils::castStringBooleanIntoBoolean($data['new_window'])
++            ));
++            $this->getSharedStorage()->set($reference, $id->getValue());
++        } catch (QuickAccessException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I edit quick access :reference with the following properties:
++     */
++    public function editQuickAccess(string $reference, TableNode $table): void
++    {
++        $data = $this->localizeByRows($table);
++        $id = $this->referenceToId($reference);
++
++        $command = new EditQuickAccessCommand($id);
++
++        if (isset($data['localizedNames'])) {
++            $command->setLocalizedNames($data['localizedNames']);
++        }
++        if (isset($data['link'])) {
++            $command->setLink((string) $data['link']);
++        }
++        if (isset($data['new_window'])) {
++            $command->setNewWindow(PrimitiveUtils::castStringBooleanIntoBoolean($data['new_window']));
++        }
++
++        try {
++            $this->getCommandBus()->handle($command);
++        } catch (QuickAccessException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I delete quick access :reference
++     */
++    public function deleteQuickAccess(string $reference): void
++    {
++        try {
++            $this->getCommandBus()->handle(new DeleteQuickAccessCommand($this->referenceToId($reference)));
++        } catch (QuickAccessException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I bulk delete quick accesses :references
++     */
++    public function bulkDeleteQuickAccesses(string $references): void
++    {
++        $ids = $this->referencesToIds($references);
++
++        try {
++            $this->getCommandBus()->handle(new BulkDeleteQuickAccessCommand($ids));
++        } catch (QuickAccessException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I toggle the new_window flag for quick access :reference
++     */
++    public function toggleQuickAccessNewWindow(string $reference): void
++    {
++        try {
++            $this->getCommandBus()->handle(new ToggleQuickAccessNewWindowCommand($this->referenceToId($reference)));
++        } catch (QuickAccessException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then quick access :reference should have the following properties:
++     */
++    public function assertQuickAccessProperties(string $reference, TableNode $table): void
++    {
++        $data = $this->localizeByRows($table);
++        $result = $this->getQuickAccessFromReference($reference);
++
++        if (isset($data['localizedNames'])) {
++            Assert::assertEquals($data['localizedNames'], $result->getLocalizedNames());
++        }
++        if (isset($data['link'])) {
++            Assert::assertEquals($data['link'], $result->getLink());
++        }
++        if (isset($data['new_window'])) {
++            Assert::assertEquals(
++                PrimitiveUtils::castStringBooleanIntoBoolean($data['new_window']),
++                $result->isNewWindow()
++            );
++        }
++    }
++
++    /**
++     * @Then quick access :reference should be deleted
++     */
++    public function assertQuickAccessIsDeleted(string $reference): void
++    {
++        if ($this->quickAccessExists($reference)) {
++            throw new NoExceptionAlthoughExpectedException(
++                sprintf('Quick access "%s" exists but was expected to be deleted', $reference)
++            );
++        }
++    }
++
++    /**
++     * @Then quick accesses :references should be deleted
++     */
++    public function assertQuickAccessesAreDeleted(string $references): void
++    {
++        foreach (PrimitiveUtils::castStringArrayIntoArray($references) as $reference) {
++            $this->assertQuickAccessIsDeleted($reference);
++        }
++    }
++
++    /**
++     * @Then I should get error that quick access was not found
++     */
++    public function assertLastErrorQuickAccessNotFound(): void
++    {
++        $this->assertLastErrorIs(QuickAccessNotFoundException::class);
++    }
++
++    /**
++     * @Then I should get error that quick access link already exists
++     */
++    public function assertLastErrorLinkAlreadyExists(): void
++    {
++        $this->assertLastErrorIs(
++            QuickAccessConstraintException::class,
++            QuickAccessConstraintException::LINK_ALREADY_EXISTS
++        );
++    }
++
++    private function getQuickAccessFromReference(string $reference): EditableQuickAccess
++    {
++        /** @var EditableQuickAccess $result */
++        $result = $this->getQueryBus()->handle(new GetQuickAccessForEditing($this->referenceToId($reference)));
++
++        return $result;
++    }
++
++    private function quickAccessExists(string $reference): bool
++    {
++        try {
++            $this->getQuickAccessFromReference($reference);
++
++            return true;
++        } catch (QuickAccessNotFoundException) {
++            return false;
++        }
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/QuickAccess/quick_access_management.feature b/tests/Integration/Behaviour/Features/Scenario/QuickAccess/quick_access_management.feature
+new file mode 100644
+index 0000000000000..204be1ce544d6
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/QuickAccess/quick_access_management.feature
+@@ -0,0 +1,129 @@
++#./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s quick_access
++@restore-all-tables-before-feature
++Feature: Quick access management
++  As an admin
++  I want to manage quick access links
++  So that I can configure the back-office quick access toolbar
++
++  Background:
++    Given language "english" with locale "en-US" exists
++    And language "french" with locale "fr-FR" exists
++
++  Scenario: Add a quick access with required fields
++    When I add a quick access "qa_orders" with the following properties:
++      | localizedNames[en-US] | Orders                     |
++      | localizedNames[fr-FR] | Commandes                  |
++      | link                  | index.php?controller=orders |
++      | new_window            | true                        |
++    Then quick access "qa_orders" should have the following properties:
++      | localizedNames[en-US] | Orders                     |
++      | localizedNames[fr-FR] | Commandes                  |
++      | link                  | index.php?controller=orders |
++      | new_window            | true                        |
++
++  Scenario: Add a quick access with new_window set to false
++    When I add a quick access "qa_catalog" with the following properties:
++      | localizedNames[en-US] | Catalog                      |
++      | localizedNames[fr-FR] | Catalogue                    |
++      | link                  | index.php?controller=catalog |
++      | new_window            | false                        |
++    Then quick access "qa_catalog" should have the following properties:
++      | localizedNames[en-US] | Catalog                      |
++      | localizedNames[fr-FR] | Catalogue                    |
++      | link                  | index.php?controller=catalog |
++      | new_window            | false                        |
++
++  Scenario: Edit a quick access - change name
++    Given I add a quick access "qa_edit" with the following properties:
++      | localizedNames[en-US] | Original name              |
++      | localizedNames[fr-FR] | Nom original               |
++      | link                  | index.php?controller=edit  |
++      | new_window            | false                      |
++    When I edit quick access "qa_edit" with the following properties:
++      | localizedNames[en-US] | Updated name    |
++      | localizedNames[fr-FR] | Nom mis à jour  |
++    Then quick access "qa_edit" should have the following properties:
++      | localizedNames[en-US] | Updated name              |
++      | localizedNames[fr-FR] | Nom mis à jour            |
++      | link                  | index.php?controller=edit |
++      | new_window            | false                     |
++
++  Scenario: Edit a quick access - change link
++    When I edit quick access "qa_edit" with the following properties:
++      | link | index.php?controller=edited-link |
++    Then quick access "qa_edit" should have the following properties:
++      | link       | index.php?controller=edited-link |
++      | new_window | false                            |
++
++  Scenario: Edit a quick access - change new_window
++    When I edit quick access "qa_edit" with the following properties:
++      | new_window | true |
++    Then quick access "qa_edit" should have the following properties:
++      | link       | index.php?controller=edited-link |
++      | new_window | true                             |
++
++  Scenario: Toggle new_window flag
++    Given I add a quick access "qa_toggle" with the following properties:
++      | localizedNames[en-US] | Toggle test                  |
++      | localizedNames[fr-FR] | Test de bascule              |
++      | link                  | index.php?controller=toggle  |
++      | new_window            | false                        |
++    When I toggle the new_window flag for quick access "qa_toggle"
++    Then quick access "qa_toggle" should have the following properties:
++      | new_window | true |
++    When I toggle the new_window flag for quick access "qa_toggle"
++    Then quick access "qa_toggle" should have the following properties:
++      | new_window | false |
++
++  Scenario: Delete a quick access
++    Given I add a quick access "qa_delete" with the following properties:
++      | localizedNames[en-US] | Delete me                    |
++      | localizedNames[fr-FR] | Supprimer moi                |
++      | link                  | index.php?controller=delete  |
++      | new_window            | false                        |
++    When I delete quick access "qa_delete"
++    Then quick access "qa_delete" should be deleted
++
++  Scenario: Bulk delete quick accesses
++    Given I add a quick access "qa_bulk1" with the following properties:
++      | localizedNames[en-US] | Bulk One                     |
++      | localizedNames[fr-FR] | Lot Un                       |
++      | link                  | index.php?controller=bulk1   |
++      | new_window            | false                        |
++    And I add a quick access "qa_bulk2" with the following properties:
++      | localizedNames[en-US] | Bulk Two                     |
++      | localizedNames[fr-FR] | Lot Deux                     |
++      | link                  | index.php?controller=bulk2   |
++      | new_window            | false                        |
++    And I add a quick access "qa_bulk3" with the following properties:
++      | localizedNames[en-US] | Bulk Three                   |
++      | localizedNames[fr-FR] | Lot Trois                    |
++      | link                  | index.php?controller=bulk3   |
++      | new_window            | false                        |
++    When I bulk delete quick accesses "qa_bulk1,qa_bulk2"
++    Then quick accesses "qa_bulk1,qa_bulk2" should be deleted
++    And quick access "qa_bulk3" should have the following properties:
++      | link | index.php?controller=bulk3 |
++
++  Scenario: Cannot add quick access with duplicate link
++    Given I add a quick access "qa_dup" with the following properties:
++      | localizedNames[en-US] | Duplicate test               |
++      | localizedNames[fr-FR] | Test dupliqué                |
++      | link                  | index.php?controller=dup     |
++      | new_window            | false                        |
++    When I add a quick access "qa_dup2" with the following properties:
++      | localizedNames[en-US] | Duplicate test 2             |
++      | localizedNames[fr-FR] | Test dupliqué 2              |
++      | link                  | index.php?controller=dup     |
++      | new_window            | false                        |
++    Then I should get error that quick access link already exists
++
++  Scenario: Cannot delete a non-existent quick access
++    Given quick access "qa_ghost" does not exist
++    When I delete quick access "qa_ghost"
++    Then I should get error that quick access was not found
++
++  Scenario: Cannot toggle a non-existent quick access
++    Given quick access "qa_ghost2" does not exist
++    When I toggle the new_window flag for quick access "qa_ghost2"
++    Then I should get error that quick access was not found
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 05d596303261d..b70dcc5ac884b 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -45,6 +45,13 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\TitleFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\TitleFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++    quick_access:
++      paths:
++        - "%paths.base%/Features/Scenario/QuickAccess"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\QuickAccessFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+     store:
+       paths:
+         - "%paths.base%/Features/Scenario/Store"

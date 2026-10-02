@@ -1,0 +1,723 @@
+diff --git a/composer.json b/composer.json
+index 9f606ffcc6591..2b916f37de52d 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/hummingbird": "^2.1",
+         "prestashop/pagesnotfound": "^4",
+         "prestashop/productcomments": "^8.0",
+-        "prestashop/ps_apiresources": "^0.8.0",
++        "prestashop/ps_apiresources": "dev-taxrules-list",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^2.0",
+         "prestashop/ps_brandlist": "^1.0",
+diff --git a/composer.lock b/composer.lock
+index 0f17e00fbedfa..8126feb95b2bf 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "eea381d521e3ae3831f1cdab7fb90a0a",
++    "content-hash": "5af655fb448c617686550abe39d33d2d",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5211,16 +5211,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "v0.8.0",
++            "version": "dev-taxrules-list",
+             "source": {
+                 "type": "git",
+                 "url": "https://github.com/PrestaShop/ps_apiresources.git",
+-                "reference": "86d4883698e4e132b357e512f09eff0e773e029f"
++                "reference": "4f2124baf5e6f7dd1a530c98ec9ffae4474411ef"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/86d4883698e4e132b357e512f09eff0e773e029f",
+-                "reference": "86d4883698e4e132b357e512f09eff0e773e029f",
++                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/4f2124baf5e6f7dd1a530c98ec9ffae4474411ef",
++                "reference": "4f2124baf5e6f7dd1a530c98ec9ffae4474411ef",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5300,10 +5300,10 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/PrestaShop/ps_apiresources/tree/v0.8.0",
++                "source": "https://github.com/PrestaShop/ps_apiresources/tree/taxrules-list",
+                 "issues": "https://github.com/PrestaShop/ps_apiresources/issues"
+             },
+-            "time": "2026-07-07T17:24:43+00:00"
++            "time": "2026-07-30T12:05:03+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -18480,7 +18480,9 @@
+     ],
+     "aliases": [],
+     "minimum-stability": "dev",
+-    "stability-flags": {},
++    "stability-flags": {
++        "prestashop/ps_apiresources": 20
++    },
+     "prefer-stable": true,
+     "prefer-lowest": false,
+     "platform": {
+diff --git a/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php b/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php
+index 717b8ca27c01a..2f142118bffe1 100644
+--- a/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php
++++ b/src/Adapter/TaxRulesGroup/CommandHandler/AddTaxRuleHandler.php
+@@ -16,6 +16,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Command\AddTaxRuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandHandler\AddTaxRuleHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult\AddTaxRuleResult;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
+ use TaxRule;
+ 
+ /**
+@@ -45,13 +46,14 @@ public function handle(AddTaxRuleCommand $command): AddTaxRuleResult
+ 
+         $taxRulesGroup = $this->taxRulesGroupRepository->get($newGroupId);
+ 
++        $taxRuleIds = [];
+         foreach ($countryIds as $countryId) {
+             foreach ($stateIds as $stateId) {
+                 if ($taxRulesGroup->hasUniqueTaxRuleForCountry($countryId, $stateId)) {
+                     continue;
+                 }
+ 
+-                $this->createTaxRule(
++                $taxRuleIds[] = $this->createTaxRule(
+                     $newGroupId->getValue(),
+                     $countryId,
+                     $stateId,
+@@ -60,7 +62,7 @@ public function handle(AddTaxRuleCommand $command): AddTaxRuleResult
+             }
+         }
+ 
+-        return new AddTaxRuleResult($newGroupId);
++        return new AddTaxRuleResult($newGroupId, $taxRuleIds);
+     }
+ 
+     /**
+@@ -88,13 +90,15 @@ private function resolveCountryIds(int $countryId): array
+      * @param int $countryId
+      * @param int $stateId
+      * @param AddTaxRuleCommand $command
++     *
++     * @return TaxRuleId
+      */
+     private function createTaxRule(
+         int $taxRulesGroupId,
+         int $countryId,
+         int $stateId,
+         AddTaxRuleCommand $command
+-    ): void {
++    ): TaxRuleId {
+         $taxRule = new TaxRule();
+         $taxRule->id_tax_rules_group = $taxRulesGroupId;
+         $taxRule->id_country = $countryId;
+@@ -115,6 +119,6 @@ private function createTaxRule(
+             $taxRule->zipcode_to = $zipcodeTo;
+         }
+ 
+-        $this->taxRuleRepository->add($taxRule);
++        return $this->taxRuleRepository->add($taxRule);
+     }
+ }
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php
+index 1a777e8602407..c7f6564e9d3ca 100644
+--- a/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/CommandResult/AddTaxRuleResult.php
+@@ -8,6 +8,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\CommandResult;
+ 
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\ValueObject\TaxRuleId;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
+ 
+ /**
+@@ -21,12 +22,20 @@ class AddTaxRuleResult
+      */
+     private TaxRulesGroupId $taxRulesGroupId;
+ 
++    /**
++     * @var TaxRuleId[]
++     */
++    private array $taxRuleIds;
++
+     /**
+      * @param TaxRulesGroupId $taxRulesGroupId the (potentially new) group id after historization
++     * @param TaxRuleId[] $taxRuleIds the ids of the tax rule(s) actually created (can be fewer than requested
++     *                                when a country/state pair already had a unique rule)
+      */
+-    public function __construct(TaxRulesGroupId $taxRulesGroupId)
++    public function __construct(TaxRulesGroupId $taxRulesGroupId, array $taxRuleIds = [])
+     {
+         $this->taxRulesGroupId = $taxRulesGroupId;
++        $this->taxRuleIds = $taxRuleIds;
+     }
+ 
+     /**
+@@ -36,4 +45,12 @@ public function getTaxRulesGroupId(): TaxRulesGroupId
+     {
+         return $this->taxRulesGroupId;
+     }
++
++    /**
++     * @return TaxRuleId[]
++     */
++    public function getTaxRuleIds(): array
++    {
++        return $this->taxRuleIds;
++    }
+ }
+diff --git a/src/Core/Grid/Query/TaxRuleQueryBuilder.php b/src/Core/Grid/Query/TaxRuleQueryBuilder.php
+index b87117014bed3..85407849559f5 100644
+--- a/src/Core/Grid/Query/TaxRuleQueryBuilder.php
++++ b/src/Core/Grid/Query/TaxRuleQueryBuilder.php
+@@ -52,7 +52,9 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+                 'tr.`id_tax_rule`',
+                 'tr.`id_tax_rules_group`',
+                 'tr.`description`',
++                'tr.`id_country` AS country_id',
+                 'cl.`name` AS country_name',
++                'tr.`id_state` AS state_id',
+                 'IFNULL(s.`name`, \'--\') AS state_name',
+                 'CASE '
+                     . ' WHEN CONCAT_WS(\' - \', tr.`zipcode_from`, tr.`zipcode_to`) = \'0 - 0\''
+@@ -60,6 +62,7 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+                 . ' END AS zipcode',
+                 'tr.behavior',
+                 't.rate',
++                'txl.`name` AS tax_name',
+             ])
+         ;
+ 
+@@ -117,9 +120,21 @@ private function getQueryBuilder(array $filters): QueryBuilder
+                 't',
+                 'tr.`id_tax` = t.`id_tax`'
+             )
+-            ->andWhere('tr.`id_tax_rules_group` = :idTaxRulesGroup')
+-            ->setParameter('idLang', $this->languageContext->getId())
+-            ->setParameter('idTaxRulesGroup', $filters['taxRulesGroupId']);
++            ->leftJoin(
++                't',
++                $this->dbPrefix . 'tax_lang',
++                'txl',
++                't.`id_tax` = txl.`id_tax` AND txl.`id_lang` = :idLang'
++            )
++            ->setParameter('idLang', $this->languageContext->getId());
++
++        // The tax rules group filter is optional: without it the query lists tax rules across all groups
++        $taxRulesGroupId = $filters['taxRulesGroupId'] ?? $filters['id_tax_rules_group'] ?? null;
++        if (!empty($taxRulesGroupId)) {
++            $qb
++                ->andWhere('tr.`id_tax_rules_group` = :idTaxRulesGroup')
++                ->setParameter('idTaxRulesGroup', (int) $taxRulesGroupId);
++        }
+ 
+         $this->applyFilters($qb, $filters);
+ 
+@@ -132,7 +147,9 @@ private function getQueryBuilder(array $filters): QueryBuilder
+      */
+     private function applyFilters(QueryBuilder $qb, array $filters): void
+     {
+-        $allowedFilters = ['country', 'state', 'zipcode', 'behavior', 'rate', 'description'];
++        // country_id, country_name, state_name and tax_name match the column aliases so the same field
++        // names can be used for both filtering and sorting (needed by the Admin API listing)
++        $allowedFilters = ['country', 'country_id', 'country_name', 'state', 'state_name', 'zipcode', 'behavior', 'rate', 'tax_name', 'description'];
+ 
+         foreach ($filters as $filterName => $filterValue) {
+             if (!in_array($filterName, $allowedFilters) || ($filterValue === '' || $filterValue === null)) {
+@@ -141,13 +158,23 @@ private function applyFilters(QueryBuilder $qb, array $filters): void
+ 
+             switch ($filterName) {
+                 case 'country':
++                case 'country_name':
+                     $qb->andWhere('cl.`name` LIKE :country');
+                     $qb->setParameter('country', '%' . $filterValue . '%');
+                     break;
++                case 'country_id':
++                    $qb->andWhere('tr.`id_country` = :countryId');
++                    $qb->setParameter('countryId', (int) $filterValue);
++                    break;
+                 case 'state':
++                case 'state_name':
+                     $qb->andWhere('s.`name` LIKE :state');
+                     $qb->setParameter('state', '%' . $filterValue . '%');
+                     break;
++                case 'tax_name':
++                    $qb->andWhere('txl.`name` LIKE :taxName');
++                    $qb->setParameter('taxName', '%' . $filterValue . '%');
++                    break;
+                 case 'zipcode':
+                     $qb->andWhere('(tr.`zipcode_from` LIKE :zipcode OR tr.`zipcode_to` LIKE :zipcode)');
+                     $qb->setParameter('zipcode', '%' . $filterValue . '%');
+diff --git a/tests/UI/campaigns/functional/API/02_checkEndpoints.ts b/tests/UI/campaigns/functional/API/02_checkEndpoints.ts
+index 1b368121c5daa..3f35492c4cd61 100644
+--- a/tests/UI/campaigns/functional/API/02_checkEndpoints.ts
++++ b/tests/UI/campaigns/functional/API/02_checkEndpoints.ts
+@@ -4,15 +4,16 @@ import {expect} from 'chai';
+ import {
+   boApiClientsPage,
+   boDashboardPage,
++  boFeatureFlagPage,
+   boLoginPage,
+   type BrowserContext,
+   type Page,
+   utilsPlaywright,
+ } from '@prestashop-core/ui-testing';
++import setFeatureFlag from '@commonTests/BO/advancedParameters/newFeatures';
+ 
+ const baseContext: string = 'functional_API_checkEndpoints';
+ 
+-// @todo : https://github.com/PrestaShop/PrestaShop/issues/41109
+ // Dear developers, the CI is broken when you update the module ps_apiresources on the Core.
+ // It's normal : it's time to add them UI Tests.
+ describe('API : Check endpoints', async () => {
+@@ -51,6 +52,9 @@ describe('API : Check endpoints', async () => {
+     '/api-clients: GET',
+     // tests/UI/campaigns/functional/API/02_endpoints/apiClient/05_postApiClient.ts
+     '/api-clients: POST',
++    '/attachments/search: GET',
++    '/attachments/{attachmentId}/files: GET',
++    '/attachments/{attachmentId}/information: GET',
+     // @todo: add tests
+     '/attributes/attributes/bulk-delete: DELETE',
+     // tests/UI/campaigns/functional/API/02_endpoints/attribute/01_deleteAttributesAttributeId.ts
+@@ -81,6 +85,7 @@ describe('API : Check endpoints', async () => {
+     '/attributes/groups: POST',
+     // @todo: add tests
+     '/cart-rules/search: GET',
++    '/carts/{cartId}/emails: PUT',
+     // @todo: add tests
+     '/categories/bulk-delete/{deleteMode}: DELETE',
+     // @todo: add tests
+@@ -135,6 +140,7 @@ describe('API : Check endpoints', async () => {
+     '/customers/groups: GET',
+     // tests/UI/campaigns/functional/API/02_endpoints/customerGroup/05_postCustomersGroup.ts
+     '/customers/groups: POST',
++    '/customers/required-fields: PUT',
+     // @todo: add tests
+     '/customers/search: GET',
+     // @todo: add tests
+@@ -148,23 +154,23 @@ describe('API : Check endpoints', async () => {
+     // @todo: add tests
+     '/customers: POST',
+     // @todo: add tests
+-    //'/discounts/bulk-delete: DELETE',
++    '/discounts/bulk-delete: DELETE',
+     // @todo: add tests
+-    //'/discounts/bulk-update-status: PATCH',
++    '/discounts/bulk-update-status: PATCH',
+     // tests/UI/campaigns/functional/API/02_endpoints/discount/01_getDiscountTypes.ts
+-    //'/discounts/types: GET',
++    '/discounts/types: GET',
+     // @todo: add tests
+-    //'/discounts/{discountId}/duplicate: POST',
++    '/discounts/{discountId}/duplicate: POST',
+     // tests/UI/campaigns/functional/API/02_endpoints/discount/02_deleteDiscountsDiscountsId.ts
+-    //'/discounts/{discountId}: DELETE',
++    '/discounts/{discountId}: DELETE',
+     // @todo : https://github.com/PrestaShop/PrestaShop/issues/38647
+-    //'/discounts/{discountId}: GET',
++    '/discounts/{discountId}: GET',
+     // @todo : https://github.com/PrestaShop/PrestaShop/issues/39682
+-    //'/discounts/{discountId}: PATCH',
++    '/discounts/{discountId}: PATCH',
+     // tests/UI/campaigns/functional/API/02_endpoints/discount/03_getDiscounts.ts
+-    //'/discounts: GET',
++    '/discounts: GET',
+     // tests/UI/campaigns/functional/API/02_endpoints/discount/03_postDiscounts.ts
+-    //'/discounts: POST',
++    '/discounts: POST',
+     // @todo: add tests
+     '/features/bulk-delete: DELETE',
+     // @todo: add tests
+@@ -312,6 +318,8 @@ describe('API : Check endpoints', async () => {
+     // @todo: add tests
+     '/search-aliases/{searchTerm}: PUT',
+     // @todo: add tests
++    '/search-aliases: GET',
++    // @todo: add tests
+     '/search-aliases: POST',
+     // tests/UI/campaigns/functional/API/02_endpoints/searchAlias/01_deleteSearch.ts
+     // '/search-aliases: DELETE',
+@@ -379,6 +387,9 @@ describe('API : Check endpoints', async () => {
+     '/tax-rules-groups: GET',
+     // @todo: add tests
+     '/tax-rules-groups: POST',
++    '/tax-rules/{taxRuleId}: DELETE',
++    '/tax-rules: GET',
++    '/tax-rules: POST',
+     // @todo: add tests
+     '/taxes/bulk-delete: PUT',
+     // @todo: add tests
+@@ -443,6 +454,8 @@ describe('API : Check endpoints', async () => {
+     await utilsPlaywright.closeBrowserContext(browserContext);
+   });
+ 
++  setFeatureFlag(boFeatureFlagPage.featureFlagExperimentalEndpoints, true, `${baseContext}_preTest_0`);
++
+   describe('Check endpoints', async () => {
+     it('should login in BO', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'loginBO', baseContext);
+@@ -503,7 +516,7 @@ describe('API : Check endpoints', async () => {
+       //console.log(endpoints);
+ 
+       // @todo : Check regulary
+-      //expect(endpoints).to.deep.equals(subsetEndpoints);
++      expect(endpoints).to.deep.equals(subsetEndpoints);
+ 
+       expect(endpoints.length).to.be.greaterThan(0);
+       subsetEndpoints.forEach((endpoint: string) => {
+@@ -514,4 +527,6 @@ describe('API : Check endpoints', async () => {
+       });
+     });
+   });
++
++  setFeatureFlag(boFeatureFlagPage.featureFlagExperimentalEndpoints, false, `${baseContext}_postTest_0`);
+ });
+diff --git a/tests/Unit/Core/Grid/Query/TaxRuleQueryBuilderTest.php b/tests/Unit/Core/Grid/Query/TaxRuleQueryBuilderTest.php
+new file mode 100644
+index 0000000000000..a7be5e00393ea
+--- /dev/null
++++ b/tests/Unit/Core/Grid/Query/TaxRuleQueryBuilderTest.php
+@@ -0,0 +1,330 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Grid\Query;
++
++use Doctrine\DBAL\Connection;
++use Doctrine\DBAL\Query\Expression\CompositeExpression;
++use Doctrine\DBAL\Query\QueryBuilder;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Grid\Query\DoctrineSearchCriteriaApplicatorInterface;
++use PrestaShop\PrestaShop\Core\Grid\Query\TaxRuleQueryBuilder;
++use PrestaShop\PrestaShop\Core\Search\Filters;
++use PrestaShop\PrestaShop\Core\Search\Filters\TaxRuleFilters;
++
++class TaxRuleQueryBuilderTest extends TestCase
++{
++    private const DB_PREFIX = 'ps_';
++    private const LANGUAGE_ID = 1;
++
++    private function getMockConnection(): Connection
++    {
++        $mock = $this->createMock(Connection::class);
++
++        $mock->method('createQueryBuilder')->willReturn(
++            $this->getMockQueryBuilder()
++        );
++
++        return $mock;
++    }
++
++    private function getMockQueryBuilder(): QueryBuilder
++    {
++        return $this->createPartialMock(QueryBuilder::class, []);
++    }
++
++    private function getFilters(): TaxRuleFilters
++    {
++        return new TaxRuleFilters(TaxRuleFilters::getDefaults());
++    }
++
++    private function getMockDoctrineSearchCriteriaApplicatorInterface(): DoctrineSearchCriteriaApplicatorInterface
++    {
++        $mock = $this->createMock(DoctrineSearchCriteriaApplicatorInterface::class);
++
++        $mock->method('applyPagination')->willReturnSelf();
++        $mock->method('applySorting')->willReturnSelf();
++
++        return $mock;
++    }
++
++    private function getMockLanguageContext(): LanguageContext
++    {
++        $mock = $this->createMock(LanguageContext::class);
++
++        $mock->method('getId')->willReturn(self::LANGUAGE_ID);
++
++        return $mock;
++    }
++
++    /**
++     * @dataProvider dataProviderQueryBuilder
++     *
++     * @param Filters $filters
++     * @param array $qbQueryParts
++     * @param array $qbQueryPartsCount
++     * @param array $qbParameters
++     *
++     * @return void
++     */
++    public function testQueryBuild(Filters $filters, array $qbQueryParts, array $qbQueryPartsCount, array $qbParameters): void
++    {
++        $queryBuilder = new TaxRuleQueryBuilder(
++            $this->getMockConnection(),
++            self::DB_PREFIX,
++            $this->getMockDoctrineSearchCriteriaApplicatorInterface(),
++            $this->getMockLanguageContext()
++        );
++
++        $qb = $queryBuilder->getSearchQueryBuilder($filters);
++
++        $this->assertEquals(
++            $qbQueryParts,
++            $qb->getQueryParts()
++        );
++
++        $this->assertEquals(
++            $qbParameters,
++            $qb->getParameters()
++        );
++    }
++
++    /**
++     * @dataProvider dataProviderQueryBuilder
++     *
++     * @param Filters $filters
++     * @param array $qbQueryParts
++     * @param array $qbQueryPartsCount
++     * @param array $qbParameters
++     *
++     * @return void
++     */
++    public function testCountQueryBuild(Filters $filters, array $qbQueryParts, array $qbQueryPartsCount, array $qbParameters): void
++    {
++        $queryBuilder = new TaxRuleQueryBuilder(
++            $this->getMockConnection(),
++            self::DB_PREFIX,
++            $this->getMockDoctrineSearchCriteriaApplicatorInterface(),
++            $this->getMockLanguageContext()
++        );
++
++        $qb = $queryBuilder->getCountQueryBuilder($filters);
++
++        $this->assertEquals(
++            $qbQueryPartsCount,
++            $qb->getQueryParts()
++        );
++
++        $this->assertEquals(
++            $qbParameters,
++            $qb->getParameters()
++        );
++    }
++
++    public function dataProviderQueryBuilder(): iterable
++    {
++        $select = [
++            'tr.`id_tax_rule`',
++            'tr.`id_tax_rules_group`',
++            'tr.`description`',
++            'tr.`id_country` AS country_id',
++            'cl.`name` AS country_name',
++            'tr.`id_state` AS state_id',
++            'IFNULL(s.`name`, \'--\') AS state_name',
++            'CASE '
++                . ' WHEN CONCAT_WS(\' - \', tr.`zipcode_from`, tr.`zipcode_to`) = \'0 - 0\''
++                . ' THEN \'--\' ELSE CONCAT_WS(\' - \', tr.`zipcode_from`, tr.`zipcode_to`)'
++            . ' END AS zipcode',
++            'tr.behavior',
++            't.rate',
++            'txl.`name` AS tax_name',
++        ];
++        $countSelect = ['COUNT(DISTINCT tr.`id_tax_rule`)'];
++
++        // Default: no filter at all, the query lists tax rules across all groups
++        $defaultFilters = $this->getFilters();
++        $defaultQueryParts = [
++            'select' => $select,
++            'distinct' => false,
++            'from' => [
++                [
++                    'table' => self::DB_PREFIX . 'tax_rule',
++                    'alias' => 'tr',
++                ],
++            ],
++            'join' => [
++                'tr' => [
++                    [
++                        'joinType' => 'left',
++                        'joinTable' => self::DB_PREFIX . 'country',
++                        'joinAlias' => 'c',
++                        'joinCondition' => 'tr.`id_country` = c.`id_country`',
++                    ],
++                    [
++                        'joinType' => 'left',
++                        'joinTable' => self::DB_PREFIX . 'country_lang',
++                        'joinAlias' => 'cl',
++                        'joinCondition' => 'tr.`id_country` = cl.`id_country` AND cl.`id_lang` = :idLang ',
++                    ],
++                    [
++                        'joinType' => 'left',
++                        'joinTable' => self::DB_PREFIX . 'state',
++                        'joinAlias' => 's',
++                        'joinCondition' => 'tr.`id_country` = s.`id_country` AND tr.`id_state` = s.`id_state`',
++                    ],
++                    [
++                        'joinType' => 'left',
++                        'joinTable' => self::DB_PREFIX . 'tax',
++                        'joinAlias' => 't',
++                        'joinCondition' => 'tr.`id_tax` = t.`id_tax`',
++                    ],
++                ],
++                't' => [
++                    [
++                        'joinType' => 'left',
++                        'joinTable' => self::DB_PREFIX . 'tax_lang',
++                        'joinAlias' => 'txl',
++                        'joinCondition' => 't.`id_tax` = txl.`id_tax` AND txl.`id_lang` = :idLang',
++                    ],
++                ],
++            ],
++            'set' => [],
++            'where' => null,
++            'groupBy' => [],
++            'having' => null,
++            'orderBy' => [],
++            'values' => [],
++            'for_update' => null,
++        ];
++        $defaultParameters = [
++            'idLang' => self::LANGUAGE_ID,
++        ];
++
++        yield 'no filter' => [
++            $defaultFilters,
++            $defaultQueryParts,
++            array_merge($defaultQueryParts, ['select' => $countSelect]),
++            $defaultParameters,
++        ];
++
++        // Scoped to a tax rules group
++        $groupFilters = clone $defaultFilters;
++        $groupFilters->addFilter([
++            'taxRulesGroupId' => 2,
++        ]);
++        $groupQueryParts = $defaultQueryParts;
++        $groupQueryParts['where'] = 'tr.`id_tax_rules_group` = :idTaxRulesGroup';
++        $groupParameters = $defaultParameters;
++        $groupParameters['idTaxRulesGroup'] = 2;
++
++        yield 'tax rules group filter' => [
++            $groupFilters,
++            $groupQueryParts,
++            array_merge($groupQueryParts, ['select' => $countSelect]),
++            $groupParameters,
++        ];
++
++        // Scoped to a tax rules group using the column alias key (used by the Admin API)
++        $groupAliasFilters = clone $defaultFilters;
++        $groupAliasFilters->addFilter([
++            'id_tax_rules_group' => 2,
++        ]);
++
++        yield 'tax rules group filter with column alias key' => [
++            $groupAliasFilters,
++            $groupQueryParts,
++            array_merge($groupQueryParts, ['select' => $countSelect]),
++            $groupParameters,
++        ];
++
++        // Column alias filters (used by the Admin API): country_name, tax_name and behavior
++        $aliasFilters = clone $defaultFilters;
++        $aliasFilters->addFilter([
++            'taxRulesGroupId' => 2,
++            'country_name' => 'Fra',
++            'tax_name' => 'VAT',
++            'behavior' => 1,
++        ]);
++        $aliasQueryParts = $defaultQueryParts;
++        $aliasQueryParts['where'] = new CompositeExpression(
++            'AND',
++            [
++                'tr.`id_tax_rules_group` = :idTaxRulesGroup',
++                'cl.`name` LIKE :country',
++                'txl.`name` LIKE :taxName',
++                'tr.`behavior` = :behavior',
++            ]
++        );
++        $aliasParameters = $defaultParameters;
++        $aliasParameters['idTaxRulesGroup'] = 2;
++        $aliasParameters['country'] = '%Fra%';
++        $aliasParameters['taxName'] = '%VAT%';
++        $aliasParameters['behavior'] = 1;
++
++        yield 'column alias filters' => [
++            $aliasFilters,
++            $aliasQueryParts,
++            array_merge($aliasQueryParts, ['select' => $countSelect]),
++            $aliasParameters,
++        ];
++
++        // Country id filter (used by the Admin API): filters on the raw id_country column
++        $countryIdFilters = clone $defaultFilters;
++        $countryIdFilters->addFilter([
++            'taxRulesGroupId' => 2,
++            'country_id' => 8,
++        ]);
++        $countryIdQueryParts = $defaultQueryParts;
++        $countryIdQueryParts['where'] = new CompositeExpression(
++            'AND',
++            [
++                'tr.`id_tax_rules_group` = :idTaxRulesGroup',
++                'tr.`id_country` = :countryId',
++            ]
++        );
++        $countryIdParameters = $defaultParameters;
++        $countryIdParameters['idTaxRulesGroup'] = 2;
++        $countryIdParameters['countryId'] = 8;
++
++        yield 'country id filter' => [
++            $countryIdFilters,
++            $countryIdQueryParts,
++            array_merge($countryIdQueryParts, ['select' => $countSelect]),
++            $countryIdParameters,
++        ];
++
++        // Legacy filter keys used by the back office grid still work
++        $legacyFilters = clone $defaultFilters;
++        $legacyFilters->addFilter([
++            'taxRulesGroupId' => 2,
++            'country' => 'Fra',
++            'state' => 'Cal',
++        ]);
++        $legacyQueryParts = $defaultQueryParts;
++        $legacyQueryParts['where'] = new CompositeExpression(
++            'AND',
++            [
++                'tr.`id_tax_rules_group` = :idTaxRulesGroup',
++                'cl.`name` LIKE :country',
++                's.`name` LIKE :state',
++            ]
++        );
++        $legacyParameters = $defaultParameters;
++        $legacyParameters['idTaxRulesGroup'] = 2;
++        $legacyParameters['country'] = '%Fra%';
++        $legacyParameters['state'] = '%Cal%';
++
++        yield 'legacy back office filter keys' => [
++            $legacyFilters,
++            $legacyQueryParts,
++            array_merge($legacyQueryParts, ['select' => $countSelect]),
++            $legacyParameters,
++        ];
++    }
++}

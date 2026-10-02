@@ -1,0 +1,140 @@
+diff --git a/classes/Product.php b/classes/Product.php
+index ad677682f054b..7175a9c1ce992 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -399,6 +399,14 @@ class ProductCore extends ObjectModel
+     /** @var array */
+     protected static $_combinations = [];
+ 
++    /**
++     * Associations between the ids of base combinations and their duplicates.
++     * Used for duplicating specific prices when duplicating a product.
++     *
++     * @var array
++     */
++    protected static $_combination_associations = [];
++
+     /**
+      * @deprecated Since 1.5.6.1
+      *
+@@ -4964,6 +4972,7 @@ public static function duplicateAttributes($id_product_old, $id_product_new)
+             $return &= $combination->save();
+ 
+             $id_product_attribute_new = (int) $combination->id;
++            self::$_combination_associations[$id_product_attribute_old] = $id_product_attribute_new;
+ 
+             if ($result_images = Product::_getAttributeImageAssociations($id_product_attribute_old)) {
+                 $combination_images['old'][$id_product_attribute_old] = $result_images;
+@@ -5363,7 +5372,7 @@ public static function duplicateSpecificPrices($old_product_id, $product_id)
+     {
+         foreach (SpecificPrice::getIdsByProductId((int) $old_product_id) as $data) {
+             $specific_price = new SpecificPrice((int) $data['id_specific_price']);
+-            if (!$specific_price->duplicate((int) $product_id)) {
++            if (!$specific_price->duplicate((int) $product_id, self::$_combination_associations)) {
+                 return false;
+             }
+         }
+diff --git a/classes/SpecificPrice.php b/classes/SpecificPrice.php
+index 33f03b040e5e5..e21676eca4d1b 100644
+--- a/classes/SpecificPrice.php
++++ b/classes/SpecificPrice.php
+@@ -213,11 +213,11 @@ public static function deleteByIdCart($id_cart, $id_product = false, $id_product
+     public static function getIdsByProductId($id_product, $id_product_attribute = false, $id_cart = 0)
+     {
+         return Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS('
+-			SELECT `id_specific_price`
+-			FROM `' . _DB_PREFIX_ . 'specific_price`
+-			WHERE `id_product` = ' . (int) $id_product . '
+-			AND id_product_attribute=' . (int) $id_product_attribute . '
+-			AND id_cart=' . (int) $id_cart);
++            SELECT `id_specific_price`
++            FROM `' . _DB_PREFIX_ . 'specific_price`
++            WHERE `id_product` = ' . (int) $id_product .
++            ($id_product_attribute !== false ? ' AND id_product_attribute = ' . (int) $id_product_attribute : '') . '
++            AND id_cart = ' . (int) $id_cart);
+     }
+ 
+     /**
+@@ -716,14 +716,18 @@ public static function deleteByProductId($id_product)
+      * Duplicate a product.
+      *
+      * @param bool|int $id_product The product ID to duplicate, false when duplicating the current product
++     * @param array $combination_associations Associations between the ids of base combinations and their duplicates
+      *
+      * @return bool
+      */
+-    public function duplicate($id_product = false)
++    public function duplicate($id_product = false, array $combination_associations = []): bool
+     {
+         if ($id_product) {
+             $this->id_product = (int) $id_product;
+         }
++        if ($this->id_product_attribute && isset($combination_associations[$this->id_product_attribute])) {
++            $this->id_product_attribute = (int) $combination_associations[$this->id_product_attribute];
++        }
+         unset($this->id);
+         // specific price row may already have been created for catalog specific price rule
+         if (static::exists(
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+index 4557d5fcbbb7b..bd5dc5a726726 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Product/duplicate_product.feature
+@@ -19,6 +19,9 @@ Feature: Duplicate product from Back Office (BO).
+     And language "language2" with locale "fr-FR" exists
+     And carrier carrier1 named "ecoCarrier" exists
+     And carrier carrier2 named "Fast carry" exists
++    And attribute group "Color" named "Color" in en language exists
++    And attribute "Red" named "Red" in en language exists
++    And attribute "Blue" named "Blue" in en language exists
+     Given I add product "product1" with following information:
+       | name[en-US] | smart sunglasses   |
+       | name[fr-FR] | lunettes de soleil |
+@@ -112,6 +115,13 @@ Feature: Duplicate product from Back Office (BO).
+     And product product1 should have following seo options:
+       | redirect_type   | 301-product |
+       | redirect_target | product2    |
++    When I add a specific price specific_price1 to product product1 with following details:
++      | price           | 0.00   |
++      | reduction type  | amount |
++      | reduction value | 5.00   |
++      | includes tax    | true   |
++      | from quantity   | 1      |
++    Then product "product1" should have 1 specific prices
+ 
+   Scenario: I duplicate product
+ #todo: add specific prices & priorities, test combinations, packs
+@@ -203,5 +213,34 @@ Feature: Duplicate product from Back Office (BO).
+     And product copy_of_product1 should have identical customization fields to product1
+     And product copy_of_product1 should have 1 customizable text field
+     And product copy_of_product1 should have 0 customizable file fields
++    And product "copy_of_product1" should have 1 specific prices
+ #@todo: assert stock info
+ #@todo: add tests for other type of products Pack, Virtual, Combinations
++
++  Scenario: I duplicate product with combinations
++    When I add product product_with_combinations with following information:
++      | name[en-US] | Jar of sand  |
++      | type        | combinations |
++    And I generate combinations for product product_with_combinations using following attributes:
++      | Color | [Red,Blue] |
++    Then product "product_with_combinations" should have following combinations:
++      | id reference                   | combination name | reference | attributes    | impact on price | quantity | is default |
++      | product_with_combinationsRed   | Color - Red      |           | [Color:Red]   | 0               | 0        | true       |
++      | product_with_combinationsBlue  | Color - Blue     |           | [Color:Blue]  | 0               | 0        | false      |
++    When I add a specific price specific_price1 to product product_with_combinations with following details:
++      | price           | 123.00                       |
++      | combination     | product_with_combinationsRed |
++      | reduction type  | amount                       |
++      | reduction value | 0.00                         |
++      | includes tax    | true                         |
++      | from quantity   | 1                            |
++    And I add a specific price specific_price2 to product product_with_combinations with following details:
++      | price           | 0.00   |
++      | reduction type  | amount |
++      | reduction value | 5.00   |
++      | includes tax    | true   |
++      | from quantity   | 1      |
++    Then product "product_with_combinations" should have 2 specific prices
++    When I duplicate product product_with_combinations to a copy_of_product_with_combinations
++    Then product "copy_of_product_with_combinations" should have 2 specific prices
++    # TODO: all sorts of other checks

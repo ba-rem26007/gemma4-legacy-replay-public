@@ -1,0 +1,380 @@
+diff --git a/src/Core/Grid/Query/OrderQueryBuilder.php b/src/Core/Grid/Query/OrderQueryBuilder.php
+index 078f33de16825..c809da3dde90d 100644
+--- a/src/Core/Grid/Query/OrderQueryBuilder.php
++++ b/src/Core/Grid/Query/OrderQueryBuilder.php
+@@ -66,27 +66,63 @@ public function __construct(
+      */
+     public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+     {
+-        $qb = $this
++        // WHY: id-first pagination (#41916). The display query streams 20+ columns plus a
++        // correlated "new customer" sub-select for every row; because the ORDER BY forces a
++        // filesort, the database evaluates all of that for EVERY matching order before the
++        // LIMIT — seconds on shops with tens of thousands of orders. Resolve the paginated
++        // page of order ids first (only the joins/filters/sort needed to select and order
++        // them), then hydrate the display columns for just those rows.
++        $paginatedIdsQb = $this
+             ->getBaseQueryBuilder($searchCriteria->getFilters())
+-            ->addSelect($this->getCustomerField() . ' AS `customer`')
++            ->select('o.id_order')
++        ;
++        $paginatedIdsQb = $this->applyNewCustomerFilter($paginatedIdsQb, $searchCriteria->getFilters());
++        // WHY: no `customer` SELECT alias exists in the id-only query, so sort by its expression.
++        $this->applySorting($paginatedIdsQb, $searchCriteria, $this->getCustomerField());
++        $this->criteriaApplicator
++            ->applyPagination($searchCriteria, $paginatedIdsQb)
++            ->applyDeterministicSorting($searchCriteria, $paginatedIdsQb, 'o', 'id_order')
++        ;
++
++        $qb = $this->connection
++            ->createQueryBuilder()
++            ->select($this->getCustomerField() . ' AS `customer`')
+             ->addSelect('o.id_order, o.reference, o.total_paid_tax_incl, os.paid, osl.name AS osname')
+             ->addSelect('o.id_currency, cur.iso_code')
+             ->addSelect('o.current_state, o.id_customer')
+             ->addSelect('cu.`id_customer` IS NULL as `deleted_customer`')
+             ->addSelect('os.color, o.payment, s.name AS shop_name')
+             ->addSelect('o.date_add, cu.company, cl.name AS country_name, o.invoice_number, o.delivery_number')
++            ->from('(' . $paginatedIdsQb->getSQL() . ')', 'paginated')
++            ->innerJoin('paginated', $this->dbPrefix . 'orders', 'o', 'o.id_order = paginated.id_order')
++            ->leftJoin('o', $this->dbPrefix . 'customer', 'cu', 'o.id_customer = cu.id_customer')
++            ->leftJoin('o', $this->dbPrefix . 'currency', 'cur', 'o.id_currency = cur.id_currency')
++            ->innerJoin('o', $this->dbPrefix . 'address', 'a', 'o.id_address_delivery = a.id_address')
++            ->innerJoin('a', $this->dbPrefix . 'country', 'c', 'a.id_country = c.id_country')
++            ->innerJoin(
++                'c',
++                $this->dbPrefix . 'country_lang',
++                'cl',
++                'c.id_country = cl.id_country AND cl.id_lang = :context_lang_id'
++            )
++            ->leftJoin('o', $this->dbPrefix . 'order_state', 'os', 'o.current_state = os.id_order_state')
++            ->leftJoin(
++                'os',
++                $this->dbPrefix . 'order_state_lang',
++                'osl',
++                'os.id_order_state = osl.id_order_state AND osl.id_lang = :context_lang_id'
++            )
++            ->leftJoin('o', $this->dbPrefix . 'shop', 's', 'o.id_shop = s.id_shop')
+         ;
+ 
+-        $this->addNewCustomerField($qb);
++        // WHY: the id query already holds every bound value (context lang/shop, grid filters,
++        // the optional "new" filter); the display joins reference :context_lang_id too, so
++        // carrying the same parameters over binds every occurrence.
++        $qb->setParameters($paginatedIdsQb->getParameters(), $paginatedIdsQb->getParameterTypes());
+ 
++        $this->addNewCustomerField($qb);
+         $this->applySorting($qb, $searchCriteria);
+-
+-        $qb = $this->applyNewCustomerFilter($qb, $searchCriteria->getFilters());
+-
+-        $this->criteriaApplicator
+-            ->applyPagination($searchCriteria, $qb)
+-            ->applyDeterministicSorting($searchCriteria, $qb, 'o', 'id_order')
+-        ;
++        $this->criteriaApplicator->applyDeterministicSorting($searchCriteria, $qb, 'o', 'id_order');
+ 
+         return $qb;
+     }
+@@ -261,7 +297,7 @@ private function applyNewCustomerFilter(QueryBuilder $qb, array $filters)
+      * @param QueryBuilder $qb
+      * @param SearchCriteriaInterface $criteria
+      */
+-    private function applySorting(QueryBuilder $qb, SearchCriteriaInterface $criteria)
++    private function applySorting(QueryBuilder $qb, SearchCriteriaInterface $criteria, string $customerSortField = 'customer')
+     {
+         $sortableFields = [
+             'id_order' => 'o.id_order',
+@@ -270,7 +306,10 @@ private function applySorting(QueryBuilder $qb, SearchCriteriaInterface $criteri
+             'reference' => 'o.`reference`',
+             'company' => 'cu.`company`',
+             'payment' => 'o.`payment`',
+-            'customer' => 'customer',
++            // WHY: the `customer` column is an alias of the SELECT list, so it can be sorted by
++            // name in the display query but must be sorted by its raw expression in the id-only
++            // paginating query (which has no SELECT alias). See getSearchQueryBuilder().
++            'customer' => $customerSortField,
+             'osname' => 'osl.name',
+             'date_add' => 'o.`date_add`',
+         ];
+diff --git a/tests/Integration/Core/Grid/Query/OrderQueryBuilderTest.php b/tests/Integration/Core/Grid/Query/OrderQueryBuilderTest.php
+new file mode 100644
+index 0000000000000..6368f38958117
+--- /dev/null
++++ b/tests/Integration/Core/Grid/Query/OrderQueryBuilderTest.php
+@@ -0,0 +1,275 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Core\Grid\Query;
++
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Core\Grid\Query\DoctrineSearchCriteriaApplicator;
++use PrestaShop\PrestaShop\Core\Grid\Query\OrderQueryBuilder;
++use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++
++class OrderQueryBuilderTest extends KernelTestCase
++{
++    private const CONTEXT_LANG_ID = 1;
++    private const CONTEXT_SHOP_ID = 1;
++    private const DEMO_CUSTOMER_ID = 1;
++    private const FILTERED_ORDER_STATE_ID = 2;
++    private const OTHER_ORDER_STATE_ID = 3;
++
++    private Connection $connection;
++    private string $dbPrefix;
++    private OrderQueryBuilder $queryBuilder;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++        self::bootKernel();
++
++        $this->connection = self::getContainer()->get('doctrine.dbal.default_connection');
++        $this->dbPrefix = self::getContainer()->getParameter('database_prefix');
++        $this->queryBuilder = new OrderQueryBuilder(
++            $this->connection,
++            $this->dbPrefix,
++            new DoctrineSearchCriteriaApplicator(),
++            self::CONTEXT_LANG_ID,
++            [self::CONTEXT_SHOP_ID]
++        );
++    }
++
++    /**
++     * The orders grid can be filtered by country, which lives on a joined table. When the newest
++     * orders belong to another country, the filter must still return the matching orders whatever
++     * the page size. Resolving the page of order ids before applying the filter would drop them —
++     * this guards the id-first pagination in getSearchQueryBuilder() against that regression.
++     */
++    public function testCountryFilterIsNotTruncatedByPagination(): void
++    {
++        $addressInCountryA = $this->insertAddress(1);
++        $addressInCountryB = $this->insertAddress(2);
++
++        // Two orders in country B, then three NEWER orders (higher id_order) in country A.
++        $olderBOrder = $this->insertOrder($addressInCountryB);
++        $newerBOrder = $this->insertOrder($addressInCountryB);
++        $newestAOrders = [
++            $this->insertOrder($addressInCountryA),
++            $this->insertOrder($addressInCountryA),
++            $this->insertOrder($addressInCountryA),
++        ];
++        $createdOrderIds = array_merge([$olderBOrder, $newerBOrder], $newestAOrders);
++
++        try {
++            // Page size 2 while the two newest orders are in country A: a query that limited the
++            // ids before filtering would return nothing for country B.
++            $criteria = $this->createSearchCriteria(['country_name' => 2], 'id_order', 'DESC', 2, 0);
++            $ids = $this->fetchOrderIds($criteria);
++
++            $this->assertSame([$newerBOrder, $olderBOrder], $ids);
++        } finally {
++            $this->deleteOrders($createdOrderIds);
++            $this->deleteAddresses([$addressInCountryA, $addressInCountryB]);
++        }
++    }
++
++    /**
++     * The grid is also filtered by order status, which is reached through a LEFT JOIN on
++     * order_state rather than the country filter's INNER JOIN chain. Same regression, different
++     * join type: once the newest orders carry another status, resolving the page of ids before
++     * applying the filter returns nothing for the status actually asked for.
++     */
++    public function testOrderStatusFilterIsNotTruncatedByPagination(): void
++    {
++        $address = $this->insertAddress(1);
++
++        // Two orders in the filtered status, then three NEWER ones (higher id_order) in another.
++        $olderMatch = $this->insertOrder($address, self::FILTERED_ORDER_STATE_ID);
++        $newerMatch = $this->insertOrder($address, self::FILTERED_ORDER_STATE_ID);
++        $newestOthers = [
++            $this->insertOrder($address, self::OTHER_ORDER_STATE_ID),
++            $this->insertOrder($address, self::OTHER_ORDER_STATE_ID),
++            $this->insertOrder($address, self::OTHER_ORDER_STATE_ID),
++        ];
++        $createdOrderIds = array_merge([$olderMatch, $newerMatch], $newestOthers);
++
++        try {
++            $criteria = $this->createSearchCriteria(
++                ['osname' => self::FILTERED_ORDER_STATE_ID],
++                'id_order',
++                'DESC',
++                2,
++                0
++            );
++            $ids = $this->fetchOrderIds($criteria);
++
++            $this->assertSame([$newerMatch, $olderMatch], $ids);
++        } finally {
++            $this->deleteOrders($createdOrderIds);
++            $this->deleteAddresses([$address]);
++        }
++    }
++
++    /**
++     * Baseline: the default grid returns the newest orders, ordered by id, honouring the page size.
++     */
++    public function testDefaultPageReturnsNewestOrdersInDescendingOrder(): void
++    {
++        $address = $this->insertAddress(1);
++        $createdOrderIds = [
++            $this->insertOrder($address),
++            $this->insertOrder($address),
++            $this->insertOrder($address),
++        ];
++
++        try {
++            $criteria = $this->createSearchCriteria([], 'id_order', 'DESC', 2, 0);
++            $ids = $this->fetchOrderIds($criteria);
++
++            $this->assertCount(2, $ids);
++            $this->assertSame([$createdOrderIds[2], $createdOrderIds[1]], $ids);
++        } finally {
++            $this->deleteOrders($createdOrderIds);
++            $this->deleteAddresses([$address]);
++        }
++    }
++
++    /**
++     * @return int[]
++     */
++    private function fetchOrderIds(SearchCriteriaInterface $criteria): array
++    {
++        $rows = $this->queryBuilder
++            ->getSearchQueryBuilder($criteria)
++            ->executeQuery()
++            ->fetchAllAssociative();
++
++        return array_map('intval', array_column($rows, 'id_order'));
++    }
++
++    private function insertAddress(int $countryId): int
++    {
++        $this->connection->executeStatement(
++            'INSERT INTO ' . $this->dbPrefix . 'address
++                (id_customer, id_country, alias, lastname, firstname, address1, city, date_add, date_upd)
++             VALUES (:customer, :country, :alias, :lastname, :firstname, :address, :city, NOW(), NOW())',
++            [
++                'customer' => self::DEMO_CUSTOMER_ID,
++                'country' => $countryId,
++                'alias' => 'order-grid-test',
++                'lastname' => 'Test',
++                'firstname' => 'Test',
++                'address' => 'Test street',
++                'city' => 'Test city',
++            ]
++        );
++
++        return (int) $this->connection->lastInsertId();
++    }
++
++    private function insertOrder(int $addressId, int $orderStateId = 1): int
++    {
++        $this->connection->executeStatement(
++            'INSERT INTO ' . $this->dbPrefix . 'orders
++                (id_address_delivery, id_address_invoice, id_cart, id_currency, id_lang, id_customer,
++                 id_carrier, current_state, payment, reference, id_shop, id_shop_group,
++                 date_add, date_upd, delivery_date, invoice_date, valid)
++             VALUES (:address, :address, 0, :currency, :lang, :customer,
++                 0, :orderState, :payment, :reference, :shop, :shopGroup,
++                 NOW(), NOW(), NOW(), NOW(), 1)',
++            [
++                'address' => $addressId,
++                'orderState' => $orderStateId,
++                'currency' => 1,
++                'lang' => self::CONTEXT_LANG_ID,
++                'customer' => self::DEMO_CUSTOMER_ID,
++                'payment' => 'Test payment',
++                'reference' => 'ORDERGRIDTEST',
++                'shop' => self::CONTEXT_SHOP_ID,
++                'shopGroup' => 1,
++            ]
++        );
++
++        return (int) $this->connection->lastInsertId();
++    }
++
++    /**
++     * @param int[] $orderIds
++     */
++    private function deleteOrders(array $orderIds): void
++    {
++        if (empty($orderIds)) {
++            return;
++        }
++
++        $this->connection->executeStatement(
++            'DELETE FROM ' . $this->dbPrefix . 'orders WHERE id_order IN (:ids)',
++            ['ids' => $orderIds],
++            ['ids' => Connection::PARAM_INT_ARRAY]
++        );
++    }
++
++    /**
++     * @param int[] $addressIds
++     */
++    private function deleteAddresses(array $addressIds): void
++    {
++        if (empty($addressIds)) {
++            return;
++        }
++
++        $this->connection->executeStatement(
++            'DELETE FROM ' . $this->dbPrefix . 'address WHERE id_address IN (:ids)',
++            ['ids' => $addressIds],
++            ['ids' => Connection::PARAM_INT_ARRAY]
++        );
++    }
++
++    /**
++     * @param array<string, mixed> $filters
++     */
++    private function createSearchCriteria(array $filters, string $orderBy, string $orderWay, int $limit, int $offset): SearchCriteriaInterface
++    {
++        return new class($filters, $orderBy, $orderWay, $limit, $offset) implements SearchCriteriaInterface {
++            /**
++             * @param array<string, mixed> $filters
++             */
++            public function __construct(
++                private array $filters,
++                private string $orderBy,
++                private string $orderWay,
++                private int $limit,
++                private int $offset
++            ) {
++            }
++
++            public function getOrderBy()
++            {
++                return $this->orderBy;
++            }
++
++            public function getOrderWay()
++            {
++                return $this->orderWay;
++            }
++
++            public function getOffset()
++            {
++                return $this->offset;
++            }
++
++            public function getLimit()
++            {
++                return $this->limit;
++            }
++
++            public function getFilters()
++            {
++                return $this->filters;
++            }
++        };
++    }
++}

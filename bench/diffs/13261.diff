@@ -1,0 +1,262 @@
+diff --git a/classes/Currency.php b/classes/Currency.php
+index f884c75894176..bf01ebe5536a4 100644
+--- a/classes/Currency.php
++++ b/classes/Currency.php
+@@ -1,4 +1,7 @@
+ <?php
++
++use PrestaShop\PrestaShop\Core\Localization\CLDR\LocaleRepository;
++
+ /**
+  * 2007-2019 PrestaShop and Contributors
+  *
+@@ -758,4 +761,41 @@ public static function isMultiCurrencyActivated($idShop = null)
+     {
+         return Currency::countActiveCurrencies($idShop) > 1;
+     }
++
++    /**
++     * This method aims to update localized data in currency from CLDR reference.
++     *
++     * @param array $languages
++     * @param LocaleRepository $localeRepoCLDR
++     *
++     * @throws PrestaShopDatabaseException
++     * @throws PrestaShopException
++     * @throws \PrestaShop\PrestaShop\Core\Localization\Exception\LocalizationException
++     */
++    public function refreshLocalizedCurrencyData(array $languages, LocaleRepository $localeRepoCLDR)
++    {
++        $symbolsByLang = $namesByLang = [];
++        foreach ($languages as $languageData) {
++            $language = new Language($languageData['id_lang']);
++            if ($language->locale === '') {
++                // Language doesn't have locale we can't install this language
++                continue;
++            }
++
++            // CLDR locale give us the CLDR reference specification
++            $cldrLocale = $localeRepoCLDR->getLocale($language->locale);
++            // CLDR currency gives data from CLDR reference, for the given language
++            $cldrCurrency = $cldrLocale->getCurrency($this->iso_code);
++
++            $symbol = (string) $cldrCurrency->getSymbol();
++            if (empty($symbol)) {
++                $symbol = $this->iso_code;
++            }
++            // symbol is localized
++            $namesByLang[$language->id] = $cldrCurrency->getDisplayName();
++            $symbolsByLang[$language->id] = $symbol;
++        }
++        $this->name = $namesByLang;
++        $this->symbol = $symbolsByLang;
++    }
+ }
+diff --git a/classes/LocalizationPack.php b/classes/LocalizationPack.php
+index 2883030da6cf4..12317c546644f 100644
+--- a/classes/LocalizationPack.php
++++ b/classes/LocalizationPack.php
+@@ -330,7 +330,7 @@ protected function _installCurrencies($xml, $install_mode = false)
+                 /** @var Language $defaultLang */
+                 $defaultLang = new Language((int) Configuration::get('PS_LANG_DEFAULT'));
+ 
+-                $currency = new Currency(null, $defaultLang->id);
++                $currency = new Currency();
+                 $currency->name = (string) $attributes['name'];
+                 $currency->iso_code = (string) $attributes['iso_code'];
+                 $currency->iso_code_num = (int) $attributes['iso_code_num'];
+@@ -352,7 +352,13 @@ protected function _installCurrencies($xml, $install_mode = false)
+                         return false;
+                     }
+                     Cache::clear();
++                    // set default data from CLDR
+                     $this->setCurrencyCldrData($currency, $defaultLang);
++
++                    // Following is required when installing new currency on existing languages:
++                    // we want to properly update the symbol in each language
++                    $localeRepoCLDR = $this->getCldrLocaleRepository();
++                    $currency->refreshLocalizedCurrencyData(Language::getLanguages(), $localeRepoCLDR);
+                     $currency->save();
+ 
+                     PaymentModule::addCurrencyPermissions($currency->id);
+@@ -373,10 +379,11 @@ protected function _installCurrencies($xml, $install_mode = false)
+     }
+ 
+     /**
+-     * @param Currency $currency
+-     * @param Language $defaultLang
++     * @return LocaleRepository
++     *
++     * @throws Exception
+      */
+-    protected function setCurrencyCldrData(Currency $currency, Language $defaultLang)
++    protected function getCldrLocaleRepository()
+     {
+         $context = Context::getContext();
+         $container = isset($context->controller) ? $context->controller->getContainer() : null;
+@@ -386,6 +393,17 @@ protected function setCurrencyCldrData(Currency $currency, Language $defaultLang
+ 
+         /** @var LocaleRepository $localeRepoCLDR */
+         $localeRepoCLDR = $container->get('prestashop.core.localization.cldr.locale_repository');
++
++        return $localeRepoCLDR;
++    }
++
++    /**
++     * @param Currency $currency
++     * @param Language $defaultLang
++     */
++    protected function setCurrencyCldrData(Currency $currency, Language $defaultLang)
++    {
++        $localeRepoCLDR = $this->getCldrLocaleRepository();
+         $cldrLocale = $localeRepoCLDR->getLocale($defaultLang->locale);
+         $cldrCurrency = $cldrLocale->getCurrency($currency->iso_code);
+ 
+@@ -448,53 +466,13 @@ protected function refreshLocalizedCurrenciesData()
+         /** @var Currency[] $currencies */
+         $currencies = Currency::getCurrencies(true, false, true);
+         $languages = Language::getLanguages();
+-        $context = Context::getContext();
+-        $container = isset($context->controller) ? $context->controller->getContainer() : null;
+-        if (null === $container) {
+-            $container = SymfonyContainer::getInstance();
+-        }
+-        /** @var LocaleRepository $localeRepoCLDR */
+-        $localeRepoCLDR = $container->get('prestashop.core.localization.cldr.locale_repository');
++        $localeRepoCLDR = $this->getCldrLocaleRepository();
+         foreach ($currencies as $currency) {
+-            $this->refreshLocalizedCurrencyData($currency, $languages, $localeRepoCLDR);
++            $currency->refreshLocalizedCurrencyData($languages, $localeRepoCLDR);
+             $currency->save();
+         }
+     }
+ 
+-    /**
+-     * This method aims to update localized data in currency from CLDR reference.
+-     *
+-     * @param Currency $currency
+-     * @param array $languages
+-     * @param LocaleRepository $localeRepoCLDR
+-     *
+-     * @throws PrestaShopDatabaseException
+-     * @throws PrestaShopException
+-     * @throws \PrestaShop\PrestaShop\Core\Localization\Exception\LocalizationException
+-     */
+-    protected function refreshLocalizedCurrencyData(Currency $currency, array $languages, LocaleRepository $localeRepoCLDR)
+-    {
+-        $symbolsByLang = [];
+-        foreach ($languages as $languageData) {
+-            $language = new Language($languageData['id_lang']);
+-            if ($language->locale === '') {
+-                // Language doesn't have locale we can't install this language
+-                continue;
+-            }
+-
+-            $cldrLocale = $localeRepoCLDR->getLocale($language->locale);
+-            $cldrCurrency = $cldrLocale->getCurrency($currency->iso_code);
+-
+-            $symbol = (string) $cldrCurrency->getSymbol();
+-            if (empty($symbol)) {
+-                $symbol = $currency->iso_code;
+-            }
+-            // symbol is localized
+-            $symbolsByLang[$language->id] = $symbol;
+-        }
+-        $currency->symbol = $symbolsByLang;
+-    }
+-
+     /**
+      * @param SimpleXMLElement $xml
+      *
+diff --git a/install-dev/upgrade/php/ps_1760_copy_data_from_currency_to_currency_lang.php b/install-dev/upgrade/php/ps_1760_copy_data_from_currency_to_currency_lang.php
+index 8d1fcb3ce6c00..ec77c5a9dfdac 100755
+--- a/install-dev/upgrade/php/ps_1760_copy_data_from_currency_to_currency_lang.php
++++ b/install-dev/upgrade/php/ps_1760_copy_data_from_currency_to_currency_lang.php
+@@ -1,4 +1,8 @@
+ <?php
++
++use PrestaShop\PrestaShop\Adapter\SymfonyContainer;
++use PrestaShop\PrestaShop\Core\Localization\CLDR\LocaleRepository;
++
+ /**
+  * 2007-2019 PrestaShop and Contributors
+  *
+@@ -37,4 +41,18 @@ function ps_1760_copy_data_from_currency_to_currency_lang()
+             "
+         );
+     }
++    /** @var Currency[] $currencies */
++    $currencies = Currency::getCurrencies(true, false);
++    $context = Context::getContext();
++    $container = isset($context->controller) ? $context->controller->getContainer() : null;
++    if (null === $container) {
++        $container = SymfonyContainer::getInstance();
++    }
++
++    /** @var LocaleRepository $localeRepoCLDR */
++    $localeRepoCLDR = $container->get('prestashop.core.localization.cldr.locale_repository');
++    foreach ($currencies as $currency) {
++        $currency->refreshLocalizedCurrencyData($languages, $localeRepoCLDR);
++        $currency->save();
++    }
+ }
+diff --git a/src/Adapter/Currency/CommandHandler/AddCurrencyHandler.php b/src/Adapter/Currency/CommandHandler/AddCurrencyHandler.php
+index 447cfc391e77f..39b559f38a106 100644
+--- a/src/Adapter/Currency/CommandHandler/AddCurrencyHandler.php
++++ b/src/Adapter/Currency/CommandHandler/AddCurrencyHandler.php
+@@ -27,12 +27,14 @@
+ namespace PrestaShop\PrestaShop\Adapter\Currency\CommandHandler;
+ 
+ use Currency;
++use Language;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Command\AddCurrencyCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\CommandHandler\AddCurrencyHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CannotCreateCurrencyException;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CurrencyConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CurrencyException;
+ use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++use PrestaShop\PrestaShop\Core\Localization\CLDR\LocaleRepository;
+ use PrestaShopException;
+ 
+ /**
+@@ -42,6 +44,19 @@
+  */
+ final class AddCurrencyHandler extends AbstractCurrencyHandler implements AddCurrencyHandlerInterface
+ {
++    /**
++     * @var LocaleRepository
++     */
++    private $localeRepoCLDR;
++
++    /**
++     * @param LocaleRepository $localeRepoCLDR
++     */
++    public function __construct(LocaleRepository $localeRepoCLDR)
++    {
++        $this->localeRepoCLDR = $localeRepoCLDR;
++    }
++
+     /**
+      * {@inheritdoc}
+      *
+@@ -57,6 +72,7 @@ public function handle(AddCurrencyCommand $command)
+             $entity->iso_code = $command->getIsoCode()->getValue();
+             $entity->active = $command->isEnabled();
+             $entity->conversion_rate = $command->getExchangeRate()->getValue();
++            $entity->refreshLocalizedCurrencyData(Language::getLanguages(), $this->localeRepoCLDR);
+ 
+             if (false === $entity->add()) {
+                 throw new CannotCreateCurrencyException('Failed to create new currency');
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/currency.yml b/src/PrestaShopBundle/Resources/config/services/adapter/currency.yml
+index c65f9ea536976..4982f4237ffdd 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/currency.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/currency.yml
+@@ -20,6 +20,8 @@ services:
+ 
+     prestashop.adapter.currency.command_handler.create_currency:
+         class: 'PrestaShop\PrestaShop\Adapter\Currency\CommandHandler\AddCurrencyHandler'
++        arguments:
++            - '@prestashop.core.localization.cldr.locale_repository'
+         tags:
+             - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\Currency\Command\AddCurrencyCommand' }
+ 

@@ -1,0 +1,314 @@
+diff --git a/app/config/admin/security.yml b/app/config/admin/security.yml
+index f2087f55e818b..cdc4475d3582f 100644
+--- a/app/config/admin/security.yml
++++ b/app/config/admin/security.yml
+@@ -48,4 +48,4 @@ security:
+     - { route: 'admin_request_password_reset', roles: PUBLIC_ACCESS }
+     - { route: 'admin_reset_password', roles: PUBLIC_ACCESS }
+     # Check it the legacy anonymous attribute has been set on the request (set by LegacyRouterChecker)
+-    - { path: ^/, roles: IS_AUTHENTICATED, allow_if: 'request.attributes.has("_legacy_controller_anonymous") and request.attributes.get("_legacy_controller_anonymous") == true' }
++    - { path: ^/, roles: IS_AUTHENTICATED, allow_if: 'request.attributes.has("_anonymous_controller") and request.attributes.get("_anonymous_controller") == true' }
+diff --git a/src/PrestaShopBundle/Controller/Admin/LegacyController.php b/src/PrestaShopBundle/Controller/Admin/LegacyController.php
+index 00cb7f7deabe9..4c19fb3b8a923 100644
+--- a/src/PrestaShopBundle/Controller/Admin/LegacyController.php
++++ b/src/PrestaShopBundle/Controller/Admin/LegacyController.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Security\Permission;
+ use PrestaShopBundle\Entity\Repository\TabRepository;
+ use PrestaShopBundle\Routing\LegacyControllerConstants;
++use PrestaShopBundle\Security\Admin\RequestAttributes;
+ use PrestaShopBundle\Twig\Layout\MenuBuilder;
+ use PrestaShopBundle\Twig\Layout\SmartyVariablesFiller;
+ use ReflectionException;
+@@ -240,7 +241,7 @@ protected function initController(Request $request, array $dispatcherHookParamet
+     private function checkIsRequestAllowed(Request $request, AdminController $adminController): void
+     {
+         // If LegacyRouterChecker has already set the request as anonymous no need for further check
+-        if ($request->attributes->get(LegacyControllerConstants::ANONYMOUS_ATTRIBUTE) === true) {
++        if ($request->attributes->get(RequestAttributes::ANONYMOUS_CONTROLLER_ATTRIBUTE) === true) {
+             return;
+         }
+ 
+diff --git a/src/PrestaShopBundle/EventListener/Admin/TokenizedUrlsListener.php b/src/PrestaShopBundle/EventListener/Admin/TokenizedUrlsListener.php
+index d7c0c291d46a5..216406abe71d9 100644
+--- a/src/PrestaShopBundle/EventListener/Admin/TokenizedUrlsListener.php
++++ b/src/PrestaShopBundle/EventListener/Admin/TokenizedUrlsListener.php
+@@ -28,7 +28,7 @@
+ 
+ use PrestaShop\PrestaShop\Core\Feature\TokenInUrls;
+ use PrestaShop\PrestaShop\Core\Util\Url\UrlCleaner;
+-use PrestaShopBundle\Routing\LegacyControllerConstants;
++use PrestaShopBundle\Security\Admin\RequestAttributes;
+ use PrestaShopBundle\Security\Admin\UserTokenManager;
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
+@@ -44,13 +44,6 @@
+  */
+ class TokenizedUrlsListener
+ {
+-    public const PUBLIC_ROUTES = [
+-        'admin_login',
+-        'admin_homepage',
+-        'admin_request_password_reset',
+-        'admin_reset_password',
+-    ];
+-
+     public function __construct(
+         private readonly RouterInterface $router,
+         private readonly UserTokenManager $userTokenManager,
+@@ -87,7 +80,7 @@ public function onKernelRequest(RequestEvent $event): void
+ 
+     private function isRequestAnonymous(Request $request): bool
+     {
+-        $publicLegacyRoute = $request->attributes->get(LegacyControllerConstants::ANONYMOUS_ATTRIBUTE);
++        $publicLegacyRoute = $request->attributes->get(RequestAttributes::ANONYMOUS_CONTROLLER_ATTRIBUTE);
+         if ($publicLegacyRoute === true) {
+             return true;
+         }
+diff --git a/src/PrestaShopBundle/Routing/LegacyControllerConstants.php b/src/PrestaShopBundle/Routing/LegacyControllerConstants.php
+index 4c72dc1d7dde5..fa5f9e54b228f 100644
+--- a/src/PrestaShopBundle/Routing/LegacyControllerConstants.php
++++ b/src/PrestaShopBundle/Routing/LegacyControllerConstants.php
+@@ -34,7 +34,6 @@ class LegacyControllerConstants
+     public const CONTROLLER_NAME_ATTRIBUTE = '_legacy_controller_name';
+     public const CONTROLLER_ACTION_ATTRIBUTE = '_legacy_controller_action';
+     public const INSTANCE_ATTRIBUTE = '_legacy_controller_instance';
+-    public const ANONYMOUS_ATTRIBUTE = '_legacy_controller_anonymous';
+     public const IS_MODULE_ATTRIBUTE = '_legacy_controller_is_module';
+     public const IS_ALL_SHOP_CONTEXT_ATTRIBUTE = '_legacy_controller_is_all_shop_context';
+ }
+diff --git a/src/PrestaShopBundle/Routing/LegacyRouterChecker.php b/src/PrestaShopBundle/Routing/LegacyRouterChecker.php
+index 5dbce8259a9fc..ed890243226b4 100644
+--- a/src/PrestaShopBundle/Routing/LegacyRouterChecker.php
++++ b/src/PrestaShopBundle/Routing/LegacyRouterChecker.php
+@@ -34,6 +34,7 @@
+ use PrestaShop\PrestaShop\Core\Security\Permission;
+ use PrestaShopBundle\Entity\Repository\TabRepository;
+ use PrestaShopBundle\Routing\Converter\LegacyParametersConverter;
++use PrestaShopBundle\Security\Admin\RequestAttributes;
+ use Symfony\Bundle\FrameworkBundle\Routing\Attribute\AsRoutingConditionService;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+@@ -118,7 +119,7 @@ public function check(Request $request): bool
+         $adminController->init();
+ 
+         $request->attributes->set(LegacyControllerConstants::INSTANCE_ATTRIBUTE, $adminController);
+-        $request->attributes->set(LegacyControllerConstants::ANONYMOUS_ATTRIBUTE, $adminController->isAnonymousAllowed());
++        $request->attributes->set(RequestAttributes::ANONYMOUS_CONTROLLER_ATTRIBUTE, $adminController->isAnonymousAllowed());
+         $request->attributes->set(LegacyControllerConstants::IS_ALL_SHOP_CONTEXT_ATTRIBUTE, $adminController->multishop_context === ShopConstraint::ALL_SHOPS);
+         $request->attributes->set(LegacyControllerConstants::CONTROLLER_CLASS_ATTRIBUTE, $controllerClass);
+         $request->attributes->set(LegacyControllerConstants::IS_MODULE_ATTRIBUTE, $isModule);
+diff --git a/src/PrestaShopBundle/Security/Admin/RequestAttributes.php b/src/PrestaShopBundle/Security/Admin/RequestAttributes.php
+new file mode 100644
+index 0000000000000..9d780a51ad213
+--- /dev/null
++++ b/src/PrestaShopBundle/Security/Admin/RequestAttributes.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Security\Admin;
++
++/**
++ * This class contains constants for specific attributes used on the request to add some features.
++ */
++class RequestAttributes
++{
++    /**
++     * Setting this attribute to true on a request makes it "anonymous" or "public access", meaning
++     * it can be accessed even without being authenticated and no CSRF token will be added in the
++     * URL.
++     *
++     * It is equivalent to settings an access_control in the framework config except this attribute can
++     * be set on a particular route settings which is very convenient for modules that can't modify the
++     * access controls.
++     *
++     * Route example:
++     *
++     *  public_anonymous_route:
++     *      path: /public_anonymous_route
++     *      defaults:
++     *          _controller: PrestaShop\Module\PublicRoute\AnonymousController::anonymousAction
++     *          _anonymous_controller: true
++     */
++    public const ANONYMOUS_CONTROLLER_ATTRIBUTE = '_anonymous_controller';
++}
+diff --git a/src/PrestaShopBundle/Service/Routing/Router.php b/src/PrestaShopBundle/Service/Routing/Router.php
+index d209ec6d90c8c..3b19102b513a4 100644
+--- a/src/PrestaShopBundle/Service/Routing/Router.php
++++ b/src/PrestaShopBundle/Service/Routing/Router.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Service\Routing;
+ 
+ use PrestaShop\PrestaShop\Core\Feature\TokenInUrls;
++use PrestaShopBundle\Security\Admin\RequestAttributes;
+ use PrestaShopBundle\Security\Admin\UserTokenManager;
+ use Symfony\Bundle\FrameworkBundle\Routing\Router as BaseRouter;
+ 
+@@ -37,10 +38,7 @@
+  */
+ class Router extends BaseRouter
+ {
+-    /**
+-     * @var UserTokenManager
+-     */
+-    private $userTokenManager;
++    private UserTokenManager $userTokenManager;
+ 
+     /**
+      * {@inheritdoc}
+@@ -48,14 +46,14 @@ class Router extends BaseRouter
+     public function generate($name, $parameters = [], $referenceType = self::ABSOLUTE_PATH): string
+     {
+         $url = parent::generate($name, $parameters, $referenceType);
+-        if (TokenInUrls::isDisabled()) {
++        if (TokenInUrls::isDisabled() || $this->isRouteAnonymous($name)) {
+             return $url;
+         }
+ 
+         return self::generateTokenizedUrl($url, $this->userTokenManager->getSymfonyToken());
+     }
+ 
+-    public function setUserTokenManager(UserTokenManager $userTokenManager)
++    public function setUserTokenManager(UserTokenManager $userTokenManager): void
+     {
+         $this->userTokenManager = $userTokenManager;
+     }
+@@ -81,4 +79,14 @@ public static function generateTokenizedUrl($url, $token)
+ 
+         return $url;
+     }
++
++    private function isRouteAnonymous(string $routeName): bool
++    {
++        $route = $this->getRouteCollection()->get($routeName);
++        if (!$route) {
++            return false;
++        }
++
++        return $route->getDefault(RequestAttributes::ANONYMOUS_CONTROLLER_ATTRIBUTE) === true;
++    }
+ }
+diff --git a/tests/Integration/PrestaShopBundle/EventListener/Admin/AccessDeniedListenerTest.php b/tests/Integration/PrestaShopBundle/EventListener/Admin/AccessDeniedListenerTest.php
+index 8ae20da0cea7f..c7282093c001d 100644
+--- a/tests/Integration/PrestaShopBundle/EventListener/Admin/AccessDeniedListenerTest.php
++++ b/tests/Integration/PrestaShopBundle/EventListener/Admin/AccessDeniedListenerTest.php
+@@ -77,4 +77,19 @@ public function testRedirection(): void
+         $this->assertStringStartsWith('/tests/something-complex?_token=', $response->headers->get('location'));
+         $this->assertStringContainsString('Redirecting to /tests/something-complex', $response->getContent());
+     }
++
++    public function testAnonymous(): void
++    {
++        $this->client->request('GET', $this->router->generate('test_anonymous'));
++
++        $response = $this->client->getResponse();
++        $this->assertEquals(Response::HTTP_OK, $response->getStatusCode());
++        $this->assertEquals('AnonymousController', $response->getContent());
++
++        $this->client->request('GET', $this->router->generate('test_hard_coded_anonymous'));
++
++        $response = $this->client->getResponse();
++        $this->assertEquals(Response::HTTP_OK, $response->getStatusCode());
++        $this->assertEquals('AnonymousController', $response->getContent());
++    }
+ }
+diff --git a/tests/Resources/Controller/TestController.php b/tests/Resources/Controller/TestController.php
+index 6fe1bda7cbf04..3e2c0936b0380 100644
+--- a/tests/Resources/Controller/TestController.php
++++ b/tests/Resources/Controller/TestController.php
+@@ -26,6 +26,7 @@
+ 
+ namespace Tests\Resources\Controller;
+ 
++use PrestaShopBundle\Security\Admin\RequestAttributes;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
+ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+ use Symfony\Component\ExpressionLanguage\Expression;
+@@ -64,4 +65,16 @@ public function doRedirectIfForbidden(): Response
+     {
+         return new Response();
+     }
++
++    #[Route('/anonymous-controller', name: 'test_anonymous', defaults: [RequestAttributes::ANONYMOUS_CONTROLLER_ATTRIBUTE => true])]
++    public function anonymousController()
++    {
++        return new Response('AnonymousController');
++    }
++
++    #[Route('/anonymous-hard-coded-controller', name: 'test_hard_coded_anonymous', defaults: ['_anonymous_controller' => true])]
++    public function hardCodedAnonymousController()
++    {
++        return new Response('AnonymousController');
++    }
+ }
+diff --git a/tests/UI/pages/BO/catalog/products/add/descriptionTab.ts b/tests/UI/pages/BO/catalog/products/add/descriptionTab.ts
+index 08430b6f36469..1673737cf6088 100644
+--- a/tests/UI/pages/BO/catalog/products/add/descriptionTab.ts
++++ b/tests/UI/pages/BO/catalog/products/add/descriptionTab.ts
+@@ -20,6 +20,8 @@ class DescriptionTab extends BOBasePage {
+ 
+   private readonly imagePreviewBlock: string;
+ 
++  private readonly imageDefaultBlock: string;
++
+   private readonly imagePreviewCover: string;
+ 
+   private readonly productImage: string;
+@@ -113,6 +115,7 @@ class DescriptionTab extends BOBasePage {
+     // Image selectors
+     this.productImageDropZoneDiv = '#product-images-dropzone';
+     this.imagePreviewBlock = `${this.productImageDropZoneDiv} div.dz-preview.openfilemanager`;
++    this.imageDefaultBlock = `${this.productImageDropZoneDiv} div.dz-default.openfilemanager`;
+     this.imagePreviewCover = `${this.productImageDropZoneDiv} div.dz-preview.is-cover`;
+     this.productImage = `${this.productImageDropZoneDiv} div.dz-preview.dz-image-preview.dz-complete`;
+     this.productImageContainer = '#product-images-container';
+@@ -189,10 +192,10 @@ class DescriptionTab extends BOBasePage {
+     const filteredImagePaths = imagesPaths.filter((el) => el !== null);
+ 
+     if (filteredImagePaths !== null && filteredImagePaths.length !== 0) {
+-      const numberOfImages = await this.getNumberOfImages(page);
++      const imagePreviewBlock = await page.locator(this.imagePreviewBlock).isVisible({timeout: 5000});
+       await this.uploadOnFileChooser(
+         page,
+-        numberOfImages === 0 ? this.productImageDropZoneDiv : this.imagePreviewBlock,
++        imagePreviewBlock ? this.imagePreviewBlock : this.imageDefaultBlock,
+         filteredImagePaths,
+       );
+     }
+@@ -209,10 +212,10 @@ class DescriptionTab extends BOBasePage {
+ 
+     if (filteredImagePaths !== null && filteredImagePaths.length !== 0) {
+       const numberOfImages = await this.getNumberOfImages(page);
+-      await this.waitForVisibleSelector(page, numberOfImages === 0 ? this.productImageDropZoneDiv : this.imagePreviewBlock);
++      const imagePreviewBlock = await page.locator(this.imagePreviewBlock).isVisible({timeout: 5000});
+       await this.uploadOnFileChooser(
+         page,
+-        numberOfImages === 0 ? this.productImageDropZoneDiv : this.imagePreviewBlock,
++        imagePreviewBlock ? this.imagePreviewBlock : this.imageDefaultBlock,
+         filteredImagePaths,
+       );
+ 

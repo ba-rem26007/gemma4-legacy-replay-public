@@ -1,0 +1,1222 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
+index 4a0f1fd123c5c..5566d39505429 100644
+--- a/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/index.ts
+@@ -4,92 +4,9 @@
+  */
+ 
+ import FormSubmitButton from '@components/form-submit-button';
+-import IframeModal from '@components/modal/iframe-modal';
+-
+-const {$} = window;
+-
+-const TAX_RULE_MODAL_ID = 'tax-rule-form-modal';
+-
+-$(() => {
+-  const taxRuleGrid = new window.prestashop.component.Grid('tax_rules');
+-
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersResetExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SortingExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ExportToSqlManagerExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ReloadListExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.BulkActionCheckboxExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitBulkActionExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.SubmitRowActionExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.LinkRowActionExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
+-  taxRuleGrid.addExtension(new window.prestashop.component.GridExtensions.ColumnTogglingExtension());
++import TaxRulesManager from '@pages/tax-rules/tax-rules-manager';
+ 
++document.addEventListener('DOMContentLoaded', () => {
+   new FormSubmitButton();
+-  initTaxRuleModals();
++  new TaxRulesManager();
+ });
+-
+-/**
+- * Intercept add and edit tax rule links to open them in a modal.
+- */
+-function initTaxRuleModals(): void {
+-  // "Add new tax rule" toolbar button
+-  document.querySelectorAll<HTMLAnchorElement>('[href*="tax-rules/new"]').forEach((button) => {
+-    button.addEventListener('click', (event: MouseEvent) => {
+-      event.preventDefault();
+-      const href = button.getAttribute('href');
+-
+-      if (href) {
+-        openTaxRuleModal(`${href}${href.includes('?') ? '&' : '?'}liteDisplaying=1`);
+-      }
+-    });
+-  });
+-
+-  // Edit links in grid rows
+-  document.querySelectorAll<HTMLAnchorElement>('#tax_rules_grid_table a.btn[href*="/edit"]').forEach((link) => {
+-    link.addEventListener('click', (event: MouseEvent) => {
+-      event.preventDefault();
+-      event.stopPropagation();
+-      const href = link.getAttribute('href');
+-
+-      if (href) {
+-        openTaxRuleModal(`${href}${href.includes('?') ? '&' : '?'}liteDisplaying=1`);
+-      }
+-    });
+-  });
+-}
+-
+-function openTaxRuleModal(formUrl: string): void {
+-  const iframeModal = new IframeModal({
+-    id: TAX_RULE_MODAL_ID,
+-    iframeUrl: formUrl,
+-    closable: true,
+-    onLoaded: (iframe: HTMLIFrameElement): void => {
+-      if (!iframe.contentWindow) {
+-        return;
+-      }
+-
+-      const iframeDoc = iframe.contentWindow.document;
+-
+-      // Check for success marker — controller returns <div data-modal-close="true"> after save
+-      const closeMarker = iframeDoc.querySelector('[data-modal-close]');
+-
+-      if (closeMarker) {
+-        // Save succeeded — close modal and reload parent to show flash message + updated grid
+-        iframeModal.hide();
+-        window.location.reload();
+-
+-        return;
+-      }
+-
+-      // Form page loaded — wire cancel button to close modal
+-      const cancelButtons = iframeDoc.querySelectorAll('.cancel-btn');
+-      cancelButtons.forEach((btn) => {
+-        btn.addEventListener('click', (e) => {
+-          e.preventDefault();
+-          iframeModal.hide();
+-        });
+-      });
+-    },
+-  });
+-  iframeModal.show();
+-}
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/service/paginated-tax-rules-service.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/service/paginated-tax-rules-service.ts
+new file mode 100644
+index 0000000000000..e03d7f24f5930
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/service/paginated-tax-rules-service.ts
+@@ -0,0 +1,26 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++import PaginationServiceType from '@PSTypes/services';
++
++export default class PaginatedTaxRulesService implements PaginationServiceType {
++  private listUrl: string;
++
++  constructor(listUrl: string) {
++    this.listUrl = listUrl;
++  }
++
++  async fetch(offset: number, limit: number): Promise<FetchResponse> {
++    const url = new URL(this.listUrl, window.location.origin);
++    url.searchParams.set('limit', String(limit));
++    url.searchParams.set('offset', String(offset));
++
++    const response = await window.fetch(url.toString(), {
++      headers: {'X-Requested-With': 'XMLHttpRequest'},
++    });
++
++    return response.json();
++  }
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-list-renderer.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-list-renderer.ts
+new file mode 100644
+index 0000000000000..e8d9e002eb2ae
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-list-renderer.ts
+@@ -0,0 +1,128 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++import RendererType from '@PSTypes/renderers';
++import ConfirmModal from '@components/modal/confirm-modal';
++
++const {$} = window;
++
++const LIST_CONTAINER_ID = '#tax-rules-list-container';
++const LOADING_SPINNER_ID = '#tax-rules-loading';
++const LIST_TABLE_ID = '#tax-rules-list-table';
++const ROW_TEMPLATE_ID = '#tax-rule-tr-template';
++
++interface TaxRuleForList {
++  id: number;
++  countryName: string;
++  stateName: string;
++  zipcode: string;
++  behavior: string;
++  taxName: string;
++  taxRate: string;
++  description: string;
++  editUrl: string;
++  deleteUrl: string;
++}
++
++export default class TaxRulesListRenderer implements RendererType {
++  private listContainer: HTMLElement;
++
++  private $loadingSpinner: JQuery;
++
++  private $listTable: JQuery;
++
++  private onListUpdated: () => void;
++
++  constructor(onListUpdated: () => void) {
++    this.listContainer = document.querySelector<HTMLElement>(LIST_CONTAINER_ID)!;
++    this.$loadingSpinner = $(LOADING_SPINNER_ID);
++    this.$listTable = $(LIST_TABLE_ID);
++    this.onListUpdated = onListUpdated;
++  }
++
++  public setLoading(loading: boolean): void {
++    this.$loadingSpinner.toggle(loading);
++    this.$listTable.toggle(!loading);
++  }
++
++  public render(data: Record<string, any>): void {
++    const tbody = this.listContainer.querySelector('tbody') as HTMLElement;
++    const trTemplateEl = this.listContainer.querySelector(ROW_TEMPLATE_ID) as HTMLScriptElement;
++    const trTemplate = trTemplateEl.innerHTML;
++    tbody.innerHTML = '';
++
++    const taxRules = data.taxRules as Array<TaxRuleForList>;
++    this.toggleListVisibility(taxRules.length > 0);
++
++    taxRules.forEach((taxRule: TaxRuleForList) => {
++      const temporaryContainer = document.createElement('tbody');
++      temporaryContainer.innerHTML = trTemplate.trim();
++      const trClone = temporaryContainer.firstChild as HTMLElement;
++
++      this.setField(trClone, '.tax-rule-country', taxRule.countryName);
++      this.setField(trClone, '.tax-rule-state', taxRule.stateName);
++      this.setField(trClone, '.tax-rule-zipcode', taxRule.zipcode);
++      this.setField(trClone, '.tax-rule-behavior', taxRule.behavior);
++      this.setField(trClone, '.tax-rule-tax-name', taxRule.taxName);
++      this.setField(trClone, '.tax-rule-tax-rate', taxRule.taxRate);
++      this.setField(trClone, '.tax-rule-description', taxRule.description);
++
++      const editBtn = trClone.querySelector<HTMLElement>('.js-edit-tax-rule-btn')!;
++      editBtn.dataset.editUrl = taxRule.editUrl;
++
++      const deleteBtn = trClone.querySelector<HTMLElement>('.js-delete-tax-rule-btn')!;
++      deleteBtn.dataset.deleteUrl = taxRule.deleteUrl;
++      deleteBtn.addEventListener('click', () => this.handleDeleteClick(deleteBtn.dataset));
++
++      tbody.append(trClone);
++    });
++  }
++
++  private toggleListVisibility(show: boolean): void {
++    this.listContainer.classList.toggle('d-none', !show);
++  }
++
++  private setField(container: HTMLElement, selector: string, value: string): void {
++    const el = container.querySelector<HTMLElement>(selector);
++
++    if (el) {
++      el.textContent = value;
++    }
++  }
++
++  private handleDeleteClick(dataset: DOMStringMap): void {
++    const modal = new ConfirmModal(
++      {
++        id: 'modal-delete-tax-rule',
++        confirmTitle: dataset.confirmTitle,
++        confirmMessage: dataset.confirmMessage,
++        confirmButtonLabel: dataset.confirmBtnLabel,
++        closeButtonLabel: dataset.cancelBtnLabel,
++        confirmButtonClass: dataset.confirmBtnClass,
++        closable: true,
++      },
++      async () => {
++        if (!dataset.deleteUrl) {
++          return;
++        }
++        try {
++          const response = await window.fetch(dataset.deleteUrl, {
++            method: 'DELETE',
++            headers: {'X-Requested-With': 'XMLHttpRequest'},
++          });
++          const json = await response.json();
++
++          if (json.message) {
++            $.growl({message: json.message});
++          }
++          this.onListUpdated();
++        } catch (e) {
++          console.error('Failed to delete tax rule', e);
++        }
++      },
++    );
++    modal.show();
++  }
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-manager.ts b/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-manager.ts
+new file mode 100644
+index 0000000000000..f05ddc9689d60
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/tax-rules/tax-rules-manager.ts
+@@ -0,0 +1,115 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++import DynamicPaginator from '@components/pagination/dynamic-paginator';
++import {FormIframeModal} from '@components/modal';
++import PaginatedTaxRulesService from '@pages/tax-rules/service/paginated-tax-rules-service';
++import TaxRulesListRenderer from '@pages/tax-rules/tax-rules-list-renderer';
++
++import ClickEvent = JQuery.ClickEvent;
++
++const {$} = window;
++
++const LIST_CONTAINER_ID = '#tax-rules-list-container';
++const PAGINATION_CONTAINER_ID = '#tax-rules-pagination';
++const MODAL_ID = 'tax-rule-form-modal';
++const FORM_SELECTOR = 'form[name="tax_rule"]';
++
++export default class TaxRulesManager {
++  private paginator!: DynamicPaginator;
++
++  private listContainer!: HTMLElement;
++
++  constructor() {
++    const container = document.querySelector<HTMLElement>(LIST_CONTAINER_ID);
++
++    if (!container) {
++      return;
++    }
++
++    this.listContainer = container;
++    const listUrl = container.dataset.listUrl!;
++    const createUrl = container.dataset.createUrl!;
++
++    this.paginator = new DynamicPaginator(
++      PAGINATION_CONTAINER_ID,
++      new PaginatedTaxRulesService(listUrl),
++      new TaxRulesListRenderer(() => this.paginator.paginate(1)),
++      1,
++    );
++
++    this.initAddButton(createUrl);
++    this.initEditButtons();
++  }
++
++  private initAddButton(createUrl: string): void {
++    const addButton = document.querySelector<HTMLElement>('.js-add-tax-rule-btn');
++
++    if (!addButton) {
++      return;
++    }
++
++    addButton.addEventListener('click', (e) => {
++      e.stopImmediatePropagation();
++      this.openModal(
++        `${createUrl}${createUrl.includes('?') ? '&' : '?'}liteDisplaying=1`,
++        addButton.dataset.modalTitle ?? 'Add new tax rule',
++        addButton.dataset.confirmButtonLabel ?? 'Save',
++        addButton.dataset.cancelButtonLabel ?? 'Cancel',
++      );
++    });
++  }
++
++  private initEditButtons(): void {
++    // Delegated listener — catches edit buttons added dynamically by the renderer
++    $(this.listContainer).on('click', '.js-edit-tax-rule-btn', (event: ClickEvent) => {
++      if (!(event.currentTarget instanceof HTMLElement)) {
++        return;
++      }
++
++      const editButton = event.currentTarget;
++      const {editUrl} = editButton.dataset;
++
++      if (!editUrl) {
++        return;
++      }
++
++      this.openModal(
++        `${editUrl}${editUrl.includes('?') ? '&' : '?'}liteDisplaying=1`,
++        editButton.dataset.modalTitle ?? 'Edit tax rule',
++        editButton.dataset.confirmButtonLabel ?? 'Save',
++        editButton.dataset.cancelButtonLabel ?? 'Cancel',
++      );
++    });
++  }
++
++  private openModal(
++    formUrl: string,
++    modalTitle: string,
++    confirmButtonLabel: string,
++    closeButtonLabel: string,
++  ): void {
++    const iframeModal = new FormIframeModal({
++      id: MODAL_ID,
++      formSelector: FORM_SELECTOR,
++      formUrl,
++      closable: true,
++      modalTitle,
++      confirmButtonLabel,
++      closeButtonLabel,
++      closeOnConfirm: false,
++      onFormLoaded: (_form: HTMLFormElement, _formData: FormData, dataAttributes: DOMStringMap | null): void => {
++        if (dataAttributes && dataAttributes.alertsSuccess === '1') {
++          iframeModal.hide();
++          this.paginator.paginate(1);
++        }
++      },
++      formConfirmCallback: (form: HTMLFormElement): void => {
++        form.submit();
++      },
++    });
++    iframeModal.show();
++  }
++}
+diff --git a/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleListHandler.php b/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleListHandler.php
+new file mode 100644
+index 0000000000000..19821badb069d
+--- /dev/null
++++ b/src/Adapter/TaxRulesGroup/QueryHandler/GetTaxRuleListHandler.php
+@@ -0,0 +1,106 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\TaxRulesGroup\QueryHandler;
++
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleList;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\TaxRuleForList;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\TaxRuleList;
++
++/**
++ * Handles query which gets paginated list of tax rules for a group
++ */
++#[AsQueryHandler]
++final class GetTaxRuleListHandler
++{
++    public function __construct(
++        private readonly Connection $connection,
++        private readonly string $dbPrefix,
++    ) {
++    }
++
++    public function handle(GetTaxRuleList $query): TaxRuleList
++    {
++        $qb = $this->connection->createQueryBuilder()
++            ->from($this->dbPrefix . 'tax_rule', 'tr')
++            ->leftJoin(
++                'tr',
++                $this->dbPrefix . 'country_lang',
++                'cl',
++                'tr.`id_country` = cl.`id_country` AND cl.`id_lang` = :idLang'
++            )
++            ->leftJoin(
++                'tr',
++                $this->dbPrefix . 'state',
++                's',
++                'tr.`id_country` = s.`id_country` AND tr.`id_state` = s.`id_state`'
++            )
++            ->leftJoin(
++                'tr',
++                $this->dbPrefix . 'tax',
++                't',
++                'tr.`id_tax` = t.`id_tax`'
++            )
++            ->leftJoin(
++                'tr',
++                $this->dbPrefix . 'tax_lang',
++                'tl',
++                'tr.`id_tax` = tl.`id_tax` AND tl.`id_lang` = :idLang'
++            )
++            ->where('tr.`id_tax_rules_group` = :idTaxRulesGroup')
++            ->setParameter('idLang', $query->getLanguageId())
++            ->setParameter('idTaxRulesGroup', $query->getTaxRulesGroupId()->getValue())
++            ->orderBy('tr.`id_tax_rule`', 'ASC')
++        ;
++
++        $countQb = clone $qb;
++        $totalCount = (int) $countQb->select('COUNT(DISTINCT tr.`id_tax_rule`)')->executeQuery()->fetchOne();
++
++        $qb->select([
++            'tr.`id_tax_rule`',
++            'IFNULL(cl.`name`, \'--\') AS country_name',
++            'IFNULL(s.`name`, \'--\') AS state_name',
++            'CASE'
++                . ' WHEN CONCAT_WS(\' - \', tr.`zipcode_from`, tr.`zipcode_to`) = \'0 - 0\''
++                . ' THEN \'--\''
++                . ' ELSE CONCAT_WS(\' - \', tr.`zipcode_from`, tr.`zipcode_to`)'
++            . ' END AS zipcode',
++            'tr.`behavior`',
++            'IFNULL(tl.`name`, \'\') AS tax_name',
++            'IFNULL(t.`rate`, \'0\') AS tax_rate',
++            'tr.`description`',
++        ]);
++
++        if ($query->getLimit() !== null) {
++            $qb->setMaxResults($query->getLimit());
++        }
++        if ($query->getOffset() !== null) {
++            $qb->setFirstResult($query->getOffset());
++        }
++
++        $rows = $qb->executeQuery()->fetchAllAssociative();
++
++        $taxRules = array_map(
++            static fn (array $row): TaxRuleForList => new TaxRuleForList(
++                (int) $row['id_tax_rule'],
++                $row['country_name'],
++                $row['state_name'],
++                $row['zipcode'],
++                (int) $row['behavior'],
++                $row['tax_name'],
++                $row['tax_rate'],
++                $row['description'],
++            ),
++            $rows
++        );
++
++        return new TaxRuleList($taxRules, $totalCount);
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleList.php b/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleList.php
+new file mode 100644
+index 0000000000000..9c2031c56221d
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/Query/GetTaxRuleList.php
+@@ -0,0 +1,48 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\ValueObject\TaxRulesGroupId;
++
++/**
++ * Query to get a paginated list of tax rules for a given tax rules group
++ */
++class GetTaxRuleList
++{
++    private TaxRulesGroupId $taxRulesGroupId;
++
++    public function __construct(
++        int $taxRulesGroupId,
++        private readonly int $languageId,
++        private readonly ?int $limit = null,
++        private readonly ?int $offset = null,
++    ) {
++        $this->taxRulesGroupId = new TaxRulesGroupId($taxRulesGroupId);
++    }
++
++    public function getTaxRulesGroupId(): TaxRulesGroupId
++    {
++        return $this->taxRulesGroupId;
++    }
++
++    public function getLanguageId(): int
++    {
++        return $this->languageId;
++    }
++
++    public function getLimit(): ?int
++    {
++        return $this->limit;
++    }
++
++    public function getOffset(): ?int
++    {
++        return $this->offset;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleForList.php b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleForList.php
+new file mode 100644
+index 0000000000000..543025dbfe957
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleForList.php
+@@ -0,0 +1,67 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult;
++
++/**
++ * Transfers tax rule data for list display
++ */
++class TaxRuleForList
++{
++    public function __construct(
++        private readonly int $taxRuleId,
++        private readonly string $countryName,
++        private readonly string $stateName,
++        private readonly string $zipcode,
++        private readonly int $behavior,
++        private readonly string $taxName,
++        private readonly string $taxRate,
++        private readonly string $description,
++    ) {
++    }
++
++    public function getTaxRuleId(): int
++    {
++        return $this->taxRuleId;
++    }
++
++    public function getCountryName(): string
++    {
++        return $this->countryName;
++    }
++
++    public function getStateName(): string
++    {
++        return $this->stateName;
++    }
++
++    public function getZipcode(): string
++    {
++        return $this->zipcode;
++    }
++
++    public function getBehavior(): int
++    {
++        return $this->behavior;
++    }
++
++    public function getTaxName(): string
++    {
++        return $this->taxName;
++    }
++
++    public function getTaxRate(): string
++    {
++        return $this->taxRate;
++    }
++
++    public function getDescription(): string
++    {
++        return $this->description;
++    }
++}
+diff --git a/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleList.php b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleList.php
+new file mode 100644
+index 0000000000000..1f4f6307287dd
+--- /dev/null
++++ b/src/Core/Domain/TaxRulesGroup/TaxRule/QueryResult/TaxRuleList.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult;
++
++/**
++ * Transfers paginated list of tax rules
++ */
++class TaxRuleList
++{
++    /**
++     * @param TaxRuleForList[] $taxRules
++     * @param int $totalCount
++     */
++    public function __construct(
++        private readonly array $taxRules,
++        private readonly int $totalCount,
++    ) {
++    }
++
++    /**
++     * @return TaxRuleForList[]
++     */
++    public function getTaxRules(): array
++    {
++        return $this->taxRules;
++    }
++
++    public function getTotalCount(): int
++    {
++        return $this->totalCount;
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
+index 7f87fa44f1462..7abe35728f760 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/TaxRulesGroupController.php
+@@ -4,9 +4,12 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++declare(strict_types=1);
++
+ namespace PrestaShopBundle\Controller\Admin\Improve\International;
+ 
+ use Exception;
++use PrestaShop\PrestaShop\Core\Domain\TaxRule\TaxRuleSettings;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Command\BulkDeleteTaxRulesGroupCommand;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Command\BulkSetTaxRulesGroupStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\Command\DeleteTaxRulesGroupCommand;
+@@ -29,13 +32,14 @@
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Exception\TaxRuleNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleForEditing;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\Query\GetTaxRuleList;
+ use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\EditableTaxRule;
++use PrestaShop\PrestaShop\Core\Domain\TaxRulesGroup\TaxRule\QueryResult\TaxRuleList;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\GridDefinitionFactoryInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\TaxRuleGridDefinitionFactory;
+ use PrestaShop\PrestaShop\Core\Grid\GridFactoryInterface;
+-use PrestaShop\PrestaShop\Core\Search\Filters\TaxRuleFilters;
+ use PrestaShop\PrestaShop\Core\Search\Filters\TaxRulesGroupFilters;
+ use PrestaShopBundle\Controller\Admin\PrestaShopAdminController;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
+@@ -117,7 +121,6 @@ public function createAction(
+      *
+      * @param Request $request
+      * @param int $taxRulesGroupId
+-     * @param TaxRuleFilters $filters
+      *
+      * @return Response
+      */
+@@ -125,18 +128,18 @@ public function createAction(
+     public function editAction(
+         Request $request,
+         int $taxRulesGroupId,
+-        TaxRuleFilters $filters,
+         #[Autowire(service: 'prestashop.core.form.identifiable_object.builder.tax_rules_group_form_builder')]
+         FormBuilderInterface $formBuilder,
+         #[Autowire(service: 'prestashop.core.form.identifiable_object.handler.tax_rules_group_form_handler')]
+         FormHandlerInterface $formHandler,
+-        #[Autowire(service: 'prestashop.core.grid.factory.tax_rule')]
+-        GridFactoryInterface $taxRuleGridFactory
+     ): Response {
+         $taxRulesGroupForm = null;
+ 
+         try {
+-            $taxRulesGroupForm = $formBuilder->getFormFor((int) $taxRulesGroupId);
++            $taxRulesGroupForm = $formBuilder->getFormFor((int) $taxRulesGroupId, [], [
++                'show_tax_rules_list' => true,
++                'tax_rules_group_id' => $taxRulesGroupId,
++            ]);
+             $taxRulesGroupForm->handleRequest($request);
+             $result = $formHandler->handleFor((int) $taxRulesGroupId, $taxRulesGroupForm);
+             if ($result->isSubmitted() && $result->isValid()) {
+@@ -154,17 +157,11 @@ public function editAction(
+             $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
+         }
+ 
+-        $filters->addFilter(['taxRulesGroupId' => $taxRulesGroupId]);
+-        $taxRuleGrid = $taxRuleGridFactory->getGrid($filters);
+-
+         return $this->render('@PrestaShop/Admin/Improve/International/TaxRulesGroup/edit.html.twig', [
+             'enableSidebar' => true,
+             'layoutTitle' => $this->trans('Editing tax rule %value%', ['%value%' => $taxRulesGroupForm->getData()['name']], 'Admin.Navigation.Menu'),
+             'taxRulesGroupForm' => $taxRulesGroupForm->createView(),
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+-            'taxRuleGrid' => $this->presentGrid($taxRuleGrid),
+-            'taxRulesGroupId' => $taxRulesGroupId,
+-            'layoutHeaderToolbarBtn' => $this->getTaxRuleToolbarButtons($taxRulesGroupId),
+         ]);
+     }
+ 
+@@ -197,6 +194,58 @@ public function getStatesForCountryAction(
+         return new JsonResponse($states);
+     }
+ 
++    /**
++     * Returns paginated list of tax rules for a group as JSON.
++     *
++     * @param Request $request
++     * @param int $taxRulesGroupId
++     *
++     * @return JsonResponse
++     */
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function listTaxRulesAction(Request $request, int $taxRulesGroupId): JsonResponse
++    {
++        $limit = $request->query->getInt('limit') ?: null;
++        $offset = $request->query->getInt('offset') ?: null;
++
++        /** @var TaxRuleList $taxRuleList */
++        $taxRuleList = $this->dispatchQuery(
++            new GetTaxRuleList(
++                $taxRulesGroupId,
++                $this->getLanguageContext()->getId(),
++                $limit,
++                $offset,
++            )
++        );
++
++        $taxRules = [];
++        foreach ($taxRuleList->getTaxRules() as $taxRule) {
++            $taxRules[] = [
++                'id' => $taxRule->getTaxRuleId(),
++                'countryName' => $taxRule->getCountryName(),
++                'stateName' => $taxRule->getStateName(),
++                'zipcode' => $taxRule->getZipcode(),
++                'behavior' => $this->formatBehavior($taxRule->getBehavior()),
++                'taxName' => $taxRule->getTaxName(),
++                'taxRate' => $taxRule->getTaxRate() . ' %',
++                'description' => $taxRule->getDescription(),
++                'editUrl' => $this->generateUrl('admin_tax_rules_edit', [
++                    'taxRulesGroupId' => $taxRulesGroupId,
++                    'taxRuleId' => $taxRule->getTaxRuleId(),
++                ]),
++                'deleteUrl' => $this->generateUrl('admin_tax_rules_delete', [
++                    'taxRulesGroupId' => $taxRulesGroupId,
++                    'taxRuleId' => $taxRule->getTaxRuleId(),
++                ]),
++            ];
++        }
++
++        return $this->json([
++            'taxRules' => $taxRules,
++            'total' => $taxRuleList->getTotalCount(),
++        ]);
++    }
++
+     /**
+      * Handles tax rules grid search (filters).
+      *
+@@ -248,7 +297,10 @@ public function createTaxRuleAction(
+                 $this->addFlash('success', $this->trans('Successful creation', [], 'Admin.Notifications.Success'));
+ 
+                 if ($isLiteDisplaying) {
+-                    return new Response('<div data-modal-close="true"></div>');
++                    return $this->redirectToRoute('admin_tax_rules_create', [
++                        'taxRulesGroupId' => $taxRulesGroupId,
++                        'liteDisplaying' => 1,
++                    ]);
+                 }
+ 
+                 $newGroupId = $handlerResult->getIdentifiableObjectId();
+@@ -302,7 +354,11 @@ public function editTaxRuleAction(
+                 $this->addFlash('success', $this->trans('Update successful', [], 'Admin.Notifications.Success'));
+ 
+                 if ($isLiteDisplaying) {
+-                    return new Response('<div data-modal-close="true"></div>');
++                    return $this->redirectToRoute('admin_tax_rules_edit', [
++                        'taxRulesGroupId' => $taxRulesGroupId,
++                        'taxRuleId' => $taxRuleId,
++                        'liteDisplaying' => 1,
++                    ]);
+                 }
+ 
+                 return $this->redirectToRoute('admin_tax_rules_groups_edit', [
+@@ -334,21 +390,21 @@ public function editTaxRuleAction(
+      * @param int $taxRulesGroupId
+      * @param int $taxRuleId
+      *
+-     * @return RedirectResponse
++     * @return JsonResponse
+      */
+     #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_tax_rules_groups_index')]
+-    public function deleteTaxRuleAction(int $taxRulesGroupId, int $taxRuleId): RedirectResponse
++    public function deleteTaxRuleAction(int $taxRulesGroupId, int $taxRuleId): JsonResponse
+     {
+         try {
+             $this->dispatchCommand(new DeleteTaxRuleCommand($taxRuleId));
+-            $this->addFlash('success', $this->trans('Successful deletion', [], 'Admin.Notifications.Success'));
+         } catch (Exception $e) {
+-            $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages()));
++            return $this->json(
++                ['error' => $this->getErrorMessageForException($e, $this->getErrorMessages())],
++                Response::HTTP_BAD_REQUEST
++            );
+         }
+ 
+-        return $this->redirectToRoute('admin_tax_rules_groups_edit', [
+-            'taxRulesGroupId' => $taxRulesGroupId,
+-        ]);
++        return $this->json(['message' => $this->trans('Successful deletion', [], 'Admin.Notifications.Success')]);
+     }
+ 
+     /**
+@@ -559,20 +615,13 @@ private function getTaxRulesGroupToolbarButtons(): array
+         ];
+     }
+ 
+-    /**
+-     * @param int $taxRulesGroupId
+-     *
+-     * @return array
+-     */
+-    private function getTaxRuleToolbarButtons(int $taxRulesGroupId): array
++    private function formatBehavior(int $behavior): string
+     {
+-        return [
+-            'add' => [
+-                'href' => $this->generateUrl('admin_tax_rules_create', ['taxRulesGroupId' => $taxRulesGroupId]),
+-                'desc' => $this->trans('Add new tax rule', [], 'Admin.International.Feature'),
+-                'icon' => 'add_circle_outline',
+-            ],
+-        ];
++        return match ($behavior) {
++            TaxRuleSettings::BEHAVIOR_COMBINE => $this->trans('Combine', [], 'Admin.International.Feature'),
++            TaxRuleSettings::BEHAVIOR_ONE_AFTER_ANOTHER => $this->trans('One after another', [], 'Admin.International.Feature'),
++            default => $this->trans('This tax only', [], 'Admin.International.Feature'),
++        };
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesGroupType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesGroupType.php
+index 16034783cb739..e6da51780e3d6 100644
+--- a/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesGroupType.php
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesGroupType.php
+@@ -15,6 +15,7 @@
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
+ use Symfony\Component\Validator\Constraints\Length;
+ use Symfony\Component\Validator\Constraints\NotBlank;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+@@ -91,5 +92,22 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ],
+             ]);
+         }
++
++        if ($options['show_tax_rules_list']) {
++            $builder->add('tax_rules', TaxRulesType::class, [
++                'mapped' => false,
++                'tax_rules_group_id' => $options['tax_rules_group_id'],
++            ]);
++        }
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver->setDefaults([
++            'show_tax_rules_list' => false,
++            'tax_rules_group_id' => null,
++        ]);
++        $resolver->setAllowedTypes('show_tax_rules_list', 'bool');
++        $resolver->setAllowedTypes('tax_rules_group_id', ['null', 'int']);
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesType.php
+new file mode 100644
+index 0000000000000..0fe98622173d6
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Tax/TaxRulesType.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Tax;
++
++use PrestaShopBundle\Form\Admin\Type\IconButtonType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormInterface;
++use Symfony\Component\Form\FormView;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++/**
++ * Form type that renders the "Add a tax rule" button and the inline tax rules list.
++ * Intended to be embedded in TaxRulesGroupType when editing an existing group.
++ */
++class TaxRulesType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder->add('add_tax_rule_btn', IconButtonType::class, [
++            'label' => $this->trans('Add a tax rule', 'Admin.International.Feature'),
++            'attr' => [
++                'class' => 'js-add-tax-rule-btn btn btn-primary',
++                'data-modal-title' => $this->trans('Add new tax rule', 'Admin.International.Feature'),
++                'data-confirm-button-label' => $this->trans('Save', 'Admin.Actions'),
++                'data-cancel-button-label' => $this->trans('Cancel', 'Admin.Actions'),
++            ],
++            'icon' => 'add_circle',
++        ]);
++    }
++
++    public function buildView(FormView $view, FormInterface $form, array $options): void
++    {
++        parent::buildView($view, $form, $options);
++        $view->vars['tax_rules_group_id'] = $options['tax_rules_group_id'];
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        parent::configureOptions($resolver);
++        $resolver->setDefaults([
++            'form_theme' => '@PrestaShop/Admin/Improve/International/TaxRulesGroup/FormTheme/tax_rules.html.twig',
++            'tax_rules_group_id' => null,
++        ]);
++        $resolver->setAllowedTypes('tax_rules_group_id', ['null', 'int']);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
+index bda823d4de96d..85350238f23b8 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/improve/international/tax_rules_groups.yml
+@@ -117,6 +117,17 @@ admin_tax_rules_search:
+   requirements:
+     taxRulesGroupId: \d+
+ 
++admin_tax_rules_list:
++  path: /{taxRulesGroupId}/tax-rules/list
++  methods: [ GET ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Improve\International\TaxRulesGroupController::listTaxRulesAction
++    _legacy_controller: AdminTaxRulesGroup
++    _legacy_link: AdminTaxRulesGroup
++    _legacy_feature_flag: tax_rules_group
++  requirements:
++    taxRulesGroupId: \d+
++
+ admin_tax_rules_create:
+   path: /{taxRulesGroupId}/tax-rules/new
+   methods: [ GET, POST ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml b/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
+index 5719d839e939b..4a320a979c35f 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/tax_rules_group.yml
+@@ -59,4 +59,10 @@ services:
+     autowire: true
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\TaxRulesGroup\QueryHandler\GetTaxRuleListHandler:
++    autowire: true
++    autoconfigure: true
++    arguments:
++      $dbPrefix: '%database_prefix%'
++
+   PrestaShop\PrestaShop\Adapter\TaxRulesGroup\Repository\TaxRuleRepository: ~
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 2624dd7e34d0e..a0f6ec67a5837 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -634,6 +634,8 @@ services:
+ 
+   PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRulesGroupType:
+ 
++  PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRulesType:
++
+   PrestaShopBundle\Form\Admin\Improve\International\Tax\TaxRuleType:
+     arguments:
+       $taxByIdChoiceProvider: '@PrestaShop\PrestaShop\Core\Form\ChoiceProvider\TaxByIdChoiceProvider'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig
+index e3c9a6455e5ac..6656a3654bbe7 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_form.html.twig
+@@ -6,30 +6,35 @@
+ {% form_theme taxRuleForm '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit.html.twig' %}
+ 
+ {{ form_start(taxRuleForm, {attr: {'data-states-url': path('admin_tax_rules_states_for_country', {countryId: 0})}}) }}
+-<div class="card">
+-  <h3 class="card-header">
+-    <i class="material-icons">payments</i>
+-    {{ 'Tax Rule'|trans({}, 'Admin.International.Feature') }}
+-  </h3>
+-
+-  <div class="card-body">
++{% block tax_rule_form_widget %}
++  {% if lightDisplay|default(false) %}
+     <div class="form-wrapper">
+-      {% block tax_rule_form_widget %}
+-        {{ form_widget(taxRuleForm) }}
+-      {% endblock %}
++      {{ form_widget(taxRuleForm) }}
+     </div>
+-  </div>
++  {% else %}
++    <div class="card">
++      <h3 class="card-header">
++        <i class="material-icons">payments</i>
++        {{ 'Tax Rule'|trans({}, 'Admin.International.Feature') }}
++      </h3>
+ 
+-  <div class="card-footer">
+-    <div class="d-inline-flex">
+-      <a href="{{ path('admin_tax_rules_groups_edit', {taxRulesGroupId: taxRulesGroupId}) }}" class="btn btn-outline-secondary cancel-btn">
+-        {{ 'Cancel'|trans({}, 'Admin.Actions') }}
+-      </a>
+-    </div>
+-    <div class="d-inline-flex float-right">
+-      <button class="btn btn-primary">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
+-    </div>
+-  </div>
++      <div class="card-body">
++        <div class="form-wrapper">
++          {{ form_widget(taxRuleForm) }}
++        </div>
++      </div>
+ 
+-</div>
++      <div class="card-footer">
++        <div class="d-inline-flex">
++          <a href="{{ path('admin_tax_rules_groups_edit', {taxRulesGroupId: taxRulesGroupId}) }}" class="btn btn-outline-secondary cancel-btn">
++            {{ 'Cancel'|trans({}, 'Admin.Actions') }}
++          </a>
++        </div>
++        <div class="d-inline-flex float-right">
++          <button class="btn btn-primary">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++        </div>
++      </div>
++    </div>
++  {% endif %}
++{% endblock %}
+ {{ form_end(taxRuleForm) }}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rules_list.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rules_list.html.twig
+new file mode 100644
+index 0000000000000..63b28cb3fda69
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rules_list.html.twig
+@@ -0,0 +1,75 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++<div id="tax-rules-list-container"
++     class="mt-3"
++     data-list-url="{{ path('admin_tax_rules_list', {taxRulesGroupId: taxRulesGroupId}) }}"
++     data-create-url="{{ path('admin_tax_rules_create', {taxRulesGroupId: taxRulesGroupId}) }}"
++>
++  <div id="tax-rules-loading">
++    <div class="loading-label">{{ 'Loading tax rules'|trans({}, 'Admin.International.Feature') }}</div>
++    <div class="spinner spinner-primary"></div>
++  </div>
++  <table class="table" id="tax-rules-list-table">
++    <thead class="thead-default">
++    <tr>
++      <th>{{ 'Country'|trans({}, 'Admin.Global') }}</th>
++      <th>{{ 'State'|trans({}, 'Admin.Global') }}</th>
++      <th>{{ 'Zip/Postal code'|trans({}, 'Admin.International.Feature') }}</th>
++      <th>{{ 'Behavior'|trans({}, 'Admin.International.Feature') }}</th>
++      <th>{{ 'Tax'|trans({}, 'Admin.Global') }}</th>
++      <th>{{ 'Rate'|trans({}, 'Admin.Global') }}</th>
++      <th>{{ 'Description'|trans({}, 'Admin.Global') }}</th>
++      <th></th>
++      <th></th>
++    </tr>
++    </thead>
++    <tbody>
++    {# rows dynamically generated by JavaScript #}
++    </tbody>
++  </table>
++  <div class="row justify-content-center" id="tax-rules-pagination">
++    {{ include('@PrestaShop/Admin/Common/javascript_pagination.html.twig', {
++      limit: 10,
++      limitChoices: [10, 20, 50, 100],
++    }) }}
++  </div>
++  <script type="text/html" id="tax-rule-tr-template">
++    <tr>
++      <td class="tax-rule-country"></td>
++      <td class="tax-rule-state"></td>
++      <td class="tax-rule-zipcode"></td>
++      <td class="tax-rule-behavior"></td>
++      <td class="tax-rule-tax-name"></td>
++      <td class="tax-rule-tax-rate"></td>
++      <td class="tax-rule-description"></td>
++      <td>
++        <button
++          type="button"
++          title="{{ 'Edit'|trans({}, 'Admin.Actions') }}"
++          class="js-edit-tax-rule-btn btn tooltip-link"
++          data-modal-title="{{ 'Edit tax rule'|trans({}, 'Admin.International.Feature') }}"
++          data-confirm-button-label="{{ 'Save'|trans({}, 'Admin.Actions') }}"
++          data-cancel-button-label="{{ 'Cancel'|trans({}, 'Admin.Actions') }}"
++        >
++          <i class="material-icons">edit</i>
++        </button>
++      </td>
++      <td>
++        <button
++          type="button"
++          title="{{ 'Delete'|trans({}, 'Admin.Actions') }}"
++          class="js-delete-tax-rule-btn btn tooltip-link"
++          data-confirm-title="{{ 'Tax rule deletion'|trans({}, 'Admin.International.Feature') }}"
++          data-confirm-message="{{ 'Are you sure you want to delete this tax rule?'|trans({}, 'Admin.International.Feature') }}"
++          data-confirm-btn-label="{{ 'Delete'|trans({}, 'Admin.Actions') }}"
++          data-cancel-btn-label="{{ 'Cancel'|trans({}, 'Admin.Actions') }}"
++          data-confirm-btn-class="btn-danger"
++        ><i class="material-icons">delete</i>
++        </button>
++      </td>
++    </tr>
++  </script>
++</div>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/FormTheme/tax_rules.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/FormTheme/tax_rules.html.twig
+new file mode 100644
+index 0000000000000..afd8781b0ab0e
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/FormTheme/tax_rules.html.twig
+@@ -0,0 +1,17 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/TwigTemplateForm/prestashop_ui_kit_base.html.twig' %}
++
++{% block tax_rules_widget %}
++  <div id="tax-rules-container">
++    {{ form_widget(form) }}
++    {{ block('tax_rules_list') }}
++  </div>
++{% endblock %}
++
++{% block tax_rules_list %}
++  {% set taxRulesGroupId = form.vars.tax_rules_group_id %}
++  {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rules_list.html.twig', {taxRulesGroupId: taxRulesGroupId}) }}
++{% endblock %}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
+index 1285956ab7c37..8cde131c80d88 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/TaxRulesGroup/edit.html.twig
+@@ -6,15 +6,10 @@
+ 
+ {% block content %}
+   {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/form.html.twig', {taxRulesGroupForm: taxRulesGroupForm}) }}
+-
+-  {% block tax_rules_list_panel %}
+-    {{ include('@PrestaShop/Admin/Improve/International/TaxRulesGroup/Blocks/tax_rule_grid_panel.html.twig', {grid: taxRuleGrid, taxRulesGroupId: taxRulesGroupId}) }}
+-  {% endblock %}
+ {% endblock %}
+ 
+ {% block javascripts %}
+   {{ parent() }}
+ 
+   <script src="{{ asset('themes/new-theme/public/tax_rules.bundle.js') }}"></script>
+-  <script src="{{ asset('themes/default/js/bundle/pagination.js') }}"></script>
+ {% endblock %}

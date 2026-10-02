@@ -1,0 +1,339 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/module/controller.js b/admin-dev/themes/new-theme/js/pages/module/controller.js
+index 1b714e162c017..a9f043cdbb07d 100644
+--- a/admin-dev/themes/new-theme/js/pages/module/controller.js
++++ b/admin-dev/themes/new-theme/js/pages/module/controller.js
+@@ -602,7 +602,7 @@ class AdminModuleController {
+     // @see: dropzone.js
+     const dropzoneOptions = {
+       url: window.moduleURLs.moduleImport,
+-      acceptedFiles: '.zip, .tar',
++      acceptedFiles: '.zip, .tar, .tar.gz, .tgz',
+       // The name that will be used to transfer the file
+       paramName: 'file_uploaded',
+       uploadMultiple: false,
+diff --git a/src/Core/Module/SourceHandler/TarSourceHandler.php b/src/Core/Module/SourceHandler/TarSourceHandler.php
+new file mode 100644
+index 0000000000000..865410f2c5782
+--- /dev/null
++++ b/src/Core/Module/SourceHandler/TarSourceHandler.php
+@@ -0,0 +1,134 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Module\SourceHandler;
++
++use Phar;
++use PharData;
++use PrestaShop\PrestaShop\Core\Module\Exception\ModuleErrorException;
++use RecursiveIteratorIterator;
++use Symfony\Contracts\Translation\TranslatorInterface;
++use Throwable;
++
++class TarSourceHandler implements SourceHandlerInterface
++{
++    private const AUTHORIZED_MIME = [
++        'application/gzip',
++        'application/x-gzip',
++        'application/x-gtar',
++        'application/x-tgz',
++        'application/x-tar',
++    ];
++
++    private const MODULE_REGEX = '/^(.*)\/\1\.php$/i'; // module_name/module_name.php
++
++    /** @var string */
++    protected $modulePath;
++
++    /** @var TranslatorInterface */
++    protected $translator;
++
++    public function __construct(string $modulePath, TranslatorInterface $translator)
++    {
++        $this->modulePath = rtrim($modulePath, '/') . '/';
++        $this->translator = $translator;
++    }
++
++    public function canHandle($source): bool
++    {
++        return is_file($source) && in_array(mime_content_type($source), self::AUTHORIZED_MIME, true);
++    }
++
++    public function getModuleName($source): string
++    {
++        $archivePath = $this->copyToNamedArchive($source);
++
++        try {
++            $archive = new PharData($archivePath);
++            $iterator = new RecursiveIteratorIterator($archive);
++            foreach ($iterator as $file) {
++                if (preg_match(self::MODULE_REGEX, $iterator->getSubPathName(), $matches)) {
++                    return $matches[1];
++                }
++            }
++        } catch (Throwable $e) {
++            // Not a readable archive; fall through to the exception below.
++        } finally {
++            $this->removeNamedArchive($archivePath);
++        }
++
++        throw new ModuleErrorException(
++            $this->translator->trans(
++                'This file does not seem to be a valid module archive',
++                [],
++                'Admin.Modules.Notification'
++            )
++        );
++    }
++
++    public function handle(string $source): void
++    {
++        $archivePath = $this->copyToNamedArchive($source);
++
++        try {
++            $archive = new PharData($archivePath);
++            $archive->extractTo($this->modulePath, null, true);
++        } catch (Throwable $e) {
++            throw new ModuleErrorException(
++                $this->translator->trans(
++                    'Cannot extract module in %path%. %error%',
++                    [
++                        '%path%' => $this->modulePath,
++                        '%error%' => $e->getMessage(),
++                    ],
++                    'Admin.Modules.Notification'
++                )
++            );
++        } finally {
++            $this->removeNamedArchive($archivePath);
++        }
++    }
++
++    /**
++     * PharData detects the archive format from the file name extension, but uploaded files are
++     * stored under an extension-less temporary name. Copy the source to a temporary file that
++     * keeps the .tar.gz extension so PharData can open it.
++     *
++     * @throws ModuleErrorException
++     */
++    private function copyToNamedArchive(string $source): string
++    {
++        $archivePath = sprintf('%s/%s.tar.gz', sys_get_temp_dir(), uniqid('ps_module_', true));
++
++        if (!is_file($source) || !copy($source, $archivePath)) {
++            throw new ModuleErrorException(
++                $this->translator->trans(
++                    'Cannot read the uploaded module archive.',
++                    [],
++                    'Admin.Modules.Notification'
++                )
++            );
++        }
++
++        return $archivePath;
++    }
++
++    private function removeNamedArchive(string $archivePath): void
++    {
++        if (!is_file($archivePath)) {
++            return;
++        }
++
++        try {
++            // PharData keeps the archive open; this releases it and removes the temporary file.
++            Phar::unlinkArchive($archivePath);
++        } catch (Throwable $e) {
++            @unlink($archivePath);
++        }
++    }
++}
+diff --git a/src/Core/Module/SourceHandler/ZipSourceHandler.php b/src/Core/Module/SourceHandler/ZipSourceHandler.php
+index ec9425f0788c7..b00718af3b916 100644
+--- a/src/Core/Module/SourceHandler/ZipSourceHandler.php
++++ b/src/Core/Module/SourceHandler/ZipSourceHandler.php
+@@ -16,10 +16,6 @@ class ZipSourceHandler implements SourceHandlerInterface
+ {
+     private const AUTHORIZED_MIME = [
+         'application/zip',
+-        'application/x-gzip',
+-        'application/gzip',
+-        'application/x-gtar',
+-        'application/x-tgz',
+     ];
+ 
+     private const MODULE_REGEX = '/^(.*)\/\1\.php$/i'; // module_name/module_name.php
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+index 5d22979b1ef75..82c8f589e4536 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+@@ -15,8 +15,8 @@
+ use PrestaShop\PrestaShop\Adapter\Module\Module as ModuleAdapter;
+ use PrestaShop\PrestaShop\Core\Module\ModuleCollection;
+ use PrestaShop\PrestaShop\Core\Module\ModuleManager;
++use PrestaShop\PrestaShop\Core\Module\SourceHandler\SourceHandlerFactory;
+ use PrestaShop\PrestaShop\Core\Module\SourceHandler\SourceHandlerNotFoundException;
+-use PrestaShop\PrestaShop\Core\Module\SourceHandler\ZipSourceHandler;
+ use PrestaShop\PrestaShop\Core\Security\Permission;
+ use PrestaShopBundle\Controller\Admin\Improve\Modules\ModuleAbstractController;
+ use PrestaShopBundle\Entity\ModuleHistory;
+@@ -311,7 +311,7 @@ public function moduleAction(
+     public function importModuleAction(
+         Request $request,
+         ModuleManager $moduleManager,
+-        ZipSourceHandler $zipSource,
++        SourceHandlerFactory $sourceHandlerFactory,
+     ): JsonResponse {
+         if ($this->isDemoModeEnabled()) {
+             return new JsonResponse(
+@@ -366,6 +366,7 @@ public function importModuleAction(
+                             'application/gzip',
+                             'application/x-gtar',
+                             'application/x-tgz',
++                            'application/x-tar',
+                         ],
+                     ]
+                 ),
+@@ -381,10 +382,11 @@ public function importModuleAction(
+                 throw new Exception(implode(PHP_EOL, $violationsMessages));
+             }
+ 
+-            $moduleName = $zipSource->getModuleName($fileUploaded->getPathname());
++            $uploadedPath = $fileUploaded->getPathname();
++            $moduleName = $sourceHandlerFactory->getHandler($uploadedPath)->getModuleName($uploadedPath);
+ 
+             $moduleWasAlreadyInstalled = $moduleManager->isInstalled($moduleName);
+-            $installationResult = $moduleManager->install($moduleName, $fileUploaded->getPathname());
++            $installationResult = $moduleManager->install($moduleName, $uploadedPath);
+ 
+             // Install the module
+             $installationResponse = [
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/module.yml b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+index 38a15a9971746..a378aebac5da1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/module.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/module.yml
+@@ -43,6 +43,12 @@ services:
+       $modulePath: '%prestashop.module_dir%'
+     tags: [ core.module.source_handler ]
+ 
++  PrestaShop\PrestaShop\Core\Module\SourceHandler\TarSourceHandler:
++    autowire: true
++    arguments:
++      $modulePath: '%prestashop.module_dir%'
++    tags: [ core.module.source_handler ]
++
+   PrestaShop\PrestaShop\Core\Module\SourceHandler\RemoteZipSourceHandler:
+     autowire: true
+     public: false
+diff --git a/tests/Resources/dummyFile/valid_module.tar.gz b/tests/Resources/dummyFile/valid_module.tar.gz
+new file mode 100644
+index 0000000000000..75ae82ed9c9b6
+Binary files /dev/null and b/tests/Resources/dummyFile/valid_module.tar.gz differ
+diff --git a/tests/Unit/Core/Module/SourceHandler/TarSourceHandlerTest.php b/tests/Unit/Core/Module/SourceHandler/TarSourceHandlerTest.php
+new file mode 100644
+index 0000000000000..60578e03f2fef
+--- /dev/null
++++ b/tests/Unit/Core/Module/SourceHandler/TarSourceHandlerTest.php
+@@ -0,0 +1,99 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Module\SourceHandler;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Module\Exception\ModuleErrorException;
++use PrestaShop\PrestaShop\Core\Module\SourceHandler\TarSourceHandler;
++use Symfony\Contracts\Translation\TranslatorInterface;
++use Tests\Resources\ResourceResetter;
++
++class TarSourceHandlerTest extends TestCase
++{
++    private const UNHANDLABLE_SOURCE = 'unhandlablesource';
++    private const VALID_SOURCE = __DIR__ . '/../../../../Resources/dummyFile/valid_module.tar.gz';
++
++    /** @var TarSourceHandler */
++    private $tarSourceHandler;
++
++    /**
++     * @var ResourceResetter : responsible to reset resources used for tests
++     */
++    private $resourceResetter;
++
++    public function setUp(): void
++    {
++        $this->resourceResetter = new ResourceResetter();
++        $this->resourceResetter->backupTestModules();
++
++        $translator = $this->createMock(TranslatorInterface::class);
++        $translator->method('trans')->willReturnArgument(0);
++
++        $this->tarSourceHandler = new TarSourceHandler(
++            $this->resourceResetter::TEST_MODULES_DIR,
++            $translator
++        );
++    }
++
++    public function tearDown(): void
++    {
++        $this->resourceResetter->resetTestModules();
++    }
++
++    public function testCanHandle(): void
++    {
++        $this->assertFalse($this->tarSourceHandler->canHandle(self::UNHANDLABLE_SOURCE));
++        $this->assertTrue($this->tarSourceHandler->canHandle(self::VALID_SOURCE));
++    }
++
++    public function testGetNameUnexistingSource(): void
++    {
++        $this->expectException(ModuleErrorException::class);
++        $this->tarSourceHandler->getModuleName(self::UNHANDLABLE_SOURCE);
++    }
++
++    public function testGetNameValidSource(): void
++    {
++        $this->assertSame(
++            'valid_module',
++            $this->tarSourceHandler->getModuleName(self::VALID_SOURCE)
++        );
++    }
++
++    /**
++     * Uploaded files are stored under an extension-less temporary name; the handler must still
++     * resolve the module name from such a file (this is the case that originally failed).
++     */
++    public function testGetNameValidSourceWithoutExtension(): void
++    {
++        $extensionLessCopy = tempnam(sys_get_temp_dir(), 'ps_module_upload_');
++        copy(self::VALID_SOURCE, $extensionLessCopy);
++
++        try {
++            $this->assertSame(
++                'valid_module',
++                $this->tarSourceHandler->getModuleName($extensionLessCopy)
++            );
++        } finally {
++            @unlink($extensionLessCopy);
++        }
++    }
++
++    public function testHandleUnhandlableSource(): void
++    {
++        $this->expectException(ModuleErrorException::class);
++        $this->tarSourceHandler->handle(self::UNHANDLABLE_SOURCE);
++    }
++
++    public function testHandleValidSource(): void
++    {
++        $this->tarSourceHandler->handle(self::VALID_SOURCE);
++        $this->assertFileExists($this->resourceResetter::TEST_MODULES_DIR . '/valid_module/valid_module.php');
++    }
++}

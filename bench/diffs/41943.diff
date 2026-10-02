@@ -1,0 +1,139 @@
+diff --git a/classes/Carrier.php b/classes/Carrier.php
+index 965578346dd7a..c13f96fec0d88 100644
+--- a/classes/Carrier.php
++++ b/classes/Carrier.php
+@@ -386,18 +386,19 @@ public function getMaxDeliveryPriceByWeight($id_zone)
+     }
+ 
+     /**
+-     * Get delivery price for a given order by total order price MINUS shipping costs.
++     * Get delivery price for a given order by total MINUS shipping costs.
+      *
+      * @param float $order_total Order total to pay
+      * @param int $id_zone Zone id (for customer delivery address)
+      * @param int|null $id_currency Currency ID
++     * @param float|null $shipmentTotal Total of the current shipment, sent to the actionDeliveryPriceByPrice hook when the improved_shipment feature is enabled, null otherwise (including for legacy orders predating this feature)
+      *
+      * @return float Maximum delivery price
+      */
+-    public function getDeliveryPriceByPrice($order_total, $id_zone, $id_currency = null)
++    public function getDeliveryPriceByPrice($order_total, $id_zone, $id_currency = null, $shipmentTotal = null)
+     {
+         $id_carrier = (int) $this->id;
+-        $cache_key = $this->id . '_' . $order_total . '_' . $id_zone . '_' . $id_currency;
++        $cache_key = $this->id . '_' . $order_total . '_' . $id_zone . '_' . $id_currency . '_' . $shipmentTotal;
+         if (!isset(self::$price_by_price[$cache_key])) {
+             if (!empty($id_currency)) {
+                 $order_total = Tools::convertPrice($order_total, $id_currency, false);
+@@ -420,7 +421,12 @@ public function getDeliveryPriceByPrice($order_total, $id_zone, $id_currency = n
+             }
+         }
+ 
+-        $price_by_price = Hook::exec('actionDeliveryPriceByPrice', ['id_carrier' => $id_carrier, 'order_total' => $order_total, 'id_zone' => $id_zone]);
++        $price_by_price = Hook::exec('actionDeliveryPriceByPrice', [
++            'id_carrier' => $id_carrier,
++            'order_total' => $order_total,
++            'shipment_total' => $shipmentTotal,
++            'id_zone' => $id_zone,
++        ]);
+         if (is_numeric($price_by_price)) {
+             self::$price_by_price[$cache_key] = $price_by_price;
+         }
+@@ -435,13 +441,14 @@ public function getDeliveryPriceByPrice($order_total, $id_zone, $id_currency = n
+      * @param float $order_total Order total to pay
+      * @param int $id_zone Zone id (for customer delivery address)
+      * @param int|null $id_currency Currency ID
++     * @param float|null $shipmentTotal Total of the current shipment, sent to the actionDeliveryPriceByPrice hook when the improved_shipment feature is enabled, null otherwise (including for legacy orders predating this feature)
+      *
+      * @return bool true if carrier is available
+      */
+-    public static function checkDeliveryPriceByPrice($id_carrier, $order_total, $id_zone, $id_currency = null)
++    public static function checkDeliveryPriceByPrice($id_carrier, $order_total, $id_zone, $id_currency = null, $shipmentTotal = null)
+     {
+         $id_carrier = (int) $id_carrier;
+-        $cache_key = $id_carrier . '_' . $order_total . '_' . $id_zone . '_' . $id_currency;
++        $cache_key = $id_carrier . '_' . $order_total . '_' . $id_zone . '_' . $id_currency . '_' . $shipmentTotal;
+         if (!isset(self::$price_by_price2[$cache_key])) {
+             if (!empty($id_currency)) {
+                 $order_total = Tools::convertPrice($order_total, $id_currency, false);
+@@ -460,7 +467,12 @@ public static function checkDeliveryPriceByPrice($id_carrier, $order_total, $id_
+             self::$price_by_price2[$cache_key] = (isset($result['price']));
+         }
+ 
+-        $price_by_price = Hook::exec('actionDeliveryPriceByPrice', ['id_carrier' => $id_carrier, 'order_total' => $order_total, 'id_zone' => $id_zone]);
++        $price_by_price = Hook::exec('actionDeliveryPriceByPrice', [
++            'id_carrier' => $id_carrier,
++            'order_total' => $order_total,
++            'shipment_total' => $shipmentTotal,
++            'id_zone' => $id_zone,
++        ]);
+         if (is_numeric($price_by_price)) {
+             self::$price_by_price2[$cache_key] = true;
+         }
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 94cdae952adf5..a9ed08f310dd2 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -3704,6 +3704,19 @@ protected function getPackageShippingCostValue(
+         // Order total in default currency without fees
+         $order_total = $this->getOrderTotal(true, Cart::BOTH_WITHOUT_SHIPPING, $product_list, $id_carrier, false, $keepOrderPrices);
+ 
++        // When the improved_shipment feature is enabled and this call is scoped to a specific shipment,
++        // $order_total above is actually the value of the shipment contents: keep it as $shipment_total and recompute
++        // $order_total so it always reflects the whole order, as expected by the actionDeliveryPriceByPrice hook.
++        $shipment_total = null;
++        if (null !== $product_list) {
++            $containerFinder = new ContainerFinder(Context::getContext());
++            $featureFlagManager = $containerFinder->getContainer()->get(FeatureFlagStateCheckerInterface::class);
++            if ($featureFlagManager !== null && $featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
++                $shipment_total = $order_total;
++                $order_total = $this->getOrderTotal(true, Cart::BOTH_WITHOUT_SHIPPING, null, $id_carrier, false, $keepOrderPrices);
++            }
++        }
++
+         // Start with shipping cost at 0
+         $shipping_cost = 0;
+ 
+@@ -3795,7 +3808,7 @@ protected function getPackageShippingCostValue(
+ 
+                     // If the carrier has price based shipping, remove the carrier if it does not have a compatible range
+                     if ($shipping_method == Carrier::SHIPPING_METHOD_PRICE
+-                        && Carrier::checkDeliveryPriceByPrice($row['id_carrier'], $order_total, (int) $id_zone, (int) $this->id_currency) === false) {
++                        && Carrier::checkDeliveryPriceByPrice($row['id_carrier'], $order_total, (int) $id_zone, (int) $this->id_currency, $shipment_total) === false) {
+                         continue;
+                     }
+                 }
+@@ -3804,7 +3817,7 @@ protected function getPackageShippingCostValue(
+                 if ($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT) {
+                     $shipping = $carrier->getDeliveryPriceByWeight($this->getTotalWeight($product_list), (int) $id_zone);
+                 } else {
+-                    $shipping = $carrier->getDeliveryPriceByPrice($order_total, (int) $id_zone, (int) $this->id_currency);
++                    $shipping = $carrier->getDeliveryPriceByPrice($order_total, (int) $id_zone, (int) $this->id_currency, $shipment_total);
+                 }
+ 
+                 // And if it's the first carrier we check OR it's cheaper, we use the ID
+@@ -3957,21 +3970,21 @@ protected function getPackageShippingCostValue(
+         if ($carrier->range_behavior == OutOfRangeBehavior::DISABLED) {
+             if (($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT && Carrier::checkDeliveryPriceByWeight($carrier->id, $this->getTotalWeight(), (int) $id_zone) === false)
+                 || (
+-                    $shipping_method == Carrier::SHIPPING_METHOD_PRICE && Carrier::checkDeliveryPriceByPrice($carrier->id, $order_total, $id_zone, (int) $this->id_currency) === false
++                    $shipping_method == Carrier::SHIPPING_METHOD_PRICE && Carrier::checkDeliveryPriceByPrice($carrier->id, $order_total, $id_zone, (int) $this->id_currency, $shipment_total) === false
+                 )) {
+                 $shipping_cost += 0;
+             } else {
+                 if ($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT) {
+                     $shipping_cost += $carrier->getDeliveryPriceByWeight($this->getTotalWeight($product_list), $id_zone);
+                 } else { // by price
+-                    $shipping_cost += $carrier->getDeliveryPriceByPrice($order_total, $id_zone, (int) $this->id_currency);
++                    $shipping_cost += $carrier->getDeliveryPriceByPrice($order_total, $id_zone, (int) $this->id_currency, $shipment_total);
+                 }
+             }
+         } else {
+             if ($shipping_method == Carrier::SHIPPING_METHOD_WEIGHT) {
+                 $shipping_cost += $carrier->getDeliveryPriceByWeight($this->getTotalWeight($product_list), $id_zone);
+             } else {
+-                $shipping_cost += $carrier->getDeliveryPriceByPrice($order_total, $id_zone, (int) $this->id_currency);
++                $shipping_cost += $carrier->getDeliveryPriceByPrice($order_total, $id_zone, (int) $this->id_currency, $shipment_total);
+             }
+         }
+ 

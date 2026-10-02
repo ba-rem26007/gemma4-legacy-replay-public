@@ -1,0 +1,150 @@
+diff --git a/src/Adapter/Presenter/Cart/CartPresenter.php b/src/Adapter/Presenter/Cart/CartPresenter.php
+index 7451c4c1f6ae5..ca4cd9f432a3d 100644
+--- a/src/Adapter/Presenter/Cart/CartPresenter.php
++++ b/src/Adapter/Presenter/Cart/CartPresenter.php
+@@ -34,6 +34,8 @@
+ use Hook;
+ use PrestaShop\PrestaShop\Adapter\Image\ImageRetriever;
+ use PrestaShop\PrestaShop\Adapter\Presenter\PresenterInterface;
++use PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductLazyArray;
++use PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductListingLazyArray;
+ use PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductListingPresenter;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
+ use PrestaShop\PrestaShop\Adapter\Product\ProductColorsRetriever;
+@@ -71,6 +73,16 @@ class CartPresenter implements PresenterInterface
+      */
+     private $taxConfiguration;
+ 
++    /**
++     * @var ProductPresentationSettings
++     */
++    protected $settings;
++
++    /**
++     * @var ProductAssembler
++     */
++    protected $productAssembler;
++
+     public function __construct()
+     {
+         $context = Context::getContext();
+@@ -92,24 +104,13 @@ private function includeTaxes()
+     /**
+      * @param array $rawProduct
+      *
+-     * @return \PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductLazyArray|\PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductListingLazyArray
++     * @return ProductLazyArray|ProductListingLazyArray
+      */
+     private function presentProduct(array $rawProduct)
+     {
+-        $assembler = new ProductAssembler(Context::getContext());
+-        $assembledProduct = $assembler->assembleProduct($rawProduct);
++        $assembledProduct = $this->getProductAssembler()->assembleProduct($rawProduct);
+         $rawProduct = array_merge($assembledProduct, $rawProduct);
+ 
+-        $settings = new ProductPresentationSettings();
+-
+-        $settings->catalog_mode = Configuration::isCatalogMode();
+-        $settings->catalog_mode_with_prices = (int) Configuration::get('PS_CATALOG_MODE_WITH_PRICES');
+-        $settings->include_taxes = $this->includeTaxes();
+-        $settings->allow_add_variant_to_cart_from_listing = (int) Configuration::get('PS_ATTRIBUTE_CATEGORY_DISPLAY');
+-        $settings->stock_management_enabled = Configuration::get('PS_STOCK_MANAGEMENT');
+-        $settings->showPrices = Configuration::showPrices();
+-        $settings->showLabelOOSListingPages = (bool) Configuration::get('PS_SHOW_LABEL_OOS_LISTING_PAGES');
+-
+         if (isset($rawProduct['attributes']) && is_string($rawProduct['attributes'])) {
+             $rawProduct['attributes'] = $this->getAttributesArrayFromString($rawProduct['attributes']);
+         }
+@@ -179,7 +180,7 @@ private function presentProduct(array $rawProduct)
+         );
+ 
+         return $presenter->present(
+-            $settings,
++            $this->getSettings(),
+             $rawProduct,
+             Context::getContext()->language
+         );
+@@ -679,4 +680,30 @@ protected function getAttributesArrayFromString($attributes)
+ 
+         return $attributesArray;
+     }
++
++    protected function getSettings(): ProductPresentationSettings
++    {
++        if ($this->settings === null) {
++            $this->settings = new ProductPresentationSettings();
++
++            $this->settings->catalog_mode = Configuration::isCatalogMode();
++            $this->settings->catalog_mode_with_prices = (int) Configuration::get('PS_CATALOG_MODE_WITH_PRICES');
++            $this->settings->include_taxes = $this->includeTaxes();
++            $this->settings->allow_add_variant_to_cart_from_listing = (int) Configuration::get('PS_ATTRIBUTE_CATEGORY_DISPLAY');
++            $this->settings->stock_management_enabled = Configuration::get('PS_STOCK_MANAGEMENT');
++            $this->settings->showPrices = Configuration::showPrices();
++            $this->settings->showLabelOOSListingPages = (bool) Configuration::get('PS_SHOW_LABEL_OOS_LISTING_PAGES');
++        }
++
++        return $this->settings;
++    }
++
++    protected function getProductAssembler(): ProductAssembler
++    {
++        if ($this->productAssembler === null) {
++            $this->productAssembler = new ProductAssembler(Context::getContext());
++        }
++
++        return $this->productAssembler;
++    }
+ }
+diff --git a/src/Adapter/Presenter/Order/OrderLazyArray.php b/src/Adapter/Presenter/Order/OrderLazyArray.php
+index 37fdb4cc9d258..2958de00dafda 100644
+--- a/src/Adapter/Presenter/Order/OrderLazyArray.php
++++ b/src/Adapter/Presenter/Order/OrderLazyArray.php
+@@ -202,14 +202,17 @@ public function getProducts()
+ 
+             foreach ($cartProducts['products'] as $cartProduct) {
+                 if (($cartProduct['id_product'] === $orderProduct['id_product'])
+-                    && ($cartProduct['id_product_attribute'] === $orderProduct['id_product_attribute'])) {
++                    && ($cartProduct['id_product_attribute'] === $orderProduct['id_product_attribute'])
++                ) {
+                     if (isset($cartProduct['attributes'])) {
+                         $orderProduct['attributes'] = $cartProduct['attributes'];
+                     } else {
+                         $orderProduct['attributes'] = [];
+                     }
+                     $orderProduct['cover'] = $cartProduct['cover'];
++                    $orderProduct['default_image'] = $cartProduct['default_image'];
+                     $orderProduct['unit_price_full'] = $cartProduct['unit_price_full'];
++                    break;
+                 }
+             }
+ 
+diff --git a/themes/classic/templates/checkout/_partials/cart-summary-product-line.tpl b/themes/classic/templates/checkout/_partials/cart-summary-product-line.tpl
+index 20d95b3121f99..2eabef29893e9 100644
+--- a/themes/classic/templates/checkout/_partials/cart-summary-product-line.tpl
++++ b/themes/classic/templates/checkout/_partials/cart-summary-product-line.tpl
+@@ -25,8 +25,8 @@
+ {block name='cart_summary_product_line'}
+   <div class="media-left">
+     <a href="{$product.url}" title="{$product.name}">
+-      {if $product.cover}
+-        <img class="media-object" src="{$product.cover.small.url}" alt="{$product.name}" loading="lazy">
++      {if $product.default_image}
++        <img class="media-object" src="{$product.default_image.small.url}" alt="{$product.name}" loading="lazy">
+       {else}
+         <img src="{$urls.no_picture_image.bySize.small_default.url}" loading="lazy" />
+       {/if}
+diff --git a/themes/classic/templates/checkout/_partials/order-confirmation-table.tpl b/themes/classic/templates/checkout/_partials/order-confirmation-table.tpl
+index b3bb5427156d8..b0c23fb11b226 100644
+--- a/themes/classic/templates/checkout/_partials/order-confirmation-table.tpl
++++ b/themes/classic/templates/checkout/_partials/order-confirmation-table.tpl
+@@ -39,8 +39,8 @@
+         <div class="order-line row">
+           <div class="col-sm-2 col-xs-3">
+             <span class="image">
+-              {if !empty($product.cover)}
+-                <img src="{$product.cover.medium.url}" loading="lazy" />
++              {if !empty($product.default_image)}
++                <img src="{$product.default_image.medium.url}" loading="lazy" />
+               {else}
+                 <img src="{$urls.no_picture_image.bySize.medium_default.url}" loading="lazy" />
+               {/if}

@@ -1,0 +1,3996 @@
+diff --git a/.ai/GOTCHAS.md b/.ai/GOTCHAS.md
+index 2079741dd57c7..6b73fbc0f08b1 100644
+--- a/.ai/GOTCHAS.md
++++ b/.ai/GOTCHAS.md
+@@ -59,6 +59,12 @@ Normally: interfaces in Core, concrete implementations in Adapter. Exceptions wh
+ 
+ When adding a handler to these domains, follow the existing pattern (Core) rather than the standard pattern. When handlers are migrated to the future persistence system (probably Doctrine), they should be moved into the Core namespace.
+ 
++## Translation catalog extraction
++
++**Never wrap `TranslatorInterface::trans()`** — not in a private helper, not in a closure, not in a base-class proxy. The translation-catalog extractor scans for direct `->trans('literal string', [...], 'Domain')` calls in source; anything that hides the call (e.g. `$this->t(...)`, `$t(...)`, `$translatable->translate(...)`) is invisible to the extractor and the wording will not be added to the catalog, or its domain will be lost.
++
++Always call `$this->translator->trans($message, $parameters, $domain)` directly at every call site, even when it's repetitive — readability cost is real but extraction correctness is non-negotiable. If you find an existing helper, fix the helper's call sites instead of adding more.
++
+ ## Legacy class size warnings
+ 
+ | Domain | Legacy class | Lines | Risk |
+diff --git a/admin-dev/themes/new-theme/js/pages/address/index.ts b/admin-dev/themes/new-theme/js/pages/address/index.ts
+index 951fa2eed5eab..13b6906bf967a 100644
+--- a/admin-dev/themes/new-theme/js/pages/address/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/address/index.ts
+@@ -20,4 +20,17 @@ $(() => {
+       'ChoiceTable',
+     ],
+   );
++
++  // When deep-linked from the country address-format builder
++  // (e.g. /admin/sell/addresses#addressRequiredFieldsContainer), expand the
++  // required-fields collapse panel and scroll it into view so the merchant
++  // lands directly on the form.
++  if (window.location.hash === '#addressRequiredFieldsContainer') {
++    const target = document.querySelector<HTMLElement>(window.location.hash);
++
++    if (target) {
++      $(target).collapse('show');
++      target.scrollIntoView({behavior: 'smooth', block: 'start'});
++    }
++  }
+ });
+diff --git a/admin-dev/themes/new-theme/js/pages/country/components/AddressFormatBuilder.vue b/admin-dev/themes/new-theme/js/pages/country/components/AddressFormatBuilder.vue
+new file mode 100644
+index 0000000000000..c50cd2a88fae0
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/country/components/AddressFormatBuilder.vue
+@@ -0,0 +1,1190 @@
++<!--*
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ *-->
++<template>
++  <div class="address-format-builder">
++    <div class="address-format-builder__header">
++      <ul
++        class="nav nav-tabs"
++        role="tablist"
++      >
++        <li class="nav-item">
++          <button
++            type="button"
++            class="nav-link"
++            :class="{active: mode === 'visual'}"
++            role="tab"
++            :aria-selected="mode === 'visual'"
++            @click.prevent="setMode('visual')"
++          >
++            <i class="material-icons">view_module</i>
++            {{ $t('mode.visual') }}
++          </button>
++        </li>
++        <li class="nav-item">
++          <button
++            type="button"
++            class="nav-link"
++            :class="{active: mode === 'raw'}"
++            role="tab"
++            :aria-selected="mode === 'raw'"
++            @click.prevent="setMode('raw')"
++          >
++            <i class="material-icons">code</i>
++            {{ $t('mode.raw') }}
++          </button>
++        </li>
++      </ul>
++
++      <div class="dropdown">
++        <button
++          type="button"
++          class="btn btn-sm btn-outline-secondary dropdown-toggle"
++          data-toggle="dropdown"
++          aria-haspopup="true"
++          aria-expanded="false"
++        >
++          <i class="material-icons">restart_alt</i>
++          {{ $t('reset.button') }}
++        </button>
++        <div class="dropdown-menu dropdown-menu-right">
++          <button
++            type="button"
++            class="dropdown-item"
++            @click.prevent="resetTo(defaultFormat)"
++          >
++            <i class="material-icons">history</i>
++            {{ $t('reset.default') }}
++          </button>
++          <button
++            type="button"
++            class="dropdown-item"
++            @click.prevent="resetTo(initialValue)"
++          >
++            <i class="material-icons">save</i>
++            {{ $t('reset.lastSaved') }}
++          </button>
++          <div class="dropdown-divider" />
++          <button
++            type="button"
++            class="dropdown-item text-danger"
++            @click.prevent="confirmClear"
++          >
++            <i class="material-icons">delete_sweep</i>
++            {{ $t('reset.clear') }}
++          </button>
++        </div>
++      </div>
++    </div>
++
++    <div class="address-format-builder__body">
++      <div class="address-format-builder__editor">
++        <div
++          v-if="mode === 'visual' && missingFields.length > 0"
++          class="alert alert-warning"
++          role="status"
++          aria-live="polite"
++        >
++          <strong v-if="missingFields.length === 1">{{ $t('banner.missingOne') }}</strong>
++          <strong v-else>{{ $t('banner.missingMany', {count: missingFields.length}) }}</strong>
++          <span class="address-format-builder__missing-tokens">
++            <button
++              v-for="field in missingFields"
++              :key="field"
++              type="button"
++              class="btn btn-sm address-format-builder__missing-chip"
++              :title="$t('picker.required')"
++              @click.stop.prevent="insertField(field)"
++            >
++              <i class="material-icons">add</i>
++              {{ field }}
++            </button>
++          </span>
++          <button
++            type="button"
++            class="btn btn-link btn-sm address-format-builder__insert-all-action"
++            @click.stop.prevent="insertAllMissing"
++          >
++            {{ $t('banner.insertAll') }} →
++          </button>
++        </div>
++
++        <div
++          v-if="mode === 'visual'"
++          class="address-format-builder__lines"
++        >
++          <template
++            v-for="(line, lineIndex) in lines"
++            :key="`line-${lineIndex}`"
++          >
++            <div
++              v-if="lineDropTarget && lineDropTarget.index === lineIndex && lineDropTarget.before"
++              class="address-format-builder__line-drop-indicator"
++              aria-hidden="true"
++            />
++            <div
++              class="address-format-builder__line"
++              :class="{
++                'is-drag-over': dragOverLine === lineIndex && draggingLine < 0,
++                'is-dragging': draggingLine === lineIndex,
++                'is-selected': selectedLine === lineIndex,
++              }"
++              :aria-pressed="selectedLine === lineIndex"
++              @click="toggleSelectLine(lineIndex)"
++              @dragenter="onLineDragEnter(lineIndex, $event)"
++              @dragover="onLineDragOver(lineIndex, $event)"
++              @dragleave="onLineDragLeave"
++              @drop="onLineDrop(lineIndex, $event)"
++            >
++              <span
++                class="address-format-builder__grip"
++                draggable="true"
++                :title="$t('lines.dragHint')"
++                :aria-label="$t('lines.dragHint')"
++                tabindex="0"
++                @click.stop
++                @dragstart="onLineDragStart(lineIndex, $event)"
++                @dragend="onLineDragEnd"
++                @keydown="onGripKeydown(lineIndex, $event)"
++              >
++                <i class="material-icons">drag_indicator</i>
++              </span>
++              <span class="address-format-builder__line-number">{{ lineIndex + 1 }}</span>
++              <div class="address-format-builder__chips">
++                <span
++                  v-if="line.length === 0"
++                  class="address-format-builder__line-empty"
++                >{{ $t('lines.empty') }}</span>
++                <template
++                  v-for="(token, chipIndex) in line"
++                  :key="`chip-${lineIndex}-${chipIndex}-${token.raw}`"
++                >
++                  <span
++                    v-if="chipDropTarget
++                      && chipDropTarget.lineIndex === lineIndex
++                      && chipDropTarget.chipIndex === chipIndex
++                      && chipDropTarget.before"
++                    class="address-format-builder__chip-drop-indicator"
++                    aria-hidden="true"
++                  />
++                  <span
++                    class="tag address-format-builder__chip"
++                    :class="{
++                      'is-dragging': dragSource && dragSource.kind === 'chip'
++                        && dragSource.lineIndex === lineIndex && dragSource.chipIndex === chipIndex,
++                      'is-selected': selectedChip
++                        && selectedChip.lineIndex === lineIndex && selectedChip.chipIndex === chipIndex,
++                    }"
++                    draggable="true"
++                    @click.stop="toggleSelectChip(lineIndex, chipIndex)"
++                    @dragstart="onChipDragStart(lineIndex, chipIndex, $event)"
++                    @dragend="onChipDragEnd"
++                    @dragover="onChipDragOver(lineIndex, chipIndex, $event)"
++                  >
++                    <span class="address-format-builder__chip-key">{{ token.object }}</span>
++                    <span class="address-format-builder__chip-sep">:</span>
++                    <span class="address-format-builder__chip-value">{{ token.field }}</span>
++                    <button
++                      type="button"
++                      class="address-format-builder__chip-close"
++                      :aria-label="$t('lines.removeChip')"
++                      @click.stop.prevent="removeToken(lineIndex, chipIndex)"
++                    >
++                      <i class="material-icons">close</i>
++                    </button>
++                  </span>
++                  <span
++                    v-if="chipDropTarget
++                      && chipDropTarget.lineIndex === lineIndex
++                      && chipDropTarget.chipIndex === chipIndex
++                      && !chipDropTarget.before"
++                    class="address-format-builder__chip-drop-indicator"
++                    aria-hidden="true"
++                  />
++                </template>
++              </div>
++              <button
++                type="button"
++                class="btn btn-link btn-sm address-format-builder__line-remove"
++                :aria-label="$t('lines.remove')"
++                @click.stop.prevent="removeLine(lineIndex)"
++              >
++                <i class="material-icons">delete</i>
++              </button>
++            </div>
++            <div
++              v-if="lineDropTarget && lineDropTarget.index === lineIndex && !lineDropTarget.before"
++              class="address-format-builder__line-drop-indicator"
++              aria-hidden="true"
++            />
++          </template>
++          <button
++            type="button"
++            class="btn btn-outline-secondary btn-sm address-format-builder__add-line"
++            @click.prevent="addLine"
++          >
++            <i class="material-icons">add</i>
++            {{ $t('lines.add') }}
++          </button>
++        </div>
++
++        <div v-else>
++          <textarea
++            v-model="rawText"
++            class="form-control address-format-builder__raw"
++            rows="9"
++            spellcheck="false"
++            @blur="commitRaw"
++          />
++          <p class="form-text text-muted">
++            {{ $t('raw.help') }}
++          </p>
++        </div>
++      </div>
++
++      <div class="address-format-builder__sidebar">
++        <div class="address-format-builder__preview">
++          <p class="address-format-builder__section-title">
++            <i class="material-icons">visibility</i>
++            {{ $t('preview.title') }}
++          </p>
++          <address>
++            <div
++              v-for="(line, idx) in previewLines"
++              :key="`preview-${idx}`"
++            >
++              {{ line }}
++            </div>
++            <span
++              v-if="previewLines.length === 0"
++              class="text-muted font-italic"
++            >{{ $t('preview.empty') }}</span>
++          </address>
++        </div>
++
++        <div class="address-format-builder__picker">
++          <p class="address-format-builder__section-title">
++            <i class="material-icons">add_box</i>
++            {{ $t('picker.title') }}
++          </p>
++          <div class="form-group">
++            <input
++              v-model="searchQuery"
++              type="search"
++              class="form-control"
++              :placeholder="$t('picker.search')"
++            >
++          </div>
++          <ul
++            class="nav nav-tabs"
++            :class="{'is-disabled': isSearching}"
++            role="tablist"
++          >
++            <li
++              v-for="obj in pickerObjects"
++              :key="obj"
++              class="nav-item"
++            >
++              <button
++                type="button"
++                class="nav-link"
++                :class="{active: obj === activeTab && !isSearching}"
++                @click.prevent="selectTab(obj)"
++              >
++                {{ obj }}
++                <span
++                  v-if="objectHasMissing(obj)"
++                  class="address-format-builder__required-asterisk"
++                  aria-hidden="true"
++                >*</span>
++              </button>
++            </li>
++          </ul>
++          <div class="address-format-builder__picker-body">
++            <div
++              v-for="group in filteredGroups"
++              :key="group.object"
++              class="address-format-builder__picker-group"
++            >
++              <div
++                v-if="isSearching"
++                class="address-format-builder__picker-group-label"
++              >
++                {{ group.object }}
++              </div>
++              <div class="address-format-builder__pills">
++                <button
++                  v-for="field in group.fields"
++                  :key="`${group.object}:${field}`"
++                  type="button"
++                  class="btn btn-outline-secondary btn-sm address-format-builder__pill"
++                  :class="{'is-added': isPlaced(group.object, field)}"
++                  :disabled="isPlaced(group.object, field)"
++                  :draggable="!isPlaced(group.object, field)"
++                  :title="isPlaced(group.object, field) ? $t('picker.alreadyAdded') : ''"
++                  @click.stop.prevent="addPickerField(group.object, field)"
++                  @dragstart="onPickerDragStart(group.object, field, $event)"
++                >
++                  <i
++                    v-if="isPlaced(group.object, field)"
++                    class="material-icons"
++                  >check</i>
++                  <i
++                    v-else
++                    class="material-icons"
++                  >add</i>
++                  {{ field }}
++                  <span
++                    v-if="isRequired(group.object, field)"
++                    class="address-format-builder__required-asterisk"
++                    :title="$t('picker.required')"
++                  >*</span>
++                </button>
++              </div>
++            </div>
++            <p
++              v-if="filteredGroups.length === 0"
++              class="text-muted small"
++            >
++              {{ $t('picker.noMatch') }}
++            </p>
++          </div>
++          <p class="form-text small text-muted address-format-builder__picker-footer">
++            <span class="address-format-builder__required-asterisk">*</span>
++            <span v-html="requiredFooterHtml" />
++          </p>
++        </div>
++      </div>
++    </div>
++  </div>
++</template>
++
++<script lang="ts">
++  import {defineComponent, PropType} from 'vue';
++  import {
++    AvailableObjects,
++    Line,
++    Token,
++    parseFormat,
++    serializeLines,
++    resolveToken,
++    renderPreview,
++    missingRequired,
++    placedFieldKeys,
++    preferredRaw,
++    SampleData,
++  } from '@pages/country/components/addressFormatModel';
++
++  type Mode = 'visual' | 'raw';
++  type DragSource =
++    | {kind: 'picker', object: string, field: string}
++    | {kind: 'chip', lineIndex: number, chipIndex: number}
++    | {kind: 'line', lineIndex: number}
++    | null;
++
++  interface LineDropTarget {
++    index: number;
++    before: boolean;
++  }
++
++  interface ChipDropTarget {
++    lineIndex: number;
++    chipIndex: number;
++    before: boolean;
++  }
++
++  interface SelectedChip {
++    lineIndex: number;
++    chipIndex: number;
++  }
++
++  interface State {
++    mode: Mode;
++    lines: Line[];
++    rawText: string;
++    activeTab: string;
++    searchQuery: string;
++    selectedLine: number;
++    selectedChip: SelectedChip | null;
++    dragSource: DragSource;
++    dragOverLine: number;
++    draggingLine: number;
++    lineDropTarget: LineDropTarget | null;
++    chipDropTarget: ChipDropTarget | null;
++  }
++
++  const PICKER_OBJECTS = ['Address', 'Country', 'State', 'Customer', 'Warehouse'];
++
++  export default defineComponent({
++    name: 'AddressFormatBuilder',
++    props: {
++      hiddenInput: {
++        type: HTMLInputElement,
++        required: true,
++      },
++      initialValue: {
++        type: String,
++        default: '',
++      },
++      objects: {
++        type: Object as PropType<AvailableObjects>,
++        required: true,
++      },
++      requiredFields: {
++        type: Array as PropType<string[]>,
++        default: () => [],
++      },
++      defaultFormat: {
++        type: String,
++        default: '',
++      },
++      sampleData: {
++        type: Object as PropType<SampleData>,
++        required: true,
++      },
++      requiredFieldsUrl: {
++        type: String,
++        default: '',
++      },
++    },
++    data(): State {
++      return {
++        mode: 'visual',
++        lines: parseFormat(this.initialValue),
++        rawText: this.initialValue,
++        activeTab: 'Address',
++        searchQuery: '',
++        selectedLine: -1,
++        selectedChip: null,
++        dragSource: null,
++        dragOverLine: -1,
++        draggingLine: -1,
++        lineDropTarget: null,
++        chipDropTarget: null,
++      };
++    },
++    computed: {
++      pickerObjects(): string[] {
++        return PICKER_OBJECTS.filter((o) => Array.isArray(this.objects[o]));
++      },
++      isSearching(): boolean {
++        return this.searchQuery.trim().length > 0;
++      },
++      previewLines(): string[] {
++        return renderPreview(this.lines, this.sampleData);
++      },
++      missingFields(): string[] {
++        return missingRequired(this.lines, this.requiredFields);
++      },
++      placedKeys(): Set<string> {
++        return placedFieldKeys(this.lines);
++      },
++      filteredGroups(): {object: string, fields: string[]}[] {
++        const term = this.searchQuery.trim().toLowerCase();
++        const sources = this.isSearching ? this.pickerObjects : [this.activeTab];
++
++        return sources
++          .map((obj) => ({
++            object: obj,
++            fields: (this.objects[obj] ?? []).filter((f) => !term || f.toLowerCase().includes(term)),
++          }))
++          .filter((group) => group.fields.length > 0);
++      },
++      hiddenValue(): string {
++        return serializeLines(this.lines);
++      },
++      requiredFooterHtml(): string {
++        const raw = this.$t('picker.requiredFooter') as string;
++
++        return raw
++          .replace('[link]', `<a href="${this.requiredFieldsUrl}" target="_blank" rel="noopener noreferrer">`)
++          .replace('[/link]', '</a>');
++      },
++    },
++    watch: {
++      hiddenValue: {
++        immediate: true,
++        handler(value: string) {
++          this.hiddenInput.value = value;
++        },
++      },
++      mode(value: Mode) {
++        if (value === 'raw') {
++          this.rawText = serializeLines(this.lines);
++        } else {
++          this.commitRaw();
++        }
++      },
++    },
++    mounted(): void {
++      document.addEventListener('click', this.handleDocumentClick);
++    },
++    beforeUnmount(): void {
++      document.removeEventListener('click', this.handleDocumentClick);
++    },
++    methods: {
++      setMode(mode: Mode): void {
++        this.mode = mode;
++      },
++      isPlaced(object: string, field: string): boolean {
++        return this.placedKeys.has(`${object}:${field}`);
++      },
++      /**
++       * A pill (object, field) is required when the corresponding required entry
++       * resolves to the same (object, field) pair. Bare entries (e.g. `firstname`)
++       * resolve to `Address:firstname`, so the asterisk lights up only on the
++       * Address tab — not on Customer's `firstname` pill, which would need an
++       * explicit `Customer:firstname` entry in the required list.
++       */
++      isRequired(object: string, field: string): boolean {
++        return this.requiredFields.some((req) => {
++          const resolved = resolveToken(req);
++
++          return resolved.object === object && resolved.field === field;
++        });
++      },
++      objectHasMissing(object: string): boolean {
++        return this.missingFields.some((req) => resolveToken(req).object === object);
++      },
++      selectTab(obj: string): void {
++        this.searchQuery = '';
++        this.activeTab = obj;
++      },
++      addPickerField(object: string, field: string): void {
++        if (this.isPlaced(object, field)) {
++          return;
++        }
++        this.appendToken({
++          object,
++          field,
++          raw: preferredRaw(object, field),
++        });
++      },
++      insertField(req: string): void {
++        // `req` is a required-field entry (bare → Address, or explicit Object:field).
++        this.appendToken(resolveToken(req));
++      },
++      /**
++       * Append a token to the currently-selected row when the user has selected one,
++       * otherwise to the last row (or as a new row when the last row is non-empty).
++       */
++      appendToken(token: Token): void {
++        if (this.selectedLine >= 0 && this.selectedLine < this.lines.length) {
++          this.lines[this.selectedLine].push(token);
++          return;
++        }
++        const last = this.lines[this.lines.length - 1];
++
++        if (last && last.length === 0) {
++          last.push(token);
++        } else {
++          this.lines.push([token]);
++        }
++      },
++      toggleSelectLine(lineIndex: number): void {
++        this.selectedLine = this.selectedLine === lineIndex ? -1 : lineIndex;
++        // Selecting a row clears any chip selection — only one selection at a time.
++        this.selectedChip = null;
++      },
++      toggleSelectChip(lineIndex: number, chipIndex: number): void {
++        const isSame = this.selectedChip
++          && this.selectedChip.lineIndex === lineIndex
++          && this.selectedChip.chipIndex === chipIndex;
++        this.selectedChip = isSame ? null : {lineIndex, chipIndex};
++      },
++      /**
++       * Document-level click listener: clear the selection whenever the click
++       * lands outside any line row. Two kinds of in-component clicks are
++       * exempt:
++       *   - the row itself → its own @click handler toggles selection
++       *   - field-adding actions (picker pills, missing-banner per-field
++       *     chips, "Insert all missing") → preserve selection so the merchant
++       *     can chain multiple inserts onto the same selected row
++       */
++      handleDocumentClick(ev: MouseEvent): void {
++        const target = ev.target as HTMLElement | null;
++
++        if (!target) {
++          return;
++        }
++        const exempt = [
++          '.address-format-builder__line',
++          '.address-format-builder__pill',
++          '.address-format-builder__missing-chip',
++          '.address-format-builder__insert-all-action',
++        ];
++
++        if (exempt.some((sel) => target.closest(sel))) {
++          return;
++        }
++        if (this.selectedLine !== -1) {
++          this.selectedLine = -1;
++        }
++        if (this.selectedChip !== null) {
++          this.selectedChip = null;
++        }
++      },
++      insertAllMissing(): void {
++        [...this.missingFields].forEach((field) => this.insertField(field));
++      },
++      removeToken(lineIndex: number, chipIndex: number): void {
++        this.lines[lineIndex].splice(chipIndex, 1);
++        if (this.selectedChip && this.selectedChip.lineIndex === lineIndex) {
++          if (this.selectedChip.chipIndex === chipIndex) {
++            this.selectedChip = null;
++          } else if (this.selectedChip.chipIndex > chipIndex) {
++            this.selectedChip = {
++              lineIndex,
++              chipIndex: this.selectedChip.chipIndex - 1,
++            };
++          }
++        }
++      },
++      removeLine(lineIndex: number): void {
++        this.lines.splice(lineIndex, 1);
++        if (this.lines.length === 0) {
++          this.lines.push([]);
++        }
++        if (this.selectedLine === lineIndex) {
++          this.selectedLine = -1;
++        } else if (this.selectedLine > lineIndex) {
++          this.selectedLine -= 1;
++        }
++        if (this.selectedChip && this.selectedChip.lineIndex === lineIndex) {
++          this.selectedChip = null;
++        } else if (this.selectedChip && this.selectedChip.lineIndex > lineIndex) {
++          this.selectedChip = {
++            lineIndex: this.selectedChip.lineIndex - 1,
++            chipIndex: this.selectedChip.chipIndex,
++          };
++        }
++      },
++      addLine(): void {
++        this.lines.push([]);
++      },
++      moveLine(from: number, to: number): void {
++        if (from === to || from < 0 || to < 0 || from >= this.lines.length) {
++          return;
++        }
++        const adjusted = to > from ? to - 1 : to;
++        const [moved] = this.lines.splice(from, 1);
++        this.lines.splice(Math.max(0, Math.min(this.lines.length, adjusted)), 0, moved);
++      },
++      /**
++       * Move a chip to a target line at a specific insertion index.
++       * When `toChip` is null the chip is appended to the end of the destination line.
++       * Same-line moves are special-cased so the index doesn't shift after splice.
++       */
++      moveChip(fromLine: number, fromChip: number, toLine: number, toChip: number | null = null): void {
++        if (!this.lines[fromLine] || !this.lines[toLine]) {
++          return;
++        }
++        if (fromLine === toLine) {
++          if (toChip === null || toChip === fromChip || toChip === fromChip + 1) {
++            return;
++          }
++          const [token] = this.lines[fromLine].splice(fromChip, 1);
++          const adjusted = toChip > fromChip ? toChip - 1 : toChip;
++          this.lines[fromLine].splice(adjusted, 0, token);
++          return;
++        }
++        const [token] = this.lines[fromLine].splice(fromChip, 1);
++
++        if (toChip === null) {
++          this.lines[toLine].push(token);
++        } else {
++          this.lines[toLine].splice(toChip, 0, token);
++        }
++      },
++      resetTo(format: string): void {
++        this.lines = parseFormat(format);
++        this.rawText = format;
++      },
++      confirmClear(): void {
++        // window.confirm is fine here — the dropdown is closed by Bootstrap on item click
++        // and we want a lightweight confirmation rather than pulling in a modal for this single case.
++        // eslint-disable-next-line no-alert
++        if (window.confirm(this.$t('reset.confirm') as string)) {
++          this.lines = [[]];
++          this.rawText = '';
++        }
++      },
++      commitRaw(): void {
++        this.lines = parseFormat(this.rawText);
++      },
++      onPickerDragStart(object: string, field: string, ev: DragEvent): void {
++        if (this.isPlaced(object, field)) {
++          ev.preventDefault();
++          return;
++        }
++        ev.dataTransfer?.setData(
++          'application/prestashop-address-format-field',
++          JSON.stringify({object, field}),
++        );
++        if (ev.dataTransfer) {
++          ev.dataTransfer.effectAllowed = 'copy';
++        }
++        this.dragSource = {kind: 'picker', object, field};
++      },
++      onChipDragStart(lineIndex: number, chipIndex: number, ev: DragEvent): void {
++        ev.dataTransfer?.setData(
++          'application/prestashop-address-format-chip',
++          JSON.stringify({lineIndex, chipIndex}),
++        );
++        if (ev.dataTransfer) {
++          ev.dataTransfer.effectAllowed = 'move';
++        }
++        this.dragSource = {kind: 'chip', lineIndex, chipIndex};
++        // The chip is about to land somewhere else — drop the persistent selection
++        // so it doesn't reference a stale (line, index) pair after the drop.
++        this.selectedChip = null;
++      },
++      onChipDragEnd(): void {
++        this.dragSource = null;
++        this.dragOverLine = -1;
++        this.chipDropTarget = null;
++      },
++      /**
++       * Compute whether the cursor is on the left or right half of the hovered chip
++       * so the insertion indicator (and the eventual drop) lands at the right index.
++       */
++      onChipDragOver(lineIndex: number, chipIndex: number, ev: DragEvent): void {
++        if (!ev.dataTransfer?.types.includes('application/prestashop-address-format-chip')) {
++          return;
++        }
++        ev.preventDefault();
++        const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
++        const before = (ev.clientX - rect.left) < rect.width / 2;
++        this.chipDropTarget = {lineIndex, chipIndex, before};
++      },
++      onLineDragStart(lineIndex: number, ev: DragEvent): void {
++        ev.dataTransfer?.setData(
++          'application/prestashop-address-format-line',
++          String(lineIndex),
++        );
++        if (ev.dataTransfer) {
++          ev.dataTransfer.effectAllowed = 'move';
++        }
++        this.dragSource = {kind: 'line', lineIndex};
++        this.draggingLine = lineIndex;
++      },
++      onLineDragEnd(): void {
++        this.dragSource = null;
++        this.draggingLine = -1;
++        this.lineDropTarget = null;
++      },
++      onLineDragEnter(lineIndex: number, ev: DragEvent): void {
++        if (this.draggingLine !== -1) {
++          return;
++        }
++        const types = ev.dataTransfer?.types ?? [];
++
++        if (
++          types.includes('application/prestashop-address-format-field')
++          || types.includes('application/prestashop-address-format-chip')
++        ) {
++          this.dragOverLine = lineIndex;
++        }
++      },
++      onLineDragOver(lineIndex: number, ev: DragEvent): void {
++        const types = ev.dataTransfer?.types ?? [];
++        const isLineDrag = types.includes('application/prestashop-address-format-line');
++        const isFieldDrag = types.includes('application/prestashop-address-format-field');
++        const isChipDrag = types.includes('application/prestashop-address-format-chip');
++
++        if (!isLineDrag && !isFieldDrag && !isChipDrag) {
++          return;
++        }
++        ev.preventDefault();
++        if (ev.dataTransfer) {
++          ev.dataTransfer.dropEffect = isFieldDrag ? 'copy' : 'move';
++        }
++
++        if (isLineDrag) {
++          // Decide whether to land before or after the hovered row based on cursor Y.
++          const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
++          const before = (ev.clientY - rect.top) < rect.height / 2;
++          this.lineDropTarget = {index: lineIndex, before};
++        } else {
++          this.dragOverLine = lineIndex;
++        }
++      },
++      onLineDragLeave(): void {
++        this.dragOverLine = -1;
++      },
++      onLineDrop(lineIndex: number, ev: DragEvent): void {
++        ev.preventDefault();
++        const fieldData = ev.dataTransfer?.getData('application/prestashop-address-format-field');
++        const chipData = ev.dataTransfer?.getData('application/prestashop-address-format-chip');
++        const lineData = ev.dataTransfer?.getData('application/prestashop-address-format-line');
++
++        if (fieldData) {
++          const {object, field} = JSON.parse(fieldData) as {object: string, field: string};
++
++          if (!this.isPlaced(object, field)) {
++            this.lines[lineIndex].push({
++              object,
++              field,
++              raw: preferredRaw(object, field),
++            });
++          }
++        } else if (chipData) {
++          const {lineIndex: fromLine, chipIndex} = JSON.parse(chipData) as {lineIndex: number, chipIndex: number};
++          // If the cursor was on a specific chip in the destination line, use that
++          // index (with `before` to land left or right of it). Otherwise append.
++          let toChip: number | null = null;
++
++          if (this.chipDropTarget && this.chipDropTarget.lineIndex === lineIndex) {
++            toChip = this.chipDropTarget.before
++              ? this.chipDropTarget.chipIndex
++              : this.chipDropTarget.chipIndex + 1;
++          }
++          this.moveChip(fromLine, chipIndex, lineIndex, toChip);
++        } else if (lineData) {
++          const fromLine = parseInt(lineData, 10);
++          // Use the cursor-derived target so dragging upward lands above the target row.
++          const before = this.lineDropTarget?.index === lineIndex && this.lineDropTarget.before;
++          const target = before ? lineIndex : lineIndex + 1;
++          this.moveLine(fromLine, target);
++        }
++
++        this.dragOverLine = -1;
++        this.dragSource = null;
++        this.draggingLine = -1;
++        this.lineDropTarget = null;
++        this.chipDropTarget = null;
++      },
++      onGripKeydown(lineIndex: number, ev: KeyboardEvent): void {
++        if (ev.key === 'ArrowUp') {
++          ev.preventDefault();
++          this.moveLine(lineIndex, lineIndex - 1);
++        } else if (ev.key === 'ArrowDown') {
++          ev.preventDefault();
++          this.moveLine(lineIndex, lineIndex + 2);
++        }
++      },
++    },
++  });
++</script>
++
++<style lang="scss" scoped>
++  .address-format-builder {
++    &__header {
++      display: flex;
++      justify-content: space-between;
++      align-items: flex-end;
++      margin-bottom: 1rem;
++      border-bottom: 1px solid #ced4da;
++
++      .nav-tabs {
++        border-bottom: none;
++        margin-bottom: -1px;
++      }
++
++      .nav-link i {
++        font-size: 1rem;
++        vertical-align: -3px;
++        margin-right: 0.25rem;
++      }
++
++      // Lift the reset dropdown trigger away from the header's border-bottom
++      // so the button doesn't visually stick to the line under it.
++      .dropdown {
++        margin-bottom: 0.375rem;
++      }
++    }
++
++    &__body {
++      display: grid;
++      grid-template-columns: 1.15fr 0.85fr;
++      gap: 1.5rem;
++
++      @media (max-width: 992px) {
++        grid-template-columns: 1fr;
++      }
++    }
++
++    &__lines {
++      border: 1px solid #ced4da;
++      padding: 0.375rem;
++      background: #ffffff;
++    }
++
++    &__line {
++      display: flex;
++      align-items: center;
++      padding: 0.5rem;
++      gap: 0.5rem;
++      border-radius: 2px;
++      cursor: pointer;
++      transition: background-color 120ms ease;
++
++      &.is-drag-over {
++        background-color: rgba(37, 185, 215, 0.08);
++        outline: 1px dashed #25b9d7;
++      }
++
++      &.is-dragging {
++        opacity: 0.4;
++      }
++
++      &.is-selected {
++        background-color: rgba(37, 185, 215, 0.12);
++        outline: 1px solid rgba(37, 185, 215, 0.5);
++      }
++
++      & + & {
++        border-top: 1px solid #f1f3f5;
++      }
++    }
++
++    &__line-drop-indicator {
++      height: 2px;
++      background-color: #25b9d7;
++      margin: 0 0.375rem;
++      border-radius: 1px;
++      pointer-events: none;
++    }
++
++    &__grip {
++      cursor: grab;
++      color: #6c757d;
++      display: inline-flex;
++      align-items: center;
++      // Stretch full row height + bleed into the line's padding so the entire
++      // left edge of the row is a drag handle. +3px each side widens the hit zone.
++      align-self: stretch;
++      padding: 0.5rem 3px;
++      margin: -0.5rem 0;
++      transition: color 120ms ease;
++
++      // Suppress the default focus outline (browsers add one because the grip
++      // is tabindex="0" for keyboard reorder) and instead colour the icon
++      // cyan on hover/focus so the affordance is visible without a hard border.
++      &:focus,
++      &:focus-visible {
++        outline: none;
++      }
++
++      &:hover,
++      &:focus-visible {
++        color: #25b9d7;
++      }
++
++      i {
++        font-size: 1.125rem;
++      }
++    }
++
++    &__line-number {
++      min-width: 1.25rem;
++      color: #6c757d;
++      font-size: 0.75rem;
++      font-variant-numeric: tabular-nums;
++    }
++
++    &__chips {
++      display: flex;
++      flex-wrap: wrap;
++      gap: 0.375rem;
++      flex: 1;
++      min-height: 2rem;
++      align-items: center;
++    }
++
++    &__line-empty {
++      color: #adb5bd;
++      font-style: italic;
++      font-size: 0.8125rem;
++    }
++
++    &__chip {
++      display: inline-flex;
++      align-items: center;
++      gap: 0.25rem;
++      padding: 0.25rem 0.5rem;
++      background: #ffffff;
++      border: 1px solid #ced4da;
++      border-radius: 2px;
++      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
++      font-size: 0.8125rem;
++      cursor: grab;
++
++      // Highlight the chip's border in cyan both when it's clicked-to-select
++      // and while it's being dragged, so the user always sees which chip is
++      // their current focus. Dragging also dims it via opacity.
++      &.is-selected,
++      &.is-dragging {
++        border-color: #25b9d7;
++      }
++
++      &.is-dragging {
++        opacity: 0.4;
++      }
++    }
++
++    // Thin vertical bar shown between chips while a chip is being dragged inside
++    // a line, previewing the future insertion point.
++    &__chip-drop-indicator {
++      display: inline-block;
++      width: 2px;
++      align-self: stretch;
++      background-color: #25b9d7;
++      border-radius: 1px;
++      pointer-events: none;
++    }
++
++    &__chip-key {
++      font-weight: 600;
++    }
++
++    &__chip-sep {
++      color: #6c757d;
++    }
++
++    &__chip-close {
++      background: none;
++      border: 0;
++      padding: 0;
++      color: #6c757d;
++      cursor: pointer;
++      display: inline-flex;
++
++      i {
++        font-size: 0.875rem;
++      }
++
++      &:hover {
++        color: #cd2c1d;
++      }
++    }
++
++    &__line-remove {
++      color: #6c757d;
++      padding: 0.25rem;
++
++      i {
++        font-size: 1rem;
++      }
++    }
++
++    &__add-line {
++      margin-top: 0.5rem;
++
++      i {
++        font-size: 1rem;
++        vertical-align: -3px;
++      }
++    }
++
++    &__sidebar {
++      display: flex;
++      flex-direction: column;
++      gap: 1rem;
++    }
++
++    &__preview {
++      border: 1px solid #ced4da;
++      padding: 1rem;
++      background: #f8f9fa;
++
++      address {
++        margin-bottom: 0;
++        font-style: normal;
++      }
++    }
++
++    &__picker {
++      border: 1px solid #ced4da;
++      padding: 1rem;
++
++      .nav-tabs.is-disabled {
++        opacity: 0.55;
++        pointer-events: none;
++      }
++    }
++
++    &__section-title {
++      font-size: 0.75rem;
++      font-weight: 600;
++      text-transform: uppercase;
++      letter-spacing: 0.04em;
++      color: #6c757d;
++      margin-bottom: 0.625rem;
++
++      i {
++        font-size: 1rem;
++        vertical-align: -3px;
++        margin-right: 0.25rem;
++      }
++    }
++
++    &__pills {
++      display: flex;
++      flex-wrap: wrap;
++      gap: 0.375rem;
++      margin: 0.5rem 0;
++    }
++
++    &__pill {
++      i {
++        font-size: 1rem;
++        vertical-align: -3px;
++      }
++
++      &.is-added {
++        opacity: 0.55;
++      }
++    }
++
++    &__picker-group + &__picker-group {
++      margin-top: 0.75rem;
++    }
++
++    &__picker-group-label {
++      font-size: 0.6875rem;
++      font-weight: 600;
++      text-transform: uppercase;
++      letter-spacing: 0.04em;
++      color: #6c757d;
++    }
++
++    &__picker-footer {
++      margin-top: 0.875rem;
++    }
++
++    &__required-asterisk {
++      color: #cd2c1d;
++      font-weight: 700;
++    }
++
++    &__missing-tokens {
++      display: inline-flex;
++      flex-wrap: wrap;
++      gap: 0.25rem;
++      margin-left: 0.25rem;
++    }
++
++    &__missing-chip {
++      display: inline-flex;
++      align-items: center;
++      gap: 0.125rem;
++      background: #ffffff;
++      border: 1px solid #ffa000;
++      padding: 0.125rem 0.375rem;
++      font-family: monospace;
++      font-size: 0.75rem;
++      cursor: pointer;
++
++      i {
++        font-size: 0.875rem;
++      }
++    }
++
++    &__raw {
++      font-family: monospace;
++      font-size: 0.875rem;
++    }
++  }
++</style>
+diff --git a/admin-dev/themes/new-theme/js/pages/country/components/addressFormatModel.ts b/admin-dev/themes/new-theme/js/pages/country/components/addressFormatModel.ts
+new file mode 100644
+index 0000000000000..cfc95095e9b5c
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/country/components/addressFormatModel.ts
+@@ -0,0 +1,132 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++/**
++ * Pure helpers for the country address-format builder.
++ *
++ * The component round-trips a multi-line, space-separated token format
++ * (`Object:field` or bare `field`). Bare tokens always resolve to the
++ * Address object — that's what the legacy parser does (see
++ * `AddressFormat::_checkLiableAssociation` in classes/AddressFormat.php,
++ * which validates bare tokens exclusively against the Address class).
++ *
++ * Address has firstname, lastname, company, vat_number as public properties
++ * via reflection on the ObjectModel, so a bare `firstname` token in a stored
++ * format is equivalent to `Address:firstname`. To place a Customer's first
++ * name instead, the user must pick from the Customer tab, which emits the
++ * explicit `Customer:firstname`.
++ */
++
++export type ObjectKey = string;
++
++export interface Token {
++  object: ObjectKey;
++  field: string;
++  raw: string;
++}
++
++export type Line = Token[];
++
++export interface AvailableObjects {
++  [object: string]: string[];
++}
++
++export interface SampleData {
++  [object: string]: { [field: string]: string };
++}
++
++/**
++ * Resolve a raw token string to its (object, field) pair.
++ *   - explicit `Object:field` → as authored
++ *   - bare `field` → Address (matches the legacy parser; invalid bare tokens
++ *     still render as Address-scoped chips and are caught by the validator)
++ */
++export function resolveToken(raw: string): Token {
++  const trimmed = raw.trim();
++
++  if (trimmed.includes(':')) {
++    const [object, field] = trimmed.split(':');
++
++    return {object, field, raw: trimmed};
++  }
++
++  return {object: 'Address', field: trimmed, raw: trimmed};
++}
++
++/**
++ * Choose the wire form for a (object, field) pair. Bare = Address, so picking
++ * an Address-tab field emits its bare form; everything else gets the explicit
++ * `Object:field` prefix to disambiguate (e.g. `Customer:firstname` is needed
++ * because a bare `firstname` would mean Address:firstname).
++ */
++export function preferredRaw(object: ObjectKey, field: string): string {
++  if (object === 'Address') {
++    return field;
++  }
++  return `${object}:${field}`;
++}
++
++/**
++ * Parse a raw multi-line format into structured lines.
++ * Empty lines are preserved as empty arrays (so the visual editor can keep
++ * a deliberately blank row the user added).
++ */
++export function parseFormat(text: string): Line[] {
++  if (text === '') {
++    return [];
++  }
++  return text.split('\n').map((line) => {
++    const tokens = line.split(/\s+/).filter(Boolean);
++
++    return tokens.map((t) => resolveToken(t));
++  });
++}
++
++/**
++ * Serialize lines back to the wire format. Preserves the user-authored raw
++ * for tokens that came from parseFormat — only newly-added tokens use
++ * `preferredRaw`.
++ */
++export function serializeLines(lines: Line[]): string {
++  return lines.map((line) => line.map((t) => t.raw).join(' ')).join('\n');
++}
++
++/**
++ * Render lines into preview strings using sample data. Lines whose tokens
++ * all resolve to empty values are skipped.
++ */
++export function renderPreview(lines: Line[], sample: SampleData): string[] {
++  return lines
++    .map((line) => line
++      .map((t) => sample[t.object]?.[t.field] ?? '')
++      .filter((v) => v !== '')
++      .join(' '))
++    .filter((joined) => joined !== '');
++}
++
++/**
++ * Required field names that are not yet placed anywhere in `lines`.
++ *
++ * A bare required entry (e.g. `firstname`) is satisfied only by an Address-scoped
++ * placement (chip with object='Address') — placing `Customer:firstname` does NOT
++ * satisfy bare `firstname`, matching the legacy validator. Prefixed entries like
++ * `Country:name` require an exact `Country:name` chip.
++ */
++export function missingRequired(lines: Line[], requiredFields: string[]): string[] {
++  const placedRaw = new Set(lines.flat().map((t) => `${t.object}:${t.field}`));
++
++  return requiredFields.filter((req) => {
++    const resolved = resolveToken(req);
++
++    return !placedRaw.has(`${resolved.object}:${resolved.field}`);
++  });
++}
++
++/**
++ * Set of "Object:field" keys already present, for disabling picker pills.
++ */
++export function placedFieldKeys(lines: Line[]): Set<string> {
++  return new Set(lines.flat().map((t) => `${t.object}:${t.field}`));
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/country/components/initAddressFormatBuilder.ts b/admin-dev/themes/new-theme/js/pages/country/components/initAddressFormatBuilder.ts
+new file mode 100644
+index 0000000000000..7b9c8c9c94445
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/country/components/initAddressFormatBuilder.ts
+@@ -0,0 +1,71 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++import {App, createApp} from 'vue';
++import {createI18n} from 'vue-i18n';
++import ReplaceFormatter from '@PSVue/plugins/vue-i18n/replace-formatter';
++import AddressFormatBuilder from '@pages/country/components/AddressFormatBuilder.vue';
++
++/**
++ * Mounts the address-format Vue 3 builder onto every container matching
++ * `.js-address-format-builder` rendered by the AddressFormatType form theme.
++ *
++ * The component owns a hidden `<input>` (rendered by the Twig theme) so the
++ * Symfony form processor keeps its existing contract — Vue just keeps the
++ * input's `value` in sync with the visual state on every mutation.
++ */
++export default function initAddressFormatBuilder(wrapperSelector: string): App | null {
++  const wrapper = document.querySelector<HTMLElement>(wrapperSelector);
++
++  if (!wrapper) {
++    return null;
++  }
++
++  const root = wrapper.querySelector<HTMLElement>('.js-address-format-builder');
++  const hiddenInput = wrapper.querySelector<HTMLInputElement>('.js-address-format-input');
++
++  if (!root || !hiddenInput) {
++    return null;
++  }
++
++  const initialValue = root.dataset.value ?? '';
++  const objects = JSON.parse(root.dataset.objects ?? '{}');
++  const requiredFields = JSON.parse(root.dataset.requiredFields ?? '[]');
++  const sampleData = JSON.parse(root.dataset.sampleData ?? '{}');
++  const translations = JSON.parse(root.dataset.translations ?? '{}');
++  const defaultFormat = root.dataset.defaultFormat ?? '';
++  const requiredFieldsUrl = root.dataset.requiredFieldsUrl ?? '';
++
++  const i18n = createI18n({
++    locale: 'en',
++    formatter: new ReplaceFormatter(),
++    messages: {en: translations},
++  });
++
++  const app = createApp(AddressFormatBuilder, {
++    hiddenInput,
++    initialValue,
++    objects,
++    requiredFields,
++    defaultFormat,
++    sampleData,
++    requiredFieldsUrl,
++  });
++  app.use(i18n);
++  app.mount(root);
++
++  return app;
++}
++
++export function initAllAddressFormatBuilders(): App[] {
++  const wrappers = Array.from(document.querySelectorAll<HTMLElement>('.js-address-format-wrapper'));
++
++  return wrappers
++    .map((wrapper) => {
++      const id = wrapper.id || `address-format-wrapper-${Math.random().toString(36).slice(2, 9)}`;
++      wrapper.setAttribute('id', id);
++      return initAddressFormatBuilder(`#${id}`);
++    })
++    .filter((app): app is App => app !== null);
++}
+diff --git a/admin-dev/themes/new-theme/js/pages/country/form/index.ts b/admin-dev/themes/new-theme/js/pages/country/form/index.ts
+index c647d88f6857c..07c540ac6fe69 100644
+--- a/admin-dev/themes/new-theme/js/pages/country/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/country/form/index.ts
+@@ -4,6 +4,7 @@
+  */
+ 
+ import ZipCodeManager from '@pages/country/components/zip-code-manager';
++import {initAllAddressFormatBuilders} from '@pages/country/components/initAddressFormatBuilder';
+ import FormSubmitButton from '@components/form-submit-button';
+ 
+ const {$} = window;
+@@ -17,4 +18,5 @@ $(() => {
+ 
+   new FormSubmitButton();
+   new ZipCodeManager();
++  initAllAddressFormatBuilders();
+ });
+diff --git a/admin-dev/themes/new-theme/tests/pages/country/address-format-model.spec.js b/admin-dev/themes/new-theme/tests/pages/country/address-format-model.spec.js
+new file mode 100644
+index 0000000000000..85fb447f328ea
+--- /dev/null
++++ b/admin-dev/themes/new-theme/tests/pages/country/address-format-model.spec.js
+@@ -0,0 +1,135 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++import {expect} from 'chai';
++import {
++  parseFormat,
++  serializeLines,
++  resolveToken,
++  preferredRaw,
++  renderPreview,
++  missingRequired,
++  placedFieldKeys,
++} from '../../../js/pages/country/components/addressFormatModel';
++
++const sampleData = {
++  Customer: {firstname: 'John', lastname: 'DOE', company: 'Acme Ltd.'},
++  Country: {name: 'France'},
++  Address: {
++    firstname: 'John',
++    lastname: 'DOE',
++    address1: '16 Main street',
++    postcode: '75002',
++    city: 'Paris',
++  },
++};
++
++describe('addressFormatModel', () => {
++  describe('resolveToken', () => {
++    it('resolves explicit Object:field', () => {
++      const t = resolveToken('Country:name');
++      expect(t.object).to.equal('Country');
++      expect(t.field).to.equal('name');
++      expect(t.raw).to.equal('Country:name');
++    });
++
++    it('resolves bare tokens to Address (legacy parser semantics)', () => {
++      expect(resolveToken('firstname').object).to.equal('Address');
++      expect(resolveToken('city').object).to.equal('Address');
++      expect(resolveToken('phone_mobile').object).to.equal('Address');
++    });
++  });
++
++  describe('parseFormat / serializeLines round-trip', () => {
++    it('preserves bare tokens (no re-prefixing)', () => {
++      const input = 'firstname lastname\naddress1\npostcode city\nCountry:name';
++      const lines = parseFormat(input);
++      expect(serializeLines(lines)).to.equal(input);
++    });
++
++    it('preserves prefixed tokens', () => {
++      const input = 'Customer:firstname Customer:lastname\nAddress:city';
++      const lines = parseFormat(input);
++      expect(serializeLines(lines)).to.equal(input);
++    });
++
++    it('normalizes mixed whitespace inside a line', () => {
++      const input = 'firstname    lastname';
++      const lines = parseFormat(input);
++      expect(serializeLines(lines)).to.equal('firstname lastname');
++    });
++
++    it('returns an empty array for an empty string', () => {
++      expect(parseFormat('')).to.eql([]);
++    });
++  });
++
++  describe('preferredRaw', () => {
++    it('emits the bare form for Address-tab fields', () => {
++      expect(preferredRaw('Address', 'firstname')).to.equal('firstname');
++      expect(preferredRaw('Address', 'city')).to.equal('city');
++    });
++
++    it('emits Object:field for non-Address tabs', () => {
++      expect(preferredRaw('Country', 'name')).to.equal('Country:name');
++      expect(preferredRaw('Customer', 'firstname')).to.equal('Customer:firstname');
++      expect(preferredRaw('State', 'iso_code')).to.equal('State:iso_code');
++    });
++  });
++
++  describe('renderPreview', () => {
++    it('substitutes tokens with sample values, joining with spaces', () => {
++      const lines = parseFormat('firstname lastname\naddress1\nCountry:name');
++      const preview = renderPreview(lines, sampleData);
++      expect(preview).to.eql(['John DOE', '16 Main street', 'France']);
++    });
++
++    it('skips lines whose tokens all resolve to empty values', () => {
++      const lines = parseFormat('Customer:siret\nCountry:name');
++      const preview = renderPreview(lines, sampleData);
++      // Customer:siret has no sample value → its line is skipped.
++      expect(preview).to.eql(['France']);
++    });
++  });
++
++  describe('missingRequired', () => {
++    const required = ['firstname', 'lastname', 'address1', 'city', 'Country:name'];
++
++    it('returns empty when all required are placed (bare form)', () => {
++      const lines = parseFormat('firstname lastname\naddress1 city\nCountry:name');
++      expect(missingRequired(lines, required)).to.eql([]);
++    });
++
++    it('flags a missing bare token', () => {
++      const lines = parseFormat('lastname\naddress1\ncity\nCountry:name');
++      expect(missingRequired(lines, required)).to.eql(['firstname']);
++    });
++
++    it('flags a missing prefixed token', () => {
++      const lines = parseFormat('firstname lastname\naddress1\ncity');
++      expect(missingRequired(lines, required)).to.eql(['Country:name']);
++    });
++
++    it('does NOT count Customer:firstname as satisfying bare firstname', () => {
++      // bare `firstname` requires Address:firstname; Customer:firstname is a different token.
++      const lines = parseFormat('Customer:firstname lastname\naddress1\ncity\nCountry:name');
++      expect(missingRequired(lines, required)).to.eql(['firstname']);
++    });
++
++    it('counts Address:firstname as satisfying bare firstname', () => {
++      const lines = parseFormat('Address:firstname lastname\naddress1\ncity\nCountry:name');
++      expect(missingRequired(lines, required)).to.eql([]);
++    });
++  });
++
++  describe('placedFieldKeys', () => {
++    it('returns Object:field keys for every placed token', () => {
++      const lines = parseFormat('firstname\nCountry:name');
++      const keys = placedFieldKeys(lines);
++      expect(keys.has('Address:firstname')).to.equal(true);
++      expect(keys.has('Country:name')).to.equal(true);
++      expect(keys.size).to.equal(2);
++    });
++  });
++});
+diff --git a/composer.json b/composer.json
+index c0647cd7d0944..690524ad6521f 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/hummingbird": "^2.0",
+         "prestashop/pagesnotfound": "^3",
+         "prestashop/productcomments": "^8.0",
+-        "prestashop/ps_apiresources": "^0.6",
++        "prestashop/ps_apiresources": "dev-feature/41324-country-address-format-builder",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^2.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -213,7 +213,7 @@
+         },
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/PrestaShop/ps_apiresources"
++            "url": "https://github.com/jolelievre/ps_apiresources"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 1babf42d644a5..6cefd55fb6404 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "d9802c92ab1ca020505db94c84762b46",
++    "content-hash": "289ad4da9b89731edd32108c32142228",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5206,16 +5206,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "v0.6.0",
++            "version": "dev-feature/41324-country-address-format-builder",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/PrestaShop/ps_apiresources.git",
+-                "reference": "030aa750d52ff3f13936b394fd9f7988a80921f4"
++                "url": "https://github.com/jolelievre/ps_apiresources.git",
++                "reference": "74f8a946a2f66ae8191d5c110838a62913d2aeb0"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/ps_apiresources/zipball/030aa750d52ff3f13936b394fd9f7988a80921f4",
+-                "reference": "030aa750d52ff3f13936b394fd9f7988a80921f4",
++                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/74f8a946a2f66ae8191d5c110838a62913d2aeb0",
++                "reference": "74f8a946a2f66ae8191d5c110838a62913d2aeb0",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5295,10 +5295,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/PrestaShop/ps_apiresources/tree/v0.6.0",
+-                "issues": "https://github.com/PrestaShop/ps_apiresources/issues"
++                "source": "https://github.com/jolelievre/ps_apiresources/tree/feature/41324-country-address-format-builder"
+             },
+-            "time": "2026-05-07T12:01:32+00:00"
++            "time": "2026-05-25T09:30:10+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -18421,7 +18420,9 @@
+     ],
+     "aliases": [],
+     "minimum-stability": "dev",
+-    "stability-flags": {},
++    "stability-flags": {
++        "prestashop/ps_apiresources": 20
++    },
+     "prefer-stable": true,
+     "prefer-lowest": false,
+     "platform": {
+diff --git a/src/Adapter/Country/CommandHandler/AddCountryHandler.php b/src/Adapter/Country/CommandHandler/AddCountryHandler.php
+index 127cd4c348b7b..dec39d2cf2395 100644
+--- a/src/Adapter/Country/CommandHandler/AddCountryHandler.php
++++ b/src/Adapter/Country/CommandHandler/AddCountryHandler.php
+@@ -8,11 +8,17 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Country\CommandHandler;
+ 
++use AddressFormat;
++use Cache;
+ use Country;
+ use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\AddCountryCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler\AddCountryHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotAddCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\InvalidAddressFormatException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryId;
+ 
+ /**
+@@ -21,14 +27,10 @@
+ #[AsCommandHandler]
+ class AddCountryHandler implements AddCountryHandlerInterface
+ {
+-    /**
+-     * @var CountryRepository
+-     */
+-    private $countryRepository;
+-
+-    public function __construct(CountryRepository $countryRepository)
+-    {
+-        $this->countryRepository = $countryRepository;
++    public function __construct(
++        private readonly CountryRepository $countryRepository,
++        private readonly AddressFormatCheckerInterface $addressFormatChecker,
++    ) {
+     }
+ 
+     /**
+@@ -36,6 +38,15 @@ public function __construct(CountryRepository $countryRepository)
+      */
+     public function handle(AddCountryCommand $command): CountryId
+     {
++        $errors = $this->addressFormatChecker->validate($command->getAddressFormat());
++        if ([] !== $errors) {
++            throw new InvalidAddressFormatException(
++                $errors,
++                'Invalid address format',
++                CountryConstraintException::INVALID_ADDRESS_FORMAT
++            );
++        }
++
+         $country = new Country();
+ 
+         $country->name = $command->getLocalizedNames();
+@@ -62,6 +73,28 @@ public function handle(AddCountryCommand $command): CountryId
+ 
+         $this->countryRepository->add($country);
+ 
+-        return new CountryId((int) $country->id);
++        $countryId = (int) $country->id;
++        $this->saveAddressFormat($countryId, $command->getAddressFormat());
++
++        return new CountryId($countryId);
++    }
++
++    /**
++     * @throws CannotAddCountryException when the address format row cannot be persisted
++     */
++    private function saveAddressFormat(int $countryId, string $format): void
++    {
++        $addressFormatModel = new AddressFormat();
++        $addressFormatModel->id_country = $countryId;
++        $addressFormatModel->format = $format;
++
++        if (!$addressFormatModel->save()) {
++            throw new CannotAddCountryException(sprintf('Failed to save address format for country %d', $countryId));
++        }
++
++        // The legacy AddressFormat::getFormatDB caches per-country reads in a static
++        // process cache that save() does not invalidate. Clear it so subsequent reads
++        // (e.g. GetCountryForEditing immediately after this command) return the new value.
++        Cache::clean('AddressFormat::getFormatDB' . $countryId);
+     }
+ }
+diff --git a/src/Adapter/Country/CommandHandler/EditCountryHandler.php b/src/Adapter/Country/CommandHandler/EditCountryHandler.php
+index c6dd7bf52befa..3b19296eeb4e3 100644
+--- a/src/Adapter/Country/CommandHandler/EditCountryHandler.php
++++ b/src/Adapter/Country/CommandHandler/EditCountryHandler.php
+@@ -8,10 +8,16 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Country\CommandHandler;
+ 
++use AddressFormat;
++use Cache;
+ use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Command\EditCountryCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Country\CommandHandler\EditCountryHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CannotEditCountryException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\InvalidAddressFormatException;
+ 
+ /**
+  * Handles update of country and address format
+@@ -19,14 +25,10 @@
+ #[AsCommandHandler]
+ class EditCountryHandler implements EditCountryHandlerInterface
+ {
+-    /**
+-     * @var CountryRepository
+-     */
+-    private $countryRepository;
+-
+-    public function __construct(CountryRepository $countryRepository)
+-    {
+-        $this->countryRepository = $countryRepository;
++    public function __construct(
++        private readonly CountryRepository $countryRepository,
++        private readonly AddressFormatCheckerInterface $addressFormatChecker,
++    ) {
+     }
+ 
+     /**
+@@ -83,6 +85,43 @@ public function handle(EditCountryCommand $command): void
+             $country->id_zone = $command->getZoneId();
+         }
+ 
++        $addressFormat = $command->getAddressFormat();
++        if (null !== $addressFormat) {
++            $errors = $this->addressFormatChecker->validate($addressFormat);
++            if ([] !== $errors) {
++                throw new InvalidAddressFormatException(
++                    $errors,
++                    'Invalid address format',
++                    CountryConstraintException::INVALID_ADDRESS_FORMAT
++                );
++            }
++        }
++
+         $this->countryRepository->update($country);
++
++        if (null !== $addressFormat) {
++            $this->saveAddressFormat($command->getCountryId()->getValue(), $addressFormat);
++        }
++    }
++
++    /**
++     * @throws CannotEditCountryException when the address format row cannot be persisted
++     */
++    private function saveAddressFormat(int $countryId, string $format): void
++    {
++        $addressFormatModel = new AddressFormat($countryId);
++        if (null === $addressFormatModel->id_country || 0 === (int) $addressFormatModel->id_country) {
++            $addressFormatModel->id_country = $countryId;
++        }
++        $addressFormatModel->format = $format;
++
++        if (!$addressFormatModel->save()) {
++            throw new CannotEditCountryException(sprintf('Failed to save address format for country %d', $countryId));
++        }
++
++        // The legacy AddressFormat::getFormatDB caches per-country reads in a static
++        // process cache that save() does not invalidate. Clear it so subsequent reads
++        // (e.g. GetCountryForEditing immediately after this command) return the new value.
++        Cache::clean('AddressFormat::getFormatDB' . $countryId);
+     }
+ }
+diff --git a/src/Adapter/Country/QueryHandler/GetCountryForEditingHandler.php b/src/Adapter/Country/QueryHandler/GetCountryForEditingHandler.php
+index a5afb5d4589b4..09ef910dd0ce3 100644
+--- a/src/Adapter/Country/QueryHandler/GetCountryForEditingHandler.php
++++ b/src/Adapter/Country/QueryHandler/GetCountryForEditingHandler.php
+@@ -8,6 +8,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Country\QueryHandler;
+ 
++use AddressFormat;
+ use PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Query\GetCountryForEditing;
+@@ -38,13 +39,12 @@ public function handle(GetCountryForEditing $command): CountryForEditing
+         $countryId = $command->getCountryId();
+         $country = $this->countryRepository->get($countryId);
+ 
+-        /*
+-         * todo: need to refacttor format when its part is merged,
+-         * to add: a dedicated service to fetch the country address format, it should implement a dedicated interface
+-         * for now the string format is enough, but maybe we should introduce some kind of DTO or maybe even a smarter Domain object that stores this address format
+-         * https://github.com/PrestaShop/PrestaShop/pull/29591#discussion_r976471671
+-         */
+-        //        $format = AddressFormat::getAddressCountryFormat($countryId->getValue());
++        // Read the raw stored format directly via the ObjectModel so the merchant
++        // edits exactly what's persisted. AddressFormat::getAddressCountryFormat
++        // would auto-append \ndni for countries that need DNI — that's a display-time
++        // decoration that should not leak into the edit form.
++        $addressFormatModel = new AddressFormat($countryId->getValue());
++        $storedFormat = (string) $addressFormatModel->format;
+ 
+         return new CountryForEditing(
+             $command->getCountryId(),
+@@ -55,7 +55,7 @@ public function handle(GetCountryForEditing $command): CountryForEditing
+             (int) $country->id_zone,
+             (bool) $country->need_zip_code,
+             (string) $country->zip_code_format,
+-            '', // todo: add when address format will be added
++            $storedFormat,
+             (bool) $country->active,
+             (bool) $country->contains_states,
+             (bool) $country->need_identification_number,
+diff --git a/src/Core/ConstraintValidator/Constraints/ValidAddressFormat.php b/src/Core/ConstraintValidator/Constraints/ValidAddressFormat.php
+new file mode 100644
+index 0000000000000..be9acf6fc8586
+--- /dev/null
++++ b/src/Core/ConstraintValidator/Constraints/ValidAddressFormat.php
+@@ -0,0 +1,28 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints;
++
++use Attribute;
++use PrestaShop\PrestaShop\Core\ConstraintValidator\ValidAddressFormatValidator;
++use Symfony\Component\Validator\Constraint;
++
++/**
++ * Validates that a country address format string is parseable and references
++ * only allowed object/field tokens, with all required fields present.
++ */
++#[Attribute(Attribute::TARGET_PROPERTY | Attribute::TARGET_METHOD | Attribute::IS_REPEATABLE)]
++class ValidAddressFormat extends Constraint
++{
++    public string $message = 'Invalid address format: %errors%';
++
++    public function validatedBy(): string
++    {
++        return ValidAddressFormatValidator::class;
++    }
++}
+diff --git a/src/Core/ConstraintValidator/ValidAddressFormatValidator.php b/src/Core/ConstraintValidator/ValidAddressFormatValidator.php
+new file mode 100644
+index 0000000000000..2e93cab511f97
+--- /dev/null
++++ b/src/Core/ConstraintValidator/ValidAddressFormatValidator.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ConstraintValidator;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\ValidAddressFormat;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface;
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\ConstraintValidator;
++use Symfony\Component\Validator\Exception\UnexpectedTypeException;
++use Symfony\Component\Validator\Exception\UnexpectedValueException;
++
++class ValidAddressFormatValidator extends ConstraintValidator
++{
++    public function __construct(private readonly AddressFormatCheckerInterface $checker)
++    {
++    }
++
++    public function validate($value, Constraint $constraint): void
++    {
++        if (!$constraint instanceof ValidAddressFormat) {
++            throw new UnexpectedTypeException($constraint, ValidAddressFormat::class);
++        }
++
++        if (null === $value || '' === $value) {
++            return;
++        }
++
++        if (!is_string($value)) {
++            throw new UnexpectedValueException($value, 'string');
++        }
++
++        $errors = $this->checker->validate($value);
++        foreach ($errors as $error) {
++            $this->context->buildViolation($error)->addViolation();
++        }
++    }
++}
+diff --git a/src/Core/Domain/Country/AddressFormat/AddressFormatChecker.php b/src/Core/Domain/Country/AddressFormat/AddressFormatChecker.php
+new file mode 100644
+index 0000000000000..16edc166077c9
+--- /dev/null
++++ b/src/Core/Domain/Country/AddressFormat/AddressFormatChecker.php
+@@ -0,0 +1,171 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat;
++
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++/**
++ * Pure Core implementation of {@see AddressFormatCheckerInterface}.
++ *
++ * Validates an address-format string against the picker's known object/field
++ * surface (provided by {@see AddressFormatFieldsProviderInterface}) without
++ * touching the legacy AddressFormat ObjectModel. Encapsulates the same rules
++ * the legacy widget enforced:
++ *
++ *   - tokens are split on non-word/non-colon characters
++ *   - bare tokens must name a valid Address field
++ *   - prefixed `Object:field` tokens must name an exposed picker class with a
++ *     known field on it
++ *   - duplicate tokens are rejected
++ *   - all required fields must be present (bare entries match Address tokens)
++ *
++ * Errors are translated through the Symfony TranslatorInterface so unit tests
++ * and the form layer get human-readable strings without booting the legacy
++ * Context.
++ */
++final class AddressFormatChecker implements AddressFormatCheckerInterface
++{
++    /**
++     * Mirrors the legacy AddressFormat::_CLEANING_REGEX_ — splits a line on
++     * any character that isn't a word char, colon, or underscore.
++     */
++    private const TOKEN_SPLIT_REGEX = '#([^\w:_]+)#i';
++
++    private const TRANSLATION_DOMAIN = 'Admin.Notifications.Error';
++
++    public function __construct(
++        private readonly AddressFormatFieldsProviderInterface $fieldsProvider,
++        private readonly TranslatorInterface $translator,
++    ) {
++    }
++
++    public function validate(string $format): array
++    {
++        $errors = [];
++        $usedTokens = [];
++        $placedKeys = [];
++
++        foreach (explode("\n", $format) as $line) {
++            foreach ($this->extractTokens($line) as $token) {
++                if (in_array($token, $usedTokens, true)) {
++                    $errors[] = $this->translator->trans(
++                        'This key has already been used: %key%.',
++                        ['%key%' => $token],
++                        self::TRANSLATION_DOMAIN
++                    );
++                    continue;
++                }
++                $usedTokens[] = $token;
++
++                $placement = $this->resolveTokenPlacement($token, $errors);
++                if (null !== $placement) {
++                    $placedKeys[] = $placement;
++                }
++            }
++        }
++
++        foreach ($this->findMissingRequiredFields($placedKeys) as $missing) {
++            $errors[] = $this->translator->trans(
++                'The %field% field is required.',
++                ['%field%' => $missing],
++                self::TRANSLATION_DOMAIN
++            );
++        }
++
++        return $errors;
++    }
++
++    /**
++     * @return list<string>
++     */
++    private function extractTokens(string $line): array
++    {
++        $tokens = preg_split(self::TOKEN_SPLIT_REGEX, $line, -1, PREG_SPLIT_NO_EMPTY);
++
++        return false === $tokens ? [] : array_values($tokens);
++    }
++
++    /**
++     * @param list<string> $errors collected error messages, mutated on validation failure
++     *
++     * @return string|null Canonical "Object:field" key for required-fields tracking,
++     *                     or null when the token failed validation
++     */
++    private function resolveTokenPlacement(string $token, array &$errors): ?string
++    {
++        if (str_contains($token, ':')) {
++            $parts = explode(':', $token);
++            if (2 !== count($parts) || '' === $parts[0] || '' === $parts[1]) {
++                $errors[] = $this->translator->trans(
++                    'Syntax error with this pattern: %pattern%.',
++                    ['%pattern%' => $token],
++                    self::TRANSLATION_DOMAIN
++                );
++
++                return null;
++            }
++            $class = ucfirst($parts[0]);
++            $field = strtolower($parts[1]);
++
++            if (!in_array($class, $this->fieldsProvider->getPickerClasses(), true)) {
++                $errors[] = $this->translator->trans(
++                    'This object is not allowed: %name%.',
++                    ['%name%' => $class],
++                    self::TRANSLATION_DOMAIN
++                );
++
++                return null;
++            }
++            if (!in_array($field, $this->fieldsProvider->getFieldsForClass($class), true)) {
++                $errors[] = $this->translator->trans(
++                    'The field %field% does not exist on %class%.',
++                    ['%field%' => $field, '%class%' => $class],
++                    self::TRANSLATION_DOMAIN
++                );
++
++                return null;
++            }
++
++            return $class . ':' . $field;
++        }
++
++        // Bare token: must be an Address field.
++        $field = strtolower($token);
++        if (!in_array($field, $this->fieldsProvider->getFieldsForClass('Address'), true)) {
++            $errors[] = $this->translator->trans(
++                'This field is not a valid address property: %name%.',
++                ['%name%' => $token],
++                self::TRANSLATION_DOMAIN
++            );
++
++            return null;
++        }
++
++        return 'Address:' . $field;
++    }
++
++    /**
++     * @param list<string> $placedKeys canonical "Object:field" keys derived from the format
++     *
++     * @return list<string> required-fields entries that aren't covered by any placed token
++     */
++    private function findMissingRequiredFields(array $placedKeys): array
++    {
++        $required = $this->fieldsProvider->getRequiredFields();
++        $missing = [];
++        foreach ($required as $req) {
++            $needed = str_contains($req, ':') ? $req : 'Address:' . $req;
++            if (!in_array($needed, $placedKeys, true)) {
++                $missing[] = $req;
++            }
++        }
++
++        return $missing;
++    }
++}
+diff --git a/src/Core/Domain/Country/AddressFormat/AddressFormatCheckerInterface.php b/src/Core/Domain/Country/AddressFormat/AddressFormatCheckerInterface.php
+new file mode 100644
+index 0000000000000..6e930fd551d73
+--- /dev/null
++++ b/src/Core/Domain/Country/AddressFormat/AddressFormatCheckerInterface.php
+@@ -0,0 +1,24 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat;
++
++/**
++ * Validates the country address-format string against the same rules the legacy widget enforces:
++ * unknown property/class tokens, forbidden classes, duplicate tokens, missing required fields.
++ *
++ * Both the Symfony constraint and the CQRS handler depend on this interface so the validation
++ * surface stays consistent regardless of entry point.
++ */
++interface AddressFormatCheckerInterface
++{
++    /**
++     * @return string[] list of (already translated) error messages, empty when valid
++     */
++    public function validate(string $format): array;
++}
+diff --git a/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProvider.php b/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProvider.php
+new file mode 100644
+index 0000000000000..4aaa18ad33962
+--- /dev/null
++++ b/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProvider.php
+@@ -0,0 +1,105 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat;
++
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\Address\Query\GetRequiredFieldsForAddress;
++
++/**
++ * Pure Core implementation of {@see AddressFormatFieldsProviderInterface}.
++ *
++ * Field lists per object are hardcoded here — they define the merchant-facing
++ * picker surface for the country address-format builder, not a runtime reflection
++ * of ObjectModel public properties. Decoupling them from legacy class shapes
++ * keeps the picker stable and lets us drop the legacy AddressFormat dependency.
++ *
++ * Required-fields are sourced from the existing GetRequiredFieldsForAddress
++ * query (DB-managed list) merged with a static minimum that the legacy
++ * validator also enforced regardless of merchant configuration.
++ */
++final class AddressFormatFieldsProvider implements AddressFormatFieldsProviderInterface
++{
++    /**
++     * Address fields that are always required on top of whatever the merchant
++     * configures via BO > Customers > Addresses. Mirrors the legacy
++     * AddressFormat::$requireFormFieldsList minimum.
++     */
++    private const STATIC_REQUIRED_FIELDS = [
++        'firstname',
++        'lastname',
++        'address1',
++        'city',
++        'Country:name',
++    ];
++
++    /**
++     * @var array<string, list<string>>
++     */
++    private const FIELDS_BY_CLASS = [
++        'Address' => [
++            'firstname',
++            'lastname',
++            'company',
++            'vat_number',
++            'address1',
++            'address2',
++            'postcode',
++            'city',
++            'other',
++            'phone',
++            'phone_mobile',
++            'dni',
++        ],
++        'Country' => [
++            'name',
++            'iso_code',
++        ],
++        'State' => [
++            'name',
++            'iso_code',
++        ],
++        'Customer' => [
++            'firstname',
++            'lastname',
++            'company',
++            'vat_number',
++            'email',
++            'birthday',
++            'website',
++            'siret',
++        ],
++        'Warehouse' => [
++            'name',
++            'reference',
++            'management_type',
++        ],
++    ];
++
++    public function __construct(private readonly CommandBusInterface $queryBus)
++    {
++    }
++
++    public function getPickerClasses(): array
++    {
++        return array_keys(self::FIELDS_BY_CLASS);
++    }
++
++    public function getFieldsForClass(string $className): array
++    {
++        return self::FIELDS_BY_CLASS[$className] ?? [];
++    }
++
++    public function getRequiredFields(): array
++    {
++        /** @var list<string> $dbManaged */
++        $dbManaged = $this->queryBus->handle(new GetRequiredFieldsForAddress());
++
++        return array_values(array_unique(array_merge(self::STATIC_REQUIRED_FIELDS, $dbManaged)));
++    }
++}
+diff --git a/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderInterface.php b/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderInterface.php
+new file mode 100644
+index 0000000000000..8fd096af32ea7
+--- /dev/null
++++ b/src/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderInterface.php
+@@ -0,0 +1,48 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat;
++
++/**
++ * Lists the public properties of the ObjectModel classes that the address-format
++ * picker exposes (Customer, Warehouse, Country, State, Address). Used by the form
++ * type to populate the Vue builder's picker pills.
++ */
++interface AddressFormatFieldsProviderInterface
++{
++    /**
++     * Returns the ordered list of object class names the picker exposes
++     * (e.g. ['Address', 'Country', 'State', 'Customer', 'Warehouse']). This is the
++     * single source of truth: the form type uses it to build the picker columns
++     * and the validator uses it to reject prefixed tokens that target any other class.
++     *
++     * @return list<string>
++     */
++    public function getPickerClasses(): array;
++
++    /**
++     * @param string $className One of the picker's object names
++     *
++     * @return list<string>
++     */
++    public function getFieldsForClass(string $className): array;
++
++    /**
++     * Returns the merged list of required fields the address format must include:
++     * the static defaults (firstname, lastname, address1, city, Country:name) plus
++     * any field the merchant flagged as required in BO > Customers > Addresses.
++     *
++     * This is broader than the dedicated GetRequiredFieldsForAddress CQRS query,
++     * which intentionally returns only the DB-managed list and is consumed by the
++     * customer-facing address form. The address-format builder needs both layers
++     * because the legacy validator does too (see AddressFormat::getFieldsRequired).
++     *
++     * @return list<string>
++     */
++    public function getRequiredFields(): array;
++}
+diff --git a/src/Core/Domain/Country/Command/AddCountryCommand.php b/src/Core/Domain/Country/Command/AddCountryCommand.php
+index a371f3528bf5f..5bc3d8d06a9e9 100644
+--- a/src/Core/Domain/Country/Command/AddCountryCommand.php
++++ b/src/Core/Domain/Country/Command/AddCountryCommand.php
+@@ -17,99 +17,32 @@
+  */
+ class AddCountryCommand
+ {
+-    /**
+-     * @var string[]
+-     */
+-    private $localizedNames;
+-
+-    /**
+-     * @var string
+-     */
+-    private $isoCode;
+-
+-    /**
+-     * @var int
+-     */
+-    private $callPrefix;
+-
+-    /**
+-     * @var int
+-     */
+-    private $defaultCurrency;
+-
+-    /**
+-     * @var ZoneId
+-     */
+-    private $zoneId;
+-
+-    /**
+-     * @var bool
+-     */
+-    private $needZipCode;
+-
+-    /**
+-     * @var ?CountryZipCodeFormat
+-     */
+-    private $zipCodeFormat;
+-
+-    /**
+-     * @var string
+-     */
+-    private $addressFormat;
+-
+-    /**
+-     * @var bool
+-     */
+-    private $enabled;
+-
+-    /**
+-     * @var bool
+-     */
+-    private $containsStates;
+-
+-    /**
+-     * @var bool
+-     */
+-    private $needIdNumber;
++    private string $isoCode;
++    private ZoneId $zoneId;
++    private ?CountryZipCodeFormat $zipCodeFormat;
+ 
+     /**
+-     * @var bool
++     * @param string[] $localizedNames
++     * @param int[] $shopAssociation
+      */
+-    private $displayTaxLabel;
+-
+-    /**
+-     * @var int[]
+-     */
+-    private $shopAssociation;
+-
+     public function __construct(
+-        array $localizedNames,
++        private array $localizedNames,
+         string $isoCode,
+-        int $callPrefix,
+-        int $defaultCurrency,
++        private int $callPrefix,
++        private int $defaultCurrency,
+         int $zoneId,
+-        bool $needZipCode,
++        private bool $needZipCode,
+         ?string $zipCodeFormat,
+-        string $addressFormat,
+-        bool $enabled,
+-        bool $containsStates,
+-        bool $needIdNumber,
+-        bool $displayTaxLabel,
+-        array $shopAssociation
++        private string $addressFormat,
++        private bool $enabled,
++        private bool $containsStates,
++        private bool $needIdNumber,
++        private bool $displayTaxLabel,
++        private array $shopAssociation,
+     ) {
+-        $this->localizedNames = $localizedNames;
+         $this->isoCode = Tools::strtoupper(Tools::substr($isoCode, 0, 2));
+-        $this->callPrefix = $callPrefix;
+-        $this->defaultCurrency = $defaultCurrency;
+         $this->zoneId = new ZoneId($zoneId);
+-        $this->needZipCode = $needZipCode;
+         $this->zipCodeFormat = $zipCodeFormat ? new CountryZipCodeFormat($zipCodeFormat) : null;
+-        $this->addressFormat = $addressFormat;
+-        $this->enabled = $enabled;
+-        $this->containsStates = $containsStates;
+-        $this->needIdNumber = $needIdNumber;
+-        $this->displayTaxLabel = $displayTaxLabel;
+-        $this->shopAssociation = $shopAssociation;
+     }
+ 
+     /**
+@@ -120,7 +53,7 @@ public function getLocalizedNames(): array
+         return $this->localizedNames;
+     }
+ 
+-    public function getIsoCode()
++    public function getIsoCode(): string
+     {
+         return $this->isoCode;
+     }
+diff --git a/src/Core/Domain/Country/Command/DeleteCountryCommand.php b/src/Core/Domain/Country/Command/DeleteCountryCommand.php
+index d4439f61228ac..bd52b736abe48 100644
+--- a/src/Core/Domain/Country/Command/DeleteCountryCommand.php
++++ b/src/Core/Domain/Country/Command/DeleteCountryCommand.php
+@@ -15,22 +15,13 @@
+  */
+ class DeleteCountryCommand
+ {
+-    /**
+-     * @var CountryId
+-     */
+-    private $countryId;
++    private CountryId $countryId;
+ 
+-    /**
+-     * @param int $countryId
+-     */
+     public function __construct(int $countryId)
+     {
+         $this->countryId = new CountryId($countryId);
+     }
+ 
+-    /**
+-     * @return CountryId
+-     */
+     public function getCountryId(): CountryId
+     {
+         return $this->countryId;
+diff --git a/src/Core/Domain/Country/Command/EditCountryCommand.php b/src/Core/Domain/Country/Command/EditCountryCommand.php
+index 8b9e5eb464757..c7e18fdd0e661 100644
+--- a/src/Core/Domain/Country/Command/EditCountryCommand.php
++++ b/src/Core/Domain/Country/Command/EditCountryCommand.php
+@@ -12,83 +12,47 @@
+ use PrestaShop\PrestaShop\Core\Domain\Country\ValueObject\CountryZipCodeFormat;
+ 
+ /**
+- * Adds new zone with provided data.
++ * Edits an existing country with the provided data.
++ *
++ * All non-id fields are optional: only the values explicitly set via setters
++ * are persisted by the handler — null means "don't change". Setters are kept
++ * (instead of property promotion) because the data handler builds the command
++ * progressively from the form payload.
+  */
+ class EditCountryCommand
+ {
+-    /**
+-     * @var CountryId
+-     */
+-    private $countryId;
++    private CountryId $countryId;
+ 
+-    /**
+-     * @var string[]
+-     */
+-    private $localizedNames;
++    /** @var string[]|null */
++    private ?array $localizedNames = null;
+ 
+-    /**
+-     * @var string
+-     */
+-    private $isoCode;
++    private ?string $isoCode = null;
+ 
+-    /**
+-     * @var int
+-     */
+-    private $callPrefix;
++    private ?int $callPrefix = null;
+ 
+-    /**
+-     * @var int
+-     */
+-    private $defaultCurrency;
++    private ?int $defaultCurrency = null;
+ 
+-    /**
+-     * @var int|null
+-     */
+-    private $zoneId;
++    private ?int $zoneId = null;
+ 
+-    /**
+-     * @var bool
+-     */
+-    private $needZipCode;
++    private ?bool $needZipCode = null;
+ 
+-    /**
+-     * @var ?CountryZipCodeFormat
+-     */
+-    private $zipCodeFormat;
++    private ?CountryZipCodeFormat $zipCodeFormat = null;
+ 
+-    /**
+-     * @var string
+-     */
+-    private $addressFormat;
++    private ?string $addressFormat = null;
+ 
+-    /**
+-     * @var bool
+-     */
+-    private $enabled;
++    private ?bool $enabled = null;
+ 
+-    /**
+-     * @var bool
+-     */
+-    private $containsStates;
++    private ?bool $containsStates = null;
+ 
+-    /**
+-     * @var bool
+-     */
+-    private $needIdNumber;
++    private ?bool $needIdNumber = null;
+ 
+-    /**
+-     * @var bool
+-     */
+-    private $displayTaxLabel;
++    private ?bool $displayTaxLabel = null;
+ 
+-    /**
+-     * @var int[]
+-     */
+-    private $shopAssociation;
++    /** @var int[]|null */
++    private ?array $shopAssociation = null;
+ 
+-    public function __construct(
+-        int $countryId
+-    ) {
++    public function __construct(int $countryId)
++    {
+         $this->countryId = new CountryId($countryId);
+     }
+ 
+@@ -98,17 +62,15 @@ public function getCountryId(): CountryId
+     }
+ 
+     /**
+-     * @return string[]
++     * @return string[]|null
+      */
+-    public function getLocalizedNames(): array
++    public function getLocalizedNames(): ?array
+     {
+         return $this->localizedNames;
+     }
+ 
+     /**
+      * @param string[] $localizedNames
+-     *
+-     * @return EditCountryCommand
+      */
+     public function setLocalizedNames(array $localizedNames): EditCountryCommand
+     {
+@@ -122,7 +84,7 @@ public function getIsoCode(): ?string
+         return $this->isoCode;
+     }
+ 
+-    public function setIsoCode($isoCode)
++    public function setIsoCode(string $isoCode): EditCountryCommand
+     {
+         $this->isoCode = $isoCode;
+ 
+@@ -242,11 +204,6 @@ public function displayTaxLabel(): ?bool
+         return $this->displayTaxLabel;
+     }
+ 
+-    /**
+-     * @param bool $displayTaxLabel
+-     *
+-     * @return EditCountryCommand
+-     */
+     public function setDisplayTaxLabel(bool $displayTaxLabel): EditCountryCommand
+     {
+         $this->displayTaxLabel = $displayTaxLabel;
+@@ -255,7 +212,7 @@ public function setDisplayTaxLabel(bool $displayTaxLabel): EditCountryCommand
+     }
+ 
+     /**
+-     * @return ?int[]
++     * @return int[]|null
+      */
+     public function getShopAssociation(): ?array
+     {
+@@ -264,8 +221,6 @@ public function getShopAssociation(): ?array
+ 
+     /**
+      * @param int[] $shopAssociation
+-     *
+-     * @return EditCountryCommand
+      */
+     public function setShopAssociation(array $shopAssociation): EditCountryCommand
+     {
+diff --git a/src/Core/Domain/Country/Exception/CountryConstraintException.php b/src/Core/Domain/Country/Exception/CountryConstraintException.php
+index 8be173c456fe7..1b48abaee435c 100644
+--- a/src/Core/Domain/Country/Exception/CountryConstraintException.php
++++ b/src/Core/Domain/Country/Exception/CountryConstraintException.php
+@@ -14,4 +14,6 @@ class CountryConstraintException extends CountryException
+     public const INVALID_ID = 10;
+ 
+     public const INVALID_ZIP_CODE = 20;
++
++    public const INVALID_ADDRESS_FORMAT = 30;
+ }
+diff --git a/src/Core/Domain/Country/Exception/InvalidAddressFormatException.php b/src/Core/Domain/Country/Exception/InvalidAddressFormatException.php
+new file mode 100644
+index 0000000000000..a9eea4e6c7d15
+--- /dev/null
++++ b/src/Core/Domain/Country/Exception/InvalidAddressFormatException.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Country\Exception;
++
++use Throwable;
++
++/**
++ * Thrown when a country's address format is rejected by AddressFormatChecker.
++ * Carries the list of (already translated) error messages so the Admin API or
++ * any non-form CQRS consumer can surface them.
++ */
++final class InvalidAddressFormatException extends CountryConstraintException
++{
++    /** @var string[] */
++    private array $errors;
++
++    /**
++     * @param string[] $errors
++     */
++    public function __construct(array $errors, string $message = '', int $code = 0, ?Throwable $previous = null)
++    {
++        parent::__construct($message !== '' ? $message : 'Invalid address format', $code, $previous);
++        $this->errors = $errors;
++    }
++
++    /**
++     * @return string[]
++     */
++    public function getErrors(): array
++    {
++        return $this->errors;
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+index d8aa88aa4fd96..df115c8e1ad72 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/International/CountryController.php
+@@ -173,8 +173,6 @@ public function editAction(
+             }
+         } catch (Exception $e) {
+             $this->addFlash('error', $this->getErrorMessageForException($e, $this->getErrorMessages($e)));
+-
+-            return $this->redirectToRoute('admin_countries_index');
+         }
+ 
+         return $this->render('@PrestaShop/Admin/Improve/International/Country/edit.html.twig', [
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/AddressFormatType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/AddressFormatType.php
+new file mode 100644
+index 0000000000000..cb941f812313a
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/AddressFormatType.php
+@@ -0,0 +1,229 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Improve\International\Locations;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\ValidAddressFormat;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProviderInterface;
++use Symfony\Component\Form\AbstractType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormView;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
++use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++/**
++ * Custom form type backing the country address-format Vue 3 visual builder.
++ *
++ * The submitted name remains the parent's field name (i.e. country[address_format])
++ * because this type binds directly to a string — the Vue component owns a hidden
++ * input with that name and keeps it in sync with the visual editor state.
++ *
++ * Server-side options resolved here (available_objects, required_fields,
++ * default_format, sample_data, required_fields_url, translations) are serialized
++ * as data-* attributes by the address_format_builder_widget block.
++ */
++class AddressFormatType extends AbstractType
++{
++    /**
++     * Built-in PrestaShop default layout — used when no per-country format is set
++     * and as the source of the "Default for this country" reset action.
++     *
++     * Mirrors the legacy AdminCountriesController's hard-coded default layout.
++     */
++    public const DEFAULT_LAYOUT = "firstname lastname\ncompany\nvat_number\naddress1\naddress2\npostcode city\nCountry:name\nphone";
++
++    /**
++     * Form theme path — applied via the form_theme option (see PrestaShopBundle's
++     * FormThemeExtension) so the widget block stays scoped to this type instead of
++     * being registered globally in app/config/config.yml.
++     */
++    private const FORM_THEME = '@PrestaShop/Admin/Improve/International/Country/FormTheme/address_format_builder.html.twig';
++
++    public function __construct(
++        private readonly TranslatorInterface $translator,
++        private readonly RouterInterface $router,
++        private readonly AddressFormatFieldsProviderInterface $fieldsProvider,
++    ) {
++    }
++
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder->setAttribute('address_format_options', [
++            'available_objects' => $options['available_objects'],
++            'required_fields' => $options['required_fields'],
++            'default_format' => $options['default_format'],
++            'sample_data' => $options['sample_data'],
++            'required_fields_url' => $options['required_fields_url'],
++            'translations' => $options['translations'],
++        ]);
++    }
++
++    public function buildView(FormView $view, \Symfony\Component\Form\FormInterface $form, array $options): void
++    {
++        $view->vars['address_format_options'] = $form->getConfig()->getAttribute('address_format_options');
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver
++            ->setDefaults([
++                // HiddenType bubbles errors to the parent form by default; this field
++                // has a visible UI surface (the Vue builder), so violations must render
++                // inline on the field itself.
++                'error_bubbling' => false,
++                'empty_data' => '',
++                // The Vue mount script (initAddressFormatBuilder.ts) locates the hidden
++                // input by the `js-address-format-input` selector to keep it in sync with
++                // the visual editor — propagated to the input via the form theme's
++                // {{ block('hidden_widget') }} call.
++                'attr' => ['class' => 'js-address-format-input'],
++                'form_theme' => self::FORM_THEME,
++                'available_objects' => null,
++                'required_fields' => null,
++                'default_format' => self::DEFAULT_LAYOUT,
++                'sample_data' => null,
++                'required_fields_url' => null,
++                'translations' => null,
++                'constraints' => [
++                    new NotBlank(),
++                    new ValidAddressFormat(),
++                ],
++            ])
++            ->setNormalizer('available_objects', fn ($options, $value) => $value ?? $this->buildAvailableObjects())
++            ->setNormalizer('required_fields', fn ($options, $value) => $value ?? $this->fetchRequiredFields())
++            ->setNormalizer('sample_data', fn ($options, $value) => $value ?? $this->buildSampleData())
++            ->setNormalizer('required_fields_url', fn ($options, $value) => $value ?? $this->buildRequiredFieldsUrl())
++            ->setNormalizer('translations', fn ($options, $value) => $value ?? $this->buildTranslations())
++            ->setAllowedTypes('available_objects', ['array', 'null'])
++            ->setAllowedTypes('required_fields', ['array', 'null'])
++            ->setAllowedTypes('default_format', 'string')
++            ->setAllowedTypes('sample_data', ['array', 'null'])
++            ->setAllowedTypes('required_fields_url', ['string', 'null'])
++            ->setAllowedTypes('translations', ['array', 'null']);
++    }
++
++    public function getBlockPrefix(): string
++    {
++        return 'address_format_builder';
++    }
++
++    public function getParent(): string
++    {
++        return HiddenType::class;
++    }
++
++    /**
++     * @return array<string, list<string>>
++     */
++    private function buildAvailableObjects(): array
++    {
++        $objects = [];
++        foreach ($this->fieldsProvider->getPickerClasses() as $className) {
++            $objects[$className] = $this->fieldsProvider->getFieldsForClass($className);
++        }
++
++        return $objects;
++    }
++
++    /**
++     * @return list<string>
++     */
++    private function fetchRequiredFields(): array
++    {
++        return $this->fieldsProvider->getRequiredFields();
++    }
++
++    /**
++     * Fixed sample customer used by the live preview pane (John Doe / 16 Main street / Paris).
++     *
++     * @return array<string, array<string, string>>
++     */
++    private function buildSampleData(): array
++    {
++        return [
++            'Customer' => [
++                'firstname' => 'John',
++                'lastname' => 'DOE',
++                'company' => 'Acme Ltd.',
++                'email' => 'john@example.com',
++                'website' => 'acme.com',
++                'vat_number' => 'FR12345678901',
++                'siret' => '123 456 789 12345',
++                'birthday' => '1985-04-12',
++            ],
++            'Warehouse' => [
++                'reference' => 'WH-01',
++                'name' => 'Main warehouse',
++                'management_type' => 'FIFO',
++            ],
++            'Country' => ['name' => 'France', 'iso_code' => 'FR', 'call_prefix' => '33'],
++            'State' => ['name' => 'Île de France', 'iso_code' => 'FR-IDF'],
++            'Address' => [
++                // Address has firstname/lastname/company/vat_number as public properties
++                // (the legacy Address ObjectModel exposes them) — bare tokens like
++                // `firstname` resolve to Address:firstname, so the preview reads them here.
++                'firstname' => 'John',
++                'lastname' => 'DOE',
++                'company' => 'Acme Ltd.',
++                'vat_number' => 'FR12345678901',
++                'address1' => '16 Main street',
++                'address2' => '2nd floor',
++                'postcode' => '75002',
++                'city' => 'Paris',
++                'phone' => '0102030405',
++                'phone_mobile' => '+33 6 12 34 56 78',
++                'dni' => '12345678A',
++                'other' => '3rd floor',
++            ],
++        ];
++    }
++
++    private function buildRequiredFieldsUrl(): string
++    {
++        return $this->router->generate('admin_addresses_index', [], UrlGeneratorInterface::ABSOLUTE_PATH)
++            . '#addressRequiredFieldsContainer';
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    private function buildTranslations(): array
++    {
++        return [
++            'mode.visual' => $this->translator->trans('Visual editor', [], 'Admin.International.Feature'),
++            'mode.raw' => $this->translator->trans('Raw template', [], 'Admin.International.Feature'),
++            'reset.button' => $this->translator->trans('Reset', [], 'Admin.Actions'),
++            'reset.default' => $this->translator->trans('Default for this country', [], 'Admin.International.Feature'),
++            'reset.lastSaved' => $this->translator->trans('Last saved format', [], 'Admin.International.Feature'),
++            'reset.clear' => $this->translator->trans('Clear format', [], 'Admin.International.Feature'),
++            'reset.confirm' => $this->translator->trans('Are you sure you want to clear this address format?', [], 'Admin.International.Notification'),
++            'banner.missingOne' => $this->translator->trans('1 required field missing:', [], 'Admin.International.Feature'),
++            'banner.missingMany' => $this->translator->trans('{count} required fields missing:', [], 'Admin.International.Feature'),
++            'banner.allPresent' => $this->translator->trans('All required fields are present.', [], 'Admin.International.Feature'),
++            'banner.insertAll' => $this->translator->trans('Insert all missing', [], 'Admin.International.Feature'),
++            'lines.empty' => $this->translator->trans('Drop fields here, or click + below', [], 'Admin.International.Feature'),
++            'lines.add' => $this->translator->trans('Add line', [], 'Admin.International.Feature'),
++            'lines.remove' => $this->translator->trans('Remove line', [], 'Admin.International.Feature'),
++            'lines.removeChip' => $this->translator->trans('Remove field', [], 'Admin.International.Feature'),
++            'lines.dragHint' => $this->translator->trans('Drag to reorder line', [], 'Admin.International.Feature'),
++            'picker.title' => $this->translator->trans('Available fields', [], 'Admin.International.Feature'),
++            'picker.search' => $this->translator->trans('Search across all objects…', [], 'Admin.International.Feature'),
++            'picker.noMatch' => $this->translator->trans('No fields match your search.', [], 'Admin.International.Feature'),
++            'picker.required' => $this->translator->trans('Required field', [], 'Admin.International.Feature'),
++            'picker.alreadyAdded' => $this->translator->trans('Already in the format', [], 'Admin.International.Feature'),
++            'picker.requiredFooter' => $this->translator->trans('Required fields — managed in [link]Customers › Addresses[/link]', [], 'Admin.International.Feature'),
++            'preview.title' => $this->translator->trans('Live preview · Sample customer', [], 'Admin.International.Feature'),
++            'preview.empty' => $this->translator->trans('Empty format — drag fields in to see the preview.', [], 'Admin.International.Feature'),
++            'raw.help' => $this->translator->trans('Edit the raw template directly. Each line maps to one address line; spaces join placeholders.', [], 'Admin.International.Feature'),
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryType.php b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryType.php
+index 56936ccc22ee0..bcc33a7ca66a6 100644
+--- a/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryType.php
++++ b/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/CountryType.php
+@@ -122,8 +122,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ]),
+                 ],
+             ])
+-            // todo : create address layout form
+-            ->add('address_format', TextType::class, [
++            ->add('address_format', AddressFormatType::class, [
+                 'required' => false,
+                 'label' => $this->translator->trans('Address format', [], 'Admin.International.Feature'),
+             ])
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/country.yml b/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
+index 1f2d0f159cbf6..b21615ed1c09c 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/country.yml
+@@ -19,6 +19,21 @@ services:
+     arguments:
+       - '@prestashop.adapter.data_provider.country'
+ 
++  PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatChecker:
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProviderInterface'
++      - '@translator'
++
++  PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface:
++    alias: 'PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatChecker'
++
++  PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProvider:
++    arguments:
++      - '@prestashop.core.query_bus'
++
++  PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProviderInterface:
++    alias: 'PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProvider'
++
+   PrestaShop\PrestaShop\Adapter\Country\Repository\CountryRepository:
+     autowire: true
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 8b4756f146683..9c153a554fb2e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -56,6 +56,8 @@ services:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/*"
+   PrestaShopBundle\Form\Admin\Improve\International\Localization\:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Improve/International/Localization/*"
++  PrestaShopBundle\Form\Admin\Improve\International\Locations\:
++    resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Improve/International/Locations/*"
+   PrestaShopBundle\Form\Admin\Configure\ShopParameters\:
+     resource: "%kernel.project_dir%/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/*"
+   PrestaShopBundle\Form\Admin\Login\:
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml b/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
+index ffff17ebafdac..7a4355b02d3b6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
+@@ -79,6 +79,12 @@ services:
+     autowire: true
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Core\ConstraintValidator\ValidAddressFormatValidator:
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface'
++    tags:
++      - { name: validator.constraint_validator }
++
+   PrestaShop\PrestaShop\Core\ConstraintValidator\UniqueDiscountCodeValidator:
+     autowire: true
+     autoconfigure: true
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/FormTheme/address_format_builder.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/FormTheme/address_format_builder.html.twig
+new file mode 100644
+index 0000000000000..315e4fd600033
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Improve/International/Country/FormTheme/address_format_builder.html.twig
+@@ -0,0 +1,24 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++
++{# We redefine the form type row block, because since the parent is HiddentType, it doesn't display labels and errors by default #}
++{% block address_format_builder_row %}
++  {{- block('form_row') -}}
++{% endblock %}
++
++{% block address_format_builder_widget %}
++  {% set options = address_format_options %}
++  <div class="js-address-format-wrapper address-format-wrapper">
++    {{- block('hidden_widget') -}}
++    <div class="js-address-format-builder"
++         data-value="{{ value|default('') }}"
++         data-objects="{{ options.available_objects|json_encode }}"
++         data-required-fields="{{ options.required_fields|json_encode }}"
++         data-default-format="{{ options.default_format }}"
++         data-sample-data="{{ options.sample_data|json_encode }}"
++         data-required-fields-url="{{ options.required_fields_url }}"
++         data-translations="{{ options.translations|json_encode }}"></div>
++  </div>
++{% endblock %}
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
+index f3708c58e169c..c3dfc1055824f 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CountryFeatureContext.php
+@@ -19,6 +19,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Exception\CountryNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Country\Exception\InvalidAddressFormatException;
+ use PrestaShop\PrestaShop\Core\Domain\Country\Query\GetCountryForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Country\QueryResult\CountryForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Zone\Exception\ZoneNotFoundException;
+@@ -109,7 +110,7 @@ public function createCountry(string $countryReference, TableNode $table): void
+                 (int) $data['zone'],
+                 PrimitiveUtils::castStringBooleanIntoBoolean($data['need_zip_code']),
+                 $data['zip_code_format'],
+-                (string) $data['address_format'],
++                $this->unescapeFormat((string) $data['address_format']),
+                 PrimitiveUtils::castStringBooleanIntoBoolean($data['is_enabled']),
+                 PrimitiveUtils::castStringBooleanIntoBoolean($data['contains_states']),
+                 PrimitiveUtils::castStringBooleanIntoBoolean($data['need_identification_number']),
+@@ -163,7 +164,7 @@ public function editCountry(string $countryReference, TableNode $table): void
+         }
+ 
+         if (isset($data['address_format'])) {
+-            $command->setAddressFormat($data['address_format']);
++            $command->setAddressFormat($this->unescapeFormat($data['address_format']));
+         }
+ 
+         if (isset($data['is_enabled'])) {
+@@ -182,7 +183,36 @@ public function editCountry(string $countryReference, TableNode $table): void
+             $command->setDisplayTaxLabel(PrimitiveUtils::castStringBooleanIntoBoolean($data['display_tax_label']));
+         }
+ 
+-        $this->getCommandBus()->handle($command);
++        try {
++            $this->getCommandBus()->handle($command);
++        } catch (CountryException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then I should get an :exceptionShortName error
++     */
++    public function assertCountryDomainError(string $exceptionShortName): void
++    {
++        $map = [
++            'InvalidAddressFormat' => InvalidAddressFormatException::class,
++        ];
++
++        if (!isset($map[$exceptionShortName])) {
++            throw new RuntimeException(sprintf('Unknown country error short name "%s"', $exceptionShortName));
++        }
++
++        $this->assertLastErrorIs($map[$exceptionShortName]);
++    }
++
++    /**
++     * Behat tables strip backslash escapes in cell values, so the feature file uses
++     * the literal `\n` two-character sequence instead of a newline. Convert back here.
++     */
++    private function unescapeFormat(string $format): string
++    {
++        return str_replace('\\n', "\n", $format);
+     }
+ 
+     /**
+@@ -308,18 +338,25 @@ public function assertCountryProperties(string $countryReference, TableNode $tab
+         /** @var CountryForEditing $result */
+         $result = $queryBus->handle(new GetCountryForEditing($countryId));
+ 
+-        Assert::assertEquals($expectedData['localizedNames'], $result->getLocalizedNames());
+-        Assert::assertEquals($expectedData['isoCode'], $result->getIsoCode());
+-        Assert::assertEquals($expectedData['callPrefix'], $result->getCallPrefix());
+-        Assert::assertEquals($expectedData['defaultCurrency'], $result->getDefaultCurrency());
+-        Assert::assertEquals($expectedData['zone'], $result->getZone());
+-        Assert::assertEquals($expectedData['needZipCode'], $result->isNeedZipCode());
+-        Assert::assertEquals($expectedData['zipCodeFormat'], $result->getZipCodeFormat()->getValue());
+-        Assert::assertEquals($expectedData['enabled'], $result->isEnabled());
+-        Assert::assertEquals($expectedData['containsStates'], $result->isContainsStates());
+-        Assert::assertEquals($expectedData['needIdNumber'], $result->isNeedIdNumber());
+-        Assert::assertEquals($expectedData['displayTaxLabel'], $result->isDisplayTaxLabel());
+-        Assert::assertEquals([$expectedData['shopAssociation']], $result->getShopAssociation());
++        Assert::assertEquals($expectedData['name'], $result->getLocalizedNames(), 'unexpected name');
++        Assert::assertEquals($expectedData['iso_code'], $result->getIsoCode(), 'unexpected iso_code');
++        Assert::assertEquals($expectedData['call_prefix'], $result->getCallPrefix(), 'unexpected call_prefix');
++        Assert::assertEquals($expectedData['default_currency'], $result->getDefaultCurrency(), 'unexpected default_currency');
++        Assert::assertEquals($expectedData['zone'], $result->getZone(), 'unexpected zone');
++        Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['need_zip_code']), $result->isNeedZipCode(), 'unexpected need_zip_code');
++        Assert::assertEquals($expectedData['zip_code_format'], $result->getZipCodeFormat()->getValue(), 'unexpected zip_code_format');
++        Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['is_enabled']), $result->isEnabled(), 'unexpected enabled');
++        Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['contains_states']), $result->isContainsStates(), 'unexpected contains_states');
++        Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['need_identification_number']), $result->isNeedIdNumber(), 'unexpected need_identification_number');
++        Assert::assertEquals(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['display_tax_label']), $result->isDisplayTaxLabel(), 'unexpected display_tax_label');
++        Assert::assertEquals([$expectedData['shop_association']], $result->getShopAssociation(), 'unexpected shop_association');
++        if (array_key_exists('address_format', $expectedData)) {
++            Assert::assertEquals(
++                $this->unescapeFormat((string) $expectedData['address_format']),
++                $result->getAddressFormat(),
++                'unexpected address_format'
++            );
++        }
+     }
+ 
+     private function formatCountryDataIfNeeded(array $data)
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature
+index c5c98d5e28893..471d137d37963 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_toggle_countries_status.feature
+@@ -9,33 +9,33 @@ Feature: Bulk toggle countries status
+   Scenario: Bulk enable and disable countries
+     Given language "language1" with locale "en-US" exists
+     And I add new country "bulk_country_1" with following properties:
+-      | name[en-US]                | Bulk Country 1  |
+-      | iso_code                   | QA              |
+-      | call_prefix                | 21              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | false           |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Bulk Country 1                                   |
++      | iso_code                   | QA                                               |
++      | call_prefix                | 21                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | false                                            |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     And I add new country "bulk_country_2" with following properties:
+-      | name[en-US]                | Bulk Country 2  |
+-      | iso_code                   | QB              |
+-      | call_prefix                | 22              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | false           |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Bulk Country 2                                   |
++      | iso_code                   | QB                                               |
++      | call_prefix                | 22                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | false                                            |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     When I bulk enable countries "bulk_country_1, bulk_country_2"
+     Then country "bulk_country_1" should be enabled
+     And country "bulk_country_2" should be enabled
+@@ -55,19 +55,19 @@ Feature: Bulk toggle countries status
+   Scenario: Bulk toggle should continue on partial failure and aggregate errors
+     Given language "language1" with locale "en-US" exists
+     And I add new country "bulk_partial_country" with following properties:
+-      | name[en-US]                | Bulk Partial    |
+-      | iso_code                   | QC              |
+-      | call_prefix                | 31              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | false           |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Bulk Partial                                     |
++      | iso_code                   | QC                                               |
++      | call_prefix                | 31                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | false                                            |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     And country "bulk_partial_missing" does not exist
+     When I bulk enable countries "bulk_partial_country, bulk_partial_missing"
+     Then I should get a bulk country exception containing 1 errors
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature
+index df11ef3d6c03f..29f7744dd8ec0 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/bulk_update_country_zone.feature
+@@ -9,33 +9,33 @@ Feature: Bulk update countries zone
+   Scenario: Bulk update countries zone
+     Given language "language1" with locale "en-US" exists
+     And I add new country "zone_country_1" with following properties:
+-      | name[en-US]                | Zone Country 1  |
+-      | iso_code                   | QD              |
+-      | call_prefix                | 41              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Zone Country 1                                   |
++      | iso_code                   | QD                                               |
++      | call_prefix                | 41                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     And I add new country "zone_country_2" with following properties:
+-      | name[en-US]                | Zone Country 2  |
+-      | iso_code                   | QE              |
+-      | call_prefix                | 42              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Zone Country 2                                   |
++      | iso_code                   | QE                                               |
++      | call_prefix                | 42                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     When I bulk update countries "zone_country_1, zone_country_2" to zone 2
+     Then country "zone_country_1" should be assigned to zone 2
+     And country "zone_country_2" should be assigned to zone 2
+@@ -52,38 +52,38 @@ Feature: Bulk update countries zone
+   Scenario: Bulk update countries zone should fail when zone does not exist
+     Given language "language1" with locale "en-US" exists
+     And I add new country "zone_missing_country" with following properties:
+-      | name[en-US]                | Zone Missing    |
+-      | iso_code                   | QF              |
+-      | call_prefix                | 51              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Zone Missing                                     |
++      | iso_code                   | QF                                               |
++      | call_prefix                | 51                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     When I bulk update countries "zone_missing_country" to zone 999999
+     Then I should get error that zone was not found
+ 
+   Scenario: Bulk update countries zone should continue on partial failure and aggregate errors
+     Given language "language1" with locale "en-US" exists
+     And I add new country "zone_partial_country" with following properties:
+-      | name[en-US]                | Zone Partial    |
+-      | iso_code                   | QG              |
+-      | call_prefix                | 61              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Zone Partial                                     |
++      | iso_code                   | QG                                               |
++      | call_prefix                | 61                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     And country "zone_partial_missing" does not exist
+     When I bulk update countries "zone_partial_country, zone_partial_missing" to zone 2
+     Then I should get a bulk country exception containing 1 errors
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/country_management.feature b/tests/Integration/Behaviour/Features/Scenario/Country/country_management.feature
+index 0aa5b78250184..5911efc1dcd59 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Country/country_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/country_management.feature
+@@ -1,5 +1,6 @@
+-#./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s country
++#./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s country --tags country-management
+ @restore-all-tables-before-feature
++@country-management
+ Feature: country management
+   As an employee
+   I must be able to add, edit and delete country
+@@ -8,66 +9,79 @@ Feature: country management
+     Given language "language1" with locale "en-US" exists
+     And language "language2" with locale "fr-FR" exists
+     When I add new country "test" with following properties:
+-      | name[en-US]                | testName        |
+-      | iso_code                   | TE              |
+-      | call_prefix                | 123             |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | 1 NL            |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | testName                                         |
++      | name[fr-FR]                | testNameFr                                       |
++      | iso_code                   | TE                                               |
++      | call_prefix                | 123                                              |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | 1 NL                                             |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     Then the country "test" should have the following properties:
+-      | localizedNames[en-US] | testName |
+-      | localizedNames[fr-FR] | testName |
+-      | isoCode               | TE       |
+-      | callPrefix            | 123      |
+-      | defaultCurrency       | 1        |
+-      | zone                  | 1        |
+-      | needZipCode           | true     |
+-      | zipCodeFormat         | 1 NL     |
+-      | enabled               | true     |
+-      | containsStates        | false    |
+-      | needIdNumber          | false    |
+-      | displayTaxLabel       | true     |
+-      | shopAssociation       | 1        |
++      | name[en-US]                | testName                                         |
++      | name[fr-FR]                | testNameFr                                       |
++      | iso_code                   | TE                                               |
++      | call_prefix                | 123                                              |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | 1 NL                                             |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+ 
+   Scenario: edit country
+     Given language "language1" with locale "en-US" exists
+     And language "language2" with locale "fr-FR" exists
+     When I edit country "test" with following properties:
+-      | name[en-US]                | editName1       |
+-      | name[fr-FR]                | editName2       |
+-      | iso_code                   | TA              |
+-      | call_prefix                | 1234            |
+-      | default_currency           | 2               |
+-      | zone                       | 2               |
+-      | need_zip_code              | false           |
+-      | zip_code_format            | 1 NLL           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | false           |
+-      | contains_states            | true            |
+-      | need_identification_number | true            |
+-      | display_tax_label          | false           |
+-      | shop_association           | 1               |
++      | name[en-US]                | editName                                                           |
++      | name[fr-FR]                | editNameFr                                                         |
++      | iso_code                   | TA                                                                 |
++      | call_prefix                | 1234                                                               |
++      | default_currency           | 2                                                                  |
++      | zone                       | 2                                                                  |
++      | need_zip_code              | false                                                              |
++      | zip_code_format            | 1 NLL                                                              |
++      | address_format             | firstname lastname\ncompany\naddress1\npostcode city\nCountry:name |
++      | is_enabled                 | false                                                              |
++      | contains_states            | true                                                               |
++      | need_identification_number | true                                                               |
++      | display_tax_label          | false                                                              |
++      | shop_association           | 1                                                                  |
+     Then the country "test" should have the following properties:
+-      | localizedNames[en-US] | editName1 |
+-      | localizedNames[fr-FR] | editName2 |
+-      | isoCode               | TA        |
+-      | callPrefix            | 1234      |
+-      | defaultCurrency       | 2         |
+-      | zone                  | 2         |
+-      | needZipCode           | false     |
+-      | zipCodeFormat         | 1 NLL     |
+-      | enabled               | false     |
+-      | containsStates        | true      |
+-      | needIdNumber          | true      |
+-      | displayTaxLabel       | false     |
+-      | shopAssociation       | 1         |
++      | name[en-US]                | editName                                                           |
++      | name[fr-FR]                | editNameFr                                                         |
++      | iso_code                   | TA                                                                 |
++      | call_prefix                | 1234                                                               |
++      | default_currency           | 2                                                                  |
++      | zone                       | 2                                                                  |
++      | need_zip_code              | false                                                              |
++      | zip_code_format            | 1 NLL                                                              |
++      | address_format             | firstname lastname\ncompany\naddress1\npostcode city\nCountry:name |
++      | is_enabled                 | false                                                              |
++      | contains_states            | true                                                               |
++      | need_identification_number | true                                                               |
++      | display_tax_label          | false                                                              |
++      | shop_association           | 1                                                                  |
++
++  Scenario: editing a country with an invalid address format is rejected
++    When I edit country "test" with following properties:
++      | address_format | only_garbage_here |
++    Then I should get an "InvalidAddressFormat" error
++
++  Scenario: editing a country with an address format missing a required field is rejected
++    When I edit country "test" with following properties:
++      | address_format | lastname\naddress1\ncity\nCountry:name |
++    Then I should get an "InvalidAddressFormat" error
+ 
+   Scenario: Delete country
+     When I delete country "test"
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature b/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature
+index aace01a0a4cd5..63dd807d661c6 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Country/toggle_country_status.feature
+@@ -9,19 +9,19 @@ Feature: Toggle country status
+   Scenario: Toggle one country status
+     Given language "language1" with locale "en-US" exists
+     When I add new country "toggle_country" with following properties:
+-      | name[en-US]                | Toggle Country  |
+-      | iso_code                   | QW              |
+-      | call_prefix                | 11              |
+-      | default_currency           | 1               |
+-      | zone                       | 1               |
+-      | need_zip_code              | true            |
+-      | zip_code_format            | NNNNN           |
+-      | address_format             | not implemented |
+-      | is_enabled                 | true            |
+-      | contains_states            | false           |
+-      | need_identification_number | false           |
+-      | display_tax_label          | true            |
+-      | shop_association           | 1               |
++      | name[en-US]                | Toggle Country                                   |
++      | iso_code                   | QW                                               |
++      | call_prefix                | 11                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     And I toggle country status "toggle_country"
+     Then country "toggle_country" should be disabled
+ 
+@@ -38,19 +38,19 @@ Feature: Toggle country status
+   Scenario: Toggle country status twice returns to original state
+     Given language "language1" with locale "en-US" exists
+     And I add new country "roundtrip_country" with following properties:
+-      | name[en-US]                | Roundtrip Country |
+-      | iso_code                   | QV                |
+-      | call_prefix                | 71                |
+-      | default_currency           | 1                 |
+-      | zone                       | 1                 |
+-      | need_zip_code              | true              |
+-      | zip_code_format            | NNNNN             |
+-      | address_format             | not implemented   |
+-      | is_enabled                 | true              |
+-      | contains_states            | false             |
+-      | need_identification_number | false             |
+-      | display_tax_label          | true              |
+-      | shop_association           | 1                 |
++      | name[en-US]                | Roundtrip Country                                |
++      | iso_code                   | QV                                               |
++      | call_prefix                | 71                                               |
++      | default_currency           | 1                                                |
++      | zone                       | 1                                                |
++      | need_zip_code              | true                                             |
++      | zip_code_format            | NNNNN                                            |
++      | address_format             | firstname lastname\naddress1\ncity\nCountry:name |
++      | is_enabled                 | true                                             |
++      | contains_states            | false                                            |
++      | need_identification_number | false                                            |
++      | display_tax_label          | true                                             |
++      | shop_association           | 1                                                |
+     When I toggle country status "roundtrip_country"
+     Then country "roundtrip_country" should be disabled
+     When I toggle country status "roundtrip_country"
+diff --git a/tests/Integration/PrestaShopBundle/Controller/Admin/Improve/International/CountryControllerTest.php b/tests/Integration/PrestaShopBundle/Controller/Admin/Improve/International/CountryControllerTest.php
+index 27a758b00a846..b4413c7d48989 100644
+--- a/tests/Integration/PrestaShopBundle/Controller/Admin/Improve/International/CountryControllerTest.php
++++ b/tests/Integration/PrestaShopBundle/Controller/Admin/Improve/International/CountryControllerTest.php
+@@ -8,9 +8,6 @@
+ 
+ namespace Tests\Integration\PrestaShopBundle\Controller\Admin\Improve\International;
+ 
+-use AddressFormat;
+-use Cache;
+-use Country;
+ use Symfony\Component\DomCrawler\Crawler;
+ use Tests\Integration\Core\Form\IdentifiableObject\Handler\FormHandlerChecker;
+ use Tests\Integration\PrestaShopBundle\Controller\FormGridControllerTestCase;
+@@ -35,15 +32,10 @@ public function testCreate(int $initialEntityCount): int
+     {
+         $this->client->disableReboot();
+ 
+-        // todo: uncomment and use it when address format PR is merged
+-        //        $addressFormat = 'firstname lastname
+-        //            company
+-        //            vat_number
+-        //            address1
+-        //            address2
+-        //            postcode city
+-        //            Country:name
+-        //            phone';
++        // Address format must contain every required field (firstname, lastname,
++        // address1, city, Country:name) — both the Symfony form constraint and the
++        // CQRS handler reject formats missing any of them.
++        $addressFormat = "firstname lastname\naddress1\ncity\nCountry:name";
+         $isoCode = 'AA';
+         $zipCodeFormat = '1NL';
+ 
+@@ -56,7 +48,7 @@ public function testCreate(int $initialEntityCount): int
+             'country[zone]' => 1,
+             'country[need_zip_code]' => '1',
+             'country[zip_code_format]' => $zipCodeFormat,
+-            'country[address_format]' => '', // todo: add when address format logic is added
++            'country[address_format]' => $addressFormat,
+             'country[is_enabled]' => 1,
+             'country[contains_states]' => 0,
+             'country[need_identification_number]' => 0,
+@@ -86,14 +78,9 @@ public function testEdit(int $countryId): int
+     {
+         $this->client->disableReboot();
+ 
+-        // this is the default format that is taken when opening country form, if you try to add spaces the test will fail.
+-        $addressFormat = 'firstname lastname
+-company
+-address1 address2
+-city, State:name postcode
+-Country:name
+-phone';
+-        // todo: change addressFormat and test if it was correctly changed when address format PR is merged. Now it only takes default value
++        // Use a different format than testCreate so the assertion proves the edit
++        // round-trips. All required fields are present.
++        $addressFormat = "firstname lastname\ncompany\naddress1\npostcode city\nCountry:name";
+         $isoCode = 'BB';
+         $zipCodeFormat = '2NL';
+ 
+@@ -106,7 +93,7 @@ public function testEdit(int $countryId): int
+             'country[zone]' => 1,
+             'country[need_zip_code]' => '1',
+             'country[zip_code_format]' => $zipCodeFormat,
+-            'country[address_format]' => '', // todo: add address format when logic is added
++            'country[address_format]' => $addressFormat,
+             'country[is_enabled]' => 1,
+             'country[contains_states]' => 0,
+             'country[need_identification_number]' => 0,
+@@ -114,11 +101,9 @@ public function testEdit(int $countryId): int
+         ];
+         $this->editEntityFromPage(['countryId' => $countryId], $formData);
+ 
+-        // todo: check this part with cache more deeply when address format logic is done.
+-        // need to clear cache because prestashop caches address format and without clear it sees the one before update
+-        //        Cache::clear();
+-
+-        // Then check that it was correctly updated
++        // Then check that it was correctly updated.
++        // Note: the AddressFormat::getFormatDB static cache is invalidated by the
++        // Add/Edit handlers via Cache::clean, so the read here returns the new value.
+         $this->assertFormValuesFromPage(
+             ['countryId' => $countryId],
+             $formData
+diff --git a/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatCheckerTest.php b/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatCheckerTest.php
+new file mode 100644
+index 0000000000000..320a6437f3b66
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatCheckerTest.php
+@@ -0,0 +1,151 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Country\AddressFormat;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatChecker;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatCheckerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProviderInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++/**
++ * Unit-tests the pure Core checker against an in-memory fields provider and a
++ * no-op translator — no PrestaShop bootstrap, no legacy ObjectModel reflection.
++ */
++class AddressFormatCheckerTest extends TestCase
++{
++    private AddressFormatCheckerInterface $checker;
++
++    protected function setUp(): void
++    {
++        $fieldsProvider = new class() implements AddressFormatFieldsProviderInterface {
++            public function getPickerClasses(): array
++            {
++                return ['Address', 'Country', 'State', 'Customer', 'Warehouse'];
++            }
++
++            public function getFieldsForClass(string $className): array
++            {
++                return [
++                    'Address' => ['firstname', 'lastname', 'company', 'address1', 'postcode', 'city', 'phone'],
++                    'Country' => ['name', 'iso_code'],
++                    'State' => ['name', 'iso_code'],
++                    'Customer' => ['firstname', 'lastname', 'email'],
++                    'Warehouse' => ['name', 'reference'],
++                ][$className] ?? [];
++            }
++
++            public function getRequiredFields(): array
++            {
++                return ['firstname', 'lastname', 'address1', 'city', 'Country:name'];
++            }
++        };
++
++        $translator = new class() implements TranslatorInterface {
++            public function trans(string $id, array $parameters = [], ?string $domain = null, ?string $locale = null): string
++            {
++                return strtr($id, $parameters);
++            }
++
++            public function getLocale(): string
++            {
++                return 'en';
++            }
++        };
++
++        $this->checker = new AddressFormatChecker($fieldsProvider, $translator);
++    }
++
++    public function testValidFormatReturnsNoErrors(): void
++    {
++        $format = "firstname lastname\naddress1\npostcode city\nCountry:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertSame([], $errors, 'A format containing all required fields should validate.');
++    }
++
++    public function testFormatWithBareTokensIsValid(): void
++    {
++        $format = "firstname lastname\naddress1\ncity\nCountry:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertSame([], $errors);
++    }
++
++    public function testMissingRequiredFieldProducesError(): void
++    {
++        // Drops `firstname` — required and bare → resolves to Address:firstname.
++        $format = "lastname\naddress1\ncity\nCountry:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++        $this->assertStringContainsString('firstname', $errors[0]);
++    }
++
++    public function testCustomerPrefixedTokenDoesNotSatisfyBareRequired(): void
++    {
++        // Customer:firstname is a different token from bare `firstname` (=Address:firstname).
++        // The required entry `firstname` should remain unsatisfied.
++        $format = "Customer:firstname lastname\naddress1\ncity\nCountry:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testDuplicateTokenProducesError(): void
++    {
++        $format = "firstname firstname\nlastname\naddress1\ncity\nCountry:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testUnknownBareFieldProducesError(): void
++    {
++        $format = "firstname lastname\naddress1\ncity\nCountry:name\ntotally_not_a_field";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testForbiddenClassProducesError(): void
++    {
++        // Manufacturer is not in the picker objects whitelist.
++        $format = "firstname lastname\naddress1\ncity\nCountry:name\nManufacturer:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testUnknownPrefixedFieldProducesError(): void
++    {
++        // Country exists in the picker but `siret` does not belong to it.
++        $format = "firstname lastname\naddress1\ncity\nCountry:siret";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testEmptyFormatReturnsErrors(): void
++    {
++        // No tokens at all → every required field is missing.
++        $errors = $this->checker->validate('');
++
++        $this->assertNotEmpty($errors);
++    }
++
++    public function testMalformedPrefixedTokenProducesError(): void
++    {
++        // Empty class or empty field on either side of the colon.
++        $format = "firstname lastname\naddress1\ncity\nCountry:name\n:name";
++        $errors = $this->checker->validate($format);
++
++        $this->assertNotEmpty($errors);
++    }
++}
+diff --git a/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderTest.php b/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderTest.php
+new file mode 100644
+index 0000000000000..e0b6cbbd53ed7
+--- /dev/null
++++ b/tests/Unit/Core/Domain/Country/AddressFormat/AddressFormatFieldsProviderTest.php
+@@ -0,0 +1,113 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Domain\Country\AddressFormat;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\Address\Query\GetRequiredFieldsForAddress;
++use PrestaShop\PrestaShop\Core\Domain\Country\AddressFormat\AddressFormatFieldsProvider;
++use RuntimeException;
++
++class AddressFormatFieldsProviderTest extends TestCase
++{
++    public function testGetPickerClassesReturnsExpectedOrderedList(): void
++    {
++        $provider = new AddressFormatFieldsProvider($this->fakeQueryBus([]));
++
++        $this->assertSame(
++            ['Address', 'Country', 'State', 'Customer', 'Warehouse'],
++            $provider->getPickerClasses()
++        );
++    }
++
++    public function testGetFieldsForKnownClassReturnsHardcodedList(): void
++    {
++        $provider = new AddressFormatFieldsProvider($this->fakeQueryBus([]));
++
++        $this->assertSame(
++            ['firstname', 'lastname', 'company', 'vat_number', 'address1', 'address2', 'postcode', 'city', 'other', 'phone', 'phone_mobile', 'dni'],
++            $provider->getFieldsForClass('Address')
++        );
++        $this->assertSame(['name', 'iso_code'], $provider->getFieldsForClass('Country'));
++        $this->assertSame(['name', 'iso_code'], $provider->getFieldsForClass('State'));
++        $this->assertSame(
++            ['firstname', 'lastname', 'company', 'vat_number', 'email', 'birthday', 'website', 'siret'],
++            $provider->getFieldsForClass('Customer')
++        );
++        $this->assertSame(
++            ['name', 'reference', 'management_type'],
++            $provider->getFieldsForClass('Warehouse')
++        );
++    }
++
++    public function testGetFieldsForUnknownClassReturnsEmptyList(): void
++    {
++        $provider = new AddressFormatFieldsProvider($this->fakeQueryBus([]));
++
++        $this->assertSame([], $provider->getFieldsForClass('Manufacturer'));
++        $this->assertSame([], $provider->getFieldsForClass('Supplier'));
++        $this->assertSame([], $provider->getFieldsForClass('NotAThing'));
++    }
++
++    public function testGetRequiredFieldsMergesStaticDefaultsWithDbManagedList(): void
++    {
++        $provider = new AddressFormatFieldsProvider(
++            $this->fakeQueryBus(['phone_mobile', 'company'])
++        );
++
++        $this->assertSame(
++            ['firstname', 'lastname', 'address1', 'city', 'Country:name', 'phone_mobile', 'company'],
++            $provider->getRequiredFields()
++        );
++    }
++
++    public function testGetRequiredFieldsDeduplicatesOverlappingEntries(): void
++    {
++        // Merchant flagged `firstname` (which is already in the static defaults) as
++        // required in BO > Customers > Addresses — must appear exactly once.
++        $provider = new AddressFormatFieldsProvider(
++            $this->fakeQueryBus(['firstname', 'phone_mobile'])
++        );
++
++        $this->assertSame(
++            ['firstname', 'lastname', 'address1', 'city', 'Country:name', 'phone_mobile'],
++            $provider->getRequiredFields()
++        );
++    }
++
++    public function testGetRequiredFieldsWithEmptyDbListReturnsOnlyStaticDefaults(): void
++    {
++        $provider = new AddressFormatFieldsProvider($this->fakeQueryBus([]));
++
++        $this->assertSame(
++            ['firstname', 'lastname', 'address1', 'city', 'Country:name'],
++            $provider->getRequiredFields()
++        );
++    }
++
++    /**
++     * @param list<string> $dbManagedFields
++     */
++    private function fakeQueryBus(array $dbManagedFields): CommandBusInterface
++    {
++        return new class($dbManagedFields) implements CommandBusInterface {
++            public function __construct(private readonly array $dbManagedFields)
++            {
++            }
++
++            public function handle($command): mixed
++            {
++                if ($command instanceof GetRequiredFieldsForAddress) {
++                    return $this->dbManagedFields;
++                }
++                throw new RuntimeException('Unexpected query: ' . get_class($command));
++            }
++        };
++    }
++}

@@ -1,0 +1,436 @@
+diff --git a/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php b/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php
+index 29a4f47892eba..489540699e3ee 100644
+--- a/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php
++++ b/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php
+@@ -46,10 +46,10 @@ public function validate(mixed $value, Constraint $constraint)
+ 
+         $manufacturer = $value['manufacturer'] ?? null;
+         $category = $value['category'] ?? null;
++        $supplier = $value['supplier'] ?? null;
+ 
+-        if (empty($manufacturer) && empty($category)) {
++        if (empty($manufacturer) && empty($category) && empty($supplier)) {
+             $this->context->buildViolation($this->translator->trans('At least one product segment must be selected.', [], 'Admin.Notifications.Error'))
+-                ->atPath('manufacturer')
+                 ->addViolation();
+         }
+     }
+diff --git a/src/Core/Domain/Discount/ProductRuleType.php b/src/Core/Domain/Discount/ProductRuleType.php
+index 79982e3c6d894..55e9dad9ab664 100644
+--- a/src/Core/Domain/Discount/ProductRuleType.php
++++ b/src/Core/Domain/Discount/ProductRuleType.php
+@@ -35,4 +35,5 @@ enum ProductRuleType: string
+     case PRODUCTS = 'products';
+     case COMBINATIONS = 'combinations';
+     case MANUFACTURERS = 'manufacturers';
++    case SUPPLIERS = 'suppliers';
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 5acf0d9ab61f5..f49f05bbe76e5 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -208,6 +208,7 @@ private function updateDiscountConditions(int $discountId, array $data): void
+             } elseif ($data['conditions']['cart_conditions']['children_selector'] === CartConditionsType::PRODUCT_SEGMENT) {
+                 $manufacturer = $data['conditions']['cart_conditions']['product_segment']['manufacturer'] ?? [];
+                 $category = $data['conditions']['cart_conditions']['product_segment']['category'] ?? '';
++                $supplier = $data['conditions']['cart_conditions']['product_segment']['supplier'] ?? [];
+                 $productRuleGroups = [];
+                 if (!empty($manufacturer)) {
+                     $productRuleGroups[] = new ProductRuleGroup(
+@@ -225,6 +226,14 @@ private function updateDiscountConditions(int $discountId, array $data): void
+                         ]
+                     );
+                 }
++                if (!empty($supplier)) {
++                    $productRuleGroups[] = new ProductRuleGroup(
++                        $data['conditions']['cart_conditions']['product_segment']['quantity'],
++                        [
++                            new ProductRule(ProductRuleType::SUPPLIERS, [(int) $supplier]),
++                        ]
++                    );
++                }
+ 
+                 if (!empty($productRuleGroups)) {
+                     $conditionsCommand->setProductConditions($productRuleGroups);
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index fa52215a8759b..90ea992361d7a 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -108,7 +108,7 @@ public function getData($id)
+         } elseif (!empty($specificProducts)) {
+             $selectedCondition = DiscountConditionsType::CART_CONDITIONS;
+             $selectedCartCondition = 'specific_products';
+-        } elseif (!empty($productSegment['manufacturer']) || !empty($productSegment['category'])) {
++        } elseif (!empty($productSegment['manufacturer']) || !(empty($productSegment['supplier']) || !empty($productSegment['category']))) {
+             $selectedCondition = DiscountConditionsType::CART_CONDITIONS;
+             $selectedCartCondition = 'product_segment';
+         } elseif (!empty($discountForEditing->getCarrierIds())) {
+@@ -279,8 +279,9 @@ private function getProductSegmentDetails(DiscountForEditing $discountForEditing
+     {
+         $productSegment = [
+             'manufacturer' => 0,
+-            'quantity' => 0,
+             'category' => '',
++            'supplier' => 0,
++            'quantity' => 0,
+         ];
+ 
+         foreach ($discountForEditing->getProductConditions() as $condition) {
+@@ -293,6 +294,11 @@ private function getProductSegmentDetails(DiscountForEditing $discountForEditing
+                 if ($rule->getType() === ProductRuleType::CATEGORIES) {
+                     $productSegment['category'] = $rule->getItemIds()[0];
+                 }
++                if ($rule->getType() === ProductRuleType::SUPPLIERS) {
++                    foreach ($rule->getItemIds() as $supplierId) {
++                        $productSegment['supplier'] = $supplierId;
++                    }
++                }
+             }
+ 
+             $productSegment['quantity'] = $condition->getQuantity();
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+index 8f96a414681bd..cebdcd527ad61 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+@@ -31,6 +31,7 @@
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
+ use Symfony\Component\Validator\Constraints\GreaterThanOrEqual;
+ use Symfony\Component\Validator\Constraints\NotBlank;
+ use Symfony\Component\Validator\Constraints\Type;
+@@ -41,6 +42,8 @@ class DiscountProductSegmentType extends TranslatorAwareType
+     public const CATEGORY = 'category';
+     public const MANUFACTURER = 'manufacturer';
+ 
++    public const SUPPLIER = 'supplier';
++
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         $builder
+@@ -52,6 +55,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Category', 'Admin.Catalog.Feature'),
+                 'required' => false,
+             ])
++            ->add(self::SUPPLIER, DiscountSupplierType::class, [
++                'label' => $this->trans('Supplier', 'Admin.Catalog.Feature'),
++                'required' => false,
++            ])
+             ->add('quantity', IntegerType::class, [
+                 'label' => $this->trans('Minimum product quantity', 'Admin.Catalog.Feature'),
+                 'attr' => [
+@@ -77,4 +84,13 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+         ;
+     }
++
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        parent::configureOptions($resolver);
++
++        $resolver->setDefaults([
++            'error_bubbling' => false,
++        ]);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountSupplierType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountSupplierType.php
+new file mode 100644
+index 0000000000000..4a177749426b4
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountSupplierType.php
+@@ -0,0 +1,85 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Form\Admin\Sell\Discount;
++
++use PrestaShop\PrestaShop\Core\Domain\Supplier\ValueObject\NoSupplierId;
++use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
++use Symfony\Component\Form\AbstractType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class DiscountSupplierType extends AbstractType
++{
++    /**
++     * @param TranslatorInterface $translator
++     * @param FormChoiceProviderInterface $supplierNameByIdChoiceProvider
++     */
++    public function __construct(
++        private readonly TranslatorInterface $translator,
++        private readonly FormChoiceProviderInterface $supplierNameByIdChoiceProvider
++    ) {
++    }
++
++    public function getParent(): string
++    {
++        return ChoiceType::class;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $supplier = $this->supplierNameByIdChoiceProvider->getChoices();
++        $choices = array_merge([
++            $this->trans('No Supplier', 'Admin.Catalog.Feature') => NoSupplierId::NO_SUPPLIER_ID,
++        ], $supplier);
++
++        $resolver->setDefaults([
++            'label' => $this->trans('Supplier', 'Admin.Catalog.Feature'),
++            'label_tag_name' => 'h3',
++            'required' => false,
++            // placeholder false is important to avoid empty option in select input despite required being false
++            'placeholder' => false,
++            'choices' => $choices,
++            'autocomplete' => true,
++        ]);
++    }
++
++    /**
++     * @param string $key
++     * @param string $domain
++     * @param array $parameters
++     *
++     * @return string
++     */
++    protected function trans(string $key, string $domain, array $parameters = []): string
++    {
++        return $this->translator->trans($key, $parameters, $domain);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index a27cccc46aa5e..9812f47477919 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -430,6 +430,10 @@ services:
+     arguments:
+       $manufacturerChoiceProvider: '@prestashop.adapter.form.choice_provider.manufacturer_name_by_id'
+ 
++  PrestaShopBundle\Form\Admin\Sell\Discount\DiscountSupplierType:
++    arguments:
++      $supplierNameByIdChoiceProvider: '@prestashop.adapter.form.choice_provider.supplier_name_by_id_choice_provider'
++
+   PrestaShopBundle\Form\Admin\Sell\Product\Category\CategoriesType:
+     arguments:
+       $defaultCategoryChoiceProvider: '@prestashop.adapter.form.choice_provider.product_default_category_choice_provider'
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_supplier_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_supplier_trigger.feature
+new file mode 100644
+index 0000000000000..618522d0108b9
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_supplier_trigger.feature
+@@ -0,0 +1,50 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount-with-supplier-trigger
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-discount-with-supplier-trigger
++Feature: Add discount with supplier trigger
++  PrestaShop allows BO users to update discounts conditions
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given language with iso code "en" is the default one
++
++  Scenario: Create discount with supplier trigger
++    When I add new supplier supplier1 with the following properties:
++      | name                    | my supplier 1      |
++      | address                 | Donelaicio st. 1   |
++      | city                    | Kaunas             |
++      | country                 | Lithuania          |
++      | enabled                 | true               |
++      | description[en-US]      | just a supplier    |
++      | meta title[en-US]       | my supplier nr one |
++      | meta description[en-US] |                    |
++      | shops                   | [shop1]            |
++    Then supplier supplier1 should have following properties:
++      | name                    | my supplier 1      |
++      | address                 | Donelaicio st. 1   |
++      | city                    | Kaunas             |
++      | country                 | Lithuania          |
++      | enabled                 | true               |
++      | description[en-US]      | just a supplier    |
++      | meta title[en-US]       | my supplier nr one |
++      | meta description[en-US] |                    |
++      | shops                   | [shop1]            |
++    When I create a "free_shipping" discount "discount_with_supplier_trigger" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_supplier_trigger" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_supplier_trigger" with following conditions matching at least 42 products:
++      | condition_type | items     |
++      | suppliers      | supplier1 |
++    Then discount "discount_with_supplier_trigger" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_supplier_trigger" should have the following product conditions matching at least 42 products:
++      | condition_type | items     |
++      | suppliers      | supplier1 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_supplier_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_supplier_trigger.feature
+new file mode 100644
+index 0000000000000..741f657fcfaec
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_supplier_trigger.feature
+@@ -0,0 +1,110 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-with-supplier-trigger
++@restore-all-tables-before-feature
++@discount-with-supplier-trigger
++Feature: Add discount with supplier trigger on FO
++  PrestaShop allows discounts with supplier trigger as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  Scenario: First create products and the discount that will be used in following scenarios
++    When I add new supplier supplier1 with the following properties:
++      | name                    | my supplier 1      |
++      | address                 | Donelaicio st. 1   |
++      | city                    | Kaunas             |
++      | country                 | Lithuania          |
++      | enabled                 | true               |
++      | description[en-US]      | just a supplier    |
++      | meta title[en-US]       | my supplier nr one |
++      | meta description[en-US] |                    |
++      | shops                   | [shop1]            |
++    And I add new supplier supplier2 with the following properties:
++      | name                    | my supplier 2      |
++      | address                 | Donelaicio st. 2   |
++      | city                    | Kaunas             |
++      | country                 | Lithuania          |
++      | enabled                 | true               |
++      | description[en-US]      | just a supplier    |
++      | meta title[en-US]       | my supplier nr two |
++      | meta description[en-US] |                    |
++      | shops                   | [shop1]            |
++    Given I add product "product1" with following information:
++      | name[en-US] | eastern european tracksuit |
++      | type        | standard                   |
++    When I associate suppliers to product "product1"
++      | supplier  | product_supplier  |
++      | supplier1 | product1supplier1 |
++    Then product product1 should have the following suppliers assigned:
++      | supplier1 |
++    And I update product "product1" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "product1"
++    And I update product "product1" with following values:
++      | price | 5.00 |
++    Given I add product "product2" with following information:
++      | name[en-US] | shoes    |
++      | type        | standard |
++    When I associate suppliers to product "product2"
++      | supplier  | product_supplier  |
++      | supplier2 | product2supplier2 |
++    And I update product "product2" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "product2"
++    And I update product "product2" with following values:
++      | price | 10.00 |
++    When I create a "cart_level" discount "discount_with_supplier_trigger" with following properties:
++      | name[en-US]        | Promotion                   |
++      | name[fr-FR]        | Promotion                   |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER |
++      | active             | true                        |
++      | reduction_amount   | 3.0                         |
++      | reduction_currency | usd                         |
++      | taxIncluded        | true                        |
++    Then discount "discount_with_supplier_trigger" should have the following properties:
++      | name[en-US]        | Promotion                   |
++      | name[fr-FR]        | Promotion                   |
++      | type               | cart_level                  |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER |
++      | active             | true                        |
++      | reduction_amount   | 3.0                         |
++      | reduction_currency | usd                         |
++      | taxIncluded        | true                        |
++    When I update discount "discount_with_supplier_trigger" with following conditions matching at least 1 products:
++      | condition_type | items     |
++      | suppliers      | supplier1 |
++    Then discount "discount_with_supplier_trigger" should have the following properties:
++      | minimum_product_quantity | 0 |
++    And discount "discount_with_supplier_trigger" should have the following product conditions matching at least 1 products:
++      | condition_type | items     |
++      | suppliers      | supplier1 |
++
++  Scenario: Reduction with supplier trigger on FO
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 product "shoes" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$17.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $17.00 |
++    When I use a voucher "discount_with_supplier_trigger" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$17.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $17.00 |
++    When I add 1 product "eastern european tracksuit" to the cart "dummy_cart"
++    When I use a voucher "discount_with_supplier_trigger" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$19.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $15.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$3.00 |
++      | total          | $19.00 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 6f0ee387b1948..46506adc9fad4 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -310,7 +310,6 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountConditionsFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountFeatureContext
+-        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
+@@ -331,6 +330,9 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
+ 
+     catalog_price_rule:
+       paths:

@@ -1,0 +1,134 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 458cd9587d7ab..56c331ff39a28 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -5312,4 +5312,27 @@ private function alterSummaryForDisplay(array $summary, bool $refresh = false):
+ 
+         return $summary;
+     }
++
++    /**
++     * @param Cart $cart
++     *
++     * @return float
++     */
++    public function getCartTotalPrice()
++    {
++        $summary = $this->getSummaryDetails();
++
++        $id_order = (int) Order::getIdByCartId($this->id);
++        $order = new Order($id_order);
++
++        if (Validate::isLoadedObject($order)) {
++            $taxCalculationMethod = $order->getTaxCalculationMethod();
++        } else {
++            $taxCalculationMethod = Group::getPriceDisplayMethod(Group::getCurrent()->id);
++        }
++
++        return $taxCalculationMethod == PS_TAX_EXC ?
++            $summary['total_price_without_tax'] :
++            $summary['total_price'];
++    }
+ }
+diff --git a/controllers/admin/AdminStatsController.php b/controllers/admin/AdminStatsController.php
+index b2632fe4253bb..12a42869f4b00 100644
+--- a/controllers/admin/AdminStatsController.php
++++ b/controllers/admin/AdminStatsController.php
+@@ -1025,6 +1025,17 @@ public function displayAjaxGetKpi()
+ 
+                 break;
+ 
++            case 'shopping_cart_total':
++                $cartId = Tools::getValue('cartId');
++                $cart = new Cart((int) $cartId);
++                if (Validate::isLoadedObject($cart)) {
++                    $value = $this->context->getCurrentLocale()->formatPrice(
++                        $cart->getCartTotalPrice(),
++                        Currency::getIsoCodeById((int) $cart->id_currency)
++                    );
++                }
++                break;
++
+             default:
+                 $value = false;
+         }
+diff --git a/src/Adapter/Kpi/ShoppingCartTotalKpi.php b/src/Adapter/Kpi/ShoppingCartTotalKpi.php
+index 82ca1d60780b7..b75818350913b 100644
+--- a/src/Adapter/Kpi/ShoppingCartTotalKpi.php
++++ b/src/Adapter/Kpi/ShoppingCartTotalKpi.php
+@@ -29,12 +29,9 @@
+ use Cart;
+ use Context;
+ use Currency;
+-use Group;
+ use HelperKpi;
+-use Order;
+ use PrestaShop\PrestaShop\Core\Kpi\KpiInterface;
+ use PrestaShop\PrestaShop\Core\Localization\Locale;
+-use Validate;
+ 
+ /**
+  * {@inheritdoc}
+@@ -74,9 +71,10 @@ public function render()
+         $helper->title = $translator->trans('Total Cart', [], 'Admin.Orderscustomers.Feature');
+         $helper->subtitle = $translator->trans('Cart #%ID%', ['%ID%' => $cart->id], 'Admin.Orderscustomers.Feature');
+         $helper->value = $this->locale->formatPrice(
+-            $this->getCartTotalPrice($cart),
++            $cart->getCartTotalPrice(),
+             Currency::getIsoCodeById((int) $cart->id_currency)
+         );
++        $helper->source = Context::getContext()->link->getAdminLink('AdminStats') . '&ajax=1&action=getKpi&kpi=shopping_cart_total&cartId=' . $cart->id;
+ 
+         return $helper->generate();
+     }
+@@ -90,29 +88,4 @@ public function setOptions(array $options)
+     {
+         $this->options = $options;
+     }
+-
+-    /**
+-     * @param Cart $cart
+-     *
+-     * @return float
+-     */
+-    private function getCartTotalPrice(Cart $cart)
+-    {
+-        $summary = $cart->getSummaryDetails();
+-
+-        $id_order = (int) Order::getIdByCartId($cart->id);
+-        $order = new Order($id_order);
+-
+-        if (Validate::isLoadedObject($order)) {
+-            $taxCalculationMethod = $order->getTaxCalculationMethod();
+-        } else {
+-            $taxCalculationMethod = Group::getPriceDisplayMethod(Group::getCurrent()->id);
+-        }
+-
+-        $totalPrice = $taxCalculationMethod == PS_TAX_EXC ?
+-            $summary['total_price_without_tax'] :
+-            $summary['total_price'];
+-
+-        return $totalPrice;
+-    }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
+index 85f3f1cf016b7..0c17d0664571f 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/CartController.php
+@@ -86,13 +86,15 @@ public function viewAction(Request $request, $cartId)
+         $kpiRowFactory->setOptions([
+             'cart_id' => $cartId,
+         ]);
++        $kpiRow = $kpiRowFactory->build();
++        $kpiRow->setAllowRefresh(false);
+ 
+         return $this->render('@PrestaShop/Admin/Sell/Order/Cart/view.html.twig', [
+             'cartView' => $cartView,
+             'layoutTitle' => $this->trans('View', 'Admin.Actions'),
+             'enableSidebar' => true,
+             'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+-            'cartKpi' => $kpiRowFactory->build(),
++            'cartKpi' => $kpiRow,
+             'createOrderFromCartLink' => $this->generateUrl('admin_orders_create', [
+                 'cartId' => $cartId,
+             ]),

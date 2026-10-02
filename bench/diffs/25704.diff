@@ -1,0 +1,186 @@
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php b/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
+index 6abbd18c1a633..6c7caf0765edf 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderProductsForViewingHandler.php
+@@ -111,11 +111,15 @@ public function handle(GetOrderProductsForViewing $query): OrderProductsForViewi
+             $customizations = [];
+             if (is_array($product['customizedDatas'])) {
+                 foreach ($product['customizedDatas'] as $customizationPerAddress) {
+-                    foreach ($customizationPerAddress as $customizationId => $customization) {
++                    foreach ($customizationPerAddress as $customization) {
+                         $customized_product_quantity += (int) $customization['quantity'];
+                         foreach ($customization['datas'] as $datas) {
+                             foreach ($datas as $data) {
+-                                $customizations[] = new OrderProductCustomizationForViewing((int) $data['type'], $data['name'], $data['value']);
++                                $customizations[] = new OrderProductCustomizationForViewing(
++                                    (int) $data['type'],
++                                    (string) $data['name'],
++                                    $data['value']
++                                );
+                             }
+                         }
+                     }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index cf617cb16cf03..d0d0408b3f9c3 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -2087,4 +2087,77 @@ public function orderHasFollowingDocuments(string $orderReference, TableNode $ta
+             );
+         }
+     }
++
++    /**
++     * @Then /^the order "(.+)" should have following customizations:$/
++     *
++     * @param string $orderReference
++     * @param TableNode $table
++     */
++    public function orderHasFollowingCustomizations(string $orderReference, TableNode $table): void
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        /** @var OrderForViewing $orderForViewing */
++        $orderForViewing = $this->getQueryBus()->handle(new GetOrderForViewing($orderId));
++
++        $expectedDetails = $table->getHash();
++        foreach ($expectedDetails as $expectedDetail) {
++            $hasProduct = $product = false;
++            foreach ($orderForViewing->getProducts()->getProducts() as $product) {
++                if ($expectedDetail['productReference'] === $product->getReference()) {
++                    $hasProduct = true;
++                    break;
++                }
++            }
++            if (!$hasProduct) {
++                throw new RuntimeException(sprintf(
++                    'Product not found : %s',
++                    $expectedDetail['productReference']
++                ));
++            }
++
++            if ($product->getCustomizations() === null) {
++                throw new RuntimeException(sprintf(
++                    'No customizations found for Product %s',
++                    $expectedDetail['productReference']
++                ));
++            }
++
++            $customizations = [];
++            if ($expectedDetail['type'] === 'text') {
++                $customizations = $product->getCustomizations()->getTextCustomizations();
++            }
++            if ($expectedDetail['type'] === 'file') {
++                $customizations = $product->getCustomizations()->getFileCustomizations();
++            }
++
++            $hasCustomization = $customization = false;
++            foreach ($customizations as $customization) {
++                if ($expectedDetail['name'] === $customization->getName()) {
++                    $hasCustomization = true;
++                    break;
++                }
++            }
++            if (!$hasCustomization) {
++                throw new RuntimeException(sprintf(
++                    'Customization not found : %s (for Product %s)',
++                    $expectedDetail['name'],
++                    $expectedDetail['productReference']
++                ));
++            }
++
++            Assert::assertEquals(
++                $expectedDetail['value'],
++                $customization->getValue(),
++                sprintf(
++                    'Invalid value for the customization %s in product %s for order %s, expected %s instead of %s',
++                    $expectedDetail['name'],
++                    $expectedDetail['productReference'],
++                    $orderReference,
++                    $expectedDetail['value'],
++                    $customization->getValue()
++                )
++            );
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_product.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_product.feature
+new file mode 100644
+index 0000000000000..54af0785262fb
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_product.feature
+@@ -0,0 +1,59 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s order --tags order-product
++@reset-database-before-feature
++@reset-product-price-cache
++@order-product
++Feature: Order from Back Office (BO)
++  In order to manage orders for FO customers
++  As a BO user
++  I need to be able to customize orders from the BO
++
++  Background:
++    Given email sending is disabled
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++
++  Scenario: Get informations about a customized deleted product
++    ## Add a new product
++    When I add product "product12345" with following information:
++      | name[en-US] | Customizable Postcard |
++      | type        | standard              |
++    And I update product product12345 with following customization fields:
++      | reference   | type | name[en-US] | is required |
++      | customField | text | back image  | false       |
++    And I update product "product12345" stock with following information:
++      | out_of_stock_type             | available |
++    And I update product "product12345" details with following values:
++      | reference | product12345      |
++    Then product "product12345" should allow customization
++    And product product12345 should have 1 customizable text field
++    And product "product12345" should have following stock information:
++      | out_of_stock_type             | available |
++    ## Add product to cart
++    When I add 2 customized products with reference "product12345" with all its customizations to the cart "dummy_cart"
++    ## Select address
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    ## Place order
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    ## Check order
++    Then order "bo_order1" should contain 2 products "Customizable Postcard"
++    ## Check customization
++    Then the order "bo_order1" should have following customizations:
++      | productReference | type | name       | value |
++      | product12345     | text | back image | Toto  |
++
++    ## Remove product
++    When I delete product product12345
++    Then product product12345 should not exist anymore
++    ## Check customization
++    Then the order "bo_order1" should have following customizations:
++      | productReference | type | name       | value |
++      | product12345     | text |            | Toto  |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 9b0ad71e56b33..0f14ab01c8be8 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -107,6 +107,12 @@ default:
+                 - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
+                 - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\CommonDomainFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateDetailsFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
+         currency:
+             paths:
+                 - %paths.base%/Features/Scenario/Currency

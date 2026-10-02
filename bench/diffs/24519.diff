@@ -1,0 +1,2089 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.js b/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.js
+index b04add2b1e5ea..e63c944921798 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.js
++++ b/admin-dev/themes/new-theme/js/pages/order/order-shipping-manager.js
+@@ -32,7 +32,7 @@ export default class OrderShippingManager {
+   }
+ 
+   initOrderShippingUpdateEventHandler() {
+-    $(OrderViewPageMap.showOrderShippingUpdateModalBtn).on('click', (event) => {
++    $(OrderViewPageMap.mainDiv).on('click', OrderViewPageMap.showOrderShippingUpdateModalBtn, (event) => {
+       const $btn = $(event.currentTarget);
+ 
+       $(OrderViewPageMap.updateOrderShippingTrackingNumberInput).val($btn.data('order-tracking-number'));
+diff --git a/admin-dev/themes/new-theme/js/pages/order/view/order-discounts-refresher.js b/admin-dev/themes/new-theme/js/pages/order/view/order-discounts-refresher.js
+index fc7b3f411b579..3aee3f5a763cd 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/view/order-discounts-refresher.js
++++ b/admin-dev/themes/new-theme/js/pages/order/view/order-discounts-refresher.js
+@@ -34,7 +34,7 @@ export default class OrderDiscountsRefresher {
+   }
+ 
+   refresh(orderId) {
+-    $.getJSON(this.router.generate('admin_orders_get_discounts', {orderId}))
++    $.ajax(this.router.generate('admin_orders_get_discounts', {orderId}))
+       .then((response) => {
+         $(OrderViewPageMap.productDiscountList.list).replaceWith(response);
+       });
+diff --git a/admin-dev/themes/new-theme/js/pages/order/view/order-product-edit.js b/admin-dev/themes/new-theme/js/pages/order/view/order-product-edit.js
+index 96672b96fe3bd..3ffe3a629012c 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/view/order-product-edit.js
++++ b/admin-dev/themes/new-theme/js/pages/order/view/order-product-edit.js
+@@ -230,11 +230,10 @@ export default class OrderProductEdit {
+       method: 'POST',
+       data: params,
+     }).then(
+-      (response) => {
++      () => {
+         EventEmitter.emit(OrderViewEventMap.productUpdated, {
+           orderId,
+           orderDetailId,
+-          newRow: response,
+         });
+       },
+       (response) => {
+diff --git a/admin-dev/themes/new-theme/js/pages/order/view/order-view-page.js b/admin-dev/themes/new-theme/js/pages/order/view/order-view-page.js
+index 19c6d672dcd62..ea90816e1790d 100644
+--- a/admin-dev/themes/new-theme/js/pages/order/view/order-view-page.js
++++ b/admin-dev/themes/new-theme/js/pages/order/view/order-view-page.js
+@@ -86,19 +86,10 @@ export default class OrderViewPage {
+     });
+ 
+     EventEmitter.on(OrderViewEventMap.productUpdated, (event) => {
+-      const $productRow = $(OrderViewPageMap.productsTableRow(event.orderDetailId));
+-
+-      if (event.newRow === '') {
+-        $productRow.remove();
+-      } else {
+-        this.orderProductRenderer.addOrUpdateProductToList(
+-          $productRow,
+-          event.newRow,
+-        );
+-      }
+       this.orderProductRenderer.resetEditRow(event.orderDetailId);
+       this.orderPricesRefresher.refresh(event.orderId);
+       this.orderPricesRefresher.refreshProductPrices(event.orderId);
++      this.refreshProductsList(event.orderId);
+       this.orderPaymentsRefresher.refresh(event.orderId);
+       this.orderDiscountsRefresher.refresh(event.orderId);
+       this.orderInvoicesRefresher.refresh(event.orderId);
+diff --git a/classes/Cart.php b/classes/Cart.php
+index d1e37160c3cbe..088b05da35176 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -472,10 +472,11 @@ public function getAverageProductsTaxRate(&$cartAmountTaxExcluded = null, &$cart
+      *                    - FILTER_ACTION_GIFT
+      *                    - FILTER_ACTION_ALL_NOCAP
+      * @param bool $autoAdd automaticaly adds cart ruls without code to cart
++     * @param bool $useOrderPrices
+      *
+      * @return array|false|mysqli_result|PDOStatement|resource|null Database result
+      */
+-    public function getCartRules($filter = CartRule::FILTER_ACTION_ALL, $autoAdd = true)
++    public function getCartRules($filter = CartRule::FILTER_ACTION_ALL, $autoAdd = true, $useOrderPrices = false)
+     {
+         // Define virtual context to prevent case where the cart is not the in the global context
+         $virtual_context = Context::getContext()->cloneContext();
+@@ -486,7 +487,7 @@ public function getCartRules($filter = CartRule::FILTER_ACTION_ALL, $autoAdd = t
+             return [];
+         }
+         if ($autoAdd) {
+-            CartRule::autoAddToCart($virtual_context);
++            CartRule::autoAddToCart($virtual_context, $useOrderPrices);
+         }
+ 
+         $cache_key = 'Cart::getCartRules_' . $this->id . '-' . $filter;
+@@ -1307,10 +1308,11 @@ public static function getNbProducts($id)
+      * Add a CartRule to the Cart.
+      *
+      * @param int $id_cart_rule CartRule ID
++     * @param bool $useOrderPrices
+      *
+      * @return bool Whether the CartRule has been successfully added
+      */
+-    public function addCartRule($id_cart_rule)
++    public function addCartRule($id_cart_rule, bool $useOrderPrices = false)
+     {
+         // You can't add a cart rule that does not exist
+         $cartRule = new CartRule($id_cart_rule, Context::getContext()->language->id);
+@@ -1342,7 +1344,19 @@ public function addCartRule($id_cart_rule)
+         Cache::clean('Cart::getOrderedCartRulesIds_' . $this->id . '-' . CartRule::FILTER_ACTION_GIFT . '-ids');
+ 
+         if ((int) $cartRule->gift_product) {
+-            $this->updateQty(1, $cartRule->gift_product, $cartRule->gift_product_attribute, false, 'up', 0, null, false);
++            $this->updateQty(
++                1,
++                $cartRule->gift_product,
++                $cartRule->gift_product_attribute,
++                false,
++                'up',
++                0,
++                null,
++                false,
++                false,
++                true,
++                $useOrderPrices
++            );
+         }
+ 
+         return true;
+@@ -1455,6 +1469,7 @@ public function containsProduct($id_product, $id_product_attribute = 0, $id_cust
+      * @param bool $auto_add_cart_rule
+      * @param bool $skipAvailabilityCheckOutOfStock
+      * @param bool $preserveGiftRemoval
++     * @param bool $useOrderPrices
+      *
+      * @return bool|int Whether the quantity has been successfully updated
+      */
+@@ -1468,7 +1483,8 @@ public function updateQty(
+         Shop $shop = null,
+         $auto_add_cart_rule = true,
+         $skipAvailabilityCheckOutOfStock = false,
+-        bool $preserveGiftRemoval = true
++        bool $preserveGiftRemoval = true,
++        bool $useOrderPrices = false
+     ) {
+         if (!$shop) {
+             $shop = Context::getContext()->shop;
+@@ -1539,7 +1555,7 @@ public function updateQty(
+         Hook::exec('actionCartUpdateQuantityBefore', $data);
+ 
+         if ((int) $quantity <= 0) {
+-            return $this->deleteProduct($id_product, $id_product_attribute, (int) $id_customization, (int) $id_address_delivery, $preserveGiftRemoval);
++            return $this->deleteProduct($id_product, $id_product_attribute, (int) $id_customization, (int) $id_address_delivery, $preserveGiftRemoval, $useOrderPrices);
+         }
+ 
+         if (!$product->available_for_order
+@@ -1582,7 +1598,7 @@ public function updateQty(
+                 if ($cartFirstLevelProductQuantity['quantity'] <= 1
+                     || $cartProductQuantity['quantity'] - $quantity <= 0
+                 ) {
+-                    return $this->deleteProduct((int) $id_product, (int) $id_product_attribute, (int) $id_customization, (int) $id_address_delivery, $preserveGiftRemoval);
++                    return $this->deleteProduct((int) $id_product, (int) $id_product_attribute, (int) $id_customization, (int) $id_address_delivery, $preserveGiftRemoval, $useOrderPrices);
+                 }
+             } else {
+                 return false;
+@@ -1644,9 +1660,9 @@ public function updateQty(
+         $context = Context::getContext()->cloneContext();
+         $context->cart = $this;
+         Cache::clean('getContextualValue_*');
+-        CartRule::autoRemoveFromCart();
++        CartRule::autoRemoveFromCart(null, $useOrderPrices);
+         if ($auto_add_cart_rule) {
+-            CartRule::autoAddToCart($context);
++            CartRule::autoAddToCart($context, $useOrderPrices);
+         }
+ 
+         if ($product->customizable) {
+@@ -1811,10 +1827,11 @@ public function orderExists()
+      * Remove the CartRule from the Cart.
+      *
+      * @param int $id_cart_rule CartRule ID
++     * @param bool $useOrderPrices
+      *
+      * @return bool Whether the Cart rule has been successfully removed
+      */
+-    public function removeCartRule($id_cart_rule)
++    public function removeCartRule($id_cart_rule, bool $useOrderPrices = false)
+     {
+         Cache::clean('Cart::getCartRules_' . $this->id . '-' . CartRule::FILTER_ACTION_ALL);
+         Cache::clean('Cart::getCartRules_' . $this->id . '-' . CartRule::FILTER_ACTION_SHIPPING);
+@@ -1829,8 +1846,8 @@ public function removeCartRule($id_cart_rule)
+         $result = Db::getInstance()->delete('cart_cart_rule', '`id_cart_rule` = ' . (int) $id_cart_rule . ' AND `id_cart` = ' . (int) $this->id, 1);
+ 
+         $cart_rule = new CartRule($id_cart_rule, Configuration::get('PS_LANG_DEFAULT'));
+-        if ((int) $cart_rule->gift_product) {
+-            $this->updateQty(1, $cart_rule->gift_product, $cart_rule->gift_product_attribute, null, 'down', 0, null, false);
++        if ((bool) $result && (int) $cart_rule->gift_product) {
++            $this->updateQty(1, $cart_rule->gift_product, $cart_rule->gift_product_attribute, null, 'down', 0, null, false, false, true, $useOrderPrices);
+         }
+ 
+         return $result;
+@@ -1844,6 +1861,7 @@ public function removeCartRule($id_cart_rule)
+      * @param int $id_customization Customization id
+      * @param int $id_address_delivery Delivery Address id
+      * @param bool $preserveGiftsRemoval If true gift are not removed so product is still in cart
++     * @param bool $useOrderPrices If true, will use order prices to re-calculate cartRules after the product is deleted
+      *
+      * @return bool Whether the product has been successfully deleted
+      */
+@@ -1852,7 +1870,8 @@ public function deleteProduct(
+         $id_product_attribute = 0,
+         $id_customization = 0,
+         $id_address_delivery = 0,
+-        bool $preserveGiftsRemoval = true
++        bool $preserveGiftsRemoval = true,
++        bool $useOrderPrices = false
+     ) {
+         if (isset(self::$_nbProducts[$this->id])) {
+             unset(self::$_nbProducts[$this->id]);
+@@ -1893,10 +1912,11 @@ public function deleteProduct(
+             );
+         }
+ 
++        $preservedGifts = [];
++        $giftKey = (int) $id_product . '-' . (int) $id_product_attribute;
+         if ($preserveGiftsRemoval) {
+             $preservedGifts = $this->getProductsGifts($id_product, $id_product_attribute);
+-            if (isset($preservedGifts[(int) $id_product . '-' . (int) $id_product_attribute])
+-                && $preservedGifts[(int) $id_product . '-' . (int) $id_product_attribute] > 0) {
++            if (isset($preservedGifts[$giftKey]) && $preservedGifts[$giftKey] > 0) {
+                 return Db::getInstance()->execute(
+                     'UPDATE `' . _DB_PREFIX_ . 'cart_product`
+                     SET `quantity` = ' . (int) $preservedGifts[(int) $id_product . '-' . (int) $id_product_attribute] . '
+@@ -1920,8 +1940,10 @@ public function deleteProduct(
+             $return = $this->update();
+             // refresh cache of self::_products
+             $this->_products = $this->getProducts(true);
+-            CartRule::autoRemoveFromCart();
+-            CartRule::autoAddToCart();
++            if (!isset($preservedGifts[$giftKey]) || $preservedGifts[$giftKey] <= 0) {
++                CartRule::autoRemoveFromCart(null, $useOrderPrices);
++                CartRule::autoAddToCart(null, $useOrderPrices);
++            }
+ 
+             return $return;
+         }
+@@ -2319,7 +2341,7 @@ protected function getDeliveryAddressId($products)
+     protected function getTotalCalculationCartRules($type, $withShipping)
+     {
+         if ($withShipping || $type == Cart::ONLY_DISCOUNTS) {
+-            $cartRules = $this->getCartRules(CartRule::FILTER_ACTION_ALL);
++            $cartRules = $this->getCartRules(CartRule::FILTER_ACTION_ALL, false);
+         } else {
+             $cartRules = $this->getCartRules(CartRule::FILTER_ACTION_REDUCTION, false);
+             // Cart Rules array are merged manually in order to avoid doubles
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index f1e5f8fef8467..da07e2945b7d1 100755
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -666,10 +666,12 @@ public function getProductRules($id_product_rule_group)
+      * @param Context $context Context instance
+      * @param bool $alreadyInCart Check if the voucher is already on the cart
+      * @param bool $display_error Display error
++     * @param bool $check_carrier
++     * @param bool $useOrderPrices
+      *
+      * @return bool|mixed|string
+      */
+-    public function checkValidity(Context $context, $alreadyInCart = false, $display_error = true, $check_carrier = true)
++    public function checkValidity(Context $context, $alreadyInCart = false, $display_error = true, $check_carrier = true, $useOrderPrices = false)
+     {
+         if (!CartRule::isFeatureActive()) {
+             return false;
+@@ -813,9 +815,23 @@ public function checkValidity(Context $context, $alreadyInCart = false, $display
+                 $minimum_amount = Tools::convertPriceFull($minimum_amount, new Currency($this->minimum_amount_currency), Context::getContext()->currency);
+             }
+ 
+-            $cartTotal = $cart->getOrderTotal($this->minimum_amount_tax, Cart::ONLY_PRODUCTS);
++            $cartTotal = $cart->getOrderTotal(
++                $this->minimum_amount_tax,
++                Cart::ONLY_PRODUCTS,
++                null,
++                null,
++                false,
++                $useOrderPrices
++            );
+             if ($this->minimum_amount_shipping) {
+-                $cartTotal += $cart->getOrderTotal($this->minimum_amount_tax, Cart::ONLY_SHIPPING);
++                $cartTotal += $cart->getOrderTotal(
++                    $this->minimum_amount_tax,
++                    Cart::ONLY_SHIPPING,
++                    null,
++                    null,
++                    false,
++                    $useOrderPrices
++                );
+             }
+             $products = $cart->getProducts();
+             $cart_rules = $cart->getCartRules(CartRule::FILTER_ACTION_ALL, false);
+@@ -1625,8 +1641,9 @@ public function getAssociatedRestrictions(
+      * Automatically add this CartRule to the Cart.
+      *
+      * @param Context|null $context Context instance
++     * @param bool $useOrderPrices
+      */
+-    public static function autoAddToCart(Context $context = null)
++    public static function autoAddToCart(Context $context = null, bool $useOrderPrices = false)
+     {
+         if ($context === null) {
+             $context = Context::getContext();
+@@ -1687,8 +1704,8 @@ public static function autoAddToCart(Context $context = null)
+             if ($cart_rules) {
+                 foreach ($cart_rules as $cart_rule) {
+                     /** @var CartRule $cart_rule */
+-                    if ($cart_rule->checkValidity($context, false, false)) {
+-                        $context->cart->addCartRule($cart_rule->id);
++                    if ($cart_rule->checkValidity($context, false, false, true, $useOrderPrices)) {
++                        $context->cart->addCartRule($cart_rule->id, $useOrderPrices);
+                     }
+                 }
+             }
+@@ -1699,10 +1716,11 @@ public static function autoAddToCart(Context $context = null)
+      * Automatically remove this CartRule from the Cart.
+      *
+      * @param Context|null $context Context instance
++     * @param bool $useOrderPrice
+      *
+      * @return array Error messages
+      */
+-    public static function autoRemoveFromCart(Context $context = null)
++    public static function autoRemoveFromCart(Context $context = null, bool $useOrderPrice = false)
+     {
+         if (!$context) {
+             $context = Context::getContext();
+@@ -1712,9 +1730,9 @@ public static function autoRemoveFromCart(Context $context = null)
+         }
+ 
+         static $errors = [];
+-        foreach ($context->cart->getCartRules() as $cart_rule) {
+-            if ($error = $cart_rule['obj']->checkValidity($context, true)) {
+-                $context->cart->removeCartRule($cart_rule['obj']->id);
++        foreach ($context->cart->getCartRules(CartRule::FILTER_ACTION_ALL, true, $useOrderPrice) as $cart_rule) {
++            if ($error = $cart_rule['obj']->checkValidity($context, true, true, true, $useOrderPrice)) {
++                $context->cart->removeCartRule($cart_rule['obj']->id, $useOrderPrice);
+                 $context->cart->update();
+                 $errors[] = $error;
+             }
+diff --git a/install-dev/upgrade/php/ps_1771_update_customer_note.php b/install-dev/upgrade/php/ps_1771_update_customer_note.php
+index 5a750f87bf643..e1862f2378bfe 100644
+--- a/install-dev/upgrade/php/ps_1771_update_customer_note.php
++++ b/install-dev/upgrade/php/ps_1771_update_customer_note.php
+@@ -38,7 +38,7 @@ function ps_1771_update_customer_note()
+     foreach ($notes as $note) {
+         $result &= Db::getInstance()->execute(
+             'UPDATE ' . _DB_PREFIX_ . 'customer
+-            SET note = "' . html_entity_decode($note['note']) . '"
++            SET note = "' . pSQL(html_entity_decode($note['note'])) . '"
+             WHERE id_customer = ' . $note['id_customer']
+         );
+     }
+diff --git a/install-dev/upgrade/sql/1.7.0.0.sql b/install-dev/upgrade/sql/1.7.0.0.sql
+index 528243f63cb4c..e2d283da9904a 100644
+--- a/install-dev/upgrade/sql/1.7.0.0.sql
++++ b/install-dev/upgrade/sql/1.7.0.0.sql
+@@ -117,6 +117,14 @@ CREATE TABLE `PREFIX_authorization_role` (
+   UNIQUE KEY (`slug`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8;
+ 
++/* Add missing access entries on certain installation */
++INSERT INTO `PREFIX_access` (`id_profile`, `id_tab`, `view`, `add`, `edit`, `delete`)
++  SELECT 1, `id_tab`, 0, 0 ,0 ,0
++  FROM `PREFIX_tab` WHERE `id_tab` NOT IN (SELECT `id_tab` FROM `PREFIX_access` WHERE `id_profile` = 1);
++INSERT INTO `PREFIX_module_access` (`id_profile`, `id_module`, `view`, `configure`, `uninstall`)
++  SELECT 1, `id_module`, 1, 0, 0
++  FROM `PREFIX_module` WHERE `id_module` NOT IN (SELECT `id_module` FROM `PREFIX_module_access` WHERE `id_profile` = 1);
++
+ /* Create a copy without indexes to make ID updates without conflict. */
+ CREATE TABLE `PREFIX_access_old` AS SELECT * FROM `PREFIX_access`;
+ DROP TABLE `PREFIX_access`;
+diff --git a/src/Adapter/Cart/Comparator/CartProductsComparator.php b/src/Adapter/Cart/Comparator/CartProductsComparator.php
+index 7adcad31cae89..5b31683ab2b0b 100644
+--- a/src/Adapter/Cart/Comparator/CartProductsComparator.php
++++ b/src/Adapter/Cart/Comparator/CartProductsComparator.php
+@@ -46,6 +46,11 @@ class CartProductsComparator
+      */
+     private $savedProducts;
+ 
++    /**
++     * @var CartProductUpdate[]
++     */
++    private $knownUpdates = [];
++
+     /**
+      * @param Cart $cart
+      */
+@@ -55,52 +60,58 @@ public function __construct(Cart $cart)
+         $this->savedProducts = $cart->getProducts(true);
+     }
+ 
++    /**
++     * @param array $knownUpdates
++     *
++     * @return CartProductsComparator
++     */
++    public function setKnownUpdates(array $knownUpdates): self
++    {
++        $this->knownUpdates = $knownUpdates;
++
++        return $this;
++    }
++
+     /**
+      * Returns a list of products that were strictly updated (not created) compared to the state of the cart
+      * when this object was created, it removes the already known modified products provided as argument.
+      *
+-     * @param CartProductUpdate[] $knownUpdates
+-     *
+      * @return CartProductUpdate[]
+      */
+-    public function getUpdatedProducts(array $knownUpdates = []): array
++    public function getUpdatedProducts(): array
+     {
+         $newProducts = $this->cart->getProducts(true);
+         $allUpdateProducts = $this->getAllUpdatedProducts($newProducts);
+ 
+-        return $this->filterKnownUpdates($allUpdateProducts, $knownUpdates);
++        return $this->filterKnownUpdates($allUpdateProducts);
+     }
+ 
+     /**
+      * Returns a list of products that were strictly created (not updated) compared to the state of the cart
+      * when this object was created, it removes the already known modified products provided as argument.
+      *
+-     * @param CartProductUpdate[] $knownUpdates
+-     *
+      * @return CartProductUpdate[]
+      */
+-    public function getAdditionalProducts(array $knownUpdates = []): array
++    public function getAdditionalProducts(): array
+     {
+         $newProducts = $this->cart->getProducts(true);
+         $allAdditionalProducts = $this->getAllAdditionalProducts($newProducts);
+ 
+-        return $this->filterKnownUpdates($allAdditionalProducts, $knownUpdates);
++        return $this->filterKnownUpdates($allAdditionalProducts);
+     }
+ 
+     /**
+      * Returns a list of products that were modified (created and/or updated) compared to the state of the cart
+      * when this object was created, it removes the already known modified products provided as argument.
+      *
+-     * @param CartProductUpdate[] $knownUpdates
+-     *
+      * @return CartProductUpdate[]
+      */
+-    public function getModifiedProducts(array $knownUpdates = []): array
++    public function getModifiedProducts(): array
+     {
+         $newProducts = $this->cart->getProducts(true);
+         $modifiedProducts = array_merge($this->getAllUpdatedProducts($newProducts), $this->getAllAdditionalProducts($newProducts));
+ 
+-        return $this->filterKnownUpdates($modifiedProducts, $knownUpdates);
++        return $this->filterKnownUpdates($modifiedProducts);
+     }
+ 
+     /**
+@@ -165,15 +176,14 @@ private function getAllUpdatedProducts(array $newProducts): array
+ 
+     /**
+      * @param CartProductUpdate[] $updates
+-     * @param CartProductUpdate[] $knownUpdates
+      *
+      * @return CartProductUpdate[]
+      */
+-    private function filterKnownUpdates(array $updates, array $knownUpdates): array
++    private function filterKnownUpdates(array $updates): array
+     {
+         $filteredUpdates = [];
+         foreach ($updates as $updateProduct) {
+-            foreach ($knownUpdates as $knownUpdate) {
++            foreach ($this->knownUpdates as $knownUpdate) {
+                 if ($knownUpdate->productMatches($updateProduct)) {
+                     $updateProduct->setDeltaQuantity(
+                         $updateProduct->getDeltaQuantity() - $knownUpdate->getDeltaQuantity()
+diff --git a/src/Adapter/Cart/QueryHandler/GetCartForOrderCreationHandler.php b/src/Adapter/Cart/QueryHandler/GetCartForOrderCreationHandler.php
+index 8213e63b84f6e..96fd11af3746c 100644
+--- a/src/Adapter/Cart/QueryHandler/GetCartForOrderCreationHandler.php
++++ b/src/Adapter/Cart/QueryHandler/GetCartForOrderCreationHandler.php
+@@ -152,8 +152,6 @@ public function handle(GetCartForOrderCreation $query): CartForOrderCreation
+                 $this->extractSummaryFromLegacySummary($legacySummary, $currency, $cart),
+                 $addresses ? $this->extractShippingFromLegacySummary($cart, $legacySummary, $query->hideDiscounts()) : null
+             );
+-
+-            $this->contextStateManager->restorePreviousContext();
+         } finally {
+             $this->contextStateManager->restorePreviousContext();
+         }
+diff --git a/src/Adapter/Order/CommandHandler/ChangeOrderDeliveryAddressHandler.php b/src/Adapter/Order/CommandHandler/ChangeOrderDeliveryAddressHandler.php
+index e0e55549b398f..3f78e56cad8b2 100644
+--- a/src/Adapter/Order/CommandHandler/ChangeOrderDeliveryAddressHandler.php
++++ b/src/Adapter/Order/CommandHandler/ChangeOrderDeliveryAddressHandler.php
+@@ -28,9 +28,15 @@
+ 
+ use Address;
+ use Cart;
+-use PrestaShop\PrestaShop\Adapter\Order\AbstractOrderHandler;
++use Order;
++use OrderDetail;
++use OrderInvoice;
++use PrestaShop\PrestaShop\Adapter\Cart\Comparator\CartProductsComparator;
++use PrestaShop\PrestaShop\Adapter\Cart\Comparator\CartProductUpdate;
++use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderAmountUpdater;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderDetailUpdater;
++use PrestaShop\PrestaShop\Adapter\Order\OrderProductQuantityUpdater;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Command\ChangeOrderDeliveryAddressCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Order\CommandHandler\ChangeOrderDeliveryAddressHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
+@@ -39,7 +45,7 @@
+ /**
+  * @internal
+  */
+-final class ChangeOrderDeliveryAddressHandler extends AbstractOrderHandler implements ChangeOrderDeliveryAddressHandlerInterface
++final class ChangeOrderDeliveryAddressHandler extends AbstractOrderCommandHandler implements ChangeOrderDeliveryAddressHandlerInterface
+ {
+     /**
+      * @var OrderAmountUpdater
+@@ -51,16 +57,32 @@ final class ChangeOrderDeliveryAddressHandler extends AbstractOrderHandler imple
+      */
+     private $orderDetailTaxUpdater;
+ 
++    /**
++     * @var ContextStateManager
++     */
++    private $contextStateManager;
++
++    /**
++     * @var OrderProductQuantityUpdater
++     */
++    private $orderProductQuantityUpdater;
++
+     /**
+      * @param OrderAmountUpdater $orderAmountUpdater
+      * @param OrderDetailUpdater $orderDetailTaxUpdater
++     * @param ContextStateManager $contextStateManager
++     * @param OrderProductQuantityUpdater $orderProductQuantityUpdater
+      */
+     public function __construct(
+         OrderAmountUpdater $orderAmountUpdater,
+-        OrderDetailUpdater $orderDetailTaxUpdater
++        OrderDetailUpdater $orderDetailTaxUpdater,
++        ContextStateManager $contextStateManager,
++        OrderProductQuantityUpdater $orderProductQuantityUpdater
+     ) {
+         $this->orderAmountUpdater = $orderAmountUpdater;
+         $this->orderDetailTaxUpdater = $orderDetailTaxUpdater;
++        $this->contextStateManager = $contextStateManager;
++        $this->orderProductQuantityUpdater = $orderProductQuantityUpdater;
+     }
+ 
+     /**
+@@ -77,14 +99,90 @@ public function handle(ChangeOrderDeliveryAddressCommand $command)
+             throw new OrderException('New delivery address is not valid');
+         }
+ 
+-        $cart->updateDeliveryAddressId((int) $cart->id_address_delivery, (int) $address->id);
+-        $cart->setDeliveryOption([
+-            (int) $cart->id_address_delivery => $this->formatLegacyDeliveryOptionFromCarrierId($order->id_carrier),
+-        ]);
+-        $cart->update();
++        $this->setCartContext($this->contextStateManager, $cart);
++
++        try {
++            $comparator = new CartProductsComparator($cart);
++
++            $cart->updateDeliveryAddressId((int) $cart->id_address_delivery, (int) $address->id);
++            $cart->setDeliveryOption([
++                (int) $cart->id_address_delivery => $this->formatLegacyDeliveryOptionFromCarrierId($order->id_carrier),
++            ]);
++            $cart->update();
++
++            // gift could have been added/deleted when changing delivery address
++            $this->synchronizeOrderWithCart($order, $cart, $comparator);
++
++            $order->id_address_delivery = $address->id;
++            $this->orderDetailTaxUpdater->updateOrderDetailsTaxes($order);
++            $this->orderAmountUpdater->update($order, $cart);
++        } finally {
++            $this->contextStateManager->restorePreviousContext();
++        }
++    }
++
++    /**
++     * @param Order $order
++     * @param Cart $cart
++     * @param CartProductsComparator $productsComparator
++     */
++    private function synchronizeOrderWithCart(
++        Order $order,
++        Cart $cart,
++        CartProductsComparator $productsComparator
++    ): void {
++        $modified = $productsComparator->getModifiedProducts();
++        foreach ($modified as $productUpdate) {
++            $orderDetail = $this->getOrderDetail($productUpdate, $order, $cart);
++            if (null === $orderDetail) {
++                continue;
++            }
++            $quantity = $productUpdate->isCreated()
++                ? $productUpdate->getDeltaQuantity()
++                : $orderDetail->product_quantity + $productUpdate->getDeltaQuantity();
++            $orderInvoice = $orderDetail->id_order_invoice != 0 ? new OrderInvoice($orderDetail->id_order_invoice) : null;
++
++            $this->orderProductQuantityUpdater->update(
++                $order,
++                $orderDetail,
++                $quantity,
++                $orderInvoice,
++                false
++            );
++        }
++    }
++
++    /**
++     * @param CartProductUpdate $productUpdate
++     * @param Order $order
++     * @param Cart $cart
++     *
++     * @return OrderDetail|null
++     */
++    private function getOrderDetail(CartProductUpdate $productUpdate, Order $order, Cart $cart): ?OrderDetail
++    {
++        $combinationId = $productUpdate->getCombinationId() ? $productUpdate->getCombinationId()->getValue() : 0;
++        foreach ($order->getProducts() as $product) {
++            if (
++                (int) $product['product_id'] === $productUpdate->getProductId()->getValue()
++                && (int) $product['product_attribute_id'] === $combinationId
++            ) {
++                return new OrderDetail($product['id_order_detail']);
++            }
++        }
++
++        foreach ($cart->getProducts() as $product) {
++            if (
++                (int) $product['id_product'] === $productUpdate->getProductId()->getValue()
++                && (int) $product['id_product_attribute'] === $combinationId
++            ) {
++                $orderDetail = new OrderDetail();
++                $orderDetail->createList($order, $cart, $order->getCurrentOrderState(), [$product]);
++
++                return $orderDetail;
++            }
++        }
+ 
+-        $order->id_address_delivery = $address->id;
+-        $this->orderDetailTaxUpdater->updateOrderDetailsTaxes($order);
+-        $this->orderAmountUpdater->update($order, $cart);
++        return null;
+     }
+ }
+diff --git a/src/Adapter/Order/OrderAmountUpdater.php b/src/Adapter/Order/OrderAmountUpdater.php
+index 48e18cab0f60e..969d4dac28c03 100644
+--- a/src/Adapter/Order/OrderAmountUpdater.php
++++ b/src/Adapter/Order/OrderAmountUpdater.php
+@@ -40,7 +40,10 @@
+ use OrderCartRule;
+ use OrderDetail;
+ use PrestaShop\Decimal\Number;
++use PrestaShop\PrestaShop\Adapter\Cart\Comparator\CartProductsComparator;
++use PrestaShop\PrestaShop\Adapter\Cart\Comparator\CartProductUpdate;
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
++use PrestaShop\PrestaShop\Adapter\Order\Refund\OrderProductRemover;
+ use PrestaShop\PrestaShop\Core\Cart\CartRuleData;
+ use PrestaShop\PrestaShop\Core\Domain\Configuration\ShopConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
+@@ -70,6 +73,11 @@ class OrderAmountUpdater
+      */
+     private $orderDetailUpdater;
+ 
++    /**
++     * @var OrderProductRemover
++     */
++    private $orderProductRemover;
++
+     /**
+      * @var array
+      */
+@@ -84,15 +92,18 @@ class OrderAmountUpdater
+      * @param ShopConfigurationInterface $shopConfiguration
+      * @param ContextStateManager $contextStateManager
+      * @param OrderDetailUpdater $orderDetailUpdater
++     * @param OrderProductRemover $orderProductRemover
+      */
+     public function __construct(
+         ShopConfigurationInterface $shopConfiguration,
+         ContextStateManager $contextStateManager,
+-        OrderDetailUpdater $orderDetailUpdater
++        OrderDetailUpdater $orderDetailUpdater,
++        OrderProductRemover $orderProductRemover
+     ) {
+         $this->shopConfiguration = $shopConfiguration;
+         $this->contextStateManager = $contextStateManager;
+         $this->orderDetailUpdater = $orderDetailUpdater;
++        $this->orderProductRemover = $orderProductRemover;
+     }
+ 
+     /**
+@@ -128,9 +139,14 @@ public function update(
+             // Update order details (if quantity or product price have been modified)
+             $this->updateOrderDetails($order, $cart);
+ 
++            $productsComparator = new CartProductsComparator($cart);
+             // Recalculate cart rules and Fix differences between cart's cartRules and order's cartRules
+             $this->updateOrderCartRules($order, $cart, $computingPrecision, $orderInvoiceId);
+ 
++            // Synchronize modified products with the order
++            $modifiedProducts = $productsComparator->getModifiedProducts();
++            $this->updateOrderModifiedProducts($modifiedProducts, $cart, $order);
++
+             // Update order totals
+             $this->updateOrderTotals($order, $cart, $computingPrecision);
+ 
+@@ -148,6 +164,90 @@ public function update(
+         }
+     }
+ 
++    /**
++     * Synchronizes modified products from the cart with the order
++     *
++     * @param CartProductUpdate[] $modifiedProducts
++     * @param Cart $cart
++     * @param Order $order
++     *
++     * @throws OrderException
++     * @throws PrestaShopDatabaseException
++     * @throws PrestaShopException
++     */
++    private function updateOrderModifiedProducts(array $modifiedProducts, Cart $cart, Order $order): void
++    {
++        $productsToAddToOrder = [];
++        foreach ($modifiedProducts as $modifiedProduct) {
++            $orderProduct = $this->findProductInOrder($modifiedProduct, $order);
++            $cartProduct = $this->findProductInCart($modifiedProduct, $cart);
++            if (null === $cartProduct) {
++                // The product is not in the cart anymore: delete it from the order
++                $orderDetail = new OrderDetail($orderProduct['id_order_detail']);
++                $this->orderProductRemover->deleteProductFromOrder($order, $orderDetail, false);
++            } elseif (null === $orderProduct) {
++                // The product is not in the order but in the cart: add it to the order
++                $productsToAddToOrder[] = $cartProduct;
++            } else {
++                // the product is both in the cart and the order: update its quantity and price with the cart values
++                $orderDetail = new OrderDetail($orderProduct['id_order_detail']);
++                $orderDetail->product_quantity = $cartProduct['cart_quantity'];
++                $this->orderDetailUpdater->updateOrderDetail(
++                    $orderDetail,
++                    $order,
++                    new Number((string) $cartProduct['price_with_reduction_without_tax']),
++                    new Number((string) $cartProduct['price_with_reduction'])
++                );
++            }
++        }
++        if (count($productsToAddToOrder) > 0) {
++            $orderDetail = new OrderDetail();
++            $orderDetail->createList($order, $cart, $order->getCurrentState(), $productsToAddToOrder);
++        }
++    }
++
++    /**
++     * @param CartProductUpdate $productUpdate
++     * @param Cart $cart
++     *
++     * @return array|null
++     */
++    private function findProductInCart(CartProductUpdate $productUpdate, Cart $cart): ?array
++    {
++        $combinationId = null === $productUpdate->getCombinationId()
++            ? 0
++            : $productUpdate->getCombinationId()->getValue();
++        foreach ($cart->getProducts() as $product) {
++            if ((int) $product['id_product'] === $productUpdate->getProductId()->getValue()
++                && (int) $product['id_product_attribute'] === $combinationId) {
++                return $product;
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * @param CartProductUpdate $productUpdate
++     * @param Order $order
++     *
++     * @return array|null
++     */
++    private function findProductInOrder(CartProductUpdate $productUpdate, Order $order): ?array
++    {
++        $combinationId = null === $productUpdate->getCombinationId()
++            ? 0
++            : $productUpdate->getCombinationId()->getValue();
++        foreach ($order->getProducts() as $product) {
++            if ((int) $product['product_id'] === $productUpdate->getProductId()->getValue()
++                && (int) $product['product_attribute_id'] === $combinationId) {
++                return $product;
++            }
++        }
++
++        return null;
++    }
++
+     /**
+      * There are many caches among legacy classes that can store previous prices
+      * we need to clean them to make sure the price is completely up to date
+@@ -326,14 +426,14 @@ private function updateOrderCartRules(
+         int $computingPrecision,
+         ?int $orderInvoiceId
+     ): void {
+-        CartRule::autoAddToCart();
+-        CartRule::autoRemoveFromCart();
++        CartRule::autoAddToCart(null, true);
++        CartRule::autoRemoveFromCart(null, true);
+         $carrierId = $order->id_carrier;
+ 
+-        $newCartRules = $cart->getCartRules();
++        $newCartRules = $cart->getCartRules(CartRule::FILTER_ACTION_ALL, false);
+         // We need the calculator to compute the discount on the whole products because they can interact with each
+         // other so they can't be computed independently, it needs to keep order prices
+-        $calculator = $cart->newCalculator($order->getCartProducts(), $newCartRules, $carrierId, $computingPrecision, $this->keepOrderPrices);
++        $calculator = $cart->newCalculator($cart->getProducts(), $newCartRules, $carrierId, $computingPrecision, $this->keepOrderPrices);
+         $calculator->processCalculation();
+ 
+         foreach ($order->getCartRules() as $orderCartRuleData) {
+diff --git a/src/Adapter/Order/OrderProductQuantityUpdater.php b/src/Adapter/Order/OrderProductQuantityUpdater.php
+index a3abca9401839..c9a8fbd8ff2a4 100644
+--- a/src/Adapter/Order/OrderProductQuantityUpdater.php
++++ b/src/Adapter/Order/OrderProductQuantityUpdater.php
+@@ -154,9 +154,10 @@ private function updateOrderDetail(
+         // Perform deletion first, we don't want the OrderDetail to be saved with a quantity 0, this could lead to bugs
+         if (0 === $newQuantity) {
+             // Product deletion
+-            $updatedProducts = $this->orderProductRemover->deleteProductFromOrder($order, $orderDetail, $updateCart);
++            $cartComparator = $this->orderProductRemover->deleteProductFromOrder($order, $orderDetail, $updateCart);
+             $this->updateCustomizationOnProductDelete($order, $orderDetail, $oldQuantity);
+-            $this->applyOtherProductUpdates($order, $cart, $orderInvoice, $updatedProducts);
++            $this->applyOtherProductUpdates($order, $cart, $orderInvoice, $cartComparator->getUpdatedProducts());
++            $this->applyOtherProductCreation($order, $cart, $orderInvoice, $cartComparator->getAdditionalProducts());
+         } else {
+             $this->assertValidProductQuantity($orderDetail, $newQuantity);
+             // It's important to override the invoice, this is what allows to switch an OrderDetail from an invoice to another
+@@ -170,8 +171,9 @@ private function updateOrderDetail(
+ 
+             // Update quantity on the cart and stock
+             if ($updateCart) {
+-                $updatedProducts = $this->updateProductQuantity($cart, $orderDetail, $oldQuantity, $newQuantity);
+-                $this->applyOtherProductUpdates($order, $cart, $orderInvoice, $updatedProducts);
++                $cartComparator = $this->updateProductQuantity($cart, $orderDetail, $oldQuantity, $newQuantity);
++                $this->applyOtherProductUpdates($order, $cart, $orderInvoice, $cartComparator->getUpdatedProducts());
++                $this->applyOtherProductCreation($order, $cart, $orderInvoice, $cartComparator->getAdditionalProducts());
+             } elseif ($orderDetail->id_customization > 0) {
+                 $customization = new Customization($orderDetail->id_customization);
+                 $customization->quantity = $newQuantity;
+@@ -194,12 +196,14 @@ private function applyOtherProductUpdates(
+         Cart $cart,
+         ?OrderInvoice $orderInvoice,
+         array $updatedProducts
+-    ) {
++    ): void {
+         // Some products have been affected by the removal of the initial product (probably related to a CartRule)
+         // So we detect the changes that happened in the cart and apply them on the OrderDetail
+         $orderDetails = $order->getOrderDetailList();
+         foreach ($updatedProducts as $updatedProduct) {
+-            $updatedCombinationId = $updatedProduct->getCombinationId() !== null ? $updatedProduct->getCombinationId()->getValue() : 0;
++            $updatedCombinationId = $updatedProduct->getCombinationId() !== null
++                ? $updatedProduct->getCombinationId()->getValue()
++                : 0;
+             $updatedOrderDetail = null;
+             foreach ($orderDetails as $orderDetailData) {
+                 if ((int) $orderDetailData['product_id'] === $updatedProduct->getProductId()->getValue()
+@@ -224,27 +228,64 @@ private function applyOtherProductUpdates(
+         }
+     }
+ 
++    /**
++     * @param Order $order
++     * @param Cart $cart
++     * @param OrderInvoice|null $orderInvoice
++     * @param array $createdProducts
++     */
++    private function applyOtherProductCreation(
++        Order $order,
++        Cart $cart,
++        ?OrderInvoice $orderInvoice,
++        array $createdProducts
++    ): void {
++        $productsToAdd = [];
++        foreach ($createdProducts as $createdProduct) {
++            $updatedCombinationId = $createdProduct->getCombinationId() !== null
++                ? $createdProduct->getCombinationId()->getValue()
++                : 0;
++            foreach ($cart->getProducts() as $product) {
++                if ((int) $product['id_product'] === $createdProduct->getProductId()->getValue()
++                    && (int) $product['id_product_attribute'] === $updatedCombinationId) {
++                    $productsToAdd[] = $product;
++                    break;
++                }
++            }
++        }
++        if (count($productsToAdd) > 0) {
++            $orderDetail = new OrderDetail();
++            $orderDetail->createList(
++                $order,
++                $cart,
++                $order->getCurrentState(),
++                $productsToAdd,
++                $orderInvoice ? $orderInvoice->id : 0
++            );
++        }
++    }
++
+     /**
+      * @param Cart $cart
+      * @param OrderDetail $orderDetail
+      * @param int $oldQuantity
+      * @param int $newQuantity
+      *
+-     * @return array
++     * @return CartProductsComparator
+      */
+     private function updateProductQuantity(
+         Cart $cart,
+         OrderDetail $orderDetail,
+         int $oldQuantity,
+         int $newQuantity
+-    ): array {
+-        $deltaQuantity = $newQuantity - $oldQuantity;
++    ): CartProductsComparator {
++        $cartComparator = new CartProductsComparator($cart);
+ 
++        $deltaQuantity = $newQuantity - $oldQuantity;
+         if (0 === $deltaQuantity) {
+-            return [];
++            return $cartComparator;
+         }
+ 
+-        $cartComparator = new CartProductsComparator($cart);
+         $knownUpdates = [
+             new CartProductUpdate(
+                 (int) $orderDetail->product_id,
+@@ -254,6 +295,7 @@ private function updateProductQuantity(
+                 (int) $orderDetail->id_customization
+             ),
+         ];
++        $cartComparator->setKnownUpdates($knownUpdates);
+ 
+         /**
+          * Here we update product and customization in the cart.
+@@ -286,7 +328,7 @@ private function updateProductQuantity(
+             throw new \LogicException('Something went wrong');
+         }
+ 
+-        return $cartComparator->getUpdatedProducts($knownUpdates);
++        return $cartComparator;
+     }
+ 
+     /**
+diff --git a/src/Adapter/Order/Refund/OrderProductRemover.php b/src/Adapter/Order/Refund/OrderProductRemover.php
+index aa981d8db462a..a2c595b6576a2 100644
+--- a/src/Adapter/Order/Refund/OrderProductRemover.php
++++ b/src/Adapter/Order/Refund/OrderProductRemover.php
+@@ -54,6 +54,11 @@ class OrderProductRemover
+      */
+     private $translator;
+ 
++    /**
++     * @var CartProductsComparator
++     */
++    private $cartProductComparator;
++
+     /**
+      * OrderProductRemover constructor.
+      *
+@@ -70,18 +75,25 @@ public function __construct(LoggerInterface $logger, TranslatorInterface $transl
+      * @param OrderDetail $orderDetail
+      * @param bool $updateCart Used when you don't want to update the cart (CartRule removal for example)
+      *
+-     * @return array
++     * @return CartProductsComparator
+      */
+-    public function deleteProductFromOrder(Order $order, OrderDetail $orderDetail, bool $updateCart = true): array
+-    {
++    public function deleteProductFromOrder(
++        Order $order,
++        OrderDetail $orderDetail,
++        bool $updateCart = true
++    ): CartProductsComparator {
+         $cart = new Cart($order->id_cart);
+ 
+         // Important to remove order cart rule before the product is removed, so that cart rule can detect if it's applied on it
+         $this->deleteOrderCartRule($order, $orderDetail, $cart);
+ 
+-        $updatedProducts = [];
++        if ((int) $orderDetail->id_customization > 0) {
++            $this->deleteCustomization($order, $orderDetail);
++        }
++
++        $this->cartProductComparator = new CartProductsComparator($cart);
+         if ($updateCart) {
+-            $updatedProducts = $this->updateCart($cart, $orderDetail);
++            $this->updateCart($cart, $orderDetail);
+         }
+ 
+         $this->deleteSpecificPrice($order, $orderDetail, $cart);
+@@ -95,18 +107,17 @@ public function deleteProductFromOrder(Order $order, OrderDetail $orderDetail, b
+             $orderDetail
+         );
+ 
+-        return $updatedProducts;
++        return $this->cartProductComparator;
+     }
+ 
+     /**
+      * @param Cart $cart
+      * @param OrderDetail $orderDetail
+-     *
+-     * @return CartProductUpdate[]
+      */
+-    private function updateCart(Cart $cart, OrderDetail $orderDetail): array
+-    {
+-        $cartComparator = new CartProductsComparator($cart);
++    private function updateCart(
++        Cart $cart,
++        OrderDetail $orderDetail
++    ): void {
+         $knownUpdates = [
+             new CartProductUpdate(
+                 (int) $orderDetail->product_id,
+@@ -116,6 +127,7 @@ private function updateCart(Cart $cart, OrderDetail $orderDetail): array
+                 (int) $orderDetail->id_customization
+             ),
+         ];
++        $this->cartProductComparator->setKnownUpdates($knownUpdates);
+ 
+         $cart->updateQty(
+             $orderDetail->product_quantity,
+@@ -129,8 +141,6 @@ private function updateCart(Cart $cart, OrderDetail $orderDetail): array
+             false,
+             false // Do not preserve gift removal
+         );
+-
+-        return $cartComparator->getUpdatedProducts($knownUpdates);
+     }
+ 
+     /**
+diff --git a/src/Adapter/SqlManager/CommandHandler/AbstractSqlRequestHandler.php b/src/Adapter/SqlManager/CommandHandler/AbstractSqlRequestHandler.php
+new file mode 100644
+index 0000000000000..ec9adcd5b2140
+--- /dev/null
++++ b/src/Adapter/SqlManager/CommandHandler/AbstractSqlRequestHandler.php
+@@ -0,0 +1,74 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\SqlManager\SqlQueryValidator;
++use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\SqlRequestConstraintException;
++use Symfony\Component\Translation\TranslatorInterface;
++
++/**
++ * @internal
++ */
++abstract class AbstractSqlRequestHandler
++{
++    /**
++     * @var SqlQueryValidator
++     */
++    private $sqlQueryValidator;
++
++    /**
++     * @var TranslatorInterface
++     */
++    private $translator;
++
++    public function __construct(
++        SqlQueryValidator $sqlQueryValidator,
++        TranslatorInterface $translator
++    ) {
++        $this->sqlQueryValidator = $sqlQueryValidator;
++        $this->translator = $translator;
++    }
++
++    protected function assertSqlQueryIsValid(string $sql): void
++    {
++        $errors = $this->sqlQueryValidator->validate($sql);
++        if (0 !== count($errors)) {
++            $message = $this->translator->trans(
++                $errors[0]['key'],
++                $errors[0]['parameters'],
++                $errors[0]['domain']
++            );
++
++            throw new SqlRequestConstraintException(
++                $message,
++                SqlRequestConstraintException::INVALID_SQL_QUERY
++            );
++        }
++    }
++}
+diff --git a/src/Adapter/SqlManager/CommandHandler/AddSqlRequestHandler.php b/src/Adapter/SqlManager/CommandHandler/AddSqlRequestHandler.php
+index bccd7ad3aa4ce..b0586938ff511 100644
+--- a/src/Adapter/SqlManager/CommandHandler/AddSqlRequestHandler.php
++++ b/src/Adapter/SqlManager/CommandHandler/AddSqlRequestHandler.php
+@@ -39,7 +39,7 @@
+  *
+  * @internal
+  */
+-final class AddSqlRequestHandler implements AddSqlRequestHandlerInterface
++final class AddSqlRequestHandler extends AbstractSqlRequestHandler implements AddSqlRequestHandlerInterface
+ {
+     /**
+      * {@inheritdoc}
+@@ -49,6 +49,8 @@ final class AddSqlRequestHandler implements AddSqlRequestHandlerInterface
+      */
+     public function handle(AddSqlRequestCommand $command)
+     {
++        $this->assertSqlQueryIsValid($command->getSql());
++
+         try {
+             $entity = new RequestSql();
+             $entity->name = $command->getName();
+diff --git a/src/Adapter/SqlManager/CommandHandler/EditSqlRequestHandler.php b/src/Adapter/SqlManager/CommandHandler/EditSqlRequestHandler.php
+index edbdc9a1d2ac6..424deca9721e7 100644
+--- a/src/Adapter/SqlManager/CommandHandler/EditSqlRequestHandler.php
++++ b/src/Adapter/SqlManager/CommandHandler/EditSqlRequestHandler.php
+@@ -39,7 +39,7 @@
+  *
+  * @internal
+  */
+-final class EditSqlRequestHandler implements EditSqlRequestHandlerInterface
++final class EditSqlRequestHandler extends AbstractSqlRequestHandler implements EditSqlRequestHandlerInterface
+ {
+     /**
+      * {@inheritdoc}
+@@ -52,6 +52,8 @@ final class EditSqlRequestHandler implements EditSqlRequestHandlerInterface
+      */
+     public function handle(EditSqlRequestCommand $command)
+     {
++        $this->assertSqlQueryIsValid($command->getSql());
++
+         try {
+             $entity = new RequestSql($command->getSqlRequestId()->getValue());
+ 
+diff --git a/src/Adapter/SqlManager/SqlQueryValidator.php b/src/Adapter/SqlManager/SqlQueryValidator.php
+index 0d9906485a5da..f5795c70d0ae5 100644
+--- a/src/Adapter/SqlManager/SqlQueryValidator.php
++++ b/src/Adapter/SqlManager/SqlQueryValidator.php
+@@ -84,10 +84,6 @@ private function getErrors(array $sqlErrors)
+         $errors = [];
+ 
+         foreach ($sqlErrors as $key => $sqlError) {
+-            if (false === is_array($sqlError)) {
+-                $sqlError = [];
+-            }
+-
+             if ('checkedFrom' === $key) {
+                 $errors[] = $this->getFromKeywordError($sqlError);
+             } elseif ('checkedSelect' === $key) {
+diff --git a/src/Adapter/SqlManager/SqlRequestFormDataValidator.php b/src/Adapter/SqlManager/SqlRequestFormDataValidator.php
+index 817d9c004e21f..8396d8776cad3 100644
+--- a/src/Adapter/SqlManager/SqlRequestFormDataValidator.php
++++ b/src/Adapter/SqlManager/SqlRequestFormDataValidator.php
+@@ -28,10 +28,20 @@
+ 
+ use RequestSql;
+ 
++@trigger_error(
++    sprintf(
++        '%s is deprecated since version 1.7.7.5 and will be removed in the next major version.',
++        SqlRequestFormDataValidator::class
++    ),
++    E_USER_DEPRECATED
++);
++
+ /**
+  * Class SqlRequestFormDataValidator validates SqlRequest data that is submitted via from.
+  *
+  * @internal
++ *
++ * @deprecated Since 1.7.7.5 and will be removed in the next major.
+  */
+ class SqlRequestFormDataValidator
+ {
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/SqlManagerController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/SqlManagerController.php
+index 82f2bc31bbb1f..62d3bf7885b0f 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/SqlManagerController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/SqlManagerController.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\DatabaseTableFields;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\DatabaseTablesList;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\CannotDeleteSqlRequestException;
++use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\SqlRequestConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\SqlRequestException;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\SqlRequestNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Query\GetDatabaseTableFieldsList;
+@@ -178,12 +179,16 @@ public function createAction(Request $request)
+         $sqlRequestForm = $this->getSqlRequestFormBuilder()->getForm($data);
+         $sqlRequestForm->handleRequest($request);
+ 
+-        $result = $this->getSqlRequestFormHandler()->handle($sqlRequestForm);
++        try {
++            $result = $this->getSqlRequestFormHandler()->handle($sqlRequestForm);
+ 
+-        if (null !== $result->getIdentifiableObjectId()) {
+-            $this->addFlash('success', $this->trans('Successful creation.', 'Admin.Notifications.Success'));
++            if (null !== $result->getIdentifiableObjectId()) {
++                $this->addFlash('success', $this->trans('Successful creation.', 'Admin.Notifications.Success'));
+ 
+-            return $this->redirectToRoute('admin_sql_requests_index');
++                return $this->redirectToRoute('admin_sql_requests_index');
++            }
++        } catch (SqlRequestException $e) {
++            $this->addFlash('error', $this->handleException($e));
+         }
+ 
+         return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/RequestSql/create.html.twig', [
+@@ -218,10 +223,10 @@ public function createAction(Request $request)
+      */
+     public function editAction($sqlRequestId, Request $request)
+     {
+-        try {
+-            $sqlRequestForm = $this->getSqlRequestFormBuilder()->getFormFor($sqlRequestId);
+-            $sqlRequestForm->handleRequest($request);
++        $sqlRequestForm = $this->getSqlRequestFormBuilder()->getFormFor($sqlRequestId);
++        $sqlRequestForm->handleRequest($request);
+ 
++        try {
+             $result = $this->getSqlRequestFormHandler()->handleFor($sqlRequestId, $sqlRequestForm);
+ 
+             if ($result->isSubmitted() && $result->isValid()) {
+@@ -236,6 +241,8 @@ public function editAction($sqlRequestId, Request $request)
+             );
+ 
+             return $this->redirectToRoute('admin_sql_requests_index');
++        } catch (SqlRequestException $e) {
++            $this->addFlash('error', $this->handleException($e));
+         }
+ 
+         return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/RequestSql/edit.html.twig', [
+@@ -273,7 +280,7 @@ public function deleteAction($sqlRequestId)
+ 
+             $this->addFlash('success', $this->trans('Successful deletion', 'Admin.Notifications.Success'));
+         } catch (SqlRequestException $e) {
+-            $this->addFlash('error', $this->handleDeleteException($e));
++            $this->addFlash('error', $this->handleException($e));
+         }
+ 
+         return $this->redirectToRoute('admin_sql_requests_index');
+@@ -306,7 +313,7 @@ public function deleteBulkAction(Request $request)
+                 $this->trans('The selection has been successfully deleted.', 'Admin.Notifications.Success')
+             );
+         } catch (SqlRequestException $e) {
+-            $this->addFlash('error', $this->handleDeleteException($e));
++            $this->addFlash('error', $this->handleException($e));
+         }
+ 
+         return $this->redirectToRoute('admin_sql_requests_index');
+@@ -413,7 +420,7 @@ public function ajaxTableColumnsAction($mySqlTableName)
+     }
+ 
+     /**
+-     * Get request sql repository.
++     * Get request SQL repository.
+      *
+      * @return \PrestaShopBundle\Entity\Repository\RequestSqlRepository
+      */
+@@ -477,13 +484,14 @@ protected function getSqlRequestDataFromRequest(Request $request)
+      *
+      * @return string Error message
+      */
+-    protected function handleDeleteException(SqlRequestException $e)
++    protected function handleException(SqlRequestException $e)
+     {
+         $code = $e->getCode();
+         $type = get_class($e);
+ 
+         $exceptionMessages = [
+             SqlRequestNotFoundException::class => $this->trans('The object cannot be loaded (or found)', 'Admin.Notifications.Error'),
++            SqlRequestConstraintException::class => $e->getMessage(),
+             SqlRequestException::class => $this->trans('An error occurred while deleting the object.', 'Admin.Notifications.Error'),
+         ];
+ 
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormDataProvider.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormDataProvider.php
+index 4a940dae5f685..1a0e3bf79a314 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormDataProvider.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormDataProvider.php
+@@ -38,8 +38,18 @@
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Query\GetSqlRequestForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\ValueObject\SqlRequestId;
+ 
++@trigger_error(
++    sprintf(
++        '%s is deprecated since version 1.7.7.5 and will be removed in the next major version.',
++        SqlRequestFormDataProvider::class
++    ),
++    E_USER_DEPRECATED
++);
++
+ /**
+  * Class RequestSqlFormDataProvider is responsible for getting/saving RequestSql form data.
++ *
++ * @deprecated Since 1.7.7.5 and will be removed in the next major.
+  */
+ class SqlRequestFormDataProvider
+ {
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormHandler.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormHandler.php
+index c88b985659555..d2a592a1dd7cb 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormHandler.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/RequestSql/SqlRequestFormHandler.php
+@@ -30,8 +30,18 @@
+ use Symfony\Component\Form\FormFactoryInterface;
+ use Symfony\Component\Form\FormInterface;
+ 
++@trigger_error(
++    sprintf(
++        '%s is deprecated since version 1.7.7.5 and will be removed in the next major version.',
++        SqlRequestFormHandler::class
++    ),
++    E_USER_DEPRECATED
++);
++
+ /**
+  * Class RequestSqlFormHandler is responsible for creating RequestSql form.
++ *
++ * @deprecated Since 1.7.7.5 and will be removed in the next major.
+  */
+ class SqlRequestFormHandler
+ {
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index b94bf5a8b54af..e608cc7054f4b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -51,6 +51,8 @@ services:
+     arguments:
+         - '@prestashop.adapter.order.amount.updater'
+         - '@prestashop.adapter.order.order_detail.updater'
++        - '@prestashop.adapter.context_state_manager'
++        - '@prestashop.adapter.order.product_quantity.updater'
+     tags:
+       - name: tactician.handler
+         command: PrestaShop\PrestaShop\Core\Domain\Order\Command\ChangeOrderDeliveryAddressCommand
+@@ -264,6 +266,7 @@ services:
+       - '@prestashop.adapter.legacy.configuration'
+       - '@prestashop.adapter.context_state_manager'
+       - '@prestashop.adapter.order.order_detail.updater'
++      - '@prestashop.adapter.order.product.remover'
+ 
+   prestashop.adapter.order.product_quantity.updater:
+     class: PrestaShop\PrestaShop\Adapter\Order\OrderProductQuantityUpdater
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/sql_manager.yml b/src/PrestaShopBundle/Resources/config/services/adapter/sql_manager.yml
+index 544f2652a98ca..6baf1eae76ca2 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/sql_manager.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/sql_manager.yml
+@@ -9,31 +9,34 @@ services:
+         class: 'PrestaShop\PrestaShop\Adapter\SqlManager\SqlRequestFormDataValidator'
+         arguments:
+             - '@prestashop.adapter.sql_manager.sql_query_validator'
++        deprecated: 'The "%service_id% service is deprecated. Use "prestashop.adapter.sql_manager.sql_query_validator" instead'
+ 
+     # Command handlers
+     prestashop.adapter.sql_manager.command_handler.add_request_sql:
+         class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\AddSqlRequestHandler'
+         arguments:
+             - '@prestashop.adapter.sql_manager.sql_query_validator'
++            - '@translator'
+         tags:
+             - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\AddSqlRequestCommand' }
+ 
+     prestashop.adapter.sql_manager.command_handler.edit_request_sql:
+-      class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\EditSqlRequestHandler'
+-      arguments:
+-          - '@prestashop.adapter.sql_manager.sql_query_validator'
+-      tags:
+-          - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\EditSqlRequestCommand' }
++        class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\EditSqlRequestHandler'
++        arguments:
++            - '@prestashop.adapter.sql_manager.sql_query_validator'
++            - '@translator'
++        tags:
++            - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\EditSqlRequestCommand' }
+ 
+     prestashop.adapter.sql_manager.command_handler.delete_request_sql:
+-      class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\DeleteSqlRequestHandler'
+-      tags:
+-          - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\DeleteSqlRequestCommand' }
++        class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\DeleteSqlRequestHandler'
++        tags:
++            - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\DeleteSqlRequestCommand' }
+ 
+     prestashop.adapter.sql_manager.command_handler.bulk_delete_request_sql:
+-      class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\BulkDeleteSqlRequestHandler'
+-      tags:
+-          - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\BulkDeleteSqlRequestCommand' }
++        class: 'PrestaShop\PrestaShop\Adapter\SqlManager\CommandHandler\BulkDeleteSqlRequestHandler'
++        tags:
++            - { name: 'tactician.handler', command: 'PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\BulkDeleteSqlRequestCommand' }
+ 
+     # Query handlers
+     prestashop.adapter.sql_manager.query_handler.get_request_sql_for_editing:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+index 56cb9904499a6..70712135266b4 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+@@ -495,19 +495,21 @@ services:
+             - 'PrestaShopBundle\Form\Admin\Improve\Design\Theme\ShopLogosType'
+             - 'ShopLogo'
+ 
+-  # Entity form handler
++    # Entity form handler
+     prestashop.admin.request_sql.form_handler:
+         class: 'PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\RequestSql\SqlRequestFormHandler'
+         arguments:
+             - '@form.factory'
+             - '@prestashop.adapter.sql_manager.request_sql_form_data_validator'
+             - '@prestashop.bundle.form.admin.configure.advanced_parameters.request_sql.form_data_provider'
++        deprecated: 'The "%service_id% service is deprecated. Use "prestashop.core.form.identifiable_object.sql_request_form_data_handler" instead'
+ 
+     prestashop.bundle.form.admin.configure.advanced_parameters.request_sql.form_data_provider:
+         class: 'PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\RequestSql\SqlRequestFormDataProvider'
+         arguments:
+             - '@prestashop.core.command_bus'
+             - '@prestashop.core.query_bus'
++        deprecated: 'The "%service_id% service is deprecated. Use "prestashop.core.form.identifiable_object.data_provider.sql_request_form_data_provider" instead'
+ 
+     prestashop.admin.tax_options.form_handler:
+         class: 'PrestaShop\PrestaShop\Core\Form\Handler'
+diff --git a/tests/Integration/Behaviour/Features/Context/SqlManagerFeatureContext.php b/tests/Integration/Behaviour/Features/Context/SqlManagerFeatureContext.php
+index d56b8cb018587..03aeb9c7da92e 100644
+--- a/tests/Integration/Behaviour/Features/Context/SqlManagerFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/SqlManagerFeatureContext.php
+@@ -27,16 +27,24 @@
+ namespace Tests\Integration\Behaviour\Features\Context;
+ 
+ use Behat\Gherkin\Node\TableNode;
++use Exception;
++use PHPUnit\Framework\Assert;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\AddSqlRequestCommand;
++use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Command\EditSqlRequestCommand;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\DatabaseTableFields;
++use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Exception\SqlRequestConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\Query\GetDatabaseTableFieldsList;
+ use PrestaShop\PrestaShop\Core\Domain\SqlManagement\ValueObject\DatabaseTableField;
++use PrestaShop\PrestaShop\Core\Domain\SqlManagement\ValueObject\SqlRequestId;
++use RuntimeException;
++use Symfony\Component\HttpFoundation\Request;
++use Tests\Integration\Behaviour\Features\Context\Domain\AbstractDomainFeatureContext;
+ 
+ /**
+  * SqlManagerFeatureContext provides behat steps to perform actions related to prestashop SQL management
+  * and validate returned outputs
+  */
+-class SqlManagerFeatureContext extends AbstractPrestaShopFeatureContext
++class SqlManagerFeatureContext extends AbstractDomainFeatureContext
+ {
+     /**
+      * "When" steps perform actions, and some of them store the latest result
+@@ -46,9 +54,6 @@ class SqlManagerFeatureContext extends AbstractPrestaShopFeatureContext
+      */
+     protected $latestResult;
+ 
+-    /** @var bool */
+-    protected $flagPerformDatabaseCleanHard = false;
+-
+     /**
+      * @When I request the database fields from table :tableName
+      */
+@@ -97,7 +102,7 @@ public function assertStoredSqlRequestCount($count)
+         $realCount = current($realCountResults)['result'];
+ 
+         if ((int) $realCount !== (int) $count) {
+-            throw new \RuntimeException(sprintf('Expects %d sql stored requests, got %d instead', (int) $count, (int) $realCount));
++            throw new RuntimeException(sprintf('Expects %d sql stored requests, got %d instead', (int) $count, (int) $realCount));
+         }
+     }
+ 
+@@ -123,7 +128,7 @@ public function addSqlRequest($sqlRequest, $name)
+     private function assertInstanceOf($expected, $subject)
+     {
+         if (get_class($subject) !== $expected) {
+-            throw new \RuntimeException(sprintf('Expects %s, got %s instead', $expected, $subject));
++            throw new RuntimeException(sprintf('Expects %s, got %s instead', $expected, $subject));
+         }
+     }
+ 
+@@ -140,6 +145,91 @@ private function assertDatabaseFieldsContain(DatabaseTableFields $fields, $expec
+             }
+         }
+ 
+-        throw new \RuntimeException(sprintf('Expected database field %s in given set', $expected));
++        throw new RuntimeException(sprintf('Expected database field %s in given set', $expected));
++    }
++
++    /**
++     * @Given /^I add sql request "(.+)" with the following properties$/
++     */
++    public function addSqlRequestWithProperties(string $sqlQueryReference, TableNode $node): void
++    {
++        $data = $node->getRowsHash();
++
++        try {
++            /** @var SqlRequestId $sqlRequestId */
++            $sqlRequestId = $this->getCommandBus()->handle(
++                new AddSqlRequestCommand(
++                    $data['name'],
++                    $data['sql']
++                )
++            );
++            SharedStorage::getStorage()->set($sqlQueryReference, $sqlRequestId->getValue());
++        } catch (Exception $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Given /^I edit sql request "(.+)" with the following properties$/
++     */
++    public function editSqlRequestWithProperties(string $sqlQueryReference, TableNode $node): void
++    {
++        $sqlRequestId = SharedStorage::getStorage()->get($sqlQueryReference);
++        $data = $node->getRowsHash();
++
++        try {
++            /** @var SqlRequestId $sqlRequestId */
++            $sqlRequestId = $this->getCommandBus()->handle(
++                (new EditSqlRequestCommand(new SqlRequestId((int) $sqlRequestId)))
++                    ->setName($data['name'])
++                    ->setSql($data['sql'])
++            );
++        } catch (Exception $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then the sql request is valid
++     */
++    public function sqlRequestIsValid(): void
++    {
++        $this->assertLastErrorIsNull();
++    }
++
++    /**
++     * @Then I should get an error that only the SELECT request is allowed
++     */
++    public function assertLastErrorIsOnlySelectRequest(): void
++    {
++        $this->assertLastErrorIs(SqlRequestConstraintException::class);
++        Assert::assertEquals(
++            '"SELECT" does not exist.',
++            $this->getLastException()->getMessage()
++        );
++    }
++
++    /**
++     * @Then I should get an error that the SQL request is malformed
++     */
++    public function assertLastErrorIsAMalformedSqlRequest(): void
++    {
++        $this->assertLastErrorIs(SqlRequestConstraintException::class);
++        Assert::assertEquals(
++            'Bad SQL query',
++            $this->getLastException()->getMessage()
++        );
++    }
++
++    /**
++     * @Then /^I should get an error that the table "(.+)" does not exists$/
++     */
++    public function assertLastErrorIsAnUnknownTable(string $tableName): void
++    {
++        $this->assertLastErrorIs(SqlRequestConstraintException::class);
++        Assert::assertEquals(
++            sprintf('The "%s" table does not exist.', $tableName),
++            $this->getLastException()->getMessage()
++        );
+     }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Database/sql_manager.feature b/tests/Integration/Behaviour/Features/Scenario/Database/sql_manager.feature
+index 2c585887e28f4..c564264dafe7d 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Database/sql_manager.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Database/sql_manager.feature
+@@ -1,9 +1,65 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s database
+ @reset-database-before-feature
+-  Feature: SQL Manager
++Feature: SQL Manager
+   PrestaShop allows BO users to manage SQL queries in the Configure > Advanced > Database page
+   As a BO user
+   I must be able to create, save, edit and run SQL queries
+ 
++  Background:
++    Given there is a customer named "John Doe" whose email is "john.doe@prestashop.com"
++
++  Scenario: Create a SELECT request
++    Given I add sql request "sql-request-select" with the following properties
++      | name            | sql request |
++      | sql             | SELECT 1 FROM ps_customer; |
++    Then the sql request is valid
++    Given I edit sql request "sql-request-select" with the following properties
++      | name            | New SQL request |
++      | sql             | SELECT 1 FROM ps_configuration; |
++    Then the sql request is valid
++
++  Scenario: Create an invalid SELECT request
++    Given I add sql request "sql-request-invalid-select" with the following properties
++      | name            | sql request |
++      | sql             | SELECT FROM ps_customer; |
++    Then I should get an error that the SQL request is malformed
++
++  Scenario: Create an SELECT request targetting an unknown table
++    Given I add sql request "sql-request-invalid-select" with the following properties
++      | name            | sql request |
++      | sql             | SELECT * FROM ps_customers; |
++    Then I should get an error that the table "ps_customers" does not exists
++
++  Scenario: Create a UPDATE request
++    Given I add sql request "sql-request-invalid-update" with the following properties
++      | name            | sql request |
++      | sql             | UPDATE ps_customer SET name='test'; |
++    Then I should get an error that only the SELECT request is allowed
++
++  Scenario: Create a DELETE request
++    Given I add sql request "sql-request-invalid-delete" with the following properties
++      | name            | sql request |
++      | sql             | DELETE FROM ps_customer WHERE id=1; |
++    Then I should get an error that only the SELECT request is allowed
++
++  Scenario: Create an INSERT request
++    Given I add sql request "sql-request-invalid-insert" with the following properties
++      | name            | sql request |
++      | sql             | INSERT INTO ps_customer VALUES(NULL, 'test'); |
++    Then I should get an error that only the SELECT request is allowed
++
++  Scenario: Create an ALTER request
++    Given I add sql request "sql-request-invalid-alter" with the following properties
++      | name            | sql request |
++      | sql             | ALTER TABLE ps_customer ADD troufignon BOOLEAN; |
++    Then I should get an error that only the SELECT request is allowed
++
++  Scenario: Create an DROP request
++    Given I add sql request "sql-request-invalid-drop" with the following properties
++      | name            | sql request |
++      | sql             | DROP TABLE ps_customer; |
++    Then I should get an error that only the SELECT request is allowed
++
+   Scenario: Get required database fields
+     When I request the database fields from table carrier
+     Then I should get a set of database fields that contain values:
+@@ -13,5 +69,5 @@
+ 
+   Scenario: Save a SQL request
+     Given there is 0 stored SQL requests
+-    When I add the SQL request "SELECT * FROM carrier" named "select_carriers_count_1"
++    When I add the SQL request "SELECT * FROM ps_carrier" named "select_carriers_count_1"
+     Then there should be 1 stored SQL request
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
+index 51fe2f6763107..27fda015db42b 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
+@@ -1169,3 +1169,298 @@ Feature: Order from Back Office (BO)
+       | total_paid_tax_incl      | 0.00  |
+       | total_paid               | 0.00  |
+       | total_paid_real          | 0.00  |
++
++  Scenario: I have a cart rule that adds a free gift when delivery address is in the USA,
++            when I change this delivery address, the free gift is removed
++
++    Given country "US" is enabled
++    And country "FR" is enabled
++    And there is a product in the catalog named "Product 12345" with a price of 12.0 and 100 items in stock
++    And there is a product in the catalog named "Gift product" with a price of 13.0 and 100 items in stock
++    # Create a cart rule : No cade + no conditions + free gift = demo_6
++    And there is a cart rule named "cartRuleFreeGift" that applies no discount with priority 1, quantity of 100 and quantity per user 100
++    And cart rule "cartRuleFreeGift" has no discount code
++    And cart rule "cartRuleFreeGift" offers a gift product "Gift product"
++    And cart rule "cartRuleFreeGift" is restricted to country "US"
++    # Make an order
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "Product 12345" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    Then order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 25.00 |
++      | total_products_wt        | 26.50 |
++      | total_discounts_tax_excl | 13.00 |
++      | total_discounts_tax_incl | 13.78 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 12.72 |
++      | total_price_tax_excl     | 12.00 |
++    And product "Gift product" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 13.00 |
++      | unit_price_tax_incl      | 13.78 |
++      | unit_price_tax_excl      | 13.00 |
++      | total_price_tax_incl     | 13.78 |
++      | total_price_tax_excl     | 13.00 |
++    When I add new address to customer "testCustomer" with following details:
++      | Address alias    | test-customer-france-address |
++      | First name       | testFirstName                |
++      | Last name        | testLastName                 |
++      | Address          | 36 Avenue des Champs Elysees |
++      | City             | Paris                        |
++      | Country          | France                       |
++      | Postal code      | 75008                        |
++    And I change order "bo_order1" shipping address to "test-customer-france-address"
++    Then order "bo_order1" should have 1 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 0 cart rule
++    And order "bo_order1" should have following details:
++    # There is not tax when a french address is used (in this test context)
++      | total_products           | 12.00 |
++      | total_products_wt        | 12.00 |
++      | total_discounts_tax_excl | 0.0   |
++      | total_discounts_tax_incl | 0.0   |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.0   |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 19.00 |
++      | total_paid               | 19.00 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.00 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 12.00 |
++      | total_price_tax_excl     | 12.00 |
++    When I add new address to customer "testCustomer" with following details:
++      | Address alias    | test-customer-states-address |
++      | First name       | testFirstName                |
++      | Last name        | testLastName                 |
++      | Address          | 36 Avenue des Champs Elysees |
++      | City             | Miami                        |
++      | Country          | United States                |
++      | State            | Florida                      |
++      | Postal code      | 33133                        |
++    And I change order "bo_order1" shipping address to "test-customer-states-address"
++    Then order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 25.00 |
++      | total_products_wt        | 26.50 |
++      | total_discounts_tax_excl | 13.00 |
++      | total_discounts_tax_incl | 13.78 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 12.72 |
++      | total_price_tax_excl     | 12.00 |
++    And product "Gift product" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 13.00 |
++      | unit_price_tax_incl      | 13.78 |
++      | unit_price_tax_excl      | 13.00 |
++      | total_price_tax_incl     | 13.78 |
++      | total_price_tax_excl     | 13.00 |
++
++
++  Scenario: I have a cart rule that adds a free gift when a certain amount is reached,
++            when the amount is not reached anymore (by reducing quantity), the free gift is removed
++
++    Given there is a product in the catalog named "Product 12345" with a price of 12.0 and 100 items in stock
++    And there is a product in the catalog named "Gift product" with a price of 13.0 and 100 items in stock
++    # Create a cart rule : No cade + no conditions + free gift = demo_6
++    And there is a cart rule named "cartRuleFreeGift" that applies no discount with priority 1, quantity of 100 and quantity per user 100
++    And cart rule "cartRuleFreeGift" has no discount code
++    And cart rule "cartRuleFreeGift" offers a gift product "Gift product"
++    And cart rule "cartRuleFreeGift" applies discount only when cart total is above 30.00
++    # Make an order
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 3 products "Product 12345" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    Then order "bo_order1" should have 4 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 49.00 |
++      | total_products_wt        | 51.94 |
++      | total_discounts_tax_excl | 13.00 |
++      | total_discounts_tax_incl | 13.78 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 43.00 |
++      | total_paid_tax_incl      | 45.58 |
++      | total_paid               | 45.58 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 3     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 38.16 |
++      | total_price_tax_excl     | 36.00 |
++    And product "Gift product" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 13.00 |
++      | unit_price_tax_incl      | 13.78 |
++      | unit_price_tax_excl      | 13.00 |
++      | total_price_tax_incl     | 13.78 |
++      | total_price_tax_excl     | 13.00 |
++    When I edit product "Product 12345" to order "bo_order1" with following products details:
++      | amount | 1     |
++      | price  | 12.00 |
++    Then order "bo_order1" should have 1 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 0 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 12.00 |
++      | total_products_wt        | 12.72 |
++      | total_discounts_tax_excl | 0.0   |
++      | total_discounts_tax_incl | 0.0   |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 12.72 |
++      | total_price_tax_excl     | 12.00 |
++    When I edit product "Product 12345" to order "bo_order1" with following products details:
++      | amount | 3 |
++      | price  | 12.00 |
++    Then order "bo_order1" should have 4 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 49.00 |
++      | total_products_wt        | 51.94 |
++      | total_discounts_tax_excl | 13.00 |
++      | total_discounts_tax_incl | 13.78 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 43.00 |
++      | total_paid_tax_incl      | 45.58 |
++      | total_paid               | 45.58 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 3     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 38.16 |
++      | total_price_tax_excl     | 36.00 |
++    And product "Gift product" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 13.00 |
++      | unit_price_tax_incl      | 13.78 |
++      | unit_price_tax_excl      | 13.00 |
++      | total_price_tax_incl     | 13.78 |
++      | total_price_tax_excl     | 13.00 |
++
++  Scenario: I have a cart rule that adds a free gift when a certain amount is reached,
++  when the amount is not reached anymore (by reducing price), the free gift is removed
++
++    Given there is a product in the catalog named "Product 12345" with a price of 12.0 and 100 items in stock
++    And there is a product in the catalog named "Gift product" with a price of 13.0 and 100 items in stock
++    # Create a cart rule : No cade + no conditions + free gift = demo_6
++    And there is a cart rule named "cartRuleFreeGift" that applies no discount with priority 1, quantity of 100 and quantity per user 100
++    And cart rule "cartRuleFreeGift" has no discount code
++    And cart rule "cartRuleFreeGift" offers a gift product "Gift product"
++    And cart rule "cartRuleFreeGift" applies discount only when cart total is above 30.00
++    # Make an order
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "Product 12345" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    Then order "bo_order1" should have 1 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 0 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 12.00 |
++      | total_products_wt        | 12.72 |
++      | total_discounts_tax_excl | 0.00  |
++      | total_discounts_tax_incl | 0.00  |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 12.00 |
++      | unit_price_tax_incl      | 12.72 |
++      | unit_price_tax_excl      | 12.00 |
++      | total_price_tax_incl     | 12.72 |
++      | total_price_tax_excl     | 12.00 |
++    When I edit product "Product 12345" to order "bo_order1" with following products details:
++      | amount | 1 |
++      | price  | 30.00 |
++    Then order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 43.00 |
++      | total_products_wt        | 45.58 |
++      | total_discounts_tax_excl | 13.00 |
++      | total_discounts_tax_incl | 13.78 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 37.00 |
++      | total_paid_tax_incl      | 39.22 |
++      | total_paid               | 39.22 |
++      | total_paid_real          | 0.0   |
++    And product "Product 12345" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 30.00 |
++      | unit_price_tax_incl      | 31.80 |
++      | unit_price_tax_excl      | 30.00 |
++      | total_price_tax_incl     | 31.80 |
++      | total_price_tax_excl     | 30.00 |
++    And product "Gift product" in order "bo_order1" has following details:
++      | product_quantity         | 1     |
++      | product_price            | 13.00 |
++      | unit_price_tax_incl      | 13.78 |
++      | unit_price_tax_excl      | 13.00 |
++      | total_price_tax_incl     | 13.78 |
++      | total_price_tax_excl     | 13.00 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 2dda43f6fecd4..1b04a4602a0a9 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -6,6 +6,9 @@ default:
+             contexts:
+                 - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\SqlManagerFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+         contact:
+             paths:
+                 - %paths.base%/Features/Scenario/Contact
+diff --git a/tests/UI/pages/BO/orders/view.js b/tests/UI/pages/BO/orders/view.js
+index e75c6639fddb6..d105dc9aef82a 100644
+--- a/tests/UI/pages/BO/orders/view.js
++++ b/tests/UI/pages/BO/orders/view.js
+@@ -164,7 +164,7 @@ class Order extends BOBasePage {
+    * @returns {Promise<void>}
+    */
+   async modifyProductPrice(page, row, price) {
+-    await this.dialogListener(page);
++    this.dialogListener(page);
+     await Promise.all([
+       page.click(this.editProductButton(row)),
+       this.waitForVisibleSelector(page, this.editProductPriceInput),
+@@ -172,9 +172,14 @@ class Order extends BOBasePage {
+     await this.setValue(page, this.editProductPriceInput, price);
+     await Promise.all([
+       page.click(this.UpdateProductButton),
+-      this.waitForVisibleSelector(page, this.editProductPriceInput),
++      this.waitForHiddenSelector(page, this.editProductPriceInput),
++    ]);
++
++    await page.waitForTimeout(1000);
++    await Promise.all([
++      this.waitForVisibleSelector(page, this.customerInfoBlock),
++      this.waitForVisibleSelector(page, this.orderProductsTableProductBasePrice(row)),
+     ]);
+-    await this.waitForVisibleSelector(page, this.orderProductsTableProductBasePrice(row));
+   }
+ 
+   /**
+diff --git a/tests/UI/pages/FO/product/index.js b/tests/UI/pages/FO/product/index.js
+index ea603873cd9eb..fc2dcf9eaed68 100644
+--- a/tests/UI/pages/FO/product/index.js
++++ b/tests/UI/pages/FO/product/index.js
+@@ -361,12 +361,6 @@ class Product extends FOBasePage {
+   isDeliveryInformationVisible(page) {
+     return this.elementVisible(page, this.deliveryInformationSpan, 1000);
+   }
+-
+-  /**
+-   * Get product availability label
+-   * @param page {Page} Browser tab
+-   * @returns {Promise<string>}
+-   */
+ }
+ 
+ module.exports = new Product();
+diff --git a/tests/Unit/Adapter/Cart/Comparator/CartProductsComparatorTest.php b/tests/Unit/Adapter/Cart/Comparator/CartProductsComparatorTest.php
+index b059fb4a034b8..beba2949cd975 100644
+--- a/tests/Unit/Adapter/Cart/Comparator/CartProductsComparatorTest.php
++++ b/tests/Unit/Adapter/Cart/Comparator/CartProductsComparatorTest.php
+@@ -52,8 +52,9 @@ public function testGetModifiedProducts(
+     ) {
+         $cart = $this->mockCart($initialProducts, $newProducts);
+         $comparator = new CartProductsComparator($cart);
++        $comparator->setKnownUpdates($knownUpdatedProducts);
+ 
+-        $modifiedProducts = $comparator->getModifiedProducts($knownUpdatedProducts);
++        $modifiedProducts = $comparator->getModifiedProducts();
+         Assert::assertEquals($expectedModifiedProducts, $modifiedProducts);
+     }
+ 
+@@ -265,8 +266,9 @@ public function testGetAdditionalProducts(
+     ) {
+         $cart = $this->mockCart($initialProducts, $newProducts);
+         $comparator = new CartProductsComparator($cart);
++        $comparator->setKnownUpdates($knownUpdatedProducts);
+ 
+-        $modifiedProducts = $comparator->getAdditionalProducts($knownUpdatedProducts);
++        $modifiedProducts = $comparator->getAdditionalProducts();
+         Assert::assertEquals($expectedModifiedProducts, $modifiedProducts);
+     }
+ 
+@@ -306,8 +308,9 @@ public function testGetUpdatedProducts(
+     ) {
+         $cart = $this->mockCart($initialProducts, $newProducts);
+         $comparator = new CartProductsComparator($cart);
++        $comparator->setKnownUpdates($knownUpdatedProducts);
+ 
+-        $modifiedProducts = $comparator->getUpdatedProducts($knownUpdatedProducts);
++        $modifiedProducts = $comparator->getUpdatedProducts();
+         Assert::assertEquals($expectedModifiedProducts, $modifiedProducts);
+     }
+ 

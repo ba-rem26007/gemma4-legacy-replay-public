@@ -1,0 +1,100 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 05c9e6f107fe4..30e1d3eeb155e 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -4913,6 +4913,23 @@ public function isAllProductsInStock($ignoreVirtual = false, $exclusive = false)
+         return true;
+     }
+ 
++    /**
++     * Checks that all products in cart have minimal required quantities
++     *
++     * @return bool
++     */
++    public function checkAllProductsHaveMinimalQuantities()
++    {
++        $productList = $this->getProducts(true);
++        foreach ($productList as $product) {
++            if ($product['minimal_quantity'] > $product['cart_quantity']) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
+     /**
+      * Execute hook displayCarrierList (extraCarrier) and merge them into the $array.
+      *
+diff --git a/classes/checkout/CheckoutPaymentStep.php b/classes/checkout/CheckoutPaymentStep.php
+index 73f82aa148a6e..2fc4b1a3c82c1 100644
+--- a/classes/checkout/CheckoutPaymentStep.php
++++ b/classes/checkout/CheckoutPaymentStep.php
+@@ -46,8 +46,9 @@ public function handleRequest(array $requestParams = array())
+         $cart = $this->getCheckoutSession()->getCart();
+         $allProductsInStock = $cart->isAllProductsInStock();
+         $allProductsExist = $cart->checkAllProductsAreStillAvailableInThisState();
++        $allProductsHaveMinimalQuantity = $cart->checkAllProductsHaveMinimalQuantities();
+ 
+-        if ($allProductsInStock !== true || $allProductsExist !== true) {
++        if ($allProductsInStock !== true || $allProductsExist !== true || $allProductsHaveMinimalQuantity !== true) {
+             $cartShowUrl = $this->context->link->getPageLink(
+                 'cart',
+                 null,
+diff --git a/controllers/front/CartController.php b/controllers/front/CartController.php
+index 8d4afeca62569..a202a6e5d51ab 100644
+--- a/controllers/front/CartController.php
++++ b/controllers/front/CartController.php
+@@ -98,6 +98,13 @@ public function initContent()
+             Tools::redirect('index.php');
+         }
+ 
++        /*
++         * Check that minimal quantity conditions are respected for each product in the cart
++         * (this is to be applied only on page load, not for ajax calls)
++         */
++        if (!Tools::getValue('ajax')) {
++            $this->checkCartProductsMinimalQuantities();
++        }
+         $presenter = new CartPresenter();
+         $presented_cart = $presenter->present($this->context->cart, $shouldSeparateGifts = true);
+ 
+@@ -648,4 +655,26 @@ protected function areProductsAvailable()
+             'Shop.Notifications.Error'
+         );
+     }
++
++    /**
++     * Check that minimal quantity conditions are respected for each product in the cart
++     */
++    private function checkCartProductsMinimalQuantities()
++    {
++        $productList = $this->context->cart->getProducts();
++
++        foreach ($productList as $product) {
++            if ($product['minimal_quantity'] > $product['cart_quantity']) {
++                // display minimal quantity warning error message
++                $this->errors[] = $this->trans(
++                    'The minimum purchase order quantity for the product %product% is %quantity%.',
++                    array(
++                        '%product%' => $product['name'],
++                        '%quantity%' => $product['minimal_quantity'],
++                    ),
++                    'Shop.Notifications.Error'
++                );
++            }
++        }
++    }
+ }
+diff --git a/themes/classic/templates/checkout/_partials/cart-detailed-product-line.tpl b/themes/classic/templates/checkout/_partials/cart-detailed-product-line.tpl
+index ceb6dd26b2d6e..38f5ed50139e7 100644
+--- a/themes/classic/templates/checkout/_partials/cart-detailed-product-line.tpl
++++ b/themes/classic/templates/checkout/_partials/cart-detailed-product-line.tpl
+@@ -129,7 +129,6 @@
+                 type="number"
+                 value="{$product.quantity}"
+                 name="product-quantity-spin"
+-                min="{$product.minimal_quantity}"
+               />
+             {/if}
+           </div>

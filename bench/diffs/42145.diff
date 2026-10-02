@@ -1,0 +1,2214 @@
+diff --git a/src/PrestaShopBundle/ApiPlatform/ExperimentalEndpointsCheckerTrait.php b/src/PrestaShopBundle/ApiPlatform/ExperimentalEndpointsCheckerTrait.php
+new file mode 100644
+index 0000000000000..9cbeb43a72950
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/ExperimentalEndpointsCheckerTrait.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform;
++
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use Throwable;
++
++/**
++ * Shared check for the experimental endpoints feature flag, used by the metadata decorators and the
++ * scopes extractor that filter Admin API operations. The classes using this trait must have a
++ * $featureFlagStateChecker field.
++ */
++trait ExperimentalEndpointsCheckerTrait
++{
++    /**
++     * The services using this check are implied during cache clearing which would fail when the shop is
++     * not installed because the DB config is not set up yet. So we protected the feature flag fetching
++     * in a try/catch and return false (default value) in case of an error.
++     *
++     * @return bool
++     */
++    protected function areExperimentalEndpointsEnabled(): bool
++    {
++        try {
++            return $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
++        } catch (Throwable) {
++            return false;
++        }
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
+index 75c0477caf200..228bb50f9e99c 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
+@@ -100,6 +100,8 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?bool $experimentalOperation = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractScopedOperation.php b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractScopedOperation.php
+index 112c228d3f2c8..c2c06defc568f 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractScopedOperation.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractScopedOperation.php
+@@ -99,6 +99,8 @@ public function __construct(
+         array $scopes = [],
+         ?array $ApiResourceMapping = null,
+         ?bool $experimentalOperation = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+ 
+@@ -117,10 +119,22 @@ public function __construct(
+             $passedArguments['extraProperties']['experimentalOperation'] = $experimentalOperation;
+         }
+ 
++        if (!empty($minVersion)) {
++            $this->checkArgumentAndExtraParameterValidity('minVersion', $minVersion, $passedArguments['extraProperties']);
++            $passedArguments['extraProperties']['minVersion'] = $minVersion;
++        }
++
++        if (!empty($maxVersion)) {
++            $this->checkArgumentAndExtraParameterValidity('maxVersion', $maxVersion, $passedArguments['extraProperties']);
++            $passedArguments['extraProperties']['maxVersion'] = $maxVersion;
++        }
++
+         // Remove custom arguments
+         unset($passedArguments['scopes']);
+         unset($passedArguments['ApiResourceMapping']);
+         unset($passedArguments['experimentalOperation']);
++        unset($passedArguments['minVersion']);
++        unset($passedArguments['maxVersion']);
+ 
+         // Unless especially specified we only handle JSON format by default
+         $passedArguments['formats'] = $formats ?? ['json'];
+@@ -167,6 +181,32 @@ public function withExperimentalOperation(bool $experimentalOperation): static
+         return $self;
+     }
+ 
++    public function getMinVersion(): ?string
++    {
++        return $this->extraProperties['minVersion'] ?? null;
++    }
++
++    public function withMinVersion(string $minVersion): static
++    {
++        $self = clone $this;
++        $self->extraProperties['minVersion'] = $minVersion;
++
++        return $self;
++    }
++
++    public function getMaxVersion(): ?string
++    {
++        return $this->extraProperties['maxVersion'] ?? null;
++    }
++
++    public function withMaxVersion(string $maxVersion): static
++    {
++        $self = clone $this;
++        $self->extraProperties['maxVersion'] = $maxVersion;
++
++        return $self;
++    }
++
+     protected function checkArgumentAndExtraParameterValidity(string $extraParameterName, $constructorParameterValue, array $extraProperties): void
+     {
+         if (!empty($extraProperties[$extraParameterName]) && $extraProperties[$extraParameterName] !== $constructorParameterValue) {
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+index befeb368c7fbe..237f64d55d818 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+@@ -110,6 +110,8 @@ public function __construct(
+         ?array $CQRSCommandMapping = null,
+         ?bool $experimentalOperation = null,
+         ?bool $allowEmptyBody = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
+index 76b65bc9d7063..1a50f7dce4e71 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
+@@ -107,6 +107,8 @@ public function __construct(
+         ?array $CQRSCommandMapping = null,
+         ?bool $experimentalOperation = null,
+         ?bool $allowEmptyBody = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_POST;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
+index 6db575fbddbcf..ca87d2a41f560 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
+@@ -106,6 +106,8 @@ public function __construct(
+         ?array $CQRSCommandMapping = null,
+         ?bool $experimentalOperation = null,
+         ?bool $allowEmptyBody = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_DELETE;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
+index 1c34db7bfd5bc..2e2eb43e7bc4a 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
+@@ -105,6 +105,8 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?bool $experimentalOperation = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
+index 1edd6a40806fd..1683f13b476ce 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
+@@ -107,6 +107,8 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?bool $experimentalOperation = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginate.php
+index db90be001b18a..276370d676281 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginate.php
+@@ -112,6 +112,8 @@ public function __construct(
+         ?bool $experimentalOperation = null,
+         ?string $itemsField = null,
+         ?string $countField = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+index 52ef4bcd4e7f5..ef4db6742003c 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+@@ -108,6 +108,8 @@ public function __construct(
+         ?array $CQRSCommandMapping = null,
+         ?bool $experimentalOperation = null,
+         ?bool $allowEmptyBody = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_PATCH;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+index 7cdc3fb79ac5c..e0d34e16b7c34 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+@@ -109,6 +109,8 @@ public function __construct(
+         ?array $CQRSCommandMapping = null,
+         ?bool $experimentalOperation = null,
+         ?bool $allowEmptyBody = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         // Disable read listener because it is forced when using PUT method, but we don't need it since we rely on CQRS commands/queries
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/PaginatedList.php b/src/PrestaShopBundle/ApiPlatform/Metadata/PaginatedList.php
+index 61386e3923cef..b0dea1d705bbd 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/PaginatedList.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/PaginatedList.php
+@@ -109,6 +109,8 @@ public function __construct(
+         ?string $filtersClass = null,
+         ?array $filtersMapping = null,
+         ?bool $experimentalOperation = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php
+index 312c834a8ada4..c4f7c02613607 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CQRSNotFoundMetadataCollectionFactoryDecorator.php
+@@ -12,10 +12,9 @@
+ use ApiPlatform\Metadata\Operation;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
+-use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use PrestaShopBundle\ApiPlatform\ExperimentalEndpointsCheckerTrait;
+ use Psr\Container\ContainerInterface;
+-use Throwable;
+ 
+ /**
+  * This factory decorates the ApiPlatform default resource factory. It looks into each operation and checks
+@@ -30,6 +29,8 @@
+  */
+ class CQRSNotFoundMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
+ {
++    use ExperimentalEndpointsCheckerTrait;
++
+     public function __construct(
+         private readonly ResourceMetadataCollectionFactoryInterface $decorated,
+         private readonly FeatureFlagStateCheckerInterface $featureFlagStateChecker,
+@@ -43,7 +44,7 @@ public function create(string $resourceClass): ResourceMetadataCollection
+         $resourceMetadataCollection = $this->decorated->create($resourceClass);
+ 
+         // In debug and prod mode we always hide the invalid endpoints, unless the experimental endpoints are forcefully enabled
+-        if ($this->areInvalidEndpointsEnabled()) {
++        if ($this->areExperimentalEndpointsEnabled()) {
+             return $resourceMetadataCollection;
+         }
+ 
+@@ -68,20 +69,4 @@ public function create(string $resourceClass): ResourceMetadataCollection
+ 
+         return $resourceMetadataCollection;
+     }
+-
+-    /**
+-     * This decorator is implied during cache clearing which would fail when the shop is not installed
+-     * because the DB config is not set up yet. So we protected the feature flag fetching in a try/catch
+-     * and return false (default value) in case of an error.
+-     *
+-     * @return bool
+-     */
+-    private function areInvalidEndpointsEnabled(): bool
+-    {
+-        try {
+-            return $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
+-        } catch (Throwable) {
+-            return false;
+-        }
+-    }
+ }
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecorator.php
+new file mode 100644
+index 0000000000000..c6b3f6c082545
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecorator.php
+@@ -0,0 +1,90 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory;
++
++use ApiPlatform\Metadata\ApiResource;
++use ApiPlatform\Metadata\Operation;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use PrestaShop\PrestaShop\Core\Version;
++use PrestaShopBundle\ApiPlatform\ExperimentalEndpointsCheckerTrait;
++
++/**
++ * This factory decorates the ApiPlatform default resource factory. It looks into each operation and checks
++ * if the extra properties minVersion and/or maxVersion are defined, if the running core version is out of the
++ * declared bounds the operation is removed. This means the operation is not visible in Swagger, and it's not
++ * used to generate the api routing, so it's not usable at all and returns a 404.
++ *
++ * The purpose is that the ps_apiresources module can contain endpoint definitions that rely on core fixes only
++ * available since a specific version (e.g. minVersion 9.2.1), the endpoints are then automatically filtered out
++ * on older core versions while the rest of the module's endpoints remain usable.
++ *
++ * Both bounds are inclusive and compared with version_compare, so its semantics apply as-is (note for example
++ * that 9.2.0-beta.1 < 9.2.0). No validation is performed on the version strings.
++ *
++ * Scope extraction is also impacted by this filtering, meaning if a scope is only associated to operations
++ * that are incompatible with the core version it won't be available in both prod mode and debug mode, unless
++ * you enable the related feature flag.
++ *
++ * Note that the core version constant lags behind the actual content of the development branches
++ * (Version::VERSION is only bumped at release time), so on a development branch an endpoint gated on the
++ * next patch version is filtered even though the branch may already contain its required fix: enable the
++ * experimental endpoints feature flag to work with it.
++ */
++class CoreVersionCompatibilityMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
++{
++    use ExperimentalEndpointsCheckerTrait;
++
++    public function __construct(
++        private readonly ResourceMetadataCollectionFactoryInterface $decorated,
++        private readonly FeatureFlagStateCheckerInterface $featureFlagStateChecker,
++        private readonly string $coreVersion = Version::VERSION,
++    ) {
++    }
++
++    public function create(string $resourceClass): ResourceMetadataCollection
++    {
++        // We call the original method since we only want to alter the result of this method.
++        $resourceMetadataCollection = $this->decorated->create($resourceClass);
++
++        // In debug and prod mode we always hide the incompatible endpoints, unless the experimental endpoints are forcefully enabled
++        if ($this->areExperimentalEndpointsEnabled()) {
++            return $resourceMetadataCollection;
++        }
++
++        /** @var ApiResource $resourceMetadata */
++        foreach ($resourceMetadataCollection as $resourceMetadata) {
++            $operations = $resourceMetadata->getOperations();
++            /** @var Operation $operation */
++            foreach ($operations as $key => $operation) {
++                // Single removal criteria, so no need to guard with $operations->has($key) like in
++                // CQRSNotFoundMetadataCollectionFactoryDecorator which has several independent ones
++                if (!$this->isCompatibleWithCoreVersion($operation)) {
++                    $operations->remove($key);
++                }
++            }
++        }
++
++        return $resourceMetadataCollection;
++    }
++
++    private function isCompatibleWithCoreVersion(Operation $operation): bool
++    {
++        $extraProperties = $operation->getExtraProperties();
++        if (!empty($extraProperties['minVersion']) && version_compare($this->coreVersion, $extraProperties['minVersion'], '<')) {
++            return false;
++        }
++        if (!empty($extraProperties['maxVersion']) && version_compare($this->coreVersion, $extraProperties['maxVersion'], '>')) {
++            return false;
++        }
++
++        return true;
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+index 37de34acc2776..d1e2c271892c2 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+@@ -12,9 +12,8 @@
+ use ApiPlatform\Metadata\Operation;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
+-use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+-use Throwable;
++use PrestaShopBundle\ApiPlatform\ExperimentalEndpointsCheckerTrait;
+ 
+ /**
+  * This factory decorates the ApiPlatform default resource factory. It looks into each operation and checks
+@@ -29,6 +28,8 @@
+  */
+ class ExperimentalOperationsMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
+ {
++    use ExperimentalEndpointsCheckerTrait;
++
+     public function __construct(
+         private readonly ResourceMetadataCollectionFactoryInterface $decorated,
+         private readonly bool $isDebug,
+@@ -60,20 +61,4 @@ public function create(string $resourceClass): ResourceMetadataCollection
+ 
+         return $resourceMetadataCollection;
+     }
+-
+-    /**
+-     * This decorator is implied during cache clearing which would fail when the shop is not installed
+-     * because the DB config is not set up yet. So we protected the feature flag fetching in a try/catch
+-     * and return false (default value) in case of an error.
+-     *
+-     * @return bool
+-     */
+-    private function areExperimentalEndpointsEnabled(): bool
+-    {
+-        try {
+-            return $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
+-        } catch (Throwable) {
+-            return false;
+-        }
+-    }
+ }
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/UpdatePosition.php b/src/PrestaShopBundle/ApiPlatform/Metadata/UpdatePosition.php
+index b83484a4be9bc..c12f9146cbbe4 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/UpdatePosition.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/UpdatePosition.php
+@@ -117,6 +117,8 @@ public function __construct(
+         ?bool $experimentalOperation = null,
+         ?string $positionDefinition = null,
+         ?string $parentIdField = null,
++        ?string $minVersion = null,
++        ?string $maxVersion = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_PATCH;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php b/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
+index 192eff4130dfd..742a0a332d4c8 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
++++ b/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
+@@ -14,10 +14,10 @@
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceNameCollectionFactoryInterface;
+ use PrestaShop\PrestaShop\Core\EnvironmentInterface;
+-use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use PrestaShop\PrestaShop\Core\Version;
++use PrestaShopBundle\ApiPlatform\ExperimentalEndpointsCheckerTrait;
+ use Psr\Container\ContainerInterface;
+-use Throwable;
+ 
+ /**
+  * This service manually extracts data from the ApiResource classes to get the scopes associated
+@@ -31,6 +31,8 @@
+  */
+ class ApiResourceScopesExtractor implements ApiResourceScopesExtractorInterface
+ {
++    use ExperimentalEndpointsCheckerTrait;
++
+     public function __construct(
+         private readonly ResourceMetadataCollectionFactoryInterface $resourceMetadataCollectionFactory,
+         private readonly EnvironmentInterface $environment,
+@@ -147,6 +149,10 @@ private function getScopesByResources(ApiResource $resource): array
+                 continue;
+             }
+ 
++            if ($this->skipIncompatibleCoreVersion($operation)) {
++                continue;
++            }
++
+             $extraProperties = $operation->getExtraProperties();
+             if (array_key_exists('scopes', $extraProperties)) {
+                 $operationScopes = $extraProperties['scopes'];
+@@ -172,7 +178,7 @@ private function getScopesByResources(ApiResource $resource): array
+     private function skipCQRSNotFound(Operation $operation): bool
+     {
+         // If experimental endpoints are enabled we don't filter anything
+-        if ($this->areInvalidEndpointsEnabled()) {
++        if ($this->areExperimentalEndpointsEnabled()) {
+             return false;
+         }
+ 
+@@ -191,18 +197,28 @@ private function skipCQRSNotFound(Operation $operation): bool
+     }
+ 
+     /**
+-     * This service is implied during cache clearing which would fail when the shop is not installed
+-     * because the DB config is not set up yet. So we protected the feature flag fetching in a try/catch
+-     * and return false (default value) in case of an error.
++     * Similar filter as in CoreVersionCompatibilityMetadataCollectionFactoryDecorator, operations whose
++     * minVersion/maxVersion extra properties don't match the running core version are skipped.
++     *
++     * @param Operation $operation
+      *
+      * @return bool
+      */
+-    private function areInvalidEndpointsEnabled(): bool
++    private function skipIncompatibleCoreVersion(Operation $operation): bool
+     {
+-        try {
+-            return $this->featureFlagStateChecker->isEnabled(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
+-        } catch (Throwable) {
++        // If experimental endpoints are enabled we don't filter anything
++        if ($this->areExperimentalEndpointsEnabled()) {
+             return false;
+         }
++
++        $extraProperties = $operation->getExtraProperties();
++        if (!empty($extraProperties['minVersion']) && version_compare(Version::VERSION, $extraProperties['minVersion'], '<')) {
++            return true;
++        }
++        if (!empty($extraProperties['maxVersion']) && version_compare(Version::VERSION, $extraProperties['maxVersion'], '>')) {
++            return true;
++        }
++
++        return false;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+index ad47e506310a0..ac363758244c4 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+@@ -116,6 +116,13 @@ services:
+       $decorated: '@.inner'
+       $isDebug: '%kernel.debug%'
+ 
++  # This decorator filters out operations whose minVersion/maxVersion extra properties don't match the running core version
++  PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory\CoreVersionCompatibilityMetadataCollectionFactoryDecorator:
++    decorates: api_platform.metadata.resource.metadata_collection_factory
++    autowire: true
++    arguments:
++      $decorated: '@.inner'
++
+   # This decorator allows filtering the available ApiPlatform resources when they are base on non existing CQRS classes
+   PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory\CQRSNotFoundMetadataCollectionFactoryDecorator:
+     # It is important to decorate early in the decoration chain, because InputOutputResourceMetadataCollectionFactory checks the existence
+diff --git a/tests/Integration/ApiPlatform/VersionedEndpointsTest.php b/tests/Integration/ApiPlatform/VersionedEndpointsTest.php
+new file mode 100644
+index 0000000000000..6e806f3c9d4c4
+--- /dev/null
++++ b/tests/Integration/ApiPlatform/VersionedEndpointsTest.php
+@@ -0,0 +1,178 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\ApiPlatform;
++
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagManager;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor;
++use RuntimeException;
++use Symfony\Component\Routing\RouterInterface;
++use Tests\Integration\ApiPlatform\EndPoint\ApiTestCase;
++use Tests\Resources\DatabaseDump;
++
++/**
++ * Tests for CoreVersionCompatibilityMetadataCollectionFactoryDecorator, based on the versioned test
++ * operations declared in Tests\Resources\ApiPlatform\Resources\ApiTest which use extreme min/max
++ * versions (1.0.0 and 99.99.99) so the expected filtering does not depend on the actual core version.
++ *
++ * These tests must be executed independently because their variants have impact on the cache,
++ * that is also why the cache must be cleared before, after the tests and in between them.
++ *
++ * @group isolatedProcess
++ */
++class VersionedEndpointsTest extends ApiTestCase
++{
++    private FeatureFlagManager $featureFlagManager;
++
++    public static function setUpBeforeClass(): void
++    {
++        parent::setUpBeforeClass();
++        DatabaseDump::restoreTables(['feature_flag']);
++        self::clearCache();
++    }
++
++    public static function tearDownAfterClass(): void
++    {
++        parent::tearDownAfterClass();
++        DatabaseDump::restoreTables(['feature_flag']);
++        self::clearCache();
++    }
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++        self::clearCache();
++        $this->featureFlagManager = self::getContainer()->get(FeatureFlagManager::class);
++    }
++
++    /**
++     * Since the variant configurations influence the cache we MUST clear it between each tests,
++     * and clear it again after to avoid impacting the following tests in the suite
++     */
++    protected static function clearCache(): void
++    {
++        $baseCommandLine = 'php -d memory_limit=-1 ' . __DIR__ . '/../../../bin/console ';
++        $commandLine = $baseCommandLine . 'cache:clear --no-warmup --no-interaction --env=test --app-id=admin-api --quiet';
++        $result = 0;
++        system($commandLine, $result);
++        if ($result !== 0) {
++            throw new RuntimeException('Could not clear the cache');
++        }
++    }
++
++    /**
++     * @dataProvider getVersionedEndpoints
++     */
++    public function testVersionedEndpoints(bool $isDebug, bool $forceExperimentalEndpoints, string $endpointUrl, string $endpointScope, bool $expectedAvailable): void
++    {
++        // Boot kernel with appropriate configuration, exceptionally we force the environment, so we have
++        // distinct cache and adapted data/behaviour for each use case
++        $kernelOptions = ['debug' => $isDebug];
++
++        // The purpose in this test is not to check the HTTPS protection so we mimic it (especially for prod environment)
++        $defaultClientOptions = [
++            'headers' => [
++                'X_FORWARDED_PROTO' => 'HTTPS',
++            ],
++        ];
++        static::bootKernel($kernelOptions);
++
++        // Update the configuration
++        if ($forceExperimentalEndpoints) {
++            $this->featureFlagManager->enable(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
++        } else {
++            $this->featureFlagManager->disable(FeatureFlagSettings::FEATURE_FLAG_ADMIN_API_EXPERIMENTAL_ENDPOINTS);
++        }
++
++        // The scope of a filtered operation is filtered as well, so it can only be requested with the token when the endpoint is expected available
++        $bearerToken = $this->getBearerToken($expectedAvailable ? [$endpointScope] : [], $kernelOptions, $defaultClientOptions);
++
++        static::createClient($kernelOptions, $defaultClientOptions)->request('GET', $endpointUrl, [
++            'headers' => [
++                'Authorization' => 'Bearer ' . $bearerToken,
++            ],
++        ]);
++
++        // When the operation is compatible with the core version the endpoint works, when it is not it is filtered out so a 404 is returned
++        self::assertResponseStatusCodeSame($expectedAvailable ? 200 : 404);
++
++        // The scope associated to a filtered operation must be filtered from the extracted scopes as well
++        /** @var ApiResourceScopesExtractor $scopesExtractor */
++        $scopesExtractor = static::createClient($kernelOptions)->getContainer()->get(ApiResourceScopesExtractor::class);
++        $resourceScopes = $scopesExtractor->getAllApiResourceScopes();
++        $foundScope = false;
++        foreach ($resourceScopes as $resourceScope) {
++            if (in_array($endpointScope, $resourceScope->getScopes())) {
++                $foundScope = true;
++                break;
++            }
++        }
++        $this->assertEquals($expectedAvailable, $foundScope);
++
++        // A filtered operation must not generate any route at all, the 404 comes from the routing level
++        // (the OpenApi documentation cannot be asserted from this kernel: enable_docs is false for the
++        // admin-api application, the documentation is generated by the admin one based on the same
++        // filtered metadata, see CQRSOpenApiFactoryTest)
++        /** @var RouterInterface $router */
++        $router = static::createClient($kernelOptions)->getContainer()->get('router');
++        $endpointPathTemplate = str_replace('/1', '/{productId}', $endpointUrl);
++        $routeFound = false;
++        foreach ($router->getRouteCollection() as $route) {
++            if (str_starts_with($route->getPath(), $endpointPathTemplate)) {
++                $routeFound = true;
++                break;
++            }
++        }
++        $this->assertEquals($expectedAvailable, $routeFound);
++    }
++
++    public static function getVersionedEndpoints(): iterable
++    {
++        $endpoints = [
++            'minVersion lower than the core version' => ['/test/versioned/min-valid/product/1', 'versioned_min_valid_scope', true],
++            'minVersion higher than the core version' => ['/test/versioned/min-invalid/product/1', 'versioned_min_invalid_scope', false],
++            'maxVersion higher than the core version' => ['/test/versioned/max-valid/product/1', 'versioned_max_valid_scope', true],
++            'maxVersion lower than the core version' => ['/test/versioned/max-invalid/product/1', 'versioned_max_invalid_scope', false],
++            'version range containing the core version' => ['/test/versioned/range-valid/product/1', 'versioned_range_valid_scope', true],
++            'version range not containing the core version' => ['/test/versioned/range-invalid/product/1', 'versioned_range_invalid_scope', false],
++        ];
++
++        foreach ($endpoints as $description => [$endpointUrl, $endpointScope, $compatible]) {
++            // In prod mode with the experimental feature flag disabled, incompatible operations are filtered
++            yield $description . ', debug mode off, force config off => ' . ($compatible ? 'available' : 'filtered') => [
++                false,
++                false,
++                $endpointUrl,
++                $endpointScope,
++                $compatible,
++            ];
++
++            // When the experimental endpoints feature flag is enabled nothing is filtered
++            yield $description . ', debug mode off, force config on => available' => [
++                false,
++                true,
++                $endpointUrl,
++                $endpointScope,
++                true,
++            ];
++
++            // Incompatible operations are filtered in debug mode as well (this case must remain the last one:
++            // it leaves a debug kernel which supports the cache clearing performed in tearDownAfterClass, a
++            // prod kernel would fail on shutdown because its compiled container files have been invalidated
++            // by the feature flag update)
++            yield $description . ', debug mode on, force config off => ' . ($compatible ? 'available' : 'filtered') => [
++                true,
++                false,
++                $endpointUrl,
++                $endpointScope,
++                $compatible,
++            ];
++        }
++    }
++}
+diff --git a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+index 9242317ba07c6..f8f112058352f 100644
+--- a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
++++ b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+@@ -58,6 +58,37 @@ public function testSecuritySchemes(): void
+         }
+     }
+ 
++    public function testVersionedOperationsAreFiltered(): void
++    {
++        /** @var OpenApiFactoryInterface $openApiFactory */
++        $openApiFactory = $this->getContainer()->get(OpenApiFactoryInterface::class);
++        /** @var OpenApi $openApi */
++        $openApi = $openApiFactory->__invoke();
++
++        // The core version compatibility filtering applies in debug mode as well (unless the experimental
++        // endpoints feature flag is enabled), so the versioned test operations incompatible with the core
++        // version are absent from the OpenApi documentation while the compatible ones are present (this
++        // also validates that the minVersion/maxVersion extra properties don't break the OpenApi generation,
++        // the full filtering behaviour is asserted in Tests\Integration\ApiPlatform\VersionedEndpointsTest)
++        $compatiblePaths = [
++            '/test/versioned/min-valid/product/{productId}',
++            '/test/versioned/max-valid/product/{productId}',
++            '/test/versioned/range-valid/product/{productId}',
++        ];
++        foreach ($compatiblePaths as $compatiblePath) {
++            $this->assertNotNull($openApi->getPaths()->getPath($compatiblePath), sprintf('Path %s not found in the OpenApi documentation', $compatiblePath));
++        }
++
++        $incompatiblePaths = [
++            '/test/versioned/min-invalid/product/{productId}',
++            '/test/versioned/max-invalid/product/{productId}',
++            '/test/versioned/range-invalid/product/{productId}',
++        ];
++        foreach ($incompatiblePaths as $incompatiblePath) {
++            $this->assertNull($openApi->getPaths()->getPath($incompatiblePath), sprintf('Path %s should have been filtered from the OpenApi documentation', $incompatiblePath));
++        }
++    }
++
+     /**
+      * @dataProvider provideEndpointScopes
+      */
+diff --git a/tests/Resources/ApiPlatform/Resources/ApiTest.php b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+index 90688127495b2..5550056f290cf 100644
+--- a/tests/Resources/ApiPlatform/Resources/ApiTest.php
++++ b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+@@ -58,6 +58,51 @@
+             scopes: ['filtered_grid_factory_scope'],
+             gridDataFactory: 'grid_factory_service_not_found',
+         ),
++        // Versioned operations with extreme min/max versions so the expected filtering does not depend on the actual core version
++        new CQRSGet(
++            uriTemplate: '/test/versioned/min-valid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_min_valid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            minVersion: '1.0.0',
++        ),
++        new CQRSGet(
++            uriTemplate: '/test/versioned/min-invalid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_min_invalid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            minVersion: '99.99.99',
++        ),
++        new CQRSGet(
++            uriTemplate: '/test/versioned/max-valid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_max_valid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            maxVersion: '99.99.99',
++        ),
++        new CQRSGet(
++            uriTemplate: '/test/versioned/max-invalid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_max_invalid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            maxVersion: '1.0.0',
++        ),
++        new CQRSGet(
++            uriTemplate: '/test/versioned/range-valid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_range_valid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            minVersion: '1.0.0',
++            maxVersion: '99.99.99',
++        ),
++        new CQRSGet(
++            uriTemplate: '/test/versioned/range-invalid/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['versioned_range_invalid_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            minVersion: '99.0.0',
++            maxVersion: '99.99.99',
++        ),
+     ],
+ )]
+ class ApiTest
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+index 90c54d5105f1d..d7b9aa54c24e0 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+@@ -597,4 +597,112 @@ public function testAllowEmptyBody(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property allowEmptyBody and a allowEmptyBody argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSCommand();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSCommand(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSCommand(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSCommand(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCommand(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSCommand();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSCommand(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSCommand(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSCommand(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCommand(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+index f0954c1c4a68c..9e84235db41a7 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+@@ -451,4 +451,112 @@ public function testAllowEmptyBody(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property allowEmptyBody and a allowEmptyBody argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSCreate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSCreate(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSCreate(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSCreate(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCreate(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSCreate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSCreate(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSCreate(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSCreate(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCreate(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
+index 211f02ca2c87f..ab65b33dff95b 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
+@@ -379,4 +379,112 @@ public function testAllowEmptyBody(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property allowEmptyBody and a allowEmptyBody argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSDelete();
++        $this->assertEquals(['allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSDelete(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSDelete(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSDelete(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0', 'allowEmptyBody' => true], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSDelete(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSDelete();
++        $this->assertEquals(['allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSDelete(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSDelete(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSDelete(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0', 'allowEmptyBody' => true], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0', 'allowEmptyBody' => true], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSDelete(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
+index 3ac7a38162b8d..0beaf0decc1e0 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
+@@ -354,4 +354,112 @@ public function testExperimentalOperation(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSGetCollection();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSGetCollection(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSGetCollection(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSGetCollection(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSGetCollection(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSGetCollection();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSGetCollection(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSGetCollection(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSGetCollection(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSGetCollection(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
+index bc87dbe813693..7378762bdd4c8 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
+@@ -354,4 +354,112 @@ public function testExperimentalOperation(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSGet();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSGet(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSGet(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSGet(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSGet(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSGet();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSGet(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSGet(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSGet(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSGet(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginateTest.php
+index 5d1bec48d4d31..1b0793ef55846 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPaginateTest.php
+@@ -576,4 +576,112 @@ public function testExperimentalOperation(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSPaginate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSPaginate(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSPaginate(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSPaginate(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSPaginate(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSPaginate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSPaginate(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSPaginate(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSPaginate(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSPaginate(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+index 59d54584f8f8f..fd5edea42c6a7 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+@@ -458,4 +458,112 @@ public function testAllowEmptyBody(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property allowEmptyBody and a allowEmptyBody argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSPartialUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSPartialUpdate(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSPartialUpdate(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSPartialUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSPartialUpdate(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSPartialUpdate(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+index 6d7f820b467f3..0b9b9c5fb1bdf 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+@@ -454,4 +454,112 @@ public function testAllowEmptyBody(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property allowEmptyBody and a allowEmptyBody argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new CQRSUpdate(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSUpdate(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSUpdate(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSUpdate(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new CQRSUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new CQRSUpdate(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new CQRSUpdate(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new CQRSUpdate(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSUpdate(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/PaginatedListTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/PaginatedListTest.php
+index 3f4895ef15027..864626e08d32e 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/PaginatedListTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/PaginatedListTest.php
+@@ -375,4 +375,112 @@ public function testExperimentalOperation(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new PaginatedList();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new PaginatedList(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new PaginatedList(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new PaginatedList(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new PaginatedList(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new PaginatedList();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new PaginatedList(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new PaginatedList(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new PaginatedList(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new PaginatedList(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecoratorTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecoratorTest.php
+new file mode 100644
+index 0000000000000..51a370e4dacaa
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/CoreVersionCompatibilityMetadataCollectionFactoryDecoratorTest.php
+@@ -0,0 +1,149 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory;
++
++use ApiPlatform\Metadata\ApiResource;
++use ApiPlatform\Metadata\Operations;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\FeatureFlag\DisabledFeatureFlagStateChecker;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSGet;
++use PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory\CoreVersionCompatibilityMetadataCollectionFactoryDecorator;
++use RuntimeException;
++
++class CoreVersionCompatibilityMetadataCollectionFactoryDecoratorTest extends TestCase
++{
++    private const CORE_VERSION = '9.2.0';
++
++    private const EXPECTED_KEPT_OPERATIONS = [
++        'no_version',
++        'min_below',
++        'min_equal',
++        'max_above',
++        'max_equal',
++        'range_in',
++    ];
++
++    // All the operations in their declaration order, expected when the filtering is bypassed
++    private const ALL_OPERATIONS = [
++        'no_version',
++        'min_below',
++        'min_equal',
++        'min_above',
++        'max_above',
++        'max_equal',
++        'max_below',
++        'range_in',
++        'range_out',
++    ];
++
++    public function testIncompatibleOperationsAreFiltered(): void
++    {
++        $decorator = new CoreVersionCompatibilityMetadataCollectionFactoryDecorator(
++            $this->buildDecoratedFactory(),
++            new DisabledFeatureFlagStateChecker(),
++            self::CORE_VERSION,
++        );
++
++        $this->assertEquals(self::EXPECTED_KEPT_OPERATIONS, $this->getOperationNames($decorator->create('resourceClass')));
++    }
++
++    public function testEnabledExperimentalEndpointsFeatureFlagFiltersNothing(): void
++    {
++        $featureFlagStateChecker = $this->createMock(FeatureFlagStateCheckerInterface::class);
++        $featureFlagStateChecker->method('isEnabled')->willReturn(true);
++
++        $decorator = new CoreVersionCompatibilityMetadataCollectionFactoryDecorator(
++            $this->buildDecoratedFactory(),
++            $featureFlagStateChecker,
++            self::CORE_VERSION,
++        );
++
++        $this->assertEquals(self::ALL_OPERATIONS, $this->getOperationNames($decorator->create('resourceClass')));
++    }
++
++    public function testThrowingFeatureFlagCheckerStillFilters(): void
++    {
++        // The feature flag may not be readable during cache warmup on a not installed shop, in which case
++        // the flag is considered disabled and the filtering is active
++        $featureFlagStateChecker = $this->createMock(FeatureFlagStateCheckerInterface::class);
++        $featureFlagStateChecker->method('isEnabled')->willThrowException(new RuntimeException('DB is not set up'));
++
++        $decorator = new CoreVersionCompatibilityMetadataCollectionFactoryDecorator(
++            $this->buildDecoratedFactory(),
++            $featureFlagStateChecker,
++            self::CORE_VERSION,
++        );
++
++        $this->assertEquals(self::EXPECTED_KEPT_OPERATIONS, $this->getOperationNames($decorator->create('resourceClass')));
++    }
++
++    public function testMalformedVersionStringBehavesLikeVersionCompare(): void
++    {
++        // Version strings are not validated, version_compare semantics apply as-is: an unknown
++        // string part is considered lower than any numeric part, so such a minVersion never filters
++        // while such a maxVersion always does
++        $collection = new ResourceMetadataCollection('resourceClass', [
++            (new ApiResource())->withOperations(new Operations([
++                'malformed_min' => new CQRSGet(uriTemplate: '/malformed/min', minVersion: 'not-a-version'),
++                'malformed_max' => new CQRSGet(uriTemplate: '/malformed/max', maxVersion: 'not-a-version'),
++            ])),
++        ]);
++        $decoratedFactory = $this->createMock(ResourceMetadataCollectionFactoryInterface::class);
++        $decoratedFactory->method('create')->willReturn($collection);
++
++        $decorator = new CoreVersionCompatibilityMetadataCollectionFactoryDecorator(
++            $decoratedFactory,
++            new DisabledFeatureFlagStateChecker(),
++            self::CORE_VERSION,
++        );
++
++        $this->assertEquals(['malformed_min'], $this->getOperationNames($decorator->create('resourceClass')));
++    }
++
++    private function buildDecoratedFactory(): ResourceMetadataCollectionFactoryInterface
++    {
++        $collection = new ResourceMetadataCollection('resourceClass', [
++            (new ApiResource())->withOperations(new Operations([
++                'no_version' => new CQRSGet(uriTemplate: '/no-version'),
++                'min_below' => new CQRSGet(uriTemplate: '/min-below', minVersion: '1.0.0'),
++                'min_equal' => new CQRSGet(uriTemplate: '/min-equal', minVersion: self::CORE_VERSION),
++                'min_above' => new CQRSGet(uriTemplate: '/min-above', minVersion: '99.99.99'),
++                'max_above' => new CQRSGet(uriTemplate: '/max-above', maxVersion: '99.99.99'),
++                'max_equal' => new CQRSGet(uriTemplate: '/max-equal', maxVersion: self::CORE_VERSION),
++                'max_below' => new CQRSGet(uriTemplate: '/max-below', maxVersion: '1.0.0'),
++                'range_in' => new CQRSGet(uriTemplate: '/range-in', minVersion: '1.0.0', maxVersion: '99.99.99'),
++                'range_out' => new CQRSGet(uriTemplate: '/range-out', minVersion: '98.0.0', maxVersion: '99.99.99'),
++            ])),
++        ]);
++
++        $decoratedFactory = $this->createMock(ResourceMetadataCollectionFactoryInterface::class);
++        $decoratedFactory->method('create')->willReturn($collection);
++
++        return $decoratedFactory;
++    }
++
++    /**
++     * @return string[]
++     */
++    private function getOperationNames(ResourceMetadataCollection $resourceMetadataCollection): array
++    {
++        $operationNames = [];
++        /** @var ApiResource $resourceMetadata */
++        foreach ($resourceMetadataCollection as $resourceMetadata) {
++            foreach ($resourceMetadata->getOperations() as $operationName => $operation) {
++                $operationNames[] = $operationName;
++            }
++        }
++
++        return $operationNames;
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/UpdatePositionTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/UpdatePositionTest.php
+index 9b624c4ca5048..20f104a85f0ab 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/UpdatePositionTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/UpdatePositionTest.php
+@@ -334,4 +334,112 @@ public function testExperimentalOperation(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testMinVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new UpdatePosition();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMinVersion());
++
++        // minVersion parameter in constructor
++        $operation = new UpdatePosition(
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new UpdatePosition(
++            extraProperties: ['minVersion' => '9.2.0']
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Extra properties AND minVersion parameters in constructor, no conflict when values are equal
++        $operation = new UpdatePosition(
++            extraProperties: ['minVersion' => '9.2.0'],
++            minVersion: '9.2.0',
++        );
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMinVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['minVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMinVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['minVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMinVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new UpdatePosition(
++                extraProperties: ['minVersion' => '9.2.0'],
++                minVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property minVersion and a minVersion argument that are different is invalid', $caughtException->getMessage());
++    }
++
++    public function testMaxVersion(): void
++    {
++        // Default value is null (no extra property added)
++        $operation = new UpdatePosition();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertNull($operation->getMaxVersion());
++
++        // maxVersion parameter in constructor
++        $operation = new UpdatePosition(
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties parameter in constructor
++        $operation = new UpdatePosition(
++            extraProperties: ['maxVersion' => '9.2.0']
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Extra properties AND maxVersion parameters in constructor, no conflict when values are equal
++        $operation = new UpdatePosition(
++            extraProperties: ['maxVersion' => '9.2.0'],
++            maxVersion: '9.2.0',
++        );
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withMaxVersion('9.3.0');
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['maxVersion' => '9.3.0'], $operation2->getExtraProperties());
++        $this->assertEquals('9.3.0', $operation2->getMaxVersion());
++        // Initial operation not modified of course
++        $this->assertEquals(['maxVersion' => '9.2.0'], $operation->getExtraProperties());
++        $this->assertEquals('9.2.0', $operation->getMaxVersion());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new UpdatePosition(
++                extraProperties: ['maxVersion' => '9.2.0'],
++                maxVersion: '9.2.1',
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property maxVersion and a maxVersion argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
+index 11e8527e6331b..fcee1a26d937c 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
+@@ -35,7 +35,8 @@ public function testGetAllResourceScopes(): void
+         $resourceScopes = $scopesExtractor->getAllApiResourceScopes();
+ 
+         $expectedResourceScopes = [
+-            ApiResourceScopes::createCoreScopes(['hook_read', 'hook_write']),
++            // The operation associated to hook_versioned_filtered has a minVersion higher than the core version, so it is filtered out
++            ApiResourceScopes::createCoreScopes(['hook_read', 'hook_versioned_kept', 'hook_write']),
+             ApiResourceScopes::createModuleScopes(['api_client_read'], 'fake_module'),
+             ApiResourceScopes::createModuleScopes(['customer_group_read'], 'disabled_fake_module'),
+         ];
+@@ -48,7 +49,8 @@ public function testGetEnabledResourceScopes(): void
+         $resourceScopes = $scopesExtractor->getEnabledApiResourceScopes();
+ 
+         $expectedResourceScopes = [
+-            ApiResourceScopes::createCoreScopes(['hook_read', 'hook_write']),
++            // The operation associated to hook_versioned_filtered has a minVersion higher than the core version, so it is filtered out
++            ApiResourceScopes::createCoreScopes(['hook_read', 'hook_versioned_kept', 'hook_write']),
+             ApiResourceScopes::createModuleScopes(['api_client_read'], 'fake_module'),
+         ];
+         $this->assertEquals($expectedResourceScopes, $resourceScopes);
+diff --git a/tests/Unit/Resources/api_platform/fake_core_resources/src/PrestaShopBundle/ApiPlatform/Resources/Hook.php b/tests/Unit/Resources/api_platform/fake_core_resources/src/PrestaShopBundle/ApiPlatform/Resources/Hook.php
+index 547ab52ed9df4..2f0c394ddf8f6 100644
+--- a/tests/Unit/Resources/api_platform/fake_core_resources/src/PrestaShopBundle/ApiPlatform/Resources/Hook.php
++++ b/tests/Unit/Resources/api_platform/fake_core_resources/src/PrestaShopBundle/ApiPlatform/Resources/Hook.php
+@@ -38,6 +38,28 @@
+                 'scopes' => ['hook_read'],
+             ]
+         ),
++        new Get(
++            uriTemplate: '/hook-versioned-kept/{id}',
++            requirements: ['id' => '\d+'],
++            exceptionToStatus: [HookNotFoundException::class => 404],
++            provider: QueryProvider::class,
++            extraProperties: [
++                'query' => GetHook::class,
++                'scopes' => ['hook_versioned_kept'],
++                'minVersion' => '1.0.0',
++            ]
++        ),
++        new Get(
++            uriTemplate: '/hook-versioned-filtered/{id}',
++            requirements: ['id' => '\d+'],
++            exceptionToStatus: [HookNotFoundException::class => 404],
++            provider: QueryProvider::class,
++            extraProperties: [
++                'query' => GetHook::class,
++                'scopes' => ['hook_versioned_filtered'],
++                'minVersion' => '99.99.99',
++            ]
++        ),
+     ],
+ )]
+ class Hook

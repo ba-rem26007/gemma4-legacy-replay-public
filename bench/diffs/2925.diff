@@ -1,0 +1,85 @@
+diff --git a/classes/Media.php b/classes/Media.php
+index b302fac692b5e..0932e40916c4c 100644
+--- a/classes/Media.php
++++ b/classes/Media.php
+@@ -78,6 +78,11 @@ class MediaCore
+ 	 */
+ 	protected static $inline_script_src = array();
+ 
++	/**
++	 * @var string pattern used in packJSinHTML
++	 */
++	public static $pattern_js = '#\s*(<\s*script(?:\s[^>]*(?:javascript)[^>]*|)+>)(.*)(<\s*/script\s*[^>]*>)\s*#Uims';
++
+ 	public static function minifyHTML($html_content)
+ 	{
+ 		if (strlen($html_content) > 0)
+@@ -119,7 +124,7 @@ public static function packJSinHTML($html_content)
+ 		{
+ 			$html_content_copy = $html_content;
+ 			$html_content = preg_replace_callback(
+-				'/\\s*(<script\\b[^>]*?>)([\\s\\S]*?)(<\\/script>)\\s*/i',
++				Media::$pattern_js,
+ 				array('Media', 'packJSinHTMLpregCallback'),
+ 				$html_content,
+ 				Media::getBackTrackLimit());
+@@ -794,7 +799,7 @@ public static function deferInlineScripts($output)
+ 						Context::getContext()->controller->addJS($src);
+ 				}
+ 			}
+-		$output = preg_replace_callback('/<script[^>]*>(.*)<\s*\/script\s*[^>]*>/Uims', array('Media', 'deferScript'), $output);
++		$output = preg_replace_callback(Media::$pattern_js, array('Media', 'deferScript'), $output);
+ 		return $output;
+ 	}
+ 
+@@ -815,11 +820,11 @@ public static function deferScript($matches)
+ 		if (isset($matches[0]))
+ 			$original = trim($matches[0]);
+ 
+-		if (isset($matches[1]))
+-			$inline = trim($matches[1]);
++		if (isset($matches[2]))
++			$inline = trim($matches[2]);
+ 
+ 		/* This is an inline script, add its content to inline scripts stack then remove it from content */
+-		if (!empty($inline) && preg_match('/<\s*[\/]script[^>]*>/ims', $original) !== false && Media::$inline_script[] = $inline)
++		if (!empty($inline) && preg_match(Media::$pattern_js, $original) !== false && Media::$inline_script[] = $inline)
+ 			return '';
+ 
+ 		/* This is an external script, if it already belongs to js_files then remove it from content */
+diff --git a/tests/Integration/classes/MediaCoreTest.php b/tests/Integration/classes/MediaCoreTest.php
+index b7ff34693ed3a..749efd26ee956 100644
+--- a/tests/Integration/classes/MediaCoreTest.php
++++ b/tests/Integration/classes/MediaCoreTest.php
+@@ -38,4 +38,31 @@ public function testCorrectJQueryNoConflictURL()
+         $result = Media::getJqueryPath('1.11');
+         $this->assertEquals(true, in_array('http://'.$domain.__PS_BASE_URI__.'js/jquery/jquery.noConflict.php?version=1.11', $result));
+     }
++
++	public function isJsInputsProvider()
++	{
++		return array(
++			array('<script>test 1</script>', '<script>/* <![CDATA[ */;test 1;/* ]]> */</script>'),
++			array('<script type="text/javascript">test 2</script>', '<script type="text/javascript">/* <![CDATA[ */;test 2;/* ]]> */</script>'),
++			array('<script type="javascript">test 3</script>', '<script type="javascript">/* <![CDATA[ */;test 3;/* ]]> */</script>'),
++			array('<script type= "javascript" nonsense>test 4</script>', '<script type= "javascript" nonsense>/* <![CDATA[ */;test 4;/* ]]> */</script>'),
++			array('<script language="JavaScript" type="text/javascript">test 5</script>', '<script language="JavaScript" type="text/javascript">/* <![CDATA[ */;test 5;/* ]]> */</script>'),
++			array('<script class="myJS" type="text/javascript">test 6</script>', '<script class="myJS" type="text/javascript">/* <![CDATA[ */;test 6;/* ]]> */</script>'),
++			array('<scripttype="text/javascript"> test 7</script>', '<scripttype="text/javascript"> test 7</script>'),
++			array('<script type="application/javascript">test 8</script>', '<script type="application/javascript">/* <![CDATA[ */;test 8;/* ]]> */</script>'),
++			array('<script type=\'application/javascript\'>test 9</script>', '<script type=\'application/javascript\'>/* <![CDATA[ */;test 9;/* ]]> */</script>'),
++			array('<script type=\'text/javascript\'>test 10</script>', '<script type=\'text/javascript\'>/* <![CDATA[ */;test 10;/* ]]> */</script>'),
++			array('<script type=\'javascript\'>test 11</script>', '<script type=\'javascript\'>/* <![CDATA[ */;test 11;/* ]]> */</script>'),
++			array('<script type="application/ld+json">{"@context": http://schema.org","@type": "Product","name": "[the name of the product]","aggregateRating": {"@type": "AggregateRating","ratingValue": "[rating]","reviewCount": "[number of reviews]"}}</script>', '<script type="application/ld+json">{"@context": http://schema.org","@type": "Product","name": "[the name of the product]","aggregateRating": {"@type": "AggregateRating","ratingValue": "[rating]","reviewCount": "[number of reviews]"}}</script>'),
++		);
++	}
++
++	/**
++	 * @dataProvider isJsInputsProvider
++	 */
++	public function testPackJSinHTML($input, $output)
++	{
++		$return = Media::packJSinHTML($input);
++		$this->assertEquals($output, $return, 'packJSinHTML failed for data input='.$input);
++	}
+ }

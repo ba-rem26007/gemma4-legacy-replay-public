@@ -1,0 +1,71 @@
+diff --git a/controllers/admin/AdminTaxRulesGroupController.php b/controllers/admin/AdminTaxRulesGroupController.php
+index ca6fe33701567..668ed8b464f50 100644
+--- a/controllers/admin/AdminTaxRulesGroupController.php
++++ b/controllers/admin/AdminTaxRulesGroupController.php
+@@ -487,7 +487,17 @@ protected function processCreateRule()
+ 
+     protected function processBulkDeleteTaxRules()
+     {
+-        $this->deleteTaxRule(Tools::getValue('tax_ruleBox'));
++        // WHY: the bulk "Delete" action can reach this handler with no tax_ruleBox in the request
++        // (e.g. the form is submitted without any row checked). Tools::getValue() then returns false,
++        // which violated the array type hint of deleteTaxRule() and threw a TypeError. With nothing
++        // selected there is nothing to delete, so bail out instead of reporting a false success.
++        // @see https://github.com/PrestaShop/PrestaShop/issues/31351
++        $taxRuleBox = Tools::getValue('tax_ruleBox');
++        if (!is_array($taxRuleBox) || empty($taxRuleBox)) {
++            return;
++        }
++
++        $this->deleteTaxRule($taxRuleBox);
+     }
+ 
+     protected function processDeleteTaxRule()
+diff --git a/tests/Integration/Classes/AdminTaxRulesGroupBulkDeleteTest.php b/tests/Integration/Classes/AdminTaxRulesGroupBulkDeleteTest.php
+new file mode 100644
+index 0000000000000..71005e1e4d901
+--- /dev/null
++++ b/tests/Integration/Classes/AdminTaxRulesGroupBulkDeleteTest.php
+@@ -0,0 +1,42 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Classes;
++
++use AdminTaxRulesGroupController;
++use PHPUnit\Framework\TestCase;
++use ReflectionClass;
++use ReflectionMethod;
++
++/**
++ * The "Delete" bulk action on the tax rules of a tax rules group must not crash when it is
++ * triggered with no rule selected: tax_ruleBox is then absent from the request and
++ * Tools::getValue() returns false, which used to be passed straight into
++ * AdminTaxRulesGroupController::deleteTaxRule(array $id_tax_rule_list) and threw a TypeError.
++ *
++ * @see https://github.com/PrestaShop/PrestaShop/issues/31351
++ */
++class AdminTaxRulesGroupBulkDeleteTest extends TestCase
++{
++    public function testBulkDeleteWithoutSelectionDoesNotThrowTypeError(): void
++    {
++        // No tax rule checkbox submitted: Tools::getValue('tax_ruleBox') returns false.
++        unset($_POST['tax_ruleBox'], $_GET['tax_ruleBox']);
++
++        $controller = (new ReflectionClass(AdminTaxRulesGroupController::class))->newInstanceWithoutConstructor();
++        $method = new ReflectionMethod($controller, 'processBulkDeleteTaxRules');
++        $method->setAccessible(true);
++
++        // Before the fix this threw a TypeError (false passed to deleteTaxRule(array)); any throw
++        // here fails the test, so the call itself is the assertion. With nothing selected the
++        // handler now returns early without touching deleteTaxRule().
++        $method->invoke($controller);
++
++        $this->addToAssertionCount(1);
++    }
++}

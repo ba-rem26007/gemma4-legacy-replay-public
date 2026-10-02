@@ -1,0 +1,169 @@
+diff --git a/admin-dev/themes/default/js/bundle/product/form.js b/admin-dev/themes/default/js/bundle/product/form.js
+index c0885f94dbf29..a34cd07bb4b7b 100644
+--- a/admin-dev/themes/default/js/bundle/product/form.js
++++ b/admin-dev/themes/default/js/bundle/product/form.js
+@@ -361,11 +361,13 @@ var formCategory = (function() {
+ var featuresCollection = (function() {
+ 
+   var collectionHolder = $('.feature-collection');
++  var maxCollectionChildren = collectionHolder.children('.row').length;
+ 
+   /** Add a feature */
+   function add() {
+-    var newForm = collectionHolder.attr('data-prototype').replace(/__name__/g, collectionHolder.children('.row').length);
++    var newForm = collectionHolder.attr('data-prototype').replace(/__name__/g, maxCollectionChildren);
+     collectionHolder.append(newForm);
++    maxCollectionChildren += 1;
+     prestaShopUiKit.initSelects();
+   }
+ 
+@@ -398,7 +400,7 @@ var featuresCollection = (function() {
+ 
+         if('' !== $(this).val()) {
+           $.ajax({
+-            url: $(this).attr('data-action').replace(/\/\d+(?=\?.*)/, '/' + $(this).val()),
++            url: $(this).attr('data-action').replace(/\/\d+((?=\?.*))?/, '/' + $(this).val()),
+             success: function(response) {
+               $selector.prop('disabled', response.length === 0);
+               $selector.empty();
+@@ -644,7 +646,7 @@ var form = (function() {
+         //update the customization ids
+         if (typeof response.customization_fields_ids != "undefined") {
+           $.each(response.customization_fields_ids, function (k, v) {
+-              $("#form_step6_custom_fields_" + k + "_id_customization_field").val(v);
++            $("#form_step6_custom_fields_" + k + "_id_customization_field").val(v);
+           });
+         }
+ 
+@@ -742,23 +744,23 @@ var form = (function() {
+   }
+ 
+   function updateMissingTranslatedNames() {
+-      var namesDiv = $('#form_step1_names');
+-      var defaultLanguageValue = null;
+-      $("input[id^='form_step1_name_']", namesDiv).each(function(index) {
+-          var value = $(this).val();
+-          // The first language is ALWAYS the employee language
+-          if (0 === index) {
+-              defaultLanguageValue = value;
+-          } else if (0 === value.length) {
+-              $(this).val(defaultLanguageValue);
+-          }
+-      });
++    var namesDiv = $('#form_step1_names');
++    var defaultLanguageValue = null;
++    $("input[id^='form_step1_name_']", namesDiv).each(function(index) {
++      var value = $(this).val();
++      // The first language is ALWAYS the employee language
++      if (0 === index) {
++        defaultLanguageValue = value;
++      } else if (0 === value.length) {
++        $(this).val(defaultLanguageValue);
++      }
++    });
+   }
+ 
+   /**
+    * Depending on the provided params, this method displays or hides
+    * an error panel with the form errors not linked to a specific field.
+-   * 
++   *
+    * @param {string} content The HTML content to display
+    */
+   function updateDisplayGlobalErrors(content) {
+@@ -941,10 +943,12 @@ var form = (function() {
+ var customFieldCollection = (function() {
+ 
+   var collectionHolder = $('ul.customFieldCollection');
++  var maxCollectionChildren = collectionHolder.children().length;
+ 
+   /** Add a custom field */
+   function add() {
+-    var newForm = collectionHolder.attr('data-prototype').replace(/__name__/g, collectionHolder.children().length);
++    var newForm = collectionHolder.attr('data-prototype').replace(/__name__/g, maxCollectionChildren);
++    maxCollectionChildren += 1;
+     collectionHolder.append('<li>' + newForm + '</li>');
+   }
+ 
+diff --git a/src/PrestaShopBundle/Controller/Admin/ProductController.php b/src/PrestaShopBundle/Controller/Admin/ProductController.php
+index 5b6939e506cf7..a0fa45cc5cc1f 100644
+--- a/src/PrestaShopBundle/Controller/Admin/ProductController.php
++++ b/src/PrestaShopBundle/Controller/Admin/ProductController.php
+@@ -466,6 +466,7 @@ public function formAction($id, Request $request)
+                 if ($form->isValid()) {
+                     //define POST values for keeping legacy adminController skills
+                     $_POST = $modelMapper->getModelData($formData, $isMultiShopContext) + $_POST;
++                    $_POST['form'] = $formData;
+                     $_POST['state'] = Product::STATE_SAVED;
+ 
+                     $adminProductController = $adminProductWrapper->getInstance();
+diff --git a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+index 504407980a70d..013f0f1f7eeaf 100644
+--- a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
++++ b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+@@ -26,6 +26,7 @@
+ 
+ namespace PrestaShopBundle\Form\Admin\Product;
+ 
++use PrestaShopBundle\Form\Admin\Feature\ProductFeature;
+ use PrestaShopBundle\Form\Admin\Category\SimpleCategory;
+ use PrestaShopBundle\Form\Admin\Type\ChoiceCategoriesTreeType;
+ use PrestaShopBundle\Form\Admin\Type\CommonAbstractType;
+@@ -210,7 +211,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             //FEATURES & ATTRIBUTES
+             ->add('features', FormType\CollectionType::class, [
+-                'entry_type' => 'PrestaShopBundle\Form\Admin\Feature\ProductFeature',
++                'entry_type' => ProductFeature::class,
+                 'prototype' => true,
+                 'allow_add' => true,
+                 'allow_delete' => true,
+@@ -296,6 +297,27 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 $event->setData($data);
+             }
+ 
++            /*
++             * Remove duplicates to prevent SQL errors.
++             */
++            if (isset($data['features'])) {
++                $ids = [];
++                foreach ($data['features'] as $idx => $feature) {
++                    if (empty($feature['value'])) {
++                        continue;
++                    }
++
++                    $id = sprintf('%d-%d', $feature['feature'], $feature['value']);
++                    if (in_array($id, $ids)) {
++                        unset($data['features'][$idx]);
++                    } else {
++                        $ids[] = $id;
++                    }
++                }
++
++                $event->setData($data);
++            }
++
+             //if product type is pack, check if inputPackItems is not empty
+             if ($data['type_product'] == 1) {
+                 if (!isset($data['inputPackItems']) || empty($data['inputPackItems']['data'])) {
+diff --git a/src/PrestaShopBundle/Model/Product/AdminModelAdapter.php b/src/PrestaShopBundle/Model/Product/AdminModelAdapter.php
+index 52836d62eb01b..d099984dc3bab 100644
+--- a/src/PrestaShopBundle/Model/Product/AdminModelAdapter.php
++++ b/src/PrestaShopBundle/Model/Product/AdminModelAdapter.php
+@@ -871,11 +871,14 @@ private function getFormFeatures(Product $product)
+         foreach ($product->getFeatures() as $featureData) {
+             $itemForm = [
+                 'feature' => $featureData['id_feature'],
+-                'value' => $featureData['id_feature_value'],
++                'value' => null,
+                 'custom_value' => null,
+             ];
+ 
+-            if ($featureData['custom'] == 1) {
++            if ($featureData['custom'] == 0) {
++                // use id_feature_value only if this value isn't custom
++                $itemForm['value'] = $featureData['id_feature_value'];
++            } else {
+                 $customLangs = [];
+                 $featureLangsData = $this->featureAdapter->getFeatureValueLang($featureData['id_feature_value']);
+                 foreach ($featureLangsData as $langData) {

@@ -1,0 +1,215 @@
+diff --git a/.docker/Dockerfile b/.docker/Dockerfile
+index 3f9318ffd76dc..b72ec613c0a1f 100644
+--- a/.docker/Dockerfile
++++ b/.docker/Dockerfile
+@@ -3,9 +3,12 @@ ARG VERSION
+ 
+ FROM prestashop/prestashop-git:$VERSION
+ 
++ARG GROUP_ID
++ARG USER_ID
++
+ # To run files with the same group as your primary user
+-RUN groupmod -g 1000 www-data \
+-  && usermod -u 1000 -g 1000 www-data
++RUN groupmod -g $GROUP_ID www-data \
++  && usermod -u $USER_ID -g $GROUP_ID www-data
+ 
+ COPY .docker/wait-for-it.sh /tmp/
+ COPY .docker/docker_run_git.sh /tmp/
+@@ -20,4 +23,9 @@ RUN chown -R www-data:www-data /var/www/html/var
+ RUN curl -sL https://deb.nodesource.com/setup_14.x | bash -
+ RUN apt install -y nodejs
+ 
++# Install mailutils to make sendmail work
++RUN apt install -y \
++    apt-utils \
++    mailutils
++
+ CMD ["/tmp/docker_run_git.sh"]
+diff --git a/docker-compose.yml b/docker-compose.yml
+index a53adb95623ca..1d632875a0f12 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -22,6 +22,8 @@ services:
+       context: .
+       args:
+         - VERSION=${VERSION:-7.4}
++        - USER_ID=${USER_ID:-1000}
++        - GROUP_ID=${GROUP_ID:-1000}
+     environment:
+       DISABLE_MAKE: ${DISABLE_MAKE:-0}
+       PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
+@@ -40,5 +42,7 @@ services:
+     command: ["/tmp/wait-for-it.sh", "--timeout=60", "--strict", "mysql:3306", "--", "/tmp/docker_run_git.sh"]
+     ports:
+       - "8001:80"
++    depends_on:
++        - mysql
+     volumes:
+       - ./:/var/www/html/:delegated
+diff --git a/tests/README.md b/tests/README.md
+index cc6c0086cad61..0b3fe4530824b 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -28,7 +28,7 @@ We use [Mocha](https://mochajs.org/), [Playwright](https://github.com/microsoft/
+ 
+ ## How to write e2e tests
+ 
+-Please refer to our [documentation](https://devdocs.prestashop.com/1.7/testing/how-to-create-your-own-web-acceptance-tests/).
++Please refer to our [documentation](https://devdocs.prestashop-project.org/1.7/testing/how-to-create-your-own-web-acceptance-tests/).
+ 
+ # Unit tests
+ 
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/02_invoices/03_invoiceOptions/03_enableDisableProductImage.js b/tests/UI/campaigns/functional/BO/02_orders/02_invoices/03_invoiceOptions/03_enableDisableProductImage.js
+index ab7863cad0cd7..8211993dc2798 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/02_invoices/03_invoiceOptions/03_enableDisableProductImage.js
++++ b/tests/UI/campaigns/functional/BO/02_orders/02_invoices/03_invoiceOptions/03_enableDisableProductImage.js
+@@ -64,8 +64,8 @@ describe('BO - Orders - Invoices : Enable/Disable product image in invoices', as
+   });
+ 
+   const tests = [
+-    {args: {action: 'Enable', enable: true, imageNumber: 2}},
+-    {args: {action: 'Disable', enable: false, imageNumber: 1}},
++    {args: {action: 'Enable', enable: true, imageNumber: 1}},
++    {args: {action: 'Disable', enable: false, imageNumber: 0}},
+   ];
+ 
+   tests.forEach((test, index) => {
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/03_enableDisableProductImage.js b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/03_enableDisableProductImage.js
+index 8bde0339b80c2..6164c98fcfc5c 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/03_enableDisableProductImage.js
++++ b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/03_enableDisableProductImage.js
+@@ -65,8 +65,8 @@ describe('BO - Orders - Delivery slips : Enable/Disable product image', async ()
+   });
+ 
+   const tests = [
+-    {args: {action: 'Enable', enable: true, imageNumber: 2}},
+-    {args: {action: 'Disable', enable: false, imageNumber: 1}},
++    {args: {action: 'Enable', enable: true, imageNumber: 1}},
++    {args: {action: 'Disable', enable: false, imageNumber: 0}},
+   ];
+ 
+   tests.forEach((test, index) => {
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/01_filterShoppingCarts.js b/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/01_filterShoppingCarts.js
+index 745a879c5f5d6..9f85cdf6b5e23 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/01_filterShoppingCarts.js
++++ b/tests/UI/campaigns/functional/BO/02_orders/05_shoppingCarts/01_filterShoppingCarts.js
+@@ -112,11 +112,13 @@ describe('BO - Orders - Shopping carts : Filter the Shopping carts table', async
+     await testContext.addContextItem(this, 'testIdentifier', 'changeItemNumberTo300', baseContext);
+ 
+     let paginationNumber = 0;
++
+     if (numberOfShoppingCarts >= 21) {
+       paginationNumber = await shoppingCartsPage.selectPaginationLimit(page, '300');
++      await expect(paginationNumber).to.equal('1');
++    } else {
++      await expect(paginationNumber).to.equal(0);
+     }
+-
+-    await expect(paginationNumber).to.equal('1');
+   });
+ 
+   const tests = [
+diff --git a/tests/UI/campaigns/functional/BO/04_customers/01_customers/08_viewCustomer.js b/tests/UI/campaigns/functional/BO/04_customers/01_customers/08_viewCustomer.js
+index 0984bb797bd81..7acd65c88e636 100644
+--- a/tests/UI/campaigns/functional/BO/04_customers/01_customers/08_viewCustomer.js
++++ b/tests/UI/campaigns/functional/BO/04_customers/01_customers/08_viewCustomer.js
+@@ -418,7 +418,6 @@ describe('BO - Customers - Customers : View information about customer', async (
+       const carts = await viewCustomerPage.getTextFromElement(page, 'Last connections');
+ 
+       expect(carts).to.contains(todayDate);
+-      expect(carts).to.contains('Direct link');
+     });
+ 
+     it('should check groups', async function () {
+diff --git a/tests/UI/package.json b/tests/UI/package.json
+index 1a827d168d9f1..cdbf5c15a7498 100755
+--- a/tests/UI/package.json
++++ b/tests/UI/package.json
+@@ -11,44 +11,60 @@
+     "lint": "eslint --ignore-path .gitignore .",
+ 
+     "// Step identifiers": "Script to check step identifiers",
+-    "check:step-identifiers": "node campaigns/tools/stepIdentifiersChecker.js ",
+-
++    "check:step-identifiers": "node campaigns/tools/stepIdentifiersChecker.js",
+     "// Linkchecker": "Script to run link checker",
+     "check:links": "./node_modules/mocha/bin/mocha campaigns/tools/linkchecker.js",
+-
+-    "// Specific test": "Script to run a specific test/folder",
++    "// Specific test": "Script to run a spdemoecific test/folder",
+     "test:specific": "./node_modules/mocha/bin/mocha --recursive --file campaigns/utils/setup.js campaigns/$TEST_PATH",
+     "test:specific:fast-fail": "./node_modules/mocha/bin/mocha --bail --recursive --file campaigns/utils/setup.js campaigns/$TEST_PATH",
+-
+     "// Sanity": "Scripts to run sanity tests",
+     "test:sanity": "TEST_PATH='sanity/*' npm run test:specific",
+     "test:sanity:fast-fail": "TEST_PATH='sanity/*' npm run test:specific:fast-fail",
+-
+     "// Functional": "Scripts to run functional tests",
+     "test:functional": "TEST_PATH='functional/*' npm run test:specific",
+-
+     "// Functional BO": "Scripts to run functional BO tests",
+     "test:functional:BO": "TEST_PATH='functional/BO/*' npm run test:specific",
+     "test:functional:BO:login": "TEST_PATH='functional/BO/00_login/*' npm run test:specific",
++    "test:functional:BO:dashboard": "TEST_PATH='functional/BO/01_dashboard/*' npm run test:specific",
+     "test:functional:BO:orders": "TEST_PATH='functional/BO/02_orders/*' npm run test:specific",
++    "test:functional:BO:orders:01": "TEST_PATH='functional/BO/02_orders/01*/*' npm run test:specific",
++    "test:functional:BO:orders:01:0-1": "TEST_PATH='functional/BO/02_orders/01*/{0*,1*}' npm run test:specific",
++    "test:functional:BO:orders:01-create-orders": "TEST_PATH='functional/BO/02_orders/01*/createOrders/*' npm run test:specific",
++    "test:functional:BO:orders:01-view-and-edit-order": "TEST_PATH='functional/BO/02_orders/01*/viewAndEditOrder/*' npm run test:specific",
++    "test:functional:BO:orders:02": "TEST_PATH='functional/BO/02_orders/02*/*' npm run test:specific",
++    "test:functional:BO:orders:03-05": "TEST_PATH='functional/BO/02_orders/0[3-5]*/*' npm run test:specific",
+     "test:functional:BO:catalog": "TEST_PATH='functional/BO/03_catalog/*' npm run test:specific",
++    "test:functional:BO:catalog:01-02": "TEST_PATH='functional/BO/03_catalog/0[1-2]*/*' npm run test:specific",
++    "test:functional:BO:catalog:03-04": "TEST_PATH='functional/BO/03_catalog/0[3-4]*/*' npm run test:specific",
++    "test:functional:BO:catalog:05-06": "TEST_PATH='functional/BO/03_catalog/0[5-6]*/*' npm run test:specific",
++    "test:functional:BO:catalog:07-08": "TEST_PATH='functional/BO/03_catalog/0[7-8]*/*' npm run test:specific",
+     "test:functional:BO:customer": "TEST_PATH='functional/BO/04_customers/*' npm run test:specific",
++    "test:functional:BO:customer:01": "TEST_PATH='functional/BO/04_customers/01*/*' npm run test:specific",
++    "test:functional:BO:customer:02-03": "TEST_PATH='functional/BO/04_customers/0[2-3]*/*' npm run test:specific",
+     "test:functional:BO:customer-service": "TEST_PATH='functional/BO/05_customerService/*' npm run test:specific",
+     "test:functional:BO:modules": "TEST_PATH='functional/BO/07_modules/*' npm run test:specific",
+     "test:functional:BO:design": "TEST_PATH='functional/BO/08_design/*' npm run test:specific",
+     "test:functional:BO:shipping": "TEST_PATH='functional/BO/09_shipping/*' npm run test:specific",
+     "test:functional:BO:payment": "TEST_PATH='functional/BO/10_payment/*' npm run test:specific",
+     "test:functional:BO:international": "TEST_PATH='functional/BO/11_international/*' npm run test:specific",
++    "test:functional:BO:international:01": "TEST_PATH='functional/BO/11_international/01*/*' npm run test:specific",
++    "test:functional:BO:international:02": "TEST_PATH='functional/BO/11_international/02*/*' npm run test:specific",
++    "test:functional:BO:international:03-04": "TEST_PATH='functional/BO/11_international/0[3-4]*/*' npm run test:specific",
+     "test:functional:BO:shop-parameters": "TEST_PATH='functional/BO/13_shopParameters/*' npm run test:specific",
++    "test:functional:BO:shop-parameters:01-02": "TEST_PATH='functional/BO/13_shopParameters/0[1-2]*/*' npm run test:specific",
++    "test:functional:BO:shop-parameters:03-04": "TEST_PATH='functional/BO/13_shopParameters/0[3-4]*/*' npm run test:specific",
++    "test:functional:BO:shop-parameters:05-07": "TEST_PATH='functional/BO/13_shopParameters/0[5-7]*/*' npm run test:specific",
+     "test:functional:BO:advanced-parameters": "TEST_PATH='functional/BO/14_advancedParameters/*' npm run test:specific",
++    "test:functional:BO:advanced-parameters:01-06": "TEST_PATH='functional/BO/14_advancedParameters/0[1-6]*/*' npm run test:specific",
++    "test:functional:BO:advanced-parameters:07-10": "TEST_PATH='functional/BO/14_advancedParameters/{0[7-9],10}*/*' npm run test:specific",
+     "test:functional:BO:header": "TEST_PATH='functional/BO/15_header/*' npm run test:specific",
+-
+     "// Functional FO": "Scripts to run functional FO tests",
+     "test:functional:FO": "TEST_PATH='functional/FO/*' npm run test:specific",
+-
++    "test:functional:FO:01-03": "TEST_PATH='functional/FO/0[1-3]*/*' npm run test:specific",
++    "test:functional:FO:04-07": "TEST_PATH='functional/FO/0[4-7]*/*' npm run test:specific",
++    "test:functional:FO:08-12": "TEST_PATH='functional/FO/{0[8-9],[11-12]}*/*' npm run test:specific",
+     "// Regression tests": "Scripts to run regression tests",
+     "test:regression": "TEST_PATH='regression/*' npm run test:specific",
+-
+     "// All tests": "Scripts to run all campaigns",
+     "test:all": "./node_modules/mocha/bin/mocha --recursive --file campaigns/utils/setup.js campaigns/functional/* campaigns/sanity/* campaigns/regression/*"
+   },
+diff --git a/tests/UI/pages/FO/product/index.js b/tests/UI/pages/FO/product/index.js
+index e5487b0ea26e3..78e37b03125af 100644
+--- a/tests/UI/pages/FO/product/index.js
++++ b/tests/UI/pages/FO/product/index.js
+@@ -60,8 +60,8 @@ class Product extends FOBasePage {
+     this.productReviewList = '#product-comments-list';
+     this.productReviewRows = `${this.productReviewList} div.product-comment-list-item.row`;
+     this.productReviewRow = row => `${this.productReviewRows}:nth-child(${row})`;
+-    this.productReviewTitle = row => `${this.productReviewRow(row)} h4`;
+-    this.productReviewContent = row => `${this.productReviewRow(row)} p`;
++    this.productReviewTitle = row => `${this.productReviewRow(row)} p.h4`;
++    this.productReviewContent = row => `${this.productReviewRow(row)} p:not(.h4)`;
+     this.productRatingBlock = row => `${this.productReviewRow(row)} .grade-stars`;
+     this.productRatingStar = row => `${this.productReviewRow(row)} .star-on`;
+     // Add review selectors

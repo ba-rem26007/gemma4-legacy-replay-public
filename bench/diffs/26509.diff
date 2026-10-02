@@ -1,0 +1,166 @@
+diff --git a/admin-dev/themes/new-theme/js/components/module-card.ts b/admin-dev/themes/new-theme/js/components/module-card.ts
+index e7d9dbd6e186f..fe2c7bf0a26f1 100644
+--- a/admin-dev/themes/new-theme/js/components/module-card.ts
++++ b/admin-dev/themes/new-theme/js/components/module-card.ts
+@@ -40,10 +40,10 @@ const BOEvent = {
+     });
+   },
+ 
+-  emitEvent(eventName: string, eventType: string) {
+-    const event = document.createEvent(eventType);
++  emitEvent(eventName: string, eventType: string, datas: JQuery) {
++    const event = new CustomEvent(eventType, <any>datas);
+     // true values stand for: can bubble, and is cancellable
+-    event.initEvent(eventName, true, true);
++    event.initCustomEvent(eventName, true, true, datas);
+     document.dispatchEvent(event);
+   },
+ };
+@@ -419,22 +419,30 @@ export default class ModuleCard {
+ 
+         if (action === 'uninstall') {
+           mainElement = jqElementObj.closest(`.${alteredSelector}`);
+-          mainElement.remove();
++          mainElement.attr('data-installed', '0');
++          mainElement.attr('data-active', '0');
+ 
+-          BOEvent.emitEvent('Module Uninstalled', 'CustomEvent');
++          BOEvent.emitEvent('Module Uninstalled', 'CustomEvent', mainElement);
+         } else if (action === 'disable') {
+           mainElement = jqElementObj.closest(`.${alteredSelector}`);
+           mainElement.addClass(`${alteredSelector}-isNotActive`);
+           mainElement.attr('data-active', '0');
+ 
+-          BOEvent.emitEvent('Module Disabled', 'CustomEvent');
++          BOEvent.emitEvent('Module Disabled', 'CustomEvent', mainElement);
+         } else if (action === 'enable') {
+           mainElement = jqElementObj.closest(`.${alteredSelector}`);
+           mainElement.removeClass(`${alteredSelector}-isNotActive`);
+           mainElement.attr('data-active', '1');
+ 
+-          BOEvent.emitEvent('Module Enabled', 'CustomEvent');
+-        }
++          BOEvent.emitEvent('Module Enabled', 'CustomEvent', mainElement);
++        } else if (action === 'install') {
++          mainElement = jqElementObj.closest(`.${alteredSelector}`);
++          mainElement.attr('data-installed', '1');
++          mainElement.attr('data-active', '1');
++          mainElement.removeClass(`${alteredSelector}-isNotActive`);
++
++          BOEvent.emitEvent('Module Installed', 'CustomEvent', mainElement);
++        };
+ 
+         jqElementObj.replaceWith(result[moduleTechName].action_menu_html);
+       })
+diff --git a/admin-dev/themes/new-theme/js/pages/module/controller.js b/admin-dev/themes/new-theme/js/pages/module/controller.js
+index 869ce15ca70a4..efb3acc8843d3 100644
+--- a/admin-dev/themes/new-theme/js/pages/module/controller.js
++++ b/admin-dev/themes/new-theme/js/pages/module/controller.js
+@@ -220,16 +220,57 @@ class AdminModuleController {
+   }
+ 
+   initBOEventRegistering() {
++    window.BOEvent.on('Module Enabled', this.onModuleDisabled, this);
+     window.BOEvent.on('Module Disabled', this.onModuleDisabled, this);
+-    window.BOEvent.on('Module Uninstalled', this.updateTotalResults, this);
++    window.BOEvent.on('Module Uninstalled', this.installHandler, this);
++    window.BOEvent.on('Module Installed', this.installHandler, this);
+   }
+ 
+-  onModuleDisabled() {
++  installHandler(event) {
++    this.updateModuleStatus(event);
++    this.updateModuleVisibility();
++  }
++
++  updateModuleStatus(event) {
++    this.modulesList = this.modulesList.map((module) => {
++      const moduleElement = $(event.detail[0]);
++
++      if (moduleElement.data('tech-name') === module.techName) {
++        const newModule = {
++          domObject: moduleElement,
++          id: moduleElement.data('id'),
++          name: moduleElement.data('name').toLowerCase(),
++          scoring: parseFloat(moduleElement.data('scoring')),
++          logo: moduleElement.data('logo'),
++          author: moduleElement.data('author').toLowerCase(),
++          version: moduleElement.data('version'),
++          description: moduleElement.data('description').toLowerCase(),
++          techName: moduleElement.data('tech-name').toLowerCase(),
++          childCategories: moduleElement.data('child-categories'),
++          categories: String(moduleElement.data('categories')).toLowerCase(),
++          type: moduleElement.data('type'),
++          price: parseFloat(moduleElement.data('price')),
++          active: parseInt(moduleElement.data('active'), 10),
++          installed: moduleElement.data('installed') === 1,
++          access: moduleElement.data('last-access'),
++          display: moduleElement.hasClass('module-item-list') ? this.DISPLAY_LIST : this.DISPLAY_GRID,
++          container: module.container,
++        };
++
++        return newModule;
++      }
++
++      return module;
++    });
++  }
++
++  onModuleDisabled(event) {
+     const self = this;
++    self.updateModuleStatus(event);
+     self.getModuleItemSelector();
+ 
+     $('.modules-list').each(() => {
+-      self.updateTotalResults();
++      self.updateModuleVisibility();
+     });
+   }
+ 
+@@ -449,6 +490,7 @@ class AdminModuleController {
+ 
+     for (let i = 0; i < modulesListLength; i += 1) {
+       currentModule = self.modulesList[i];
++
+       if (currentModule.display === self.currentDisplay) {
+         isVisible = true;
+ 
+@@ -471,7 +513,10 @@ class AdminModuleController {
+               || (
+                 currentModule.installed === false
+                   && self.currentRefStatus === 2
+-              )
++              ) || (
++              currentModule.installed === true
++                  && self.currentRefStatus === 3
++            )
+           );
+         }
+ 
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+index f6c4039390ce5..d24e62692061c 100755
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+@@ -341,7 +341,7 @@ public function moduleAction(Request $request)
+             $logger->error($response[$module]['msg'], ['object_type' => 'Module', 'object_id' => $moduleAccessedId]);
+         }
+ 
+-        if ($response[$module]['status'] === true && $action != 'uninstall') {
++        if ($response[$module]['status'] === true) {
+             $moduleInstance = $moduleRepository->getModule($module, false, false);
+ 
+             $collection = AddonsCollection::createFrom([$moduleInstance]);
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/dropdown_status.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/dropdown_status.html.twig
+index e8bc7d3dd6522..c99167a34d83c 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/dropdown_status.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Module/Includes/dropdown_status.html.twig
+@@ -44,5 +44,9 @@
+         <a class="dropdown-item module-status-menu" data-status-ref="2">
+           {{ 'Uninstalled modules'|trans({}, 'Admin.Modules.Feature') }}
+         </a>
++
++        <a class="dropdown-item module-status-menu" data-status-ref="3">
++          {{ 'Installed modules'|trans({}, 'Admin.Modules.Feature') }}
++        </a>
+     </div>
+ </div>

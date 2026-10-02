@@ -1,0 +1,170 @@
+diff --git a/src/Adapter/Domain/AbstractObjectModelHandler.php b/src/Adapter/Domain/AbstractObjectModelHandler.php
+index 6d2129cb3f277..fcb1a58d167b7 100644
+--- a/src/Adapter/Domain/AbstractObjectModelHandler.php
++++ b/src/Adapter/Domain/AbstractObjectModelHandler.php
+@@ -81,10 +81,13 @@ protected function associateWithShops(ObjectModel $objectModel, array $shopAssoc
+ 
+         $insert = [];
+         foreach ($shopAssociation as $shopId) {
+-            $insert[] = [
+-                $primaryKeyName => $primaryKeyValue,
+-                'id_shop' => (int) $shopId,
+-            ];
++            // Check if context employee has access to the shop before inserting shop association.
++            if (Context::getContext()->employee->hasAuthOnShop($shopId)) {
++                $insert[] = [
++                    $primaryKeyName => $primaryKeyValue,
++                    'id_shop' => (int) $shopId,
++                ];
++            }
+         }
+ 
+         Db::getInstance()->insert(
+diff --git a/src/Adapter/Form/ChoiceProvider/ShopTreeChoiceProvider.php b/src/Adapter/Form/ChoiceProvider/ShopTreeChoiceProvider.php
+index 3700bab355ef6..e80fcc70df93f 100644
+--- a/src/Adapter/Form/ChoiceProvider/ShopTreeChoiceProvider.php
++++ b/src/Adapter/Form/ChoiceProvider/ShopTreeChoiceProvider.php
+@@ -58,6 +58,11 @@ public function getChoices()
+             foreach ($shops as $shopId) {
+                 $shop = Shop::getShop($shopId['id_shop']);
+ 
++                // If context employee doesn't have access to a shop, $shop will be false
++                if (false === $shop) {
++                    continue;
++                }
++
+                 $shopGroupChoices['children'][] = [
+                     'name' => $shop['name'],
+                     'id_shop' => $shop['id_shop'],
+diff --git a/src/Adapter/Language/CommandHandler/AbstractLanguageHandler.php b/src/Adapter/Language/CommandHandler/AbstractLanguageHandler.php
+index dce4c9c9f6fb7..38a6213978235 100644
+--- a/src/Adapter/Language/CommandHandler/AbstractLanguageHandler.php
++++ b/src/Adapter/Language/CommandHandler/AbstractLanguageHandler.php
+@@ -27,21 +27,20 @@
+ namespace PrestaShop\PrestaShop\Adapter\Language\CommandHandler;
+ 
+ use Context;
+-use Db;
+ use ImageManager;
+ use ImageType;
+ use Language;
++use PrestaShop\PrestaShop\Adapter\Domain\AbstractObjectModelHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Language\Exception\CopyingNoPictureException;
+ use PrestaShop\PrestaShop\Core\Domain\Language\Exception\LanguageImageUploadingException;
+ use PrestaShop\PrestaShop\Core\Domain\Language\Exception\LanguageNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\IsoCode;
+ use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
+-use Shop;
+ 
+ /**
+  * Encapsulates common legacy behavior for adding/editing language
+  */
+-abstract class AbstractLanguageHandler
++abstract class AbstractLanguageHandler extends AbstractObjectModelHandler
+ {
+     /**
+      * Copies "No picture" image for specific language
+@@ -154,57 +153,6 @@ protected function uploadImage($languageId, $newImagePath, $imageDir)
+         unlink($temporaryImage);
+     }
+ 
+-    /**
+-     * @param int $languageId
+-     * @param int[] $shopAssociation
+-     */
+-    protected function associateWithShops($languageId, array $shopAssociation)
+-    {
+-        if (!Shop::isFeatureActive()) {
+-            return;
+-        }
+-
+-        $languageTable = Language::$definition['table'];
+-
+-        if (!Shop::isTableAssociated($languageTable)) {
+-            return;
+-        }
+-
+-        // Get list of shop id we want to exclude from asso deletion
+-        $excludeIds = $shopAssociation;
+-        foreach (Db::getInstance()->executeS('SELECT id_shop FROM ' . _DB_PREFIX_ . 'shop') as $row) {
+-            if (!Context::getContext()->employee->hasAuthOnShop($row['id_shop'])) {
+-                $excludeIds[] = $row['id_shop'];
+-            }
+-        }
+-
+-        $excludeShopsCondtion = $excludeIds ?
+-            ' AND id_shop NOT IN (' . implode(', ', array_map('intval', $excludeIds)) . ')' :
+-            ''
+-        ;
+-
+-        Db::getInstance()->delete(
+-            $languageTable . '_shop',
+-            '`id_lang` = ' . (int) $languageId . $excludeShopsCondtion
+-        );
+-
+-        $insert = [];
+-        foreach ($shopAssociation as $shopId) {
+-            $insert[] = [
+-                'id_lang' => (int) $languageId,
+-                'id_shop' => (int) $shopId,
+-            ];
+-        }
+-
+-        Db::getInstance()->insert(
+-            $languageTable . '_shop',
+-            $insert,
+-            false,
+-            true,
+-            Db::INSERT_IGNORE
+-        );
+-    }
+-
+     /**
+      * @param LanguageId $languageId
+      *
+diff --git a/src/Adapter/Language/CommandHandler/AddLanguageHandler.php b/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
+index ea35c544c331c..4c47bc74ae029 100644
+--- a/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
++++ b/src/Adapter/Language/CommandHandler/AddLanguageHandler.php
+@@ -85,7 +85,7 @@ private function assertLanguageWithIsoCodeDoesNotExist(IsoCode $isoCode)
+     private function addShopAssociation(Language $language, AddLanguageCommand $command)
+     {
+         $this->associateWithShops(
+-            (int) $language->id,
++            $language,
+             $command->getShopAssociation()
+         );
+     }
+diff --git a/src/Adapter/Language/CommandHandler/EditLanguageHandler.php b/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
+index aa95b23a73870..94ecb760e326d 100644
+--- a/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
++++ b/src/Adapter/Language/CommandHandler/EditLanguageHandler.php
+@@ -59,7 +59,7 @@ public function handle(EditLanguageCommand $command)
+         $this->moveTranslationsIfIsoChanged($language, $command);
+ 
+         $this->updateLanguageWithCommandData($language, $command);
+-        $this->updateShopAssociationIfChanged($command);
++        $this->updateShopAssociationIfChanged($language, $command);
+         $this->uploadFlagImageIfChanged($language, $command);
+ 
+         return new LanguageId((int) $language->id);
+@@ -185,16 +185,17 @@ private function moveTranslationsIfIsoChanged(Language $language, EditLanguageCo
+     }
+ 
+     /**
++     * @param Language $language
+      * @param EditLanguageCommand $command
+      */
+-    private function updateShopAssociationIfChanged(EditLanguageCommand $command)
++    private function updateShopAssociationIfChanged(Language $language, EditLanguageCommand $command)
+     {
+         if (null === $command->getShopAssociation()) {
+             return;
+         }
+ 
+         $this->associateWithShops(
+-            $command->getLanguageId()->getValue(),
++            $language,
+             $command->getShopAssociation()
+         );
+     }

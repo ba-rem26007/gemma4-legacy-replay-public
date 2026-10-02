@@ -1,0 +1,4031 @@
+diff --git a/.ai/Component/ExtraProperty/CONTEXT.md b/.ai/Component/ExtraProperty/CONTEXT.md
+index 73825b089302b..d4cdcb8d13501 100644
+--- a/.ai/Component/ExtraProperty/CONTEXT.md
++++ b/.ai/Component/ExtraProperty/CONTEXT.md
+@@ -16,14 +16,15 @@ Lets any module register **typed extra fields** on existing PrestaShop entities
+ | Validation | `src/Core/ExtraProperty/Validation/` |
+ | BO form integration | `src/Core/ExtraProperty/Form/` |
+ | BO grid integration | `src/Core/ExtraProperty/Grid/` |
+-| Admin API service | `src/PrestaShopBundle/ApiPlatform/ExtraProperties/ExtraPropertiesApiService.php` |
++| Admin API integration: response subscriber + grid-record collector | `src/PrestaShopBundle/EventListener/API/ExtraPropertyApiSubscriber.php`, `src/Core/ExtraProperty/Api/` |
++| Admin API validation + OpenAPI | `src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php`, `src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php` |
+ | Legacy + FO hooks | `classes/module/Module.php`, `classes/ObjectModel.php`, `src/Adapter/Presenter/AbstractLazyArray.php` |
+ | Registry table DDL | `install-dev/data/db_structure.sql` (`ps_extra_property_definition`) |
+ | Service wiring | `…/config/services/extra_property/{common,backend}.yml`, `…/config/services/core/grid/grid_extra_properties.yml` |
+ 
+ ## Database structure
+ 
+-**Central registry — `ps_extra_property_definition`** (created at install). One row per registered property. Real columns: `entity_name`, `module_name` (NULL = core field, no module owner), `property_name`, `type` ENUM(`int,bool,string,float,date,html,json,choice`), `scope` ENUM(`common,lang,shop`), `sql_index` ENUM(`none,key,unique`), `size`, `default_value`, `validator`, `display_front`, `display_api`, `associated_grids`/`associated_forms` (JSON placement DSL), `form_field_type`, `form_required`, `form_options`, and `label_*`/`description_*` wording+domain pairs. Unique key: `(entity_name, module_name, property_name)`.
++**Central registry — `ps_extra_property_definition`** (created at install). One row per registered property. Real columns: `entity_name`, `module_name` (NULL = core field, no module owner), `property_name`, `type` ENUM(`int,bool,string,float,date,html,json,choice`), `scope` ENUM(`common,lang,shop`), `sql_index` ENUM(`none,key,unique`), `size`, `default_value`, `validator`, `display_front`, `associated_grids`/`associated_forms`/`associated_apis` (JSON placement & API-targeting DSL), `form_field_type`, `form_required`, `form_options`, and `label_*`/`description_*` wording+domain pairs. Unique key: `(entity_name, module_name, property_name)`.
+ 
+ **Dynamic per-entity value tables**, created lazily by `ExtraPropertySchemaManager` on first registration for an entity, one per scope:
+ 
+@@ -46,7 +47,7 @@ $this->registerExtraProperty(new ExtraPropertyDefinition(
+     entityName: 'product', propertyName: 'video_link',
+     type: ExtraPropertyType::STRING, scope: ExtraPropertyScope::LANG,
+     labelWording: 'Video link', labelDomain: 'Modules.Demoextrafield.Admin',
+-    displayFront: true, displayApi: true, associatedForms: ['product'],
++    displayFront: true, associatedForms: ['product'], associatedApis: ['/products', '/products/{productId}'],
+ ));
+ // uninstall():  $this->unregisterExtraProperty($definition, dropData: true);
+ ```
+@@ -71,12 +72,23 @@ The Smarty/array index key is `extra_properties` (snake_case), and only present
+ **Rendering** (derived from the logical type, not the override):
+ - BO form field = `form_field_type` FQCN if set, else **`TextType`**; LANG scope wrapped in `TranslatableType`; `form_required` adds a `NotBlank`, `validator` adds a `Callback` constraint. (There is no per-type form-type map — `TextType` is the default for every untyped field.)
+ - Grid column: BOOL → `ToggleColumn` (route `admin_common_extra_properties_toggle`, shop resolved server-side), DATE → `DateTimeColumn`, JSON → skipped, everything else → `DataColumn`.
+-- Form field name, grid column id and grid SELECT alias all share `getFormFieldName()` = `extra_{scope}_{module}_{property}`.
++- Form field name, grid column id, grid SELECT alias and the inline key in API list responses all share `getFieldName()` = `extra_{module}_{property}`. The scope is intentionally not part of it — a property is unique per module + name.
++
++## Admin API integration
++
++Module-declared extra properties are exposed and managed on the Admin API, wired **only in the Admin API kernel** (`app/config/admin-api/services.yml`). `PrestaShopBundle\EventListener\API\ExtraPropertyApiSubscriber` (on `kernel.response`) is the single API-Platform-coupled bridge; the Core reader/writer it drives stay framework-agnostic.
++
++- **Targeting** — each definition declares `associatedApis`: URI templates with an optional `:METHOD` modifier (`/products`, `/products/{productId}:GET,PATCH`), matched against the operation's literal `uriTemplate` + method (`ExtraPropertyDefinitionCollection::filterByApi`). No class→entity inference, so a field never leaks onto a resource it does not target. Replaces the old `display_api` boolean.
++- **Read (item)** — a nested `extraProperties` sub-object keyed by module then property: COMMON scalars, LANG objects keyed by **locale** (converted from id_lang via `LocalizedValueUpdater`), SHOP flattened for the shop context. Read through `ExtraPropertyReaderInterface::getExtraProperties`.
++- **Read (list)** — each item is enriched **inline** at its root under `getFieldName()`, as the single context-locale value. Grid-associated properties are reused from `ExtraPropertyApiListRecordCollector` (the grid query already fetched them, no extra read); API-only (non-grid) properties — and every property of a non-grid, CQRS-paginated list — are read in one batched query via `getMultipleExtraProperties`.
++- **Write** — `POST`/`PUT`/`PATCH` accept the same sub-object; the subscriber filters it to the operation's definitions (so unrelated keys can't be written), converts LANG locale→id_lang, and persists via `ExtraPropertyWriterInterface::writeAll` with the request's `ShopConstraint`.
++- **Validation** — `ExtraPropertyCQRSApiValidator` decorates `CQRSApiValidator`, merging extra-property violations with the resource's into a single `422` (paths `extraProperties.<module>.<field>`).
++- **OpenAPI** — `ExtraPropertiesSchemaAdapter` documents the sub-object on the read and write schemas.
+ 
+ ## Non-obvious patterns
+ 
+ - **`nullable` and `enumValues` are NOT stored in the registry** — the live storage column schema is their source of truth. `ExtraPropertyDefinitionRepository::enrichRowsWithColumnMetadata()` runs `SHOW COLUMNS` and injects synthetic `nullable`/`enum_values` keys consumed by `ExtraPropertyDefinition::fromRow()`.
+-- **Two-tier service wiring.** `common.yml` (FO+BO): repository, cached read decorator, reader, writer, validator. `backend.yml` (BO-only): schema manager (DDL, needs logger), registry, form services, API service — registration/DDL only happen back-office. In FO the `WriterInterface` aliases the plain repository (no writes, no cache invalidation).
++- **Two-tier service wiring.** `common.yml` (FO+BO): repository, cached read decorator, reader, writer, validator. `backend.yml` (BO-only): schema manager (DDL, needs logger), registry, form services — registration/DDL only happen back-office. The Admin API bridge is wired separately in `app/config/admin-api/services.yml` (Admin API kernel only). In FO the `WriterInterface` aliases the plain repository (no writes, no cache invalidation).
+ - **`CachedExtraPropertyDefinitionRepository` implements BOTH read and write interfaces** over one filesystem cache pool; every write invalidates. The registry itself is uncached and gets the cached repo injected as its writer.
+ - **The registry refuses destructive schema changes** on an already-registered property (type/scope change, STRING size decrease, NULL→NOT NULL, ENUM value removal) — those require unregister + re-register. Non-destructive drift (default change, size increase, nullable relax, enum addition) is reconciled onto the live column via `ALTER TABLE … MODIFY COLUMN`.
+ - **Grouped value shape everywhere.** Reader returns / writer accepts `[moduleKey => [propertyName => value]]` (`'_core'` for core fields). For lang scope, `langId = null` yields `[id_lang => value]` arrays (BO/API edit-all-langs), an int yields a scalar (FO).
+@@ -85,7 +97,7 @@ The Smarty/array index key is `extra_properties` (snake_case), and only present
+ 
+ ## Status & roadmap
+ 
+-- **Admin API integration is incomplete.** `ExtraPropertiesApiService` exists and is DI-wired but is **not yet invoked** by the serialization pipeline — being reworked under [#41543](https://github.com/PrestaShop/PrestaShop/issues/41543) (+ definitions via API [#41542](https://github.com/PrestaShop/PrestaShop/issues/41542)). There is **no CQRS domain** (`src/Core/Domain/ExtraProperty`) nor Adapter layer, despite earlier drafts.
++- **Admin API integration is delivered** ([#41543](https://github.com/PrestaShop/PrestaShop/issues/41543), this PR) — see *Admin API integration* above. Defining extra properties *through* the API (CRUD on the registry itself) is still open [#41542](https://github.com/PrestaShop/PrestaShop/issues/41542). There is **no CQRS domain** (`src/Core/Domain/ExtraProperty`) nor Adapter layer — the feature lives entirely under `Core\ExtraProperty` plus the Admin API bridge.
+ - **Module uninstall cleanup is not automatic** — modules must call `unregisterExtraProperty($definition, dropData: true)` themselves.
+ - Open sub-issues: advanced form placement via `property_path` [#41425], native no-code BO management panel [#41426], multishop handling [#41568], automated tests [#41541], validation hardening [#41544], example module [#41428], docs [#41429], security review [#41640], translation scanner support [#41725], cart entity [#41424].
+ 
+diff --git a/app/config/admin-api/services.yml b/app/config/admin-api/services.yml
+index d93b5c18b247b..d4f7d61869560 100644
+--- a/app/config/admin-api/services.yml
++++ b/app/config/admin-api/services.yml
+@@ -83,3 +83,28 @@ services:
+   PrestaShopBundle\ApiPlatform\Encoder\MultipartDecoder:
+     autowire: true
+     autoconfigure: true
++
++  # ─── Extra properties (Admin API bridge) ─────────────────────────────────────
++  # Exposes and persists module-declared extra properties on the Admin API. Defined here (API kernel only) so
++  # the behaviour never loads in the Back-Office or Front-Office kernels.
++
++  # Request-scoped reuse of the extra-property values already fetched by a grid query, so list responses do not
++  # re-read them row by row. Populated by QueryListProvider, read back by the subscriber. Implements
++  # ResetInterface, so autoconfiguration tags it kernel.reset (cleared between requests in a worker runtime).
++  PrestaShop\PrestaShop\Core\ExtraProperty\Api\ExtraPropertyApiListRecordCollector: ~
++
++  # Single API-Platform bridge: resolves the entity id and converts LANG values (locale <-> id_lang), then writes
++  # the submitted payload after a write (directly via the writer) and enriches the JSON response (nested object for
++  # an item, inline grid values per list item). Auto-tagged kernel.event_subscriber via autoconfigure.
++  PrestaShopBundle\EventListener\API\ExtraPropertyApiSubscriber:
++    arguments:
++      $propertyNameCollectionFactory: '@?api_platform.metadata.property_name_collection_factory'
++      $propertyMetadataFactory: '@?api_platform.metadata.property.metadata_factory'
++
++  # Merging validator: decorates CQRSApiValidator (Admin API kernel only) so CQRSApiNormalizer transparently uses
++  # it, combining extra-property violations with the resource constraint violations into a single 422.
++  PrestaShopBundle\ApiPlatform\Validator\ExtraPropertyCQRSApiValidator:
++    decorates: PrestaShopBundle\ApiPlatform\Validator\CQRSApiValidator
++    arguments:
++      $inner: '@.inner'
++      $resourceMetadataFactory: '@api_platform.metadata.resource.metadata_collection_factory'
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index e614d1cf4889d..3be3253a1048c 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -890,7 +890,7 @@ CREATE TABLE `PREFIX_extra_property_definition` (
+   `default_value` varchar(255) DEFAULT NULL,
+   `validator` varchar(255) DEFAULT NULL,
+   `display_front` tinyint(1) unsigned NOT NULL DEFAULT 1,
+-  `display_api` tinyint(1) unsigned NOT NULL DEFAULT '0',
++  `associated_apis` text DEFAULT NULL,
+   `associated_grids` text DEFAULT NULL,
+   `associated_forms` text DEFAULT NULL,
+   `form_field_type` varchar(255) DEFAULT NULL,
+diff --git a/src/Core/ExtraProperty/Api/ExtraPropertyApiListRecordCollector.php b/src/Core/ExtraProperty/Api/ExtraPropertyApiListRecordCollector.php
+new file mode 100644
+index 0000000000000..95e79d8793b27
+--- /dev/null
++++ b/src/Core/ExtraProperty/Api/ExtraPropertyApiListRecordCollector.php
+@@ -0,0 +1,104 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ExtraProperty\Api;
++
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use Symfony\Contracts\Service\ResetInterface;
++
++/**
++ * Request-scoped store of the extra-property values a grid query already fetched and cast, so a list
++ * (collection) response can reuse them instead of re-reading the database row by row.
++ *
++ * It is populated from QueryListProvider with the records returned by the grid data factory — which the
++ * ExtraPropertiesGridQueryBuilderModifier enriched with one column per grid-associated extra property — and read
++ * back by ExtraPropertyApiSubscriber while enriching each list item.
++ *
++ * Registered only in the Admin API kernel. Records are keyed by entity name then entity id; values keep the grid
++ * column name (ExtraPropertyDefinition::getFieldName()) and the single context-locale value the grid fetched.
++ */
++class ExtraPropertyApiListRecordCollector implements ResetInterface
++{
++    /**
++     * @var array<string, array<int, array<string, mixed>>>
++     */
++    protected array $recordsByEntity = [];
++
++    public function __construct(
++        protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
++    ) {
++    }
++
++    /**
++     * Captures, from the given grid records, the extra-property columns of the definitions that target the
++     * operation (URI template + HTTP method). A column only ends up stored when the grid actually fetched it
++     * (i.e. the property is both API- and grid-associated), so nothing not displayed in a list is kept.
++     *
++     * @param array<int, array<string, mixed>> $records Records as returned by the grid data factory
++     */
++    public function capture(array $records, string $uriTemplate, string $method): void
++    {
++        $definitions = $this->repository->getAllDefinitions()->filterByApi($uriTemplate, $method);
++        if ($definitions->isEmpty()) {
++            return;
++        }
++
++        foreach ($this->groupByEntity($definitions) as $entityName => $entityDefinitions) {
++            $primaryKey = $entityDefinitions->first()->getPrimaryKeyName();
++
++            foreach ($records as $record) {
++                if (!is_array($record) || !isset($record[$primaryKey])) {
++                    continue;
++                }
++
++                $entityId = (int) $record[$primaryKey];
++                if ($entityId <= 0) {
++                    continue;
++                }
++
++                foreach ($entityDefinitions as $definition) {
++                    $alias = $definition->getFieldName();
++                    if (array_key_exists($alias, $record)) {
++                        $this->recordsByEntity[$entityName][$entityId][$alias] = $record[$alias];
++                    }
++                }
++            }
++        }
++    }
++
++    /**
++     * @return array<string, mixed>|null Extra-property columns (formFieldName => value) captured for the row
++     */
++    public function find(string $entityName, int $entityId): ?array
++    {
++        return $this->recordsByEntity[$entityName][$entityId] ?? null;
++    }
++
++    public function reset(): void
++    {
++        $this->recordsByEntity = [];
++    }
++
++    /**
++     * @return array<string, ExtraPropertyDefinitionCollection>
++     */
++    protected function groupByEntity(ExtraPropertyDefinitionCollection $definitions): array
++    {
++        $byEntity = [];
++        foreach ($definitions as $definition) {
++            $byEntity[$definition->getEntityName()][] = $definition;
++        }
++
++        return array_map(
++            static fn (array $defs): ExtraPropertyDefinitionCollection => new ExtraPropertyDefinitionCollection($defs),
++            $byEntity
++        );
++    }
++}
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+index 0563cfc990aeb..8ad814936e5da 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+@@ -32,6 +32,7 @@
+  * - entityName and propertyName are required and must be non-empty.
+  * - associatedForms: each entry must match "formId[:path[:before|after]]"; no duplicate formId.
+  * - associatedGrids: each entry must match "gridId[:columnId[:before|after]]"; no duplicate gridId.
++ * - associatedApis: each entry must match "uriPath[:METHOD[,METHOD...]]"; uriPath is the operation URI template.
+  * - labelWording is required when associatedForms or associatedGrids is non-empty.
+  *
+  * @see \PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyRegistryInterface::register()
+@@ -77,10 +78,10 @@ final class ExtraPropertyDefinition
+      * @param bool $formRequired when true, marks the BO form field as required
+      * @param int|null $size for STRING type: varchar column length (defaults to 255)
+      * @param ExtraPropertySqlIndex $sqlIndex SQL index strategy on the storage column
+-     * @param bool $displayApi include this field in Admin API JSON responses
+      * @param bool $displayFront allow this field to be exposed in front-office presenters
+      * @param list<string>|null $associatedForms Form placement entries: "formId[:path[:before|after]]". Each formId must be unique.
+      * @param list<string>|null $associatedGrids Grid placement entries: "gridId[:columnId[:before|after]]". Each gridId must be unique.
++     * @param list<string>|null $associatedApis Admin API placement entries: "uriPath[:METHOD[,METHOD...]]", matched against the operation URI template (+ optional HTTP methods). No method modifier matches every method.
+      * @param string|null $formFieldType fully-qualified Symfony Form type FQCN override for BO forms
+      * @param array<string, mixed>|null $formOptions extra options passed verbatim to the Symfony form type constructor
+      * @param string|null $validator prestaShop Validate method name applied before persistence
+@@ -103,10 +104,10 @@ public function __construct(
+         protected readonly bool $formRequired = false,
+         protected readonly ?int $size = null,
+         protected readonly ExtraPropertySqlIndex $sqlIndex = ExtraPropertySqlIndex::NONE,
+-        protected readonly bool $displayApi = false,
+         protected readonly bool $displayFront = true,
+         protected readonly ?array $associatedForms = null,
+         protected readonly ?array $associatedGrids = null,
++        protected readonly ?array $associatedApis = null,
+         protected readonly ?string $formFieldType = null,
+         protected readonly ?array $formOptions = null,
+         protected readonly ?string $validator = null,
+@@ -200,6 +201,32 @@ public function __construct(
+             }
+         }
+ 
++        if (!empty($associatedApis)) {
++            $allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
++            foreach ($associatedApis as $entry) {
++                $entryString = (string) $entry;
++                $colonPos = strpos($entryString, ':');
++                $rawPath = trim(false !== $colonPos ? substr($entryString, 0, $colonPos) : $entryString);
++                if ('' === $rawPath) {
++                    throw new InvalidExtraPropertyDefinitionException(sprintf(
++                        'ExtraPropertyDefinition: invalid associatedApis entry "%s" — URI path must not be empty.',
++                        $entry
++                    ));
++                }
++                $parsedApi = self::parseApiEntry($entryString);
++                foreach ($parsedApi['methods'] ?? [] as $method) {
++                    if (!in_array($method, $allowedMethods, true)) {
++                        throw new InvalidExtraPropertyDefinitionException(sprintf(
++                            'ExtraPropertyDefinition: invalid HTTP method "%s" in associatedApis entry "%s" (allowed: %s).',
++                            $method,
++                            $entry,
++                            implode(', ', $allowedMethods)
++                        ));
++                    }
++                }
++            }
++        }
++
+         if ((!empty($associatedForms) || !empty($associatedGrids)) && (null === $labelWording || '' === trim($labelWording))) {
+             throw new InvalidExtraPropertyDefinitionException(sprintf(
+                 'ExtraPropertyDefinition: labelWording is required when associatedForms or associatedGrids is set (entity "%s", property "%s").',
+@@ -242,6 +269,11 @@ public static function fromRow(array $row): self
+             static fn (mixed $v): bool => is_string($v) && '' !== $v
+         )) ?: null;
+ 
++        $associatedApis = array_values(array_filter(
++            (array) json_decode((string) ($row['associated_apis'] ?? ''), true),
++            static fn (mixed $v): bool => is_string($v) && '' !== $v
++        )) ?: null;
++
+         $type = ExtraPropertyType::from((string) ($row['type'] ?? ExtraPropertyType::STRING->value));
+         $rawDefaultValue = isset($row['default_value']) && '' !== $row['default_value'] ? $row['default_value'] : null;
+ 
+@@ -257,10 +289,10 @@ enumValues: isset($row['enum_values']) && is_array($row['enum_values']) && [] !=
+             formRequired: !empty($row['form_required']),
+             size: isset($row['size']) && '' !== $row['size'] ? (int) $row['size'] : null,
+             sqlIndex: ExtraPropertySqlIndex::from((string) ($row['sql_index'] ?? ExtraPropertySqlIndex::NONE->value)),
+-            displayApi: !empty($row['display_api']),
+             displayFront: !empty($row['display_front']),
+             associatedForms: is_array($associatedForms) ? $associatedForms : null,
+             associatedGrids: is_array($associatedGrids) ? $associatedGrids : null,
++            associatedApis: is_array($associatedApis) ? $associatedApis : null,
+             formFieldType: isset($row['form_field_type']) && '' !== $row['form_field_type'] ? (string) $row['form_field_type'] : null,
+             formOptions: is_array($formOptions) ? $formOptions : null,
+             validator: isset($row['validator']) && '' !== $row['validator'] ? (string) $row['validator'] : null,
+@@ -295,10 +327,10 @@ enumValues: $this->enumValues,
+             formRequired: $this->formRequired,
+             size: $this->size,
+             sqlIndex: $this->sqlIndex,
+-            displayApi: $this->displayApi,
+             displayFront: $this->displayFront,
+             associatedForms: $this->associatedForms,
+             associatedGrids: $this->associatedGrids,
++            associatedApis: $this->associatedApis,
+             formFieldType: $this->formFieldType,
+             formOptions: $this->formOptions,
+             validator: $this->validator,
+@@ -354,9 +386,53 @@ public function getScope(): ExtraPropertyScope
+         return $this->scope;
+     }
+ 
+-    public function isDisplayApi(): bool
++    /**
++     * @return list<string>|null
++     */
++    public function getAssociatedApis(): ?array
+     {
+-        return $this->displayApi;
++        return $this->associatedApis;
++    }
++
++    /**
++     * Returns the parsed Admin API placement entries.
++     *
++     * @return list<array{path: string, methods: list<string>|null}>
++     */
++    public function getApiEntries(): array
++    {
++        if (null === $this->associatedApis) {
++            return [];
++        }
++
++        return array_map(static fn (string $entry): array => self::parseApiEntry($entry), $this->associatedApis);
++    }
++
++    /**
++     * Returns true when this definition targets the given Admin API operation, identified by its
++     * URI template and HTTP method. Matching is purely URI-template based, so a definition never
++     * leaks onto a resource it does not explicitly list. An entry with no method modifier matches
++     * every HTTP method on that template.
++     */
++    public function matchesApi(string $uriTemplate, string $method): bool
++    {
++        if (null === $this->associatedApis) {
++            return false;
++        }
++
++        $normalizedTemplate = self::normalizeApiPath($uriTemplate);
++        $upperMethod = strtoupper($method);
++        foreach ($this->associatedApis as $entry) {
++            $parsed = self::parseApiEntry((string) $entry);
++            if ($parsed['path'] !== $normalizedTemplate) {
++                continue;
++            }
++            if (null === $parsed['methods'] || in_array($upperMethod, $parsed['methods'], true)) {
++                return true;
++            }
++        }
++
++        return false;
+     }
+ 
+     public function isDisplayFront(): bool
+@@ -504,13 +580,15 @@ public function getStorageColumnName(): string
+     }
+ 
+     /**
+-     * Returns the form field name and grid column identifier for this definition.
++     * The property's flat field identifier, used identically by the back-office form (field name), the grid
++     * (column id / SELECT alias) and the Admin API (inline list key).
+      *
+-     * The same format is used for unmapped Symfony form fields and SELECT aliases in grids.
++     * A property is unique per module + property name, so the scope is intentionally not part of it — keeping
++     * identifiers short and predictable.
+      */
+-    public function getFormFieldName(): string
++    public function getFieldName(): string
+     {
+-        return 'extra_' . $this->scope->value . '_' . $this->normalizedModuleKey . '_' . $this->propertyName;
++        return 'extra_' . $this->normalizedModuleKey . '_' . $this->propertyName;
+     }
+ 
+     /**
+@@ -672,4 +750,46 @@ protected static function parseFormEntry(string $entry): array
+ 
+         return ['formId' => $formId, 'mode' => $mode, 'path' => $path, 'anchor' => $anchor];
+     }
++
++    /**
++     * Parses one entry from the associated_apis JSON array.
++     *
++     * Format: "uriPath[:METHOD[,METHOD...]]"
++     * The ":" separates the URI path from an optional comma-separated HTTP method list; URI
++     * templates never contain ":", so splitting on the first ":" is unambiguous. With no method
++     * list the entry matches every HTTP method on that URI template.
++     *
++     * @return array{path: string, methods: list<string>|null}
++     */
++    protected static function parseApiEntry(string $entry): array
++    {
++        $colonPos = strpos($entry, ':');
++        if (false === $colonPos) {
++            return ['path' => self::normalizeApiPath($entry), 'methods' => null];
++        }
++
++        $path = self::normalizeApiPath(substr($entry, 0, $colonPos));
++        $methodsSpec = trim(substr($entry, $colonPos + 1));
++        if ('' === $methodsSpec) {
++            return ['path' => $path, 'methods' => null];
++        }
++
++        $methods = array_values(array_filter(
++            array_map(static fn (string $m): string => strtoupper(trim($m)), explode(',', $methodsSpec)),
++            static fn (string $m): bool => '' !== $m
++        ));
++
++        return ['path' => $path, 'methods' => [] !== $methods ? $methods : null];
++    }
++
++    /**
++     * Normalizes a URI path for comparison: trims, forces a single leading slash, and drops a
++     * trailing slash (except for the root "/").
++     */
++    protected static function normalizeApiPath(string $path): string
++    {
++        $normalized = '/' . ltrim(trim($path), '/');
++
++        return '/' !== $normalized ? rtrim($normalized, '/') : $normalized;
++    }
+ }
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionCollection.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionCollection.php
+index b5f5a07f51f66..99052e0918d44 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionCollection.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionCollection.php
+@@ -192,15 +192,16 @@ public function filterForFrontOffice(): self
+     }
+ 
+     /**
+-     * Returns a new collection containing only definitions eligible for the Admin API (display_api = true).
++     * Returns a new collection containing only definitions that target the given Admin API operation,
++     * identified by its URI template and HTTP method (via ExtraPropertyDefinition::matchesApi()).
+      *
+-     * Chainable: $collection->filterByEntity('product')->filterByApi()
++     * Chainable: $collection->filterByEntity('product')->filterByApi('/products/{productId}', 'GET')
+      */
+-    public function filterByApi(): self
++    public function filterByApi(string $uriTemplate, string $method): self
+     {
+         return new self(array_values(array_filter(
+             $this->definitions,
+-            static fn (ExtraPropertyDefinition $d): bool => $d->isDisplayApi()
++            static fn (ExtraPropertyDefinition $d): bool => $d->matchesApi($uriTemplate, $method)
+         )));
+     }
+ }
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+index a894392caa071..ec742ec3c423d 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+@@ -94,9 +94,9 @@ public function save(ExtraPropertyDefinition $definition): int|false
+             'form_options' => null !== $definition->getFormOptions() ? json_encode($definition->getFormOptions()) : null,
+             'sql_index' => $definition->getSqlIndex()->value,
+             'validator' => $definition->getValidator(),
+-            'display_api' => (int) $definition->isDisplayApi(),
+             'associated_forms' => !empty($definition->getAssociatedForms()) ? json_encode(array_values($definition->getAssociatedForms())) : null,
+             'associated_grids' => !empty($definition->getAssociatedGrids()) ? json_encode(array_values($definition->getAssociatedGrids())) : null,
++            'associated_apis' => !empty($definition->getAssociatedApis()) ? json_encode(array_values($definition->getAssociatedApis())) : null,
+             'display_front' => (int) $definition->isDisplayFront(),
+             'label_wording' => $definition->getLabelWording(),
+             'label_domain' => $definition->getLabelDomain(),
+diff --git a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+index b40182064e612..5343585721b70 100644
+--- a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
++++ b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+@@ -89,7 +89,7 @@ public function apply(FormBuilderInterface $formBuilder, string $formId, ?int $e
+         foreach ($formDefinitions as $definition) {
+             $formEntry = $definition->getFormEntry($formId);
+ 
+-            $formFieldName = $definition->getFormFieldName();
++            $formFieldName = $definition->getFieldName();
+ 
+             [$type, $typeOptions] = $this->resolveFieldTypeAndOptions($definition);
+ 
+diff --git a/src/Core/ExtraProperty/Form/ExtraPropertiesFormDataPersister.php b/src/Core/ExtraProperty/Form/ExtraPropertiesFormDataPersister.php
+index 81ee1991c00d9..20865e434c545 100644
+--- a/src/Core/ExtraProperty/Form/ExtraPropertiesFormDataPersister.php
++++ b/src/Core/ExtraProperty/Form/ExtraPropertiesFormDataPersister.php
+@@ -62,7 +62,7 @@ public function persist(FormInterface $form, string $entityName, int $entityId):
+             } else {
+                 $targetPath = (string) $formEntry['path'];
+             }
+-            $formFieldName = $definition->getFormFieldName();
++            $formFieldName = $definition->getFieldName();
+ 
+             $targetForm = $this->resolveTargetFormForExtraField($form, $targetPath, $formFieldName);
+             if (null === $targetForm) {
+diff --git a/src/Core/ExtraProperty/Grid/ExtraPropertiesGridDefinitionModifier.php b/src/Core/ExtraProperty/Grid/ExtraPropertiesGridDefinitionModifier.php
+index 960e267175b90..c47b2481e804b 100644
+--- a/src/Core/ExtraProperty/Grid/ExtraPropertiesGridDefinitionModifier.php
++++ b/src/Core/ExtraProperty/Grid/ExtraPropertiesGridDefinitionModifier.php
+@@ -54,7 +54,7 @@ public function apply(GridDefinition $definition, string $gridId): void
+                 continue;
+             }
+ 
+-            $columnId = $extraDefinition->getFormFieldName();
++            $columnId = $extraDefinition->getFieldName();
+             if ($this->hasColumnId($columns, $columnId)) {
+                 continue;
+             }
+@@ -94,7 +94,7 @@ public function apply(GridDefinition $definition, string $gridId): void
+     protected function buildColumn(string $label, ExtraPropertyDefinition $definition): ColumnInterface
+     {
+         // H8: column type is derived from the logical field type, not the form type override.
+-        $columnId = $definition->getFormFieldName();
++        $columnId = $definition->getFieldName();
+         $moduleName = $definition->getNormalizedModuleKey();
+         $fieldName = $definition->getPropertyName();
+ 
+diff --git a/src/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifier.php b/src/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifier.php
+index bdfd10051f028..7c470334f5ff3 100644
+--- a/src/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifier.php
++++ b/src/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifier.php
+@@ -110,7 +110,7 @@ public function castExtraProperties(array $records, string $gridId): array
+ 
+         foreach ($records as &$record) {
+             foreach ($definitions as $definition) {
+-                $selectAlias = $definition->getFormFieldName();
++                $selectAlias = $definition->getFieldName();
+                 if (array_key_exists($selectAlias, $record)) {
+                     $record[$selectAlias] = ExtraPropertyValueCaster::castFromDb(
+                         $definition->getType(),
+@@ -297,7 +297,7 @@ protected function applySelectsAndFilters(
+         foreach ($definitions as $definition) {
+             $storageColumn = $definition->getStorageColumnName();
+ 
+-            $selectAlias = $definition->getFormFieldName();
++            $selectAlias = $definition->getFieldName();
+             $searchQb->addSelect(sprintf('%s.`%s` AS `%s`', $joinAlias, $storageColumn, $selectAlias));
+ 
+             if (!array_key_exists($selectAlias, $filters)) {
+diff --git a/src/Core/ExtraProperty/Value/ExtraPropertyReader.php b/src/Core/ExtraProperty/Value/ExtraPropertyReader.php
+index 3b70ff44b1f12..c719c3be09abb 100644
+--- a/src/Core/ExtraProperty/Value/ExtraPropertyReader.php
++++ b/src/Core/ExtraProperty/Value/ExtraPropertyReader.php
+@@ -49,6 +49,37 @@ public function getExtraProperties(
+             return [];
+         }
+ 
++        return $this->getMultipleExtraProperties(
++            $entityName,
++            $primaryKeyName,
++            [$entityId],
++            $langId,
++            $shopConstraint,
++            $isLangMultishop,
++            $definitions,
++        )[$entityId] ?? [];
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getMultipleExtraProperties(
++        string $entityName,
++        string $primaryKeyName,
++        array $entityIds,
++        ?int $langId,
++        ShopConstraint $shopConstraint,
++        bool $isLangMultishop = false,
++        ?ExtraPropertyDefinitionCollection $definitions = null,
++    ): array {
++        $entityIds = array_values(array_unique(array_filter(
++            array_map('intval', $entityIds),
++            static fn (int $id): bool => $id > 0
++        )));
++        if (empty($entityIds)) {
++            return [];
++        }
++
+         $allDefinitions = $definitions ?? $this->repository->getAllDefinitions()->filterByEntity($entityName);
+         if ($allDefinitions->isEmpty()) {
+             return [];
+@@ -56,49 +87,39 @@ public function getExtraProperties(
+ 
+         $shopId = $shopConstraint->isSingleShopContext() ? $shopConstraint->getShopId()->getValue() : null;
+ 
+-        $propertiesByModule = [];
++        $propertiesByEntity = array_fill_keys($entityIds, []);
+ 
+         foreach (ExtraPropertyScope::cases() as $scope) {
+             $scoped = $allDefinitions->filterByScope($scope);
+             if ($scoped->isEmpty()) {
+                 continue;
+             }
+-            $propertiesByModule = array_replace_recursive(
+-                $propertiesByModule,
+-                $this->hydrateExtraPropertiesScope(
+-                    $primaryKeyName,
+-                    $entityId,
+-                    $scope,
+-                    $scoped,
+-                    $langId,
+-                    $shopId,
+-                    $isLangMultishop
+-                )
+-            );
++            foreach ($this->hydrateExtraPropertiesScope($primaryKeyName, $entityIds, $scope, $scoped, $langId, $shopId, $isLangMultishop) as $entityId => $propertiesByModule) {
++                $propertiesByEntity[$entityId] = array_replace_recursive($propertiesByEntity[$entityId] ?? [], $propertiesByModule);
++            }
+         }
+ 
+-        return $propertiesByModule;
++        return $propertiesByEntity;
+     }
+ 
+     /**
+-     * Fetches extra property values for one scope and returns them grouped by module name.
++     * Fetches extra property values for one scope across several entity ids, with a single query, and returns them
++     * grouped by entity id then module name.
+      *
+-     * For LANG scope with $langId = null: all languages are fetched and the value is an array
+-     * keyed by id_lang — used by BO forms and Admin API.
+-     * For LANG scope with $langId set: a single scalar value per field is returned.
++     * For LANG scope with $langId = null: all languages are fetched and the value is an array keyed by id_lang —
++     * used by BO forms and Admin API single-item reads. For LANG scope with $langId set: a single scalar per field.
++     * For SHOP scope: a single scalar for the given shop constraint. COMMON scope: a single scalar per field.
+      *
+-     * For SHOP scope: always returns a single scalar value for the given shop constraint.
+-     * COMMON scope: returns a single scalar value per field.
+-     *
+-     * Returned structure: ['module_key' => ['property_name' => scalar_or_lang_keyed_array]]
++     * Every requested entity id is seeded with the default-valued structure, so an id with no row still appears.
+      *
++     * @param int[] $entityIds Positive, de-duplicated entity ids
+      * @param ExtraPropertyDefinitionCollection $definitions All definitions for this scope (non-empty)
+      *
+-     * @return array<string, array<string, mixed>>
++     * @return array<int, array<string, array<string, mixed>>> [entityId => [module_key => [property_name => value]]]
+      */
+     protected function hydrateExtraPropertiesScope(
+         string $primaryKeyName,
+-        int $entityId,
++        array $entityIds,
+         ExtraPropertyScope $fieldScope,
+         ExtraPropertyDefinitionCollection $definitions,
+         ?int $langId,
+@@ -108,16 +129,15 @@ protected function hydrateExtraPropertiesScope(
+         $groupByLang = ExtraPropertyScope::LANG === $fieldScope && null === $langId;
+         $extraTableName = $this->prefix . $definitions->first()->getExtraTableName();
+ 
+-        // Build a map from DB column name to [module_key, property_name, cast inputs] and seed $result.
++        // Build a map from DB column name to [module_key, property_name, cast inputs] and the default per property.
+         $columnToPropertyMap = [];
+-        $result = [];
++        $defaultsByModule = [];
+         foreach ($definitions as $definition) {
+             $propertyName = $definition->getPropertyName();
+             $moduleName = $definition->getNormalizedModuleKey();
+-            $result[$moduleName] ??= [];
+-            $result[$moduleName][$propertyName] ??= ($groupByLang
++            $defaultsByModule[$moduleName][$propertyName] = $groupByLang
+                 ? []
+-                : ExtraPropertyValueCaster::castFromDb($definition->getType(), null, $definition->isNullable()));
++                : ExtraPropertyValueCaster::castFromDb($definition->getType(), null, $definition->isNullable());
+ 
+             $columnName = $definition->getStorageColumnName();
+             $columnToPropertyMap[$columnName] = [
+@@ -128,7 +148,10 @@ protected function hydrateExtraPropertiesScope(
+             ];
+         }
+ 
+-        // Skip if IDs that must be positive were given but are invalid.
++        // Seed every requested entity with the default-valued structure (a missing row keeps the defaults).
++        $result = array_fill_keys($entityIds, $defaultsByModule);
++
++        // Skip the query when a required id is invalid; the seeded defaults are returned.
+         if (ExtraPropertyScope::LANG === $fieldScope && null !== $langId && $langId <= 0) {
+             return $result;
+         }
+@@ -139,21 +162,23 @@ protected function hydrateExtraPropertiesScope(
+             return $result;
+         }
+ 
++        $quotedPrimaryKey = $this->connection->quoteIdentifier($primaryKeyName);
+         $qb = $this->connection->createQueryBuilder();
+         $qb
+             ->from($extraTableName, 'extra')
+-            ->where('extra.' . $this->connection->quoteIdentifier($primaryKeyName) . ' = :entityId')
+-            ->setParameter('entityId', $entityId);
++            ->where('extra.' . $quotedPrimaryKey . ' IN (:entityIds)')
++            ->setParameter('entityIds', $entityIds, Connection::PARAM_INT_ARRAY);
+ 
+-        $selectCols = array_map(
+-            fn (string $col): string => 'extra.' . $this->connection->quoteIdentifier($col),
+-            array_keys($columnToPropertyMap)
+-        );
++        // Always select the primary key so rows can be grouped back per entity.
++        $selectCols = ['extra.' . $quotedPrimaryKey];
++        foreach (array_keys($columnToPropertyMap) as $col) {
++            $selectCols[] = 'extra.' . $this->connection->quoteIdentifier($col);
++        }
+ 
+         if (ExtraPropertyScope::LANG === $fieldScope) {
+             if ($groupByLang) {
+                 // Fetch all languages; caller receives an array keyed by id_lang.
+-                array_unshift($selectCols, 'extra.' . $this->connection->quoteIdentifier('id_lang'));
++                $selectCols[] = 'extra.' . $this->connection->quoteIdentifier('id_lang');
+             } else {
+                 $qb->andWhere('extra.id_lang = :langId')->setParameter('langId', $langId);
+             }
+@@ -168,29 +193,26 @@ protected function hydrateExtraPropertiesScope(
+         $qb->select(...$selectCols);
+ 
+         try {
+-            if ($groupByLang) {
+-                $rows = $qb->executeQuery()->fetchAllAssociative();
+-            } else {
+-                $singleRow = $qb->executeQuery()->fetchAssociative();
+-                $rows = is_array($singleRow) ? [$singleRow] : [];
+-            }
++            $rows = $qb->executeQuery()->fetchAllAssociative();
+         } catch (Throwable) {
+             return $result;
+         }
+ 
+         foreach ($rows as $row) {
+-            if ($groupByLang) {
+-                $groupKey = (int) ($row['id_lang'] ?? 0);
+-                foreach ($columnToPropertyMap as $columnName => $propertyPath) {
+-                    if (array_key_exists($columnName, $row)) {
+-                        $result[$propertyPath['module_name']][$propertyPath['property_name']][$groupKey] = ExtraPropertyValueCaster::castFromDb($propertyPath['type'], $row[$columnName], $propertyPath['nullable']);
+-                    }
++            $entityId = (int) ($row[$primaryKeyName] ?? 0);
++            if (!isset($result[$entityId])) {
++                continue;
++            }
++            $groupKey = $groupByLang ? (int) ($row['id_lang'] ?? 0) : null;
++            foreach ($columnToPropertyMap as $columnName => $propertyPath) {
++                if (!array_key_exists($columnName, $row)) {
++                    continue;
+                 }
+-            } else {
+-                foreach ($columnToPropertyMap as $columnName => $propertyPath) {
+-                    if (array_key_exists($columnName, $row)) {
+-                        $result[$propertyPath['module_name']][$propertyPath['property_name']] = ExtraPropertyValueCaster::castFromDb($propertyPath['type'], $row[$columnName], $propertyPath['nullable']);
+-                    }
++                $value = ExtraPropertyValueCaster::castFromDb($propertyPath['type'], $row[$columnName], $propertyPath['nullable']);
++                if (null !== $groupKey) {
++                    $result[$entityId][$propertyPath['module_name']][$propertyPath['property_name']][$groupKey] = $value;
++                } else {
++                    $result[$entityId][$propertyPath['module_name']][$propertyPath['property_name']] = $value;
+                 }
+             }
+         }
+diff --git a/src/Core/ExtraProperty/Value/ExtraPropertyReaderInterface.php b/src/Core/ExtraProperty/Value/ExtraPropertyReaderInterface.php
+index 2833eef156e99..b01365a05ebb3 100644
+--- a/src/Core/ExtraProperty/Value/ExtraPropertyReaderInterface.php
++++ b/src/Core/ExtraProperty/Value/ExtraPropertyReaderInterface.php
+@@ -59,4 +59,24 @@ public function getExtraProperties(
+         bool $isLangMultishop = false,
+         ?ExtraPropertyDefinitionCollection $definitions = null,
+     ): array;
++
++    /**
++     * Same as {@see getExtraProperties()} but for several entity instances at once, fetched with a single query
++     * per scope (not a per-id loop). Useful to enrich a whole list/collection response without N+1 reads.
++     *
++     * @param int[] $entityIds Entity ids to read (non-positive ids and duplicates are ignored)
++     *
++     * @return array<int, array<string, array<string, mixed>>> Per entity id: the same grouped structure
++     *                                                         getExtraProperties() returns. Ids with no row still
++     *                                                         appear, seeded with each property's default value.
++     */
++    public function getMultipleExtraProperties(
++        string $entityName,
++        string $primaryKeyName,
++        array $entityIds,
++        ?int $langId,
++        ShopConstraint $shopConstraint,
++        bool $isLangMultishop = false,
++        ?ExtraPropertyDefinitionCollection $definitions = null,
++    ): array;
+ }
+diff --git a/src/PrestaShopBundle/ApiPlatform/ExtraProperties/ExtraPropertiesApiService.php b/src/PrestaShopBundle/ApiPlatform/ExtraProperties/ExtraPropertiesApiService.php
+deleted file mode 100644
+index dd8333f831459..0000000000000
+--- a/src/PrestaShopBundle/ApiPlatform/ExtraProperties/ExtraPropertiesApiService.php
++++ /dev/null
+@@ -1,683 +0,0 @@
+-<?php
+-
+-/**
+- * For the full copyright and license information, please view the
+- * docs/licenses/LICENSE.txt file that was distributed with this source code.
+- */
+-
+-declare(strict_types=1);
+-
+-namespace PrestaShopBundle\ApiPlatform\ExtraProperties;
+-
+-use ApiPlatform\Metadata\Property\Factory\PropertyMetadataFactoryInterface;
+-use ApiPlatform\Metadata\Property\Factory\PropertyNameCollectionFactoryInterface;
+-use PrestaShop\PrestaShop\Core\Context\ShopContext;
+-use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
+-use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface;
+-use PrestaShopBundle\Entity\Repository\LangRepository;
+-use Symfony\Component\HttpFoundation\RequestStack;
+-use Symfony\Component\Validator\ConstraintViolation;
+-use Symfony\Component\Validator\ConstraintViolationList;
+-use Symfony\Component\Validator\ConstraintViolationListInterface;
+-use Throwable;
+-
+-/**
+- * Handles extra properties injection and extraction in the Admin API layer.
+- *
+- * Responsibilities:
+- *  - Resolve the entity storage table from an ApiResource class name (convention-based)
+- *  - Extract `extraProperties` from incoming JSON payloads before denormalization
+- *  - Store pending extra properties in the Request for persistence after entity save
+- *  - Inject extra properties (filtered by display_api=1) into serialized JSON responses
+- *  - Delegate read/write operations to ExtraPropertyReaderInterface / ExtraPropertyWriterInterface
+- *
+- * Three field scopes are supported:
+- *  - entity : stored in `{prefix}{entity}_extra`,      keyed directly by field name
+- *  - lang   : stored in `{prefix}{entity}_extra_lang`, keyed by locale string (e.g. "fr-FR")
+- *  - shop   : stored in `{prefix}{entity}_extra_shop`, keyed by shop ID (integer)
+- */
+-class ExtraPropertiesApiService
+-{
+-    /**
+-     * Request attribute key used to store pending extra properties during a write operation.
+-     * Structure: ['entity_table' => ['module_name' => ['property_name' => value|locale-array|shop-array]]]
+-     */
+-    public const PENDING_REQUEST_ATTRIBUTE = '_ps_extra_properties_pending';
+-
+-    /**
+-     * Class name prefixes to strip when resolving the entity name from an ApiResource class.
+-     *
+-     * @var string[]
+-     */
+-    protected const CLASS_PREFIXES_TO_STRIP = [
+-        'AddOrEdit',
+-        'BulkDelete',
+-        'BulkUpdate',
+-        'BulkCreate',
+-        'Bulk',
+-        'Create',
+-        'Delete',
+-        'Update',
+-        'List',
+-    ];
+-
+-    /**
+-     * Request-lifetime cache for the list of API-exposed lang-scoped fields, grouped by module.
+-     *
+-     * Keyed by entity table name (e.g. 'product') to avoid recomputing it for each normalized item
+-     * in collection/bulk operations.
+-     *
+-     * @var array<string, array<string, array<string, true>>>
+-     */
+-    private array $langScopedFieldsByEntityTableCache = [];
+-
+-    public function __construct(
+-        protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
+-        protected readonly RequestStack $requestStack,
+-        protected readonly ExtraPropertyReaderInterface $reader,
+-        protected readonly ExtraPropertyWriterInterface $writer,
+-        protected readonly ExtraPropertyValidatorInterface $validatorAdapter,
+-        protected readonly ShopContext $shopContext,
+-        protected readonly LangRepository $langRepository,
+-        protected readonly ?PropertyNameCollectionFactoryInterface $propertyNameCollectionFactory = null,
+-        protected readonly ?PropertyMetadataFactoryInterface $propertyMetadataFactory = null,
+-    ) {
+-    }
+-
+-    /**
+-     * Resolves the entity storage table name from an ApiResource FQCN.
+-     *
+-     * Uses naming convention: short class name in PascalCase → snake_case entity table.
+-     * Example: "PrestaShop\...\Product\Product" → "product"
+-     *          "PrestaShop\...\Customer\AddOrEditCustomer" → "customer"
+-     *
+-     * Returns null when no extra field definitions are registered for the resolved entity,
+-     * so callers can skip processing without any extra cost.
+-     *
+-     * @param string $resourceClass Fully-qualified ApiResource class name
+-     *
+-     * @return string|null Entity table name (e.g. 'product'), or null if not resolvable
+-     */
+-    public function resolveEntityTableFromClass(string $resourceClass): ?string
+-    {
+-        // Extract the short class name from the FQCN
+-        $lastBackslash = strrpos($resourceClass, '\\');
+-        $shortName = false === $lastBackslash ? $resourceClass : substr($resourceClass, $lastBackslash + 1);
+-
+-        // Strip known operation prefixes to get the bare entity name
+-        foreach (static::CLASS_PREFIXES_TO_STRIP as $prefix) {
+-            if (str_starts_with($shortName, $prefix)) {
+-                $shortName = substr($shortName, strlen($prefix));
+-                break;
+-            }
+-        }
+-
+-        if ('' === $shortName) {
+-            return null;
+-        }
+-
+-        // PascalCase → snake_case: "CustomerAddress" → "customer_address"
+-        $entityTable = strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $shortName));
+-
+-        // Validate: the repository must have at least one definition for this entity
+-        if ($this->repository->getAllDefinitions()->filterByEntity($entityTable)->isEmpty()) {
+-            return null;
+-        }
+-
+-        return $entityTable;
+-    }
+-
+-    /**
+-     * Extracts the `extraProperties` key from a payload array and removes it from $data.
+-     *
+-     * Called before denormalization to prevent ApiPlatform from complaining about
+-     * unknown fields. Returns null when the key is absent or not an array.
+-     *
+-     * @param array<string, mixed> $data Payload array, modified in-place to remove 'extraProperties'
+-     *
+-     * @return array<string, array<string, mixed>>|null Grouped extra properties or null
+-     */
+-    public function extractExtraPropertiesFromPayload(array &$data): ?array
+-    {
+-        if (!isset($data['extraProperties']) || !is_array($data['extraProperties'])) {
+-            return null;
+-        }
+-
+-        $extraProperties = $data['extraProperties'];
+-        unset($data['extraProperties']);
+-
+-        return $extraProperties;
+-    }
+-
+-    /**
+-     * Stores pending extra properties in the current Request attributes.
+-     *
+-     * The data is keyed by entity table name so that the normalize() step can later match
+-     * the persisted entity to the correct pending payload.
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     * @param array<string, array<string, mixed>> $extraPropertiesByModule Grouped by module name
+-     */
+-    public function storePendingExtraProperties(string $entityTable, array $extraPropertiesByModule): void
+-    {
+-        $request = $this->requestStack->getCurrentRequest();
+-        if (null === $request) {
+-            return;
+-        }
+-
+-        $pending = $request->attributes->get(self::PENDING_REQUEST_ATTRIBUTE, []);
+-        $pending[$entityTable] = $extraPropertiesByModule;
+-        $request->attributes->set(self::PENDING_REQUEST_ATTRIBUTE, $pending);
+-    }
+-
+-    /**
+-     * Validates an extraProperties payload using registry validator methods.
+-     *
+-     * Returned violations are compatible with ApiPlatform error handling (HTTP 422).
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     * @param array<string, array<string, mixed>> $extraPropertiesByModule Payload grouped by module
+-     *
+-     * @return ConstraintViolationListInterface
+-     */
+-    public function validateExtraPropertiesPayload(string $entityTable, array $extraPropertiesByModule): ConstraintViolationListInterface
+-    {
+-        $violations = new ConstraintViolationList();
+-
+-        $allDefinitions = $this->repository->getAllDefinitions()->filterByEntity($entityTable);
+-        if ($allDefinitions->isEmpty() || empty($extraPropertiesByModule)) {
+-            return $violations;
+-        }
+-
+-        foreach ($allDefinitions as $def) {
+-            if (!$def->isDisplayApi() || null === $def->getValidator()) {
+-                continue;
+-            }
+-
+-            $moduleName = $def->getNormalizedModuleKey();
+-            $fieldName = $def->getPropertyName();
+-
+-            if ('' === $fieldName || !isset($extraPropertiesByModule[$moduleName]) || !array_key_exists($fieldName, $extraPropertiesByModule[$moduleName])) {
+-                continue;
+-            }
+-
+-            $value = $extraPropertiesByModule[$moduleName][$fieldName];
+-            $basePath = sprintf('extraProperties.%s.%s', $moduleName, $fieldName);
+-
+-            if (ExtraPropertyScope::LANG === $def->getScope() && is_array($value)) {
+-                foreach ($value as $locale => $localeValue) {
+-                    $this->validateOneValue($violations, $def, $localeValue, $basePath . '.' . (string) $locale);
+-                }
+-                continue;
+-            }
+-
+-            if (ExtraPropertyScope::SHOP === $def->getScope() && is_array($value)) {
+-                foreach ($value as $shopId => $shopValue) {
+-                    $this->validateOneValue($violations, $def, $shopValue, $basePath . '.' . (string) $shopId);
+-                }
+-                continue;
+-            }
+-
+-            $this->validateOneValue($violations, $def, $value, $basePath);
+-        }
+-
+-        return $violations;
+-    }
+-
+-    /**
+-     * @param mixed $value
+-     */
+-    protected function validateOneValue(
+-        ConstraintViolationListInterface $violations,
+-        ExtraPropertyDefinition $def,
+-        $value,
+-        string $propertyPath,
+-    ): void {
+-        $result = $this->validatorAdapter->validateValue($def, $value);
+-        if (true !== $result) {
+-            $violations->add(new ConstraintViolation(
+-                'This value is not valid.',
+-                'This value is not valid.',
+-                [],
+-                null,
+-                $propertyPath,
+-                $value
+-            ));
+-        }
+-    }
+-
+-    /**
+-     * Injects extra properties (filtered by display_api=1) into the normalized response array.
+-     *
+-     * When a pending write payload is found in the Request (POST/PUT/PATCH flow), it is
+-     * persisted first so the response reflects the just-written values. The pending entry
+-     * is then cleared to avoid double persistence.
+-     *
+-     * @param array<string, mixed> $normalizedData Data as produced by the upstream normalizer
+-     * @param string $resourceClass Fully-qualified ApiResource class name
+-     *
+-     * @return array<string, mixed> Modified normalized data with 'extraProperties' injected
+-     */
+-    public function injectExtraPropertiesIntoResponse(array $normalizedData, string $resourceClass): array
+-    {
+-        $entityTable = $this->resolveEntityTableFromClass($resourceClass);
+-        if (null === $entityTable) {
+-            return $normalizedData;
+-        }
+-
+-        $entityId = $this->resolveEntityIdFromData($normalizedData, $entityTable, $resourceClass);
+-        if ($entityId <= 0) {
+-            return $normalizedData;
+-        }
+-
+-        // Persist pending extra properties from the current write operation before reading
+-        $request = $this->requestStack->getCurrentRequest();
+-        if (null !== $request) {
+-            $pending = $request->attributes->get(self::PENDING_REQUEST_ATTRIBUTE, []);
+-            if (!empty($pending[$entityTable])) {
+-                $this->persistExtraProperties($entityTable, $entityId, $pending[$entityTable]);
+-                unset($pending[$entityTable]);
+-                $request->attributes->set(self::PENDING_REQUEST_ATTRIBUTE, $pending);
+-            }
+-        }
+-
+-        $extraProperties = $this->loadExtraProperties($entityTable, $entityId);
+-        if (!empty($extraProperties)) {
+-            $normalizedData['extraProperties'] = $extraProperties;
+-        }
+-
+-        return $normalizedData;
+-    }
+-
+-    /**
+-     * Loads all extra properties for the three supported scopes via the reader.
+-     *
+-     * Lang-scope values are id_lang-keyed (int).
+-     * This method converts them to locale-string-keyed (e.g. "fr-FR") for the API response.
+-     *
+-     * - entity scope : ['module' => ['field' => scalar_value]]
+-     * - lang scope   : ['module' => ['field' => ['fr-FR' => value, 'en-GB' => value]]]
+-     * - shop scope   : ['module' => ['field' => scalar_value]]   (single-shop context, R8)
+-     * - shop scope   : ['module' => ['field' => [1 => value, 2 => value]]]  (all-shops context)
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     * @param int $entityId Entity primary key value
+-     *
+-     * @return array<string, array<string, mixed>> Grouped by module name
+-     */
+-    protected function loadExtraProperties(string $entityTable, int $entityId): array
+-    {
+-        $definitions = $this->repository->getAllDefinitions()->filterByEntity($entityTable);
+-        if ($definitions->isEmpty()) {
+-            return [];
+-        }
+-
+-        $shopConstraint = $this->shopContext->getShopConstraint();
+-        $values = $this->reader->getExtraProperties(
+-            $entityTable,
+-            $definitions->first()->getPrimaryKeyName(),
+-            $entityId,
+-            null,
+-            $shopConstraint,
+-            true,
+-            $definitions
+-        );
+-
+-        if (empty($values)) {
+-            return [];
+-        }
+-
+-        // Build the list of API-exposed lang-scope fields so that locale conversion is not ambiguous.
+-        // Without this, shop-scope fields keyed by id_shop (e.g. 1) can be mistaken for id_lang keys
+-        // and wrongly converted to locales (e.g. "fr-FR") when id_lang=1 exists.
+-        $langScopedFieldsByModule = $this->buildLangScopedFieldsByModule($entityTable);
+-        $shopScopedFieldsByModule = $this->buildShopScopedFieldsByModule($entityTable);
+-
+-        // Convert id_lang → locale string for API presentation
+-        $langLocaleMap = $this->fetchLangIdLocaleMap();
+-
+-        $result = $this->convertLangKeysToLocale($values, $langLocaleMap, $langScopedFieldsByModule);
+-
+-        // R8: flatten [id_shop => value] → scalar when the request is scoped to a single shop.
+-        if ($shopConstraint->isSingleShopContext()) {
+-            $result = $this->flattenShopScopedValues($result, $shopScopedFieldsByModule);
+-        }
+-
+-        // Keep only fields flagged display_api = 1.
+-        $whitelist = [];
+-        foreach ($this->repository->getAllDefinitions()->filterByEntity($entityTable)->filterByApi() as $def) {
+-            $whitelist[$def->getNormalizedModuleKey()][$def->getPropertyName()] = true;
+-        }
+-        foreach ($result as $moduleKey => $fields) {
+-            foreach (array_keys($fields) as $fieldName) {
+-                if (!isset($whitelist[$moduleKey][$fieldName])) {
+-                    unset($result[$moduleKey][$fieldName]);
+-                }
+-            }
+-            if (empty($result[$moduleKey])) {
+-                unset($result[$moduleKey]);
+-            }
+-        }
+-
+-        return $result;
+-    }
+-
+-    /**
+-     * Persists extra properties for all three scopes via the writer.
+-     *
+-     * The payload is already grouped by module/property — the same shape the writer
+-     * accepts — so this method only filters API-writable definitions, converts lang
+-     * locale keys to id_lang, and isolates shop-scoped values per shop id. Scope
+-     * routing and storage column resolution happen inside the writer.
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     * @param int $entityId Entity primary key value
+-     * @param array<string, array<string, mixed>> $extraPropertiesByModule Grouped by module name
+-     */
+-    protected function persistExtraProperties(string $entityTable, int $entityId, array $extraPropertiesByModule): void
+-    {
+-        $allDefinitions = $this->repository->getAllDefinitions()->filterByEntity($entityTable);
+-        if ($allDefinitions->isEmpty()) {
+-            return;
+-        }
+-
+-        [$mainValuesByModule, $shopValuesByShopId] = $this->buildWritableValues($allDefinitions, $extraPropertiesByModule);
+-
+-        $primaryKeyName = $allDefinitions->first()->getPrimaryKeyName();
+-
+-        if (!empty($mainValuesByModule)) {
+-            $this->writer->writeAll(
+-                $entityTable,
+-                $primaryKeyName,
+-                $entityId,
+-                $mainValuesByModule,
+-                $this->shopContext->getShopConstraint()
+-            );
+-        }
+-
+-        foreach ($shopValuesByShopId as $shopId => $valuesByModule) {
+-            $this->writer->writeAll(
+-                $entityTable,
+-                $primaryKeyName,
+-                $entityId,
+-                $valuesByModule,
+-                ShopConstraint::shop((int) $shopId)
+-            );
+-        }
+-    }
+-
+-    /**
+-     * Splits the API payload into the main grouped write (common + lang values, with
+-     * locale keys converted to id_lang) and per-shop grouped writes (shop-scoped values
+-     * are arrays keyed by shop id in the payload).
+-     *
+-     * Only definitions flagged display_api = 1 are writable.
+-     *
+-     * @param ExtraPropertyDefinitionCollection $allDefinitions
+-     * @param array<string, array<string, mixed>> $extraPropertiesByModule
+-     *
+-     * @return array{0: array<string, array<string, mixed>>, 1: array<int, array<string, array<string, mixed>>>}
+-     */
+-    protected function buildWritableValues(ExtraPropertyDefinitionCollection $allDefinitions, array $extraPropertiesByModule): array
+-    {
+-        $localeToIdLangMap = null;
+-        $mainValuesByModule = [];
+-        $shopValuesByShopId = [];
+-
+-        foreach ($allDefinitions as $def) {
+-            if (!$def->isDisplayApi()) {
+-                continue;
+-            }
+-
+-            $moduleName = $def->getNormalizedModuleKey();
+-            $fieldName = $def->getPropertyName();
+-            if ('' === $fieldName || !isset($extraPropertiesByModule[$moduleName][$fieldName])) {
+-                continue;
+-            }
+-
+-            $value = $extraPropertiesByModule[$moduleName][$fieldName];
+-
+-            if (ExtraPropertyScope::LANG === $def->getScope()) {
+-                if (!is_array($value)) {
+-                    continue;
+-                }
+-                $localeToIdLangMap ??= array_flip($this->fetchLangIdLocaleMap());
+-                $valueByIdLang = [];
+-                foreach ($value as $locale => $langValue) {
+-                    $idLang = $localeToIdLangMap[(string) $locale] ?? null;
+-                    if (null !== $idLang) {
+-                        $valueByIdLang[(int) $idLang] = $langValue;
+-                    }
+-                }
+-                if ([] !== $valueByIdLang) {
+-                    $mainValuesByModule[$moduleName][$fieldName] = $valueByIdLang;
+-                }
+-            } elseif (ExtraPropertyScope::SHOP === $def->getScope()) {
+-                if (!is_array($value)) {
+-                    continue;
+-                }
+-                foreach ($value as $shopId => $shopValue) {
+-                    $shopValuesByShopId[(int) $shopId][$moduleName][$fieldName] = $shopValue;
+-                }
+-            } else {
+-                $mainValuesByModule[$moduleName][$fieldName] = $value;
+-            }
+-        }
+-
+-        return [$mainValuesByModule, $shopValuesByShopId];
+-    }
+-
+-    /**
+-     * Resolves the entity primary key value from the normalized response array.
+-     *
+-     * When ApiPlatform property metadata factories are available, inspects #[ApiProperty(identifier: true)]
+-     * on the resource class to find the identifier property name. Falls back to the 'id' field and then
+-     * to the camelCase pattern derived from the entity table name (e.g. 'productId', 'customerId').
+-     *
+-     * @param array<string, mixed> $normalizedData Normalized response data
+-     * @param string $entityTable Entity storage table (e.g. 'product', 'customer_address')
+-     * @param string|null $resourceClass Fully-qualified ApiResource class name (used for metadata lookup)
+-     *
+-     * @return int Entity ID, or 0 when not found
+-     */
+-    protected function resolveEntityIdFromData(array $normalizedData, string $entityTable, ?string $resourceClass = null): int
+-    {
+-        // R5: use #[ApiProperty(identifier: true)] metadata when available.
+-        if (null !== $resourceClass && null !== $this->propertyNameCollectionFactory && null !== $this->propertyMetadataFactory) {
+-            try {
+-                foreach ($this->propertyNameCollectionFactory->create($resourceClass) as $propertyName) {
+-                    $metadata = $this->propertyMetadataFactory->create($resourceClass, $propertyName);
+-                    if ($metadata->isIdentifier() && isset($normalizedData[$propertyName]) && is_int($normalizedData[$propertyName])) {
+-                        return $normalizedData[$propertyName];
+-                    }
+-                }
+-            } catch (Throwable) {
+-                // Fall through to heuristic resolution below.
+-            }
+-        }
+-
+-        // Try the generic 'id' field first (most common in PS API resources)
+-        if (isset($normalizedData['id']) && is_int($normalizedData['id'])) {
+-            return $normalizedData['id'];
+-        }
+-
+-        // Fall back to camelCase pattern: "product" → "productId", "customer_address" → "customerAddressId"
+-        $camelCase = lcfirst(str_replace('_', '', ucwords($entityTable, '_')));
+-        $idPropertyName = $camelCase . 'Id';
+-
+-        if (isset($normalizedData[$idPropertyName]) && is_int($normalizedData[$idPropertyName])) {
+-            return $normalizedData[$idPropertyName];
+-        }
+-
+-        return 0;
+-    }
+-
+-    /**
+-     * Returns a module-keyed set of field names that are shop-scoped and API-exposed.
+-     *
+-     * Used by R8 (flatten shop-scoped values in single-shop context).
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     *
+-     * @return array<string, array<string, true>> ['moduleKey' => ['fieldName' => true]]
+-     */
+-    private function buildShopScopedFieldsByModule(string $entityTable): array
+-    {
+-        $shopFields = [];
+-        foreach ($this->repository->getAllDefinitions()->filterByEntity($entityTable) as $def) {
+-            if (ExtraPropertyScope::SHOP !== $def->getScope() || !$def->isDisplayApi()) {
+-                continue;
+-            }
+-
+-            $fieldName = $def->getPropertyName();
+-            if ('' === $fieldName) {
+-                continue;
+-            }
+-
+-            $moduleKey = $def->getNormalizedModuleKey();
+-            $shopFields[$moduleKey][$fieldName] = true;
+-        }
+-
+-        return $shopFields;
+-    }
+-
+-    /**
+-     * Returns a module-keyed set of field names that are lang-scoped and API-exposed.
+-     *
+-     * @param string $entityTable Entity storage table (e.g. 'product')
+-     *
+-     * @return array<string, array<string, true>> ['moduleKey' => ['fieldName' => true]]
+-     */
+-    private function buildLangScopedFieldsByModule(string $entityTable): array
+-    {
+-        if (isset($this->langScopedFieldsByEntityTableCache[$entityTable])) {
+-            return $this->langScopedFieldsByEntityTableCache[$entityTable];
+-        }
+-
+-        $langFields = [];
+-        foreach ($this->repository->getAllDefinitions()->filterByEntity($entityTable) as $def) {
+-            if (ExtraPropertyScope::LANG !== $def->getScope() || !$def->isDisplayApi()) {
+-                continue;
+-            }
+-
+-            $fieldName = $def->getPropertyName();
+-            if ('' === $fieldName) {
+-                continue;
+-            }
+-
+-            $moduleKey = $def->getNormalizedModuleKey();
+-            $langFields[$moduleKey][$fieldName] = true;
+-        }
+-
+-        $this->langScopedFieldsByEntityTableCache[$entityTable] = $langFields;
+-
+-        return $langFields;
+-    }
+-
+-    /**
+-     * Flattens shop-scoped array values to scalars when in single-shop context.
+-     *
+-     * In single-shop context, a shop-scope field value is stored as [id_shop => value].
+-     * The API response should expose the scalar value directly, not the shop-keyed array.
+-     *
+-     * @param array<string, array<string, mixed>> $valuesByModule
+-     * @param array<string, array<string, true>> $shopScopedFieldsByModule ['moduleKey' => ['fieldName' => true]]
+-     *
+-     * @return array<string, array<string, mixed>>
+-     */
+-    private function flattenShopScopedValues(array $valuesByModule, array $shopScopedFieldsByModule): array
+-    {
+-        if (empty($shopScopedFieldsByModule)) {
+-            return $valuesByModule;
+-        }
+-
+-        foreach ($valuesByModule as $moduleName => &$fields) {
+-            foreach ($fields as $fieldName => &$value) {
+-                if (!empty($shopScopedFieldsByModule[$moduleName][$fieldName]) && is_array($value)) {
+-                    // Single-shop context: unwrap the single-element shop array.
+-                    $value = !empty($value) ? reset($value) : null;
+-                }
+-            }
+-            unset($value);
+-        }
+-        unset($fields);
+-
+-        return $valuesByModule;
+-    }
+-
+-    /**
+-     * Converts id_lang-keyed values in a module-grouped array to locale-string keys.
+-     *
+-     * Only fields that are declared as lang-scoped in the registry are converted.
+-     * Common and shop scope values are passed through unchanged.
+-     *
+-     * @param array<string, array<string, mixed>> $valuesByModule
+-     * @param array<int, string> $langLocaleMap [id_lang => locale]
+-     * @param array<string, array<string, true>> $langScopedFieldsByModule ['moduleKey' => ['fieldName' => true]]
+-     *
+-     * @return array<string, array<string, mixed>>
+-     */
+-    private function convertLangKeysToLocale(array $valuesByModule, array $langLocaleMap, array $langScopedFieldsByModule): array
+-    {
+-        if (empty($langLocaleMap)) {
+-            return $valuesByModule;
+-        }
+-
+-        $result = [];
+-        foreach ($valuesByModule as $moduleName => $fields) {
+-            foreach ($fields as $fieldName => $value) {
+-                if (!is_array($value)) {
+-                    // Common-scope scalar — pass through
+-                    $result[$moduleName][$fieldName] = $value;
+-                    continue;
+-                }
+-
+-                $isLangScoped = !empty($langScopedFieldsByModule[$moduleName][$fieldName]);
+-                if ($isLangScoped) {
+-                    // Lang-scope: convert id_lang → locale string
+-                    $converted = [];
+-                    foreach ($value as $idLang => $langValue) {
+-                        $locale = $langLocaleMap[(int) $idLang] ?? null;
+-                        if (null !== $locale) {
+-                            $converted[$locale] = $langValue;
+-                        }
+-                    }
+-                    $result[$moduleName][$fieldName] = $converted;
+-                    continue;
+-                }
+-
+-                // Shop-scope (or any other array-shaped value): keep keys as-is.
+-                $result[$moduleName][$fieldName] = $value;
+-            }
+-        }
+-
+-        return $result;
+-    }
+-
+-    /**
+-     * Returns the id_lang → locale mapping via LangRepository.
+-     *
+-     * @return array<int, string>
+-     */
+-    private function fetchLangIdLocaleMap(): array
+-    {
+-        try {
+-            $mapping = $this->langRepository->getMapping();
+-        } catch (Throwable) {
+-            return [];
+-        }
+-
+-        $result = [];
+-        foreach ($mapping as $idLang => $row) {
+-            $result[(int) $idLang] = (string) $row['locale'];
+-        }
+-
+-        return $result;
+-    }
+-}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Normalizer/CQRSApiNormalizer.php b/src/PrestaShopBundle/ApiPlatform/Normalizer/CQRSApiNormalizer.php
+index 9644b7853e810..d04879f060feb 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Normalizer/CQRSApiNormalizer.php
++++ b/src/PrestaShopBundle/ApiPlatform/Normalizer/CQRSApiNormalizer.php
+@@ -13,7 +13,7 @@
+ use PrestaShopBundle\ApiPlatform\LocalizedValueUpdater;
+ use PrestaShopBundle\ApiPlatform\Metadata\LocalizedValue;
+ use PrestaShopBundle\ApiPlatform\NormalizationMapper;
+-use PrestaShopBundle\ApiPlatform\Validator\CQRSApiValidator;
++use PrestaShopBundle\ApiPlatform\Validator\CQRSApiValidatorInterface;
+ use ReflectionClass;
+ use ReflectionMethod;
+ use ReflectionNamedType;
+@@ -50,7 +50,7 @@ class CQRSApiNormalizer extends ObjectNormalizer
+     public function __construct(
+         protected readonly DomainObjectDetector $domainObjectDetector,
+         protected readonly LocalizedValueUpdater $localizedValueUpdater,
+-        protected readonly CQRSApiValidator $CQRSApiValidator,
++        protected readonly CQRSApiValidatorInterface $CQRSApiValidator,
+         ?ClassMetadataFactoryInterface $classMetadataFactory = null,
+         ?NameConverterInterface $nameConverter = null,
+         ?PropertyAccessorInterface $propertyAccessor = null,
+diff --git a/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php b/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php
+new file mode 100644
+index 0000000000000..f7b9ab7c9030b
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/OpenApi/Adapter/ExtraPropertiesSchemaAdapter.php
+@@ -0,0 +1,178 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\OpenApi\Adapter;
++
++use ApiPlatform\Metadata\HttpOperation;
++use ApiPlatform\Metadata\Operation;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ArrayObject;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use Throwable;
++
++/**
++ * Documents the `extraProperties` sub-object in the generated OpenAPI schema.
++ *
++ * It mirrors the runtime behaviour of the extra property API bridge: a definition is documented on an endpoint
++ * only when its associatedApis matches that endpoint's URI template. The sub-object is grouped by module
++ * technical name, then by (snake_case) property name; LANG-scope fields are documented as locale-indexed objects.
++ *
++ * Two phases (see CQRSOpenApiFactory):
++ *   - resource phase ($operation === null): the read/output schema — documents the union of definitions matching
++ *     any of the resource's operations.
++ *   - operation phase ($operation !== null): the input schema — documents definitions matching that write operation.
++ *
++ * Registered with a very low priority so it runs AFTER SchemaSynchronizer (which strips properties that are not
++ * declared on the resource class) — otherwise the synthetic `extraProperties` property would be removed again.
++ */
++class ExtraPropertiesSchemaAdapter implements OpenApiSchemaAdapterInterface
++{
++    private const WRITE_METHODS = ['POST', 'PUT', 'PATCH'];
++
++    public function __construct(
++        protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
++        protected readonly ResourceMetadataCollectionFactoryInterface $resourceMetadataFactory,
++    ) {
++    }
++
++    public function adapt(string $class, ArrayObject $definition, ?Operation $operation = null): void
++    {
++        if (!isset($definition['properties'])) {
++            return;
++        }
++
++        if (null === $operation) {
++            $definitions = $this->definitionsForResource($class);
++        } else {
++            // The operation phase adapts input (write) schemas; a GET has no request body to document.
++            if (!$operation instanceof HttpOperation || !in_array(strtoupper((string) $operation->getMethod()), self::WRITE_METHODS, true)) {
++                return;
++            }
++            $definitions = $this->definitionsForOperation($operation);
++        }
++
++        if (null === $definitions || $definitions->isEmpty()) {
++            return;
++        }
++
++        $properties = $definition['properties'];
++        $properties['extraProperties'] = $this->buildExtraPropertiesSchema($definitions);
++        $definition['properties'] = $properties;
++    }
++
++    protected function definitionsForOperation(HttpOperation $operation): ?ExtraPropertyDefinitionCollection
++    {
++        $uriTemplate = (string) $operation->getUriTemplate();
++        if ('' === $uriTemplate) {
++            return null;
++        }
++
++        return $this->repository->getAllDefinitions()->filterByApi($uriTemplate, (string) $operation->getMethod());
++    }
++
++    /**
++     * Returns the union of definitions matching any operation of the given resource (deduplicated).
++     */
++    protected function definitionsForResource(string $resourceClass): ?ExtraPropertyDefinitionCollection
++    {
++        $allDefinitions = $this->repository->getAllDefinitions();
++        if ($allDefinitions->isEmpty()) {
++            return null;
++        }
++
++        try {
++            $metadataCollection = $this->resourceMetadataFactory->create($resourceClass);
++        } catch (Throwable) {
++            return null;
++        }
++
++        $matched = [];
++        $seen = [];
++        foreach ($metadataCollection as $resourceMetadata) {
++            foreach ($resourceMetadata->getOperations() ?? [] as $operation) {
++                if (!$operation instanceof HttpOperation) {
++                    continue;
++                }
++                $uriTemplate = (string) $operation->getUriTemplate();
++                if ('' === $uriTemplate) {
++                    continue;
++                }
++                foreach ($allDefinitions->filterByApi($uriTemplate, (string) $operation->getMethod()) as $definition) {
++                    $key = $definition->getEntityName() . '|' . $definition->getNormalizedModuleKey() . '|' . $definition->getPropertyName();
++                    if (!isset($seen[$key])) {
++                        $seen[$key] = true;
++                        $matched[] = $definition;
++                    }
++                }
++            }
++        }
++
++        return new ExtraPropertyDefinitionCollection($matched);
++    }
++
++    protected function buildExtraPropertiesSchema(ExtraPropertyDefinitionCollection $definitions): ArrayObject
++    {
++        $moduleProperties = [];
++        foreach ($definitions as $definition) {
++            $moduleKey = $definition->getNormalizedModuleKey();
++            if (!isset($moduleProperties[$moduleKey])) {
++                $moduleProperties[$moduleKey] = ['type' => 'object', 'properties' => []];
++            }
++            $moduleProperties[$moduleKey]['properties'][$definition->getPropertyName()] = $this->buildFieldSchema($definition);
++        }
++
++        return new ArrayObject([
++            'type' => 'object',
++            'description' => 'Module-declared extra properties, grouped by module technical name then by property name.',
++            'properties' => $moduleProperties,
++        ]);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    protected function buildFieldSchema(ExtraPropertyDefinition $definition): array
++    {
++        // LANG-scope values are exposed/expected as locale-indexed objects, whatever the underlying type.
++        if (ExtraPropertyScope::LANG === $definition->getScope()) {
++            return [
++                'type' => 'object',
++                'example' => ['en-US' => 'value', 'fr-FR' => 'valeur'],
++            ];
++        }
++
++        return match ($definition->getType()) {
++            ExtraPropertyType::INT => ['type' => 'integer'],
++            ExtraPropertyType::BOOL => ['type' => 'boolean'],
++            ExtraPropertyType::FLOAT => ['type' => 'number'],
++            ExtraPropertyType::DATE => ['type' => 'string', 'format' => 'date-time'],
++            ExtraPropertyType::JSON => ['type' => 'object'],
++            ExtraPropertyType::CHOICE => $this->buildChoiceSchema($definition),
++            default => ['type' => 'string'],
++        };
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    protected function buildChoiceSchema(ExtraPropertyDefinition $definition): array
++    {
++        $schema = ['type' => 'string'];
++        $enumValues = $definition->getEnumValues();
++        if (!empty($enumValues)) {
++            $schema['enum'] = array_values($enumValues);
++        }
++
++        return $schema;
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php b/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
+index c0e49c7939b5c..bf4826be0dfb7 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
++++ b/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
+@@ -9,11 +9,13 @@
+ namespace PrestaShopBundle\ApiPlatform\Provider;
+ 
+ use ApiPlatform\Metadata\CollectionOperationInterface;
++use ApiPlatform\Metadata\HttpOperation;
+ use ApiPlatform\Metadata\Operation;
+ use ApiPlatform\State\ProviderInterface;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Exception\TypeException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Api\ExtraPropertyApiListRecordCollector;
+ use PrestaShop\PrestaShop\Core\Grid\Data\Factory\GridDataFactoryInterface;
+ use PrestaShop\PrestaShop\Core\Search\Builder\FiltersBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Search\Filters;
+@@ -45,6 +47,7 @@ public function __construct(
+         protected readonly CommandBusInterface $queryBus,
+         protected readonly ContextParametersProvider $contextParametersProvider,
+         protected readonly PropertyAccessorInterface $propertyAccessor,
++        protected readonly ?ExtraPropertyApiListRecordCollector $extraPropertyListCollector = null,
+     ) {
+     }
+ 
+@@ -102,6 +105,16 @@ protected function paginationByGridDataFactory(string $gridDataFactoryDefinition
+         $gridDataItems = $gridData->getRecords()->all();
+         $count = $gridData->getRecordsTotal();
+ 
++        // The grid query already fetched and cast any grid-associated extra property; hand those records to the
++        // collector so the response subscriber can inline them per item instead of re-reading the database.
++        if ($operation instanceof HttpOperation) {
++            $this->extraPropertyListCollector?->capture(
++                $gridDataItems,
++                (string) $operation->getUriTemplate(),
++                (string) $operation->getMethod(),
++            );
++        }
++
+         $normalizedQueryResult = [];
+         foreach ($gridDataItems as $key => $result) {
+             $normalizedQueryResult[$key] = $this->domainSerializer->denormalize(
+diff --git a/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidator.php b/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidator.php
+index 5080b51da59a3..eb51e14386ccd 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidator.php
++++ b/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidator.php
+@@ -16,7 +16,7 @@
+  * Resource class, but since the resource carries the constraints the resource needs to be the one validated, so this service
+  * is used right before the CQRS object denormalization to validate the input.
+  */
+-class CQRSApiValidator
++class CQRSApiValidator implements CQRSApiValidatorInterface
+ {
+     public function __construct(
+         protected readonly MetadataFactoryInterface $validatorMetadataFactory,
+diff --git a/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidatorInterface.php b/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidatorInterface.php
+new file mode 100644
+index 0000000000000..571eb26857041
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Validator/CQRSApiValidatorInterface.php
+@@ -0,0 +1,25 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Validator;
++
++use ApiPlatform\Metadata\Operation;
++
++/**
++ * Contract for the CQRS API validator: it tells whether a resource needs validation (hasConstraints) and validates
++ * a denormalized API resource against the operation's constraints (validate).
++ *
++ * Implemented by CQRSApiValidator and decorated, in the Admin API kernel only, by ExtraPropertyCQRSApiValidator
++ * (which merges extra-property violations with the resource constraint violations).
++ */
++interface CQRSApiValidatorInterface
++{
++    public function hasConstraints(string $resourceClass): bool;
++
++    public function validate(mixed $apiResource, Operation $operation): void;
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php b/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php
+new file mode 100644
+index 0000000000000..e75db08ac18c1
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Validator/ExtraPropertyCQRSApiValidator.php
+@@ -0,0 +1,215 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Validator;
++
++use ApiPlatform\Metadata\HttpOperation;
++use ApiPlatform\Metadata\Operation;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ApiPlatform\Validator\Exception\ValidationException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface;
++use PrestaShopBundle\ApiPlatform\Exception\LocaleNotFoundException;
++use PrestaShopBundle\ApiPlatform\LocalizedValueUpdater;
++use PrestaShopBundle\ApiPlatform\Metadata\LocalizedValue;
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\Validator\ConstraintViolation;
++use Symfony\Component\Validator\ConstraintViolationList;
++use Symfony\Component\Validator\ConstraintViolationListInterface;
++use Throwable;
++
++/**
++ * Admin-API-only decorator of CQRSApiValidator that also validates the incoming `extraProperties` payload and
++ * MERGES its violations with the resource constraint violations into a single 422 — instead of one preempting the
++ * other.
++ *
++ * Registered with `decorates: CQRSApiValidator` in the Admin API kernel, so CQRSApiNormalizer (which depends on
++ * CQRSApiValidatorInterface) transparently uses it there. Core resource validation in PrestaShop runs during
++ * denormalization, so this is the only seam where the two violation lists can be combined.
++ */
++class ExtraPropertyCQRSApiValidator implements CQRSApiValidatorInterface
++{
++    public function __construct(
++        protected readonly CQRSApiValidatorInterface $inner,
++        protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
++        protected readonly ResourceMetadataCollectionFactoryInterface $resourceMetadataFactory,
++        protected readonly RequestStack $requestStack,
++        protected readonly ExtraPropertyValidatorInterface $validatorAdapter,
++        protected readonly LocalizedValueUpdater $localizedValueUpdater,
++    ) {
++    }
++
++    /**
++     * Returns true when the decorated validator reports constraints OR when an extra property definition targets
++     * one of the resource's operations — so extra-property validation runs even for resources with no core
++     * constraints.
++     */
++    public function hasConstraints(string $resourceClass): bool
++    {
++        return $this->inner->hasConstraints($resourceClass) || $this->resourceHasExtraProperties($resourceClass);
++    }
++
++    public function validate(mixed $apiResource, Operation $operation): void
++    {
++        $violations = new ConstraintViolationList();
++
++        try {
++            $this->inner->validate($apiResource, $operation);
++        } catch (ValidationException $e) {
++            $violations->addAll($e->getConstraintViolationList());
++        }
++
++        $payload = $this->extractExtraPropertiesPayload();
++        if (null !== $payload && $operation instanceof HttpOperation) {
++            $extraViolations = $this->validateExtraProperties(
++                $payload,
++                (string) $operation->getUriTemplate(),
++                (string) $operation->getMethod(),
++            );
++            $violations->addAll($extraViolations);
++        }
++
++        if ($violations->count() > 0) {
++            throw new ValidationException($violations);
++        }
++    }
++
++    protected function resourceHasExtraProperties(string $resourceClass): bool
++    {
++        $definitions = $this->repository->getAllDefinitions();
++        if ($definitions->isEmpty()) {
++            return false;
++        }
++
++        try {
++            $metadataCollection = $this->resourceMetadataFactory->create($resourceClass);
++        } catch (Throwable) {
++            return false;
++        }
++
++        foreach ($metadataCollection as $resourceMetadata) {
++            foreach ($resourceMetadata->getOperations() ?? [] as $operation) {
++                if (!$operation instanceof HttpOperation) {
++                    continue;
++                }
++                $uriTemplate = (string) $operation->getUriTemplate();
++                if ('' === $uriTemplate) {
++                    continue;
++                }
++                if (!$definitions->filterByApi($uriTemplate, (string) $operation->getMethod())->isEmpty()) {
++                    return true;
++                }
++            }
++        }
++
++        return false;
++    }
++
++    /**
++     * Validates an extraProperties payload against the definitions targeting the given operation (URI template +
++     * HTTP method). Returns an empty list when nothing matches or the payload is empty. Violations use the path
++     * "extraProperties.<module>.<field>[.<locale|shopId>]" so they merge with the resource constraint violations.
++     *
++     * @param array<string, array<string, mixed>> $extraPropertiesByModule
++     */
++    protected function validateExtraProperties(array $extraPropertiesByModule, string $uriTemplate, string $method): ConstraintViolationListInterface
++    {
++        $violations = new ConstraintViolationList();
++        if (empty($extraPropertiesByModule)) {
++            return $violations;
++        }
++
++        $definitions = $this->repository->getAllDefinitions()->filterByApi($uriTemplate, $method);
++        foreach ($definitions as $definition) {
++            $moduleKey = $definition->getNormalizedModuleKey();
++            $fieldName = $definition->getPropertyName();
++            if (!isset($extraPropertiesByModule[$moduleKey]) || !array_key_exists($fieldName, $extraPropertiesByModule[$moduleKey])) {
++                continue;
++            }
++
++            $value = $extraPropertiesByModule[$moduleKey][$fieldName];
++            $basePath = sprintf('extraProperties.%s.%s', $moduleKey, $fieldName);
++
++            if (ExtraPropertyScope::LANG === $definition->getScope() && is_array($value)) {
++                foreach ($value as $locale => $localeValue) {
++                    $this->validateOneValue($violations, $definition, $localeValue, $basePath . '.' . (string) $locale);
++                }
++                $this->assertKnownLocales($violations, $value, $fieldName, $basePath);
++                continue;
++            }
++
++            if (ExtraPropertyScope::SHOP === $definition->getScope() && is_array($value)) {
++                foreach ($value as $shopId => $shopValue) {
++                    $this->validateOneValue($violations, $definition, $shopValue, $basePath . '.' . (string) $shopId);
++                }
++                continue;
++            }
++
++            $this->validateOneValue($violations, $definition, $value, $basePath);
++        }
++
++        return $violations;
++    }
++
++    protected function validateOneValue(ConstraintViolationListInterface $violations, ExtraPropertyDefinition $definition, mixed $value, string $propertyPath): void
++    {
++        if (null === $definition->getValidator()) {
++            return;
++        }
++
++        $result = $this->validatorAdapter->validateValue($definition, $value);
++        if (true !== $result) {
++            $message = is_string($result) && '' !== $result ? $result : 'This value is not valid.';
++            $violations->add(new ConstraintViolation($message, $message, [], null, $propertyPath, $value));
++        }
++    }
++
++    /**
++     * Adds a violation when a LANG-scope payload uses a locale that does not exist in the shop.
++     *
++     * @param array<int|string, mixed> $localizedValue
++     */
++    protected function assertKnownLocales(ConstraintViolationListInterface $violations, array $localizedValue, string $fieldName, string $basePath): void
++    {
++        try {
++            $this->localizedValueUpdater->denormalizeLocalizedValue(
++                $localizedValue,
++                $fieldName,
++                [LocalizedValue::IS_LOCALIZED_VALUE => true, LocalizedValue::DENORMALIZED_KEY => LocalizedValue::ID_KEY],
++            );
++        } catch (LocaleNotFoundException $e) {
++            $violations->add(new ConstraintViolation($e->getMessage(), $e->getMessage(), [], null, $basePath, $localizedValue));
++        }
++    }
++
++    /**
++     * @return array<string, array<string, mixed>>|null
++     */
++    protected function extractExtraPropertiesPayload(): ?array
++    {
++        $request = $this->requestStack->getCurrentRequest();
++        if (null === $request) {
++            return null;
++        }
++
++        $content = $request->getContent();
++        if ('' === $content) {
++            return null;
++        }
++
++        $decoded = json_decode($content, true);
++        if (!is_array($decoded) || !isset($decoded['extraProperties']) || !is_array($decoded['extraProperties'])) {
++            return null;
++        }
++
++        return $decoded['extraProperties'];
++    }
++}
+diff --git a/src/PrestaShopBundle/EventListener/API/ExtraPropertyApiSubscriber.php b/src/PrestaShopBundle/EventListener/API/ExtraPropertyApiSubscriber.php
+new file mode 100644
+index 0000000000000..a32fe9da80fa1
+--- /dev/null
++++ b/src/PrestaShopBundle/EventListener/API/ExtraPropertyApiSubscriber.php
+@@ -0,0 +1,455 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\EventListener\API;
++
++use ApiPlatform\Metadata\CollectionOperationInterface;
++use ApiPlatform\Metadata\HttpOperation;
++use ApiPlatform\Metadata\Property\Factory\PropertyMetadataFactoryInterface;
++use ApiPlatform\Metadata\Property\Factory\PropertyNameCollectionFactoryInterface;
++use ObjectModelCore;
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Api\ExtraPropertyApiListRecordCollector;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface;
++use PrestaShop\PrestaShop\Core\Util\Inflector;
++use PrestaShopBundle\ApiPlatform\Exception\LocaleNotFoundException;
++use PrestaShopBundle\ApiPlatform\LocalizedValueUpdater;
++use PrestaShopBundle\ApiPlatform\Metadata\LocalizedValue;
++use PrestaShopBundle\ApiPlatform\Provider\QueryListProvider;
++use Symfony\Component\DependencyInjection\Container;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\Event\ResponseEvent;
++use Symfony\Component\HttpKernel\KernelEvents;
++use Throwable;
++
++/**
++ * Bridges Admin API responses with the extra property system, and is the single API-Platform-coupled entry point of
++ * the feature: it resolves the entity id and converts LANG values between locale and id_lang (LocalizedValueUpdater),
++ * so the pure-Core services it drives — the reader (single item), the grid-record collector (list) and the writer
++ * — never depend on API Platform. Validation lives in the dedicated CQRSApiValidator decorator.
++ *
++ * On kernel.response (after API Platform produced the JSON body) it:
++ *  - persists the submitted extraProperties payload of a write, once the entity id is in the response body,
++ *  - enriches the response: a single item gets the nested `extraProperties` object (all locales), each item of a
++ *    paginated list gets the grid-fetched values inline at its root (single context locale).
++ *
++ * Registered only in the Admin API kernel.
++ */
++class ExtraPropertyApiSubscriber implements EventSubscriberInterface
++{
++    public function __construct(
++        protected readonly ExtraPropertyDefinitionRepositoryInterface $repository,
++        protected readonly ExtraPropertyReaderInterface $reader,
++        protected readonly ExtraPropertyApiListRecordCollector $listRecordCollector,
++        protected readonly ExtraPropertyWriterInterface $writer,
++        protected readonly ShopContext $shopContext,
++        protected readonly LanguageContext $languageContext,
++        protected readonly LocalizedValueUpdater $localizedValueUpdater,
++        protected readonly ?PropertyNameCollectionFactoryInterface $propertyNameCollectionFactory = null,
++        protected readonly ?PropertyMetadataFactoryInterface $propertyMetadataFactory = null,
++    ) {
++    }
++
++    public static function getSubscribedEvents(): array
++    {
++        return [
++            // We run on kernel.response, after API Platform has serialized the result and built the Response on
++            // kernel.view (SerializeListener/RespondListener). EventPriorities::* constants are kernel.view
++            // priorities, so they don't apply here; -10 simply keeps us after any other kernel.response listener.
++            KernelEvents::RESPONSE => [['onKernelResponse', -10]],
++        ];
++    }
++
++    public function onKernelResponse(ResponseEvent $event): void
++    {
++        if (!$event->isMainRequest()) {
++            return;
++        }
++
++        $request = $event->getRequest();
++        $operation = $request->attributes->get('_api_operation');
++        if (!$operation instanceof HttpOperation) {
++            return;
++        }
++
++        $response = $event->getResponse();
++        if (!$this->isJsonEntityResponse($response)) {
++            return;
++        }
++
++        $content = $response->getContent();
++        if (false === $content || '' === $content) {
++            return;
++        }
++
++        $decoded = json_decode($content, true);
++        if (!is_array($decoded)) {
++            return;
++        }
++
++        $uriTemplate = (string) $operation->getUriTemplate();
++        $method = (string) $operation->getMethod();
++
++        // Single match: the definitions targeting this operation. When none match there is nothing to do.
++        $definitions = $this->repository->getAllDefinitions()->filterByApi($uriTemplate, $method);
++        if ($definitions->isEmpty()) {
++            return;
++        }
++
++        $resourceClass = (string) $operation->getClass();
++        $entityName = $definitions->first()->getEntityName();
++        $langScopedFields = $this->langScopedFields($definitions);
++
++        if ($this->isCollection($operation, $decoded)) {
++            if (isset($decoded['items']) && is_array($decoded['items'])) {
++                $decoded['items'] = $this->enrichListItems($decoded['items'], $operation, $definitions, $entityName, $resourceClass);
++            }
++        } else {
++            $entityId = $this->resolveId($decoded, $entityName, $resourceClass);
++            if ($entityId > 0) {
++                // Persist the submitted payload first (write operations), so the read-back below reflects it. A 2xx
++                // response means the merging validator already accepted the payload.
++                if ($this->isWriteMethod($method)) {
++                    $payload = $this->extractRequestPayload($request, $definitions);
++                    if ([] !== $payload) {
++                        // The payload is already in writeAll() shape (LANG values keyed by id_lang). Shop scoping
++                        // comes from the ShopContext, built by the Admin API kernel's shop-context listener — a
++                        // multi-shop value is a single value identified by that context, like the form integration.
++                        $this->writer->writeAll(
++                            $entityName,
++                            $definitions->first()->getPrimaryKeyName(),
++                            $entityId,
++                            $this->localesToIds($payload, $langScopedFields),
++                            $this->shopContext->getShopConstraint(),
++                        );
++                    }
++                }
++
++                $values = $this->idsToLocales(
++                    $this->reader->getExtraProperties(
++                        $entityName,
++                        $definitions->first()->getPrimaryKeyName(),
++                        $entityId,
++                        null,
++                        $this->shopContext->getShopConstraint(),
++                        $this->isLangMultishop($entityName),
++                        $definitions,
++                    ),
++                    $langScopedFields
++                );
++                if ([] !== $values) {
++                    $decoded['extraProperties'] = array_merge(
++                        is_array($decoded['extraProperties'] ?? null) ? $decoded['extraProperties'] : [],
++                        $values
++                    );
++                }
++            }
++        }
++
++        $response->setContent((string) json_encode($decoded));
++        // Content length is recomputed when the response is sent; drop any stale value.
++        $response->headers->remove('Content-Length');
++    }
++
++    /**
++     * Enriches each item of a collection response with its extra properties, inline at the item root under the field
++     * name (single context-locale value), combining two sources:
++     *  - grid-associated properties on a grid-backed list (QueryListProvider + grid data factory) are reused from the
++     *    collector — the grid query already fetched them, so no extra read;
++     *  - the rest are read from the database in a single batched query: on a grid-backed list that is the
++     *    API-associated-but-not-grid properties (exposed on the API yet absent from the grid); on a CQRS-paginated
++     *    list (e.g. /products/{id}/combinations) the grid never runs, so it is every property.
++     *
++     * @param array<int, mixed> $items
++     *
++     * @return array<int, mixed>
++     */
++    protected function enrichListItems(array $items, HttpOperation $operation, ExtraPropertyDefinitionCollection $definitions, string $entityName, string $resourceClass): array
++    {
++        $gridBacked = $this->isGridBackedCollection($operation);
++
++        // On a grid-backed list the grid already provided the grid-associated properties (read back from the
++        // collector); only the API-associated properties it did not fetch still need a database read. On any other
++        // list the grid never runs, so every property is read.
++        $readerDefinitions = $gridBacked ? $this->apiOnlyDefinitions($definitions) : $definitions;
++
++        // Resolve every item's entity id once.
++        $entityIdByIndex = [];
++        foreach ($items as $index => $item) {
++            if (!is_array($item)) {
++                continue;
++            }
++            $entityId = $this->resolveId($item, $entityName, $resourceClass);
++            if ($entityId > 0) {
++                $entityIdByIndex[$index] = $entityId;
++            }
++        }
++        if ([] === $entityIdByIndex) {
++            return $items;
++        }
++
++        // Batch-read the properties the grid did not provide, in one query, for the current display language.
++        $valuesByEntity = [];
++        if (!$readerDefinitions->isEmpty()) {
++            $valuesByEntity = $this->reader->getMultipleExtraProperties(
++                $entityName,
++                $readerDefinitions->first()->getPrimaryKeyName(),
++                array_values($entityIdByIndex),
++                $this->languageContext->getId(),
++                $this->shopContext->getShopConstraint(),
++                $this->isLangMultishop($entityName),
++                $readerDefinitions,
++            );
++        }
++
++        foreach ($entityIdByIndex as $index => $entityId) {
++            $item = $items[$index];
++
++            if ($gridBacked) {
++                // Grid-associated properties: reuse exactly the (single context-locale) values the grid fetched.
++                $captured = $this->listRecordCollector->find($entityName, $entityId);
++                if (null !== $captured) {
++                    $item = array_merge($item, $captured);
++                }
++            }
++
++            // Reader-fetched properties, flattened to the same inline shape: field name => value.
++            $entityValues = $valuesByEntity[$entityId] ?? null;
++            if (null !== $entityValues) {
++                foreach ($readerDefinitions as $definition) {
++                    $moduleValues = $entityValues[$definition->getNormalizedModuleKey()] ?? null;
++                    if (null !== $moduleValues && array_key_exists($definition->getPropertyName(), $moduleValues)) {
++                        $item[$definition->getFieldName()] = $moduleValues[$definition->getPropertyName()];
++                    }
++                }
++            }
++
++            $items[$index] = $item;
++        }
++
++        return $items;
++    }
++
++    /**
++     * The subset of $definitions NOT associated with any grid — exposed on the API (and possibly a form) but never
++     * fetched by a grid query, so they are absent from the grid-record collector and must be read from the database.
++     */
++    protected function apiOnlyDefinitions(ExtraPropertyDefinitionCollection $definitions): ExtraPropertyDefinitionCollection
++    {
++        $apiOnly = [];
++        foreach ($definitions as $definition) {
++            if (empty($definition->getAssociatedGrids())) {
++                $apiOnly[] = $definition;
++            }
++        }
++
++        return new ExtraPropertyDefinitionCollection($apiOnly);
++    }
++
++    /**
++     * A list is grid-backed when it is served by QueryListProvider through a grid data factory — the only case
++     * where ExtraPropertyApiListRecordCollector has captured the values. Everything else (CQRS-paginated lists)
++     * must be read from the database.
++     */
++    protected function isGridBackedCollection(HttpOperation $operation): bool
++    {
++        return QueryListProvider::class === $operation->getProvider()
++            && null !== ($operation->getExtraProperties()['gridDataFactory'] ?? null);
++    }
++
++    /**
++     * Whether the entity stores LANG values per shop (its ObjectModel definition is multilang_shop). The class name
++     * is the StudlyCase of the (tableized) entity name; isClassLangMultishop safely returns false for any unknown
++     * class, so a wrong guess never breaks the read.
++     */
++    protected function isLangMultishop(string $entityName): bool
++    {
++        return ObjectModelCore::isClassLangMultishop(Inflector::getInflector()->classify($entityName));
++    }
++
++    protected function isJsonEntityResponse(Response $response): bool
++    {
++        if (Response::HTTP_OK !== $response->getStatusCode() && Response::HTTP_CREATED !== $response->getStatusCode()) {
++            return false;
++        }
++
++        return str_contains((string) $response->headers->get('Content-Type', ''), 'json');
++    }
++
++    /**
++     * @param array<string, mixed> $decoded
++     */
++    protected function isCollection(HttpOperation $operation, array $decoded): bool
++    {
++        return $operation instanceof CollectionOperationInterface || array_key_exists('items', $decoded);
++    }
++
++    protected function isWriteMethod(string $method): bool
++    {
++        return in_array(strtoupper($method), ['POST', 'PUT', 'PATCH'], true);
++    }
++
++    /**
++     * Resolves the integer entity identifier from a normalized API item. Resolution order: the
++     * #[ApiProperty(identifier: true)] property (via metadata) → the generic 'id' field → the camelCase
++     * "{entity}Id" pattern (e.g. product → productId). Returns 0 when none is found.
++     *
++     * @param array<string, mixed> $normalizedData
++     */
++    protected function resolveId(array $normalizedData, string $entityName, string $resourceClass): int
++    {
++        if (null !== $this->propertyNameCollectionFactory && null !== $this->propertyMetadataFactory) {
++            try {
++                foreach ($this->propertyNameCollectionFactory->create($resourceClass) as $propertyName) {
++                    $metadata = $this->propertyMetadataFactory->create($resourceClass, $propertyName);
++                    if ($metadata->isIdentifier() && isset($normalizedData[$propertyName]) && is_int($normalizedData[$propertyName])) {
++                        return $normalizedData[$propertyName];
++                    }
++                }
++            } catch (Throwable) {
++                // Fall through to heuristic resolution below.
++            }
++        }
++
++        if (isset($normalizedData['id']) && is_int($normalizedData['id'])) {
++            return $normalizedData['id'];
++        }
++
++        $idPropertyName = lcfirst(Container::camelize($entityName)) . 'Id';
++        if (isset($normalizedData[$idPropertyName]) && is_int($normalizedData[$idPropertyName])) {
++            return $normalizedData[$idPropertyName];
++        }
++
++        return 0;
++    }
++
++    /**
++     * Reads the submitted extraProperties sub-object from the initial request body and keeps only the properties
++     * actually associated with this operation — those in $definitions, already narrowed by filterByApi. Without this
++     * filtering, a write to any endpoint-associated property would let the payload smuggle in unrelated extra
++     * properties (no definition of theirs matched the operation). Request::getContent() is cached, so this does not
++     * consume the input stream a second time.
++     *
++     * @return array<string, array<string, mixed>>
++     */
++    protected function extractRequestPayload(Request $request, ExtraPropertyDefinitionCollection $definitions): array
++    {
++        $content = $request->getContent();
++        if ('' === $content) {
++            return [];
++        }
++
++        $decoded = json_decode($content, true);
++        if (!is_array($decoded) || !isset($decoded['extraProperties']) || !is_array($decoded['extraProperties'])) {
++            return [];
++        }
++
++        $submitted = $decoded['extraProperties'];
++        $filtered = [];
++        foreach ($definitions as $definition) {
++            $moduleKey = $definition->getNormalizedModuleKey();
++            $propertyName = $definition->getPropertyName();
++            // array_key_exists (not isset): an explicit null is a valid submitted value and must be kept.
++            if (isset($submitted[$moduleKey]) && is_array($submitted[$moduleKey]) && array_key_exists($propertyName, $submitted[$moduleKey])) {
++                $filtered[$moduleKey][$propertyName] = $submitted[$moduleKey][$propertyName];
++            }
++        }
++
++        return $filtered;
++    }
++
++    /**
++     * @return array<string, array<string, true>> [moduleKey][propertyName] => true for LANG-scoped definitions
++     */
++    protected function langScopedFields(ExtraPropertyDefinitionCollection $definitions): array
++    {
++        $fields = [];
++        foreach ($definitions as $definition) {
++            if (ExtraPropertyScope::LANG === $definition->getScope()) {
++                $fields[$definition->getNormalizedModuleKey()][$definition->getPropertyName()] = true;
++            }
++        }
++
++        return $fields;
++    }
++
++    /**
++     * Converts the LANG fields of a submitted payload from locale keys to id_lang keys; other scopes pass through.
++     *
++     * @param array<string, array<string, mixed>> $payload
++     * @param array<string, array<string, true>> $langScopedFields
++     *
++     * @return array<string, array<string, mixed>>
++     */
++    protected function localesToIds(array $payload, array $langScopedFields): array
++    {
++        foreach ($payload as $moduleKey => $fields) {
++            if (!is_array($fields)) {
++                continue;
++            }
++            foreach ($fields as $fieldName => $value) {
++                if (!is_array($value) || empty($langScopedFields[$moduleKey][$fieldName])) {
++                    continue;
++                }
++                try {
++                    $payload[$moduleKey][$fieldName] = $this->localizedValueUpdater->denormalizeLocalizedValue(
++                        $value,
++                        $fieldName,
++                        [LocalizedValue::IS_LOCALIZED_VALUE => true, LocalizedValue::DENORMALIZED_KEY => LocalizedValue::ID_KEY],
++                    );
++                } catch (LocaleNotFoundException) {
++                    // Unknown locale (already reported by validation) — drop the field rather than fail the write.
++                    unset($payload[$moduleKey][$fieldName]);
++                }
++            }
++        }
++
++        return $payload;
++    }
++
++    /**
++     * Converts the LANG fields of loaded values from id_lang keys to locale keys; other scopes pass through.
++     *
++     * @param array<string, array<string, mixed>> $valuesByModule
++     * @param array<string, array<string, true>> $langScopedFields
++     *
++     * @return array<string, array<string, mixed>>
++     */
++    protected function idsToLocales(array $valuesByModule, array $langScopedFields): array
++    {
++        foreach ($valuesByModule as $moduleKey => $fields) {
++            if (!is_array($fields)) {
++                continue;
++            }
++            foreach ($fields as $fieldName => $value) {
++                if (!is_array($value) || empty($langScopedFields[$moduleKey][$fieldName])) {
++                    continue;
++                }
++                try {
++                    $valuesByModule[$moduleKey][$fieldName] = $this->localizedValueUpdater->normalizeLocalizedValue(
++                        $value,
++                        $fieldName,
++                        [LocalizedValue::IS_LOCALIZED_VALUE => true],
++                    );
++                } catch (Throwable) {
++                    // Unknown id_lang in stored data — keep the raw value rather than fail the response.
++                }
++            }
++        }
++
++        return $valuesByModule;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+index 35e14f2d4a17b..ad47e506310a0 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+@@ -71,6 +71,10 @@ services:
+     arguments:
+       $validatorMetadataFactory: '@validator.mapping.class_metadata_factory'
+ 
++  # Consumers (CQRSApiNormalizer) depend on the interface so the Admin API kernel can decorate it (extra properties).
++  PrestaShopBundle\ApiPlatform\Validator\CQRSApiValidatorInterface:
++    alias: PrestaShopBundle\ApiPlatform\Validator\CQRSApiValidator
++
+ 
+   # Decorator of api_platform.state_provider.deserialize DeserializeProvider
+   PrestaShopBundle\ApiPlatform\Provider\EmptyBodyDeserializerProvider:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/open_api.yml b/src/PrestaShopBundle/Resources/config/services/bundle/open_api.yml
+index d4912564e6066..40204972d871a 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/open_api.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/open_api.yml
+@@ -59,6 +59,15 @@ services:
+ 
+   PrestaShopBundle\ApiPlatform\OpenApi\FileUploadRequestBodyBuilder: ~
+ 
++  # Documents the extraProperties sub-object. Runs LAST (after SchemaSynchronizer, which would otherwise strip
++  # this synthetic property since it is not declared on the resource class).
++  PrestaShopBundle\ApiPlatform\OpenApi\Adapter\ExtraPropertiesSchemaAdapter:
++    arguments:
++      $resourceMetadataFactory: '@api_platform.metadata.resource.metadata_collection_factory'
++    tags:
++      - { name: 'prestashop.openapi.schema_adapter.resource', priority: -100 }
++      - { name: 'prestashop.openapi.schema_adapter.operation', priority: -100 }
++
+   # Schema adapter chains - orchestrates adapters in the correct order
+   prestashop_bundle.api_platform.open_api.resource_schema_adapter_chain:
+     class: PrestaShopBundle\ApiPlatform\OpenApi\Adapter\SchemaAdapterChain
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+index 810f2f2c895f1..05710ac6b68c2 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+@@ -4,9 +4,10 @@ services:
+     autowire: true
+     public: false
+ 
+-  # ─── Repository write alias (BO override) ────────────────────────────────────
+-  # Overrides the common alias so that write operations in the back-office also
+-  # invalidate the definition cache.
++  # ─── Repository write alias (back-office only) ───────────────────────────────
++  # Registering/unregistering extra property definitions only happens on the back-office side (module install),
++  # so the writer interface is bound here (not in common.yml). It points at the cache decorator so every write
++  # invalidates the definition cache.
+   PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionWriterInterface:
+     alias: 'PrestaShop\PrestaShop\Core\ExtraProperty\Definition\CachedExtraPropertyDefinitionRepository'
+ 
+@@ -52,17 +53,3 @@ services:
+       $repository: '@PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface'
+       $writer: '@PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface'
+       $shopContext: '@PrestaShop\PrestaShop\Core\Context\ShopContext'
+-
+-  # ─── Admin API extra properties service ──────────────────────────────────────
+-
+-  PrestaShopBundle\ApiPlatform\ExtraProperties\ExtraPropertiesApiService:
+-    arguments:
+-      $repository: '@PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface'
+-      $requestStack: '@request_stack'
+-      $reader: '@PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface'
+-      $writer: '@PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface'
+-      $validatorAdapter: '@PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidatorInterface'
+-      $shopContext: '@PrestaShop\PrestaShop\Core\Context\ShopContext'
+-      $langRepository: '@PrestaShopBundle\Entity\Repository\LangRepository'
+-      $propertyNameCollectionFactory: '@?api_platform.metadata.property_name_collection_factory'
+-      $propertyMetadataFactory: '@?api_platform.metadata.property.metadata_factory'
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+index ad3ef4b427844..3fd879dc1b273 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/common.yml
+@@ -19,8 +19,11 @@ services:
+       $connection: '@doctrine.dbal.default_connection'
+       $prefix: '%database_prefix%'
+ 
+-  PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionWriterInterface:
+-    alias: 'PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepository'
++  # Note: the definition WRITER interface (ExtraPropertyDefinitionWriterInterface) is intentionally NOT aliased
++  # here. Writing definitions (register/unregister) is a back-office-only concern, so the alias lives in
++  # backend.yml. Defining it here too would both leak it into the legacy FO container (where it is never used)
++  # and — because this file is imported after backend.yml by the services/extra_property/*.yml glob — override
++  # the back-office alias.
+ 
+   # ─── Cached repository decorator (read-only, production use) ─────────────────
+ 
+diff --git a/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php b/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
+index 5eb0b4a3a61eb..15748944da665 100644
+--- a/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
++++ b/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
+@@ -18,6 +18,10 @@
+ use RuntimeException;
+ use Shop;
+ use ShopGroup;
++use Symfony\Component\HttpFoundation\File\UploadedFile;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++use Symfony\Component\HttpKernel\KernelInterface;
+ use Tests\Integration\Utility\LanguageTrait;
+ use Tests\Resources\Resetter\ApiClientResetter;
+ 
+@@ -28,8 +32,28 @@ abstract class ApiTestCase extends ApiPlatformTestCase
+     protected const CLIENT_ID = 'test_client_id';
+     protected const CLIENT_NAME = 'test_client_name';
+ 
++    /**
++     * Secret of the single shared API Client created through the legacy createApiClient() path.
++     * Kept for backward compatibility with tests that call createApiClient() in their setUp and then
++     * read static::$clientSecret / static::CLIENT_ID directly (e.g. ApiAccessTokenEndpointTest).
++     */
+     protected static ?string $clientSecret = null;
+ 
++    /**
++     * Cache of API Clients created through the multi-scope path, keyed numerically.
++     * Each entry is ['client_name' => string, 'client_id' => string, 'secret' => string, 'scopes' => array].
++     *
++     * @var array<int, array{client_name: string, client_id: string, secret: string, scopes: array}>|null
++     */
++    protected static ?array $apiClients = null;
++
++    /**
++     * Cache of bearer tokens created through the multi-scope path, to avoid hitting /access_token repeatedly.
++     *
++     * @var array<int, array{token: string, scopes: array}>|null
++     */
++    protected static ?array $bearerTokens = null;
++
+     public static function setUpBeforeClass(): void
+     {
+         parent::setUpBeforeClass();
+@@ -43,6 +67,8 @@ public static function tearDownAfterClass(): void
+         ApiClientResetter::resetApiClient();
+         self::updateConfiguration('PS_ADMIN_API_FORCE_DEBUG_SECURED', 1);
+         self::$clientSecret = null;
++        self::$apiClients = null;
++        self::$bearerTokens = null;
+     }
+ 
+     /**
+@@ -108,6 +134,16 @@ protected static function getKernelClass(): string
+         return AdminAPIKernel::class;
+     }
+ 
++    protected static function bootKernel(array $options = []): KernelInterface
++    {
++        $bootKernel = parent::bootKernel($options);
++        // We must define the global $kernel variable for legacy code to access the container (see SymfonyContainer::getInstance)
++        global $kernel;
++        $kernel = $bootKernel;
++
++        return $bootKernel;
++    }
++
+     protected static function createClient(array $kernelOptions = [], array $defaultOptions = []): Client
+     {
+         if (!isset($defaultOptions['headers']['accept'])) {
+@@ -121,29 +157,308 @@ protected static function createClient(array $kernelOptions = [], array $default
+         return parent::createClient($kernelOptions, $defaultOptions);
+     }
+ 
++    /**
++     * Get a bearer token usable for the requested scopes.
++     *
++     * Two compatible strategies coexist:
++     *  - Legacy single-client path: when a test created the shared client via createApiClient() (so
++     *    static::$clientSecret is set), the token is requested against that client using static::CLIENT_ID.
++     *    This preserves the historical behaviour relied on by existing endpoint tests.
++     *  - Multi-scope path: otherwise (no shared client created), a dedicated API Client owning the requested
++     *    scopes is found in the cache or created on the fly, and tokens are cached per-scope to limit
++     *    /access_token round-trips. Token caching is skipped when custom kernel/client options are passed.
++     *
++     * @param array $scopes List of scopes to request the token for
++     * @param array $kernelOptions Custom kernel options (e.g. debug mode); forwarded to the /access_token request
++     * @param array $clientOptions Custom client options; forwarded to the /access_token request
++     */
+     protected function getBearerToken(array $scopes = [], array $kernelOptions = [], array $clientOptions = []): string
+     {
+-        if (null === self::$clientSecret) {
+-            self::createApiClient($scopes);
++        // Legacy behaviour: a single shared API Client was explicitly created by the test, always use it.
++        if (null !== self::$clientSecret) {
++            $options = [
++                'extra' => [
++                    'parameters' => [
++                        'client_id' => static::CLIENT_ID,
++                        'client_secret' => static::$clientSecret,
++                        'grant_type' => 'client_credentials',
++                        'scope' => $scopes,
++                    ],
++                ],
++                'headers' => [
++                    'content-type' => 'application/x-www-form-urlencoded',
++                ],
++            ];
++            $response = static::createClient($kernelOptions, $clientOptions)->request('POST', '/access_token', $options);
++
++            return json_decode($response->getContent())->access_token;
++        }
++
++        if (null === static::$bearerTokens) {
++            static::$bearerTokens = [];
++        }
++
++        // Custom kernel/client options (e.g. a specific debug mode, like DisabledEndpointsTest uses) change which
++        // operations/routes the kernel exposes, so a token cached under different options must not be reused: doing
++        // so would also skip the /access_token request that warms the route cache under those very options, leaving
++        // a stale cache. We therefore only cache (and reuse) tokens for the default options.
++        $useTokenCache = empty($kernelOptions) && empty($clientOptions);
++
++        // If a token with these scopes already exists then we reuse it, it prevents requesting the /access_token API all the time
++        if ($useTokenCache) {
++            foreach (static::$bearerTokens as $bearerToken) {
++                $containsAllScopes = count(array_intersect($bearerToken['scopes'], $scopes)) === count($scopes);
++                if ($containsAllScopes) {
++                    return $bearerToken['token'];
++                }
++            }
+         }
++
++        // No token was found that can use all the request scopes so we create a new one
++        $apiClient = static::getApiClientWithScopes($scopes);
++        $parameters = ['parameters' => [
++            'client_id' => $apiClient['client_id'],
++            'client_secret' => $apiClient['secret'],
++            'grant_type' => 'client_credentials',
++            'scope' => $scopes,
++        ]];
+         $options = [
+-            'extra' => [
+-                'parameters' => [
+-                    'client_id' => static::CLIENT_ID,
+-                    'client_secret' => static::$clientSecret,
+-                    'grant_type' => 'client_credentials',
+-                    'scope' => $scopes,
+-                ],
+-            ],
++            'extra' => $parameters,
+             'headers' => [
+                 'content-type' => 'application/x-www-form-urlencoded',
+             ],
+         ];
++        // Forward the kernel/client options so the token is requested against the same kernel configuration as the
++        // subsequent calls (this also warms the route cache under those options before the actual request).
+         $response = static::createClient($kernelOptions, $clientOptions)->request('POST', '/access_token', $options);
++        self::assertResponseStatusCodeSame(200);
++
++        $bearerToken = json_decode($response->getContent())->access_token;
++
++        // Cache the bearer token with associated scopes
++        if ($useTokenCache) {
++            static::$bearerTokens[] = [
++                'token' => $bearerToken,
++                'scopes' => $scopes,
++            ];
++        }
++
++        return $bearerToken;
++    }
++
++    /**
++     * @param string $httpMethod HTTP method to use (GET, POST, PATCH, PUT, DELETE)
++     * @param string $endPointUrl HTTP url for the requested endpoint
++     * @param array|null $data Flatten array data that will be sent as JSON (null if no JSON is sent)
++     * @param array $scopes List of scopes to use for this request, a Bearer token will be requested based on the list and use for the request
++     * @param int|null $expectedHttpCode Expected HTTP code, by default it will be inferred based on the HTTP method used but you can specify it (especially when you want to assert requests that will return error codes)
++     * @param array|null $requestOptions Specify custom options for the request (useful to change the content-type, upload files, ...))
++     *
++     * @return array|string|null JSON response is returned as an array, unless it only contains one string message, null is returned for NoContent responses
++     */
++    protected function requestApi(string $httpMethod, string $endPointUrl, ?array $data = null, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        $options = [];
++        if (!empty($scopes)) {
++            $bearerToken = $this->getBearerToken($scopes);
++            $options['auth_bearer'] = $bearerToken;
++        }
++
++        // JSON option is only set when the JSON is not empty
++        if (!empty($data)) {
++            $options['json'] = $data;
++        }
++
++        // Merge additional options if present
++        if (null !== $requestOptions) {
++            $options = array_merge($options, $requestOptions);
++        }
++
++        $response = static::createClient()->request($httpMethod, $endPointUrl, $options);
++
++        // Unless you mean to test a specific code (for invalid requests mostly) the expected code can be deduced from the
++        // HTTP method by convention
++        if (null === $expectedHttpCode) {
++            $expectedHttpCode = match ($httpMethod) {
++                Request::METHOD_POST => Response::HTTP_CREATED,
++                Request::METHOD_DELETE => Response::HTTP_NO_CONTENT,
++                default => Response::HTTP_OK,
++            };
++        }
++
++        self::assertResponseStatusCodeSame($expectedHttpCode);
++        $content = $response->getContent(false);
++
++        // Some endpoint returns no content (204 code should be used in this case)
++        if (empty($content)) {
++            $this->assertEquals(Response::HTTP_NO_CONTENT, $response->getStatusCode());
++
++            return null;
++        }
++
++        $decodedResponse = json_decode($content, true);
++        $this->assertNotFalse($decodedResponse);
++
++        return $decodedResponse;
++    }
++
++    /**
++     * Performs a GET request to get a single item.
++     */
++    protected function getItem(string $endPointUrl, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_GET, $endPointUrl, null, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    /**
++     * Performs a POST request to create an item
++     */
++    protected function createItem(string $endPointUrl, ?array $data, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_POST, $endPointUrl, $data, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    /**
++     * Performs a PATCH request to partially update an item
++     */
++    protected function partialUpdateItem(string $endPointUrl, ?array $data, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_PATCH, $endPointUrl, $data, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    /**
++     * Performs a PUT request to completely update an item
++     */
++    protected function updateItem(string $endPointUrl, ?array $data, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_PUT, $endPointUrl, $data, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    /**
++     * Performs a DELETE request to delete an item
++     */
++    protected function deleteItem(string $endPointUrl, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_DELETE, $endPointUrl, null, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    /**
++     * Performs a DELETE request to delete multiple items, which requires passing some data
++     */
++    protected function bulkDeleteItems(string $endPointUrl, ?array $data, array $scopes = [], ?int $expectedHttpCode = null, ?array $requestOptions = null): array|string|null
++    {
++        return $this->requestApi(Request::METHOD_DELETE, $endPointUrl, $data, $scopes, $expectedHttpCode, $requestOptions);
++    }
++
++    protected function bulkCommandItemsWithExpectedErrors(string $httpMethod, string $endPointUrl, ?array $data, ?array $expectedErrors, array $scopes = [], ?array $requestOptions = null): array|string|null
++    {
++        // In 9.1, we added a new normalizer to handle bulk command exceptions and return a 207 code with details about each error.
++        // If the normalizer is not present, it means we are on an older version and the API will return a 422 code with a generic error message,
++        // so we adapt our assertions based on the normalizer presence.
++        $newNormalizer = class_exists("PrestaShopBundle\ApiPlatform\Normalizer\BulkCommandExceptionNormalizer");
++        $expectedHttpCode = $newNormalizer ? Response::HTTP_MULTI_STATUS : Response::HTTP_UNPROCESSABLE_ENTITY;
++
++        $responseData = $this->requestApi($httpMethod, $endPointUrl, $data, $scopes, $expectedHttpCode, $requestOptions);
++
++        if ($newNormalizer && null !== $expectedErrors) {
++            $this->assertArrayHasKey('errors', $responseData);
++            $this->assertIsArray($responseData['errors']);
++            $this->assertEquals($expectedErrors, $responseData['errors']);
++        }
++
++        return $responseData;
++    }
++
++    /**
++     * Performs a GET request to list some items, returned data is paginated
++     */
++    protected function listItems(string $listUrl, array $scopes = [], array $filters = []): array
++    {
++        $bearerToken = $this->getBearerToken($scopes);
++        $response = static::createClient()->request('GET', $listUrl, [
++            'auth_bearer' => $bearerToken,
++            'extra' => [
++                'parameters' => [
++                    'filters' => $filters,
++                ],
++            ],
++        ]);
++        self::assertResponseStatusCodeSame(200);
++
++        $decodedResponse = json_decode($response->getContent(), true);
++        $this->assertNotFalse($decodedResponse);
++        $this->assertArrayHasKey('totalItems', $decodedResponse);
++        $this->assertArrayHasKey('sortOrder', $decodedResponse);
++        $this->assertArrayHasKey('limit', $decodedResponse);
++        $this->assertArrayHasKey('filters', $decodedResponse);
++        $this->assertArrayHasKey('items', $decodedResponse);
++
++        return $decodedResponse;
++    }
++
++    /**
++     * Performs a GET request to list some items, but simply return the count
++     */
++    protected function countItems(string $listUrl, array $scopes = [], array $filters = []): int
++    {
++        $list = $this->listItems($listUrl, $scopes, $filters);
+ 
+-        return json_decode($response->getContent())->access_token;
++        return $list['totalItems'];
+     }
+ 
++    protected function prepareUploadedFile(string $assetFilePath): UploadedFile
++    {
++        // Uploaded file must be a temporary copy because the file will be moved by the API
++        $tmpUploadedImagePath = rtrim(sys_get_temp_dir(), '/') . '/' . basename($assetFilePath);
++        copy($assetFilePath, $tmpUploadedImagePath);
++
++        return new UploadedFile($tmpUploadedImagePath, basename($assetFilePath));
++    }
++
++    protected function assertValidationErrors(array $expectedErrors, array $responseErrors): void
++    {
++        foreach ($responseErrors as $errorDetail) {
++            $this->assertArrayHasKey('propertyPath', $errorDetail);
++            $this->assertArrayHasKey('message', $errorDetail);
++            $this->assertArrayHasKey('code', $errorDetail);
++
++            $errorFound = false;
++            foreach ($expectedErrors as $expectedError) {
++                if (
++                    (empty($expectedError['message']) || $expectedError['message'] === $errorDetail['message'])
++                    && (empty($expectedError['propertyPath']) || $expectedError['propertyPath'] === $errorDetail['propertyPath'])
++                ) {
++                    $errorFound = true;
++                    break;
++                }
++            }
++
++            $this->assertTrue($errorFound, 'Found error that was not expected: ' . var_export($errorDetail, true));
++        }
++
++        foreach ($expectedErrors as $expectedError) {
++            $errorFound = false;
++            foreach ($responseErrors as $errorDetail) {
++                if (
++                    (empty($expectedError['message']) || $expectedError['message'] === $errorDetail['message'])
++                    && (empty($expectedError['propertyPath']) || $expectedError['propertyPath'] === $errorDetail['propertyPath'])
++                ) {
++                    $errorFound = true;
++                    break;
++                }
++            }
++
++            $this->assertTrue($errorFound, 'Could not find expected error: ' . var_export($expectedError, true));
++        }
++    }
++
++    /**
++     * Creates the single shared API Client (legacy path).
++     *
++     * This keeps the historical contract used by existing endpoint tests: it sets static::$clientSecret and
++     * registers the client under the fixed static::CLIENT_ID / static::CLIENT_NAME. Tests calling this method
++     * in their setUp continue to use the legacy single-client token strategy in getBearerToken().
++     */
+     protected static function createApiClient(array $scopes = [], int $lifetime = 10000): void
+     {
+         $command = new AddApiClientCommand(
+@@ -162,6 +477,68 @@ protected static function createApiClient(array $scopes = [], int $lifetime = 10
+         self::$clientSecret = $createdApiClient->getSecret();
+     }
+ 
++    /**
++     * Creates a dedicated API Client owning the given scopes (multi-scope path).
++     *
++     * Unlike createApiClient(), each client gets a unique name/id derived from its scopes so several clients
++     * with different scope sets can coexist within the same test class. The created client is cached and the
++     * full descriptor (including its secret) is returned.
++     *
++     * @return array{client_name: string, client_id: string, secret: string, scopes: array}
++     */
++    protected static function createApiClientWithScopes(array $scopes = [], int $lifetime = 10000): array
++    {
++        if (null === self::$apiClients) {
++            self::$apiClients = [];
++        }
++
++        $apiClient = [
++            'client_name' => md5(implode(',', $scopes)),
++            'client_id' => md5(implode(',', $scopes)),
++            'scopes' => $scopes,
++        ];
++
++        $command = new AddApiClientCommand(
++            $apiClient['client_name'],
++            $apiClient['client_id'],
++            true,
++            '',
++            $lifetime,
++            $scopes
++        );
++
++        $container = static::createClient()->getContainer();
++        $commandBus = $container->get('prestashop.core.command_bus');
++        $createdApiClient = $commandBus->handle($command);
++
++        $apiClient['secret'] = $createdApiClient->getSecret();
++        self::$apiClients[] = $apiClient;
++
++        return $apiClient;
++    }
++
++    /**
++     * Get an API client that has permissions over the provided scopes, create it if it doesn't exist.
++     *
++     * @return array{client_name: string, client_id: string, secret: string, scopes: array}
++     */
++    protected static function getApiClientWithScopes(array $scopes = []): array
++    {
++        if (null === self::$apiClients) {
++            self::$apiClients = [];
++        }
++
++        foreach (static::$apiClients as $apiClient) {
++            $containsAllScopes = count(array_intersect($apiClient['scopes'], $scopes)) === count($scopes);
++            if ($containsAllScopes) {
++                return $apiClient;
++            }
++        }
++
++        // API Client with all the scopes was not found so we create a new one with the required scopes
++        return self::createApiClientWithScopes($scopes);
++    }
++
+     protected static function addShopGroup(string $groupName, ?string $color = null): int
+     {
+         $shopGroup = new ShopGroup();
+diff --git a/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php b/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php
+new file mode 100644
+index 0000000000000..7b2142056fbea
+--- /dev/null
++++ b/tests/Integration/ApiPlatform/EndPoint/ExtraPropertyEndpointTest.php
+@@ -0,0 +1,382 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\ApiPlatform\EndPoint;
++
++use Db;
++use Language;
++use Module;
++use Symfony\Component\HttpFoundation\Response;
++use Tests\Resources\DatabaseDump;
++use Tests\Resources\Resetter\LanguageResetter;
++use Tests\Resources\Resetter\ProductResetter;
++use Tools;
++
++/**
++ * Integration tests for the "Extra Properties on the Admin API" feature.
++ *
++ * Two test modules (extrapropertytest, extrapropertytest2) register extra properties scoped to specific API
++ * endpoints. The tests assert the runtime contract of the dedicated extraProperties sub-object (single items) and
++ * the inline grid/list values (collections), validating the EXACT content so an unexpected field would fail, that
++ * two modules cohabit without clashing, and that a CQRS-paginated list (combinations) is enriched too.
++ */
++final class ExtraPropertyEndpointTest extends ApiTestCase
++{
++    private const MODULE_NAME = 'extrapropertytest';
++    private const MODULE_2_NAME = 'extrapropertytest2';
++
++    /**
++     * @var string[]
++     */
++    private const TEST_MODULES = [self::MODULE_NAME, self::MODULE_2_NAME];
++
++    private const PRODUCT_READ = 'product_read';
++    private const PRODUCT_WRITE = 'product_write';
++    private const CUSTOMER_READ = 'customer_read';
++    private const CUSTOMER_WRITE = 'customer_write';
++
++    /**
++     * Existing product fixture id from the standard test fixtures (has combinations).
++     */
++    private const PRODUCT_ID = 1;
++
++    /**
++     * Extra-property value tables created by the test modules, cleared before each test for deterministic content.
++     */
++    private const EXTRA_VALUE_TABLES = ['product_extra', 'product_extra_lang', 'customer_extra'];
++
++    public static function setUpBeforeClass(): void
++    {
++        parent::setUpBeforeClass();
++
++        // The localized extra property (api_note) is written/read in several locales, so install a second language
++        // (the default install only has en-US).
++        LanguageResetter::resetLanguages();
++        $frenchLanguageId = self::addLanguageByLocale('fr-FR');
++
++        ProductResetter::resetProducts();
++        DatabaseDump::restoreTables(['customer', 'customer_group']);
++
++        // ProductResetter restores products from an English-only dump, dropping the French translations the new
++        // language created. Copy them back (en → fr for every *_lang table) so the product list can be requested in
++        // either language: the grid joins the *_extra_lang table on the base *_lang row, which must therefore exist.
++        Language::copyLanguageData((int) Language::getIdByLocale('en-US'), $frenchLanguageId);
++
++        foreach (self::TEST_MODULES as $moduleName) {
++            // Copy the test module into the test modules directory (mirrors ModuleManagerBuilderTest). The copy must
++            // happen before the defensive uninstall below so the module class can always be loaded.
++            $sourceModuleDir = dirname(__DIR__, 3) . '/Resources/modules_tests/' . $moduleName;
++            if (is_dir($sourceModuleDir)) {
++                Tools::recurseCopy($sourceModuleDir, self::moduleDir($moduleName));
++            }
++
++            // Self-heal: a previous interrupted run may have left the module installed in the test DB.
++            self::uninstallTestModuleIfInstalled($moduleName);
++
++            $module = Module::getInstanceByName($moduleName);
++            self::assertInstanceOf(Module::class, $module);
++            self::assertTrue((bool) $module->install(), sprintf('The %s module could not be installed', $moduleName));
++        }
++    }
++
++    public static function tearDownAfterClass(): void
++    {
++        // Always clean up — even if the install or a test failed midway — so nothing leaks into the shared test
++        // modules directory or the test database (a module left here is installed by every integration run).
++        foreach (self::TEST_MODULES as $moduleName) {
++            self::uninstallTestModuleIfInstalled($moduleName);
++        }
++
++        // Order matters: LanguageResetter::resetLanguages() below calls ResourceResetter::resetTestModules(), which
++        // mirrors tests/Resources/modules/ back from a temp backup. So we run that FIRST and only then drop the
++        // module dirs — otherwise the mirror would restore them right after we deleted them.
++        ProductResetter::resetProducts();
++        DatabaseDump::restoreTables(['customer', 'customer_group']);
++        LanguageResetter::resetLanguages();
++
++        foreach (self::TEST_MODULES as $moduleName) {
++            if (is_dir(self::moduleDir($moduleName))) {
++                Tools::deleteDirectory(self::moduleDir($moduleName));
++            }
++        }
++
++        parent::tearDownAfterClass();
++    }
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        // Clear all extra-property values so each test starts from a known, empty state (exact-content assertions
++        // would otherwise depend on values persisted by earlier tests).
++        foreach (self::EXTRA_VALUE_TABLES as $table) {
++            Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . $table . '`');
++        }
++    }
++
++    /**
++     * Absolute path of a test module once copied into the test modules directory.
++     */
++    private static function moduleDir(string $moduleName): string
++    {
++        return _PS_MODULE_DIR_ . $moduleName;
++    }
++
++    /**
++     * Uninstalls a test module when installed (dropping its definitions, extra tables and roles). Safe to call
++     * defensively before install and unconditionally on teardown.
++     */
++    private static function uninstallTestModuleIfInstalled(string $moduleName): void
++    {
++        if (!Module::isInstalled($moduleName)) {
++            return;
++        }
++
++        $module = Module::getInstanceByName($moduleName);
++        if ($module instanceof Module) {
++            $module->uninstall();
++        }
++    }
++
++    public function getProtectedEndpoints(): iterable
++    {
++        yield 'get product endpoint' => ['GET', '/products/' . self::PRODUCT_ID];
++        yield 'update product endpoint' => ['PATCH', '/products/' . self::PRODUCT_ID];
++        yield 'get customer endpoint' => ['GET', '/customers/1'];
++        yield 'update customer endpoint' => ['PATCH', '/customers/1'];
++    }
++
++    /**
++     * Round-trip + cohabitation: a PATCH writing properties of BOTH modules must round-trip, and the response must
++     * carry EXACTLY those properties keyed per module (an unexpected/leaked field would fail the assertion).
++     */
++    public function testWriteAndReadProductExtraProperties(): void
++    {
++        $patchedProduct = $this->partialUpdateItem(
++            '/products/' . self::PRODUCT_ID,
++            [
++                'extraProperties' => [
++                    self::MODULE_NAME => [
++                        'api_flag' => true,
++                        'api_note' => ['en-US' => 'hello', 'fr-FR' => 'bonjour'],
++                    ],
++                    self::MODULE_2_NAME => [
++                        'extra_tag' => 'tagged',
++                        'api_only_note' => ['en-US' => 'note-en', 'fr-FR' => 'note-fr'],
++                    ],
++                ],
++            ],
++            [self::PRODUCT_WRITE]
++        );
++
++        $expected = [
++            self::MODULE_NAME => [
++                'api_flag' => true,
++                'api_note' => ['en-US' => 'hello', 'fr-FR' => 'bonjour'],
++            ],
++            self::MODULE_2_NAME => [
++                'extra_tag' => 'tagged',
++                'api_only_note' => ['en-US' => 'note-en', 'fr-FR' => 'note-fr'],
++            ],
++        ];
++        $this->assertArrayHasKey('extraProperties', $patchedProduct);
++        $this->assertEquals($expected, $patchedProduct['extraProperties']);
++
++        // The same values must be persisted and returned, exactly, on a plain GET.
++        $fetchedProduct = $this->getItem('/products/' . self::PRODUCT_ID, [self::PRODUCT_READ]);
++        $this->assertArrayHasKey('extraProperties', $fetchedProduct);
++        $this->assertEquals($expected, $fetchedProduct['extraProperties']);
++    }
++
++    /**
++     * The product list (grid-backed collection) exposes the API-associated properties of BOTH modules INLINE at the
++     * item root under their field name (extra_<module>_<field>), not in a nested extraProperties sub-object. This
++     * includes an API-only property (no grid association), which the grid never fetches and is therefore surfaced
++     * through the batch-reader fallback. The localized values follow the langId query parameter, so we assert the
++     * exact value per language.
++     */
++    public function testListInjectsExtraProperties(): void
++    {
++        $this->partialUpdateItem(
++            '/products/' . self::PRODUCT_ID,
++            [
++                'extraProperties' => [
++                    self::MODULE_NAME => [
++                        'api_flag' => true,
++                        'api_note' => ['en-US' => 'hello', 'fr-FR' => 'bonjour'],
++                    ],
++                    self::MODULE_2_NAME => [
++                        'extra_tag' => 'tagged',
++                        'api_only_note' => ['en-US' => 'note-en', 'fr-FR' => 'note-fr'],
++                    ],
++                ],
++            ],
++            [self::PRODUCT_WRITE]
++        );
++
++        $flagKey = 'extra_' . self::MODULE_NAME . '_api_flag';
++        $noteKey = 'extra_' . self::MODULE_NAME . '_api_note';
++        $tagKey = 'extra_' . self::MODULE_2_NAME . '_extra_tag';
++        $apiOnlyNoteKey = 'extra_' . self::MODULE_2_NAME . '_api_only_note';
++
++        $expectations = [
++            'en-US' => ['note' => 'hello', 'apiOnlyNote' => 'note-en'],
++            'fr-FR' => ['note' => 'bonjour', 'apiOnlyNote' => 'note-fr'],
++        ];
++        foreach ($expectations as $locale => $expected) {
++            $list = $this->listItems('/products?langId=' . (int) Language::getIdByLocale($locale), [self::PRODUCT_READ]);
++            $writtenItem = $this->findListItem($list['items'], 'productId', self::PRODUCT_ID);
++            $this->assertNotNull($writtenItem, 'The product written to was not present in the list');
++
++            // List items carry the inline grid values, not the nested extraProperties object.
++            $this->assertArrayNotHasKey('extraProperties', $writtenItem);
++            // Grid-associated properties, reused from the grid-record collector.
++            $this->assertTrue($writtenItem[$flagKey]);
++            $this->assertSame('tagged', $writtenItem[$tagKey]);
++            $this->assertSame($expected['note'], $writtenItem[$noteKey]);
++            // API-only property (no grid association): never fetched by the grid query, so it is surfaced through
++            // the batch-reader fallback. Its localized value still follows the requested langId.
++            $this->assertSame($expected['apiOnlyNote'], $writtenItem[$apiOnlyNoteKey]);
++        }
++    }
++
++    /**
++     * A value that fails the registered validator (isBool) must produce a 422 whose violation points at the merged
++     * extraProperties.<module>.<field> path AND carries a non-empty message.
++     */
++    public function testValidationErrorReturns422(): void
++    {
++        $response = $this->partialUpdateItem(
++            '/products/' . self::PRODUCT_ID,
++            [
++                'extraProperties' => [
++                    self::MODULE_NAME => [
++                        'api_flag' => 'not-a-bool',
++                    ],
++                ],
++            ],
++            [self::PRODUCT_WRITE],
++            Response::HTTP_UNPROCESSABLE_ENTITY
++        );
++
++        // The 422 body decodes to a flat list of violations ({propertyPath, message, code}). Assert exactly one,
++        // at the merged path, with a non-empty message.
++        $this->assertIsArray($response);
++        $this->assertCount(1, $response);
++        $this->assertSame('extraProperties.' . self::MODULE_NAME . '.api_flag', $response[0]['propertyPath']);
++        $this->assertNotEmpty($response[0]['message']);
++    }
++
++    /**
++     * A property registered on one entity must never appear on another. The product and customer responses must
++     * each contain EXACTLY their own module properties.
++     */
++    public function testCrossEntityIsolation(): void
++    {
++        $customerId = $this->getExistingCustomerId();
++
++        $this->partialUpdateItem(
++            '/products/' . self::PRODUCT_ID,
++            ['extraProperties' => [self::MODULE_NAME => ['api_flag' => true]]],
++            [self::PRODUCT_WRITE]
++        );
++
++        $patchedCustomer = $this->partialUpdateItem(
++            '/customers/' . $customerId,
++            ['extraProperties' => [self::MODULE_NAME => ['api_score' => 42]]],
++            [self::CUSTOMER_WRITE]
++        );
++        // The customer carries exactly its own (customer-scoped) property — no product property leaks in.
++        $this->assertEquals(
++            [self::MODULE_NAME => ['api_score' => 42]],
++            $patchedCustomer['extraProperties']
++        );
++
++        // The product carries exactly its product-scoped properties (api_flag set, the rest at their default), and
++        // none of the customer-only property.
++        $product = $this->getItem('/products/' . self::PRODUCT_ID, [self::PRODUCT_READ]);
++        $this->assertEquals(
++            [
++                self::MODULE_NAME => ['api_flag' => true, 'api_note' => []],
++                self::MODULE_2_NAME => ['extra_tag' => null, 'api_only_note' => []],
++            ],
++            $product['extraProperties']
++        );
++
++        $customer = $this->getItem('/customers/' . $customerId, [self::CUSTOMER_READ]);
++        $this->assertEquals(
++            [self::MODULE_NAME => ['api_score' => 42]],
++            $customer['extraProperties']
++        );
++    }
++
++    /**
++     * An unknown extra property key (no matching definition) must be silently ignored: the write succeeds and the
++     * unknown field is absent from the response.
++     */
++    public function testUnknownExtraPropertyKeyIsTolerated(): void
++    {
++        $patchedProduct = $this->partialUpdateItem(
++            '/products/' . self::PRODUCT_ID,
++            ['extraProperties' => [self::MODULE_NAME => ['does_not_exist' => 'x']]],
++            [self::PRODUCT_WRITE]
++        );
++
++        // The unknown key is filtered out; only the real (default-valued) properties remain.
++        $this->assertEquals(
++            [
++                self::MODULE_NAME => ['api_flag' => null, 'api_note' => []],
++                self::MODULE_2_NAME => ['extra_tag' => null, 'api_only_note' => []],
++            ],
++            $patchedProduct['extraProperties']
++        );
++    }
++
++    /**
++     * @param array<int, array<string, mixed>> $items
++     *
++     * @return array<string, mixed>|null
++     */
++    private function findListItem(array $items, string $idField, int $id): ?array
++    {
++        foreach ($items as $item) {
++            if (isset($item[$idField]) && (int) $item[$idField] === $id) {
++                return $item;
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * Returns a real, existing customer id, created through the API (the customer API exposes no GET collection).
++     */
++    private function getExistingCustomerId(): int
++    {
++        $customer = $this->createItem(
++            '/customers',
++            [
++                'firstName' => 'Extra',
++                'lastName' => 'Property',
++                'email' => 'extra.property.api@example.com',
++                'password' => 'TestPassword123!',
++                'defaultGroupId' => 3,
++                'groupIds' => [3],
++                'genderId' => 1,
++                'enabled' => true,
++                'partnerOffersSubscribed' => false,
++                'birthday' => '1990-01-15',
++                'guest' => false,
++            ],
++            [self::CUSTOMER_WRITE]
++        );
++        $this->assertArrayHasKey('customerId', $customer);
++
++        return (int) $customer['customerId'];
++    }
++}
+diff --git a/tests/Integration/Classes/CartTest.php b/tests/Integration/Classes/CartTest.php
+index 2af228e8c26e5..a9d899d5878a8 100644
+--- a/tests/Integration/Classes/CartTest.php
++++ b/tests/Integration/Classes/CartTest.php
+@@ -20,15 +20,15 @@
+ use Exception;
+ use Group;
+ use Order;
+-use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\OutOfRangeBehavior;
+ use Product;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+ use Tax;
+ use TaxRule;
+ use TaxRulesGroup;
+ use Tools;
+ 
+-class CartTest extends TestCase
++class CartTest extends KernelTestCase
+ {
+     /**
+      * @var int
+@@ -291,6 +291,14 @@ protected function setUp(): void
+     {
+         parent::setUp();
+ 
++        // Init Symfony so the container is reachable: Cart computations resolve services through
++        // ContainerFinder (e.g. the discount feature flag in Cart::getCartRules). Without booting here the
++        // class only passed inside the full suite, relying on a kernel a previous test happened to leave booted.
++        self::bootKernel();
++        // Global var read by SymfonyContainer::getInstance() / ContainerFinder.
++        global $kernel;
++        $kernel = self::$kernel;
++
+         // Context needs a currency but doesn't set it by itself, use default one.
+         Context::getContext()->currency = Currency::getDefaultCurrency();
+ 
+diff --git a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+index 7ad0856d4409e..9566598ee5db2 100644
+--- a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
++++ b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+@@ -36,7 +36,7 @@
+  */
+ class ExtraPropertiesFormBuilderModifierTest extends AbstractFormTester
+ {
+-    private const FIELD_NAME = 'extra_common_demoextrafield_is_dangerous';
++    private const FIELD_NAME = 'extra_demoextrafield_is_dangerous';
+ 
+     public function testBareFormIdOnSimpleFormAppendsAtRoot(): void
+     {
+diff --git a/tests/Integration/Core/ExtraProperty/Value/ExtraPropertyReaderTest.php b/tests/Integration/Core/ExtraProperty/Value/ExtraPropertyReaderTest.php
+new file mode 100644
+index 0000000000000..df23c3469de50
+--- /dev/null
++++ b/tests/Integration/Core/ExtraProperty/Value/ExtraPropertyReaderTest.php
+@@ -0,0 +1,173 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Core\ExtraProperty\Value;
++
++use Db;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyRegistryInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Tests\Integration\Utility\LanguageTrait;
++use Tests\Resources\Resetter\LanguageResetter;
++
++/**
++ * Integration test for ExtraPropertyReader against the *_extra / *_extra_lang tables. It covers BOTH methods of
++ * ExtraPropertyReaderInterface — getExtraProperties() (one entity) and getMultipleExtraProperties() (several
++ * entities in a single query) — across COMMON and LANG scopes, with localized values in two languages.
++ *
++ * It registers its own definitions on the product entity (independent of any module or the Admin API), so it lives
++ * here rather than in the API endpoint test where the previous version sat.
++ */
++class ExtraPropertyReaderTest extends KernelTestCase
++{
++    use LanguageTrait;
++
++    private const MODULE = 'extrapropertyreadertest';
++    private const ENTITY = 'product';
++    private const PRIMARY_KEY = 'id_product';
++
++    /**
++     * The default language always installed (English), used for the single-language reads.
++     */
++    private const DEFAULT_LANG_ID = 1;
++
++    private static int $frenchLanguageId;
++    private static ExtraPropertyReaderInterface $reader;
++    private static ExtraPropertyWriterInterface $writer;
++    private static ExtraPropertyRegistryInterface $registry;
++
++    public static function setUpBeforeClass(): void
++    {
++        parent::setUpBeforeClass();
++        self::bootKernel();
++        // Global var read by legacy code resolving the container (SymfonyContainer::getInstance).
++        global $kernel;
++        $kernel = self::$kernel;
++
++        // A second language is required to exercise multilingual (LANG-scope) reads.
++        LanguageResetter::resetLanguages();
++        self::$frenchLanguageId = self::addLanguageByLocale('fr-FR');
++
++        $container = self::getContainer();
++        self::$reader = $container->get(ExtraPropertyReaderInterface::class);
++        self::$writer = $container->get(ExtraPropertyWriterInterface::class);
++        self::$registry = $container->get(ExtraPropertyRegistryInterface::class);
++
++        self::$registry->register(self::commonDefinition());
++        self::$registry->register(self::langDefinition());
++    }
++
++    public static function tearDownAfterClass(): void
++    {
++        self::$registry->unregister(self::commonDefinition(), true);
++        self::$registry->unregister(self::langDefinition(), true);
++        LanguageResetter::resetLanguages();
++
++        parent::tearDownAfterClass();
++    }
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        // Start from an empty state so each test controls exactly the rows it reads.
++        Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . 'product_extra`');
++        Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . 'product_extra_lang`');
++    }
++
++    public function testGetExtraPropertiesReturnsTheValuesOfOneEntity(): void
++    {
++        $shopConstraint = ShopConstraint::shop(1);
++        self::$writer->writeAll(
++            self::ENTITY,
++            self::PRIMARY_KEY,
++            101,
++            [self::MODULE => [
++                'reader_common' => 'hello',
++                'reader_lang' => [self::DEFAULT_LANG_ID => 'english', self::$frenchLanguageId => 'french'],
++            ]],
++            $shopConstraint
++        );
++
++        // langId null → COMMON scalar + LANG value keyed by id_lang for every language.
++        $allLanguages = self::$reader->getExtraProperties(self::ENTITY, self::PRIMARY_KEY, 101, null, $shopConstraint);
++        $this->assertSame('hello', $allLanguages[self::MODULE]['reader_common']);
++        $this->assertEqualsCanonicalizing(
++            [self::DEFAULT_LANG_ID => 'english', self::$frenchLanguageId => 'french'],
++            $allLanguages[self::MODULE]['reader_lang']
++        );
++
++        // langId given → LANG value collapsed to that one language's scalar.
++        $english = self::$reader->getExtraProperties(self::ENTITY, self::PRIMARY_KEY, 101, self::DEFAULT_LANG_ID, $shopConstraint);
++        $this->assertSame('english', $english[self::MODULE]['reader_lang']);
++
++        $french = self::$reader->getExtraProperties(self::ENTITY, self::PRIMARY_KEY, 101, self::$frenchLanguageId, $shopConstraint);
++        $this->assertSame('french', $french[self::MODULE]['reader_lang']);
++
++        // Non-positive id → empty.
++        $this->assertSame([], self::$reader->getExtraProperties(self::ENTITY, self::PRIMARY_KEY, 0, null, $shopConstraint));
++    }
++
++    public function testGetMultipleExtraPropertiesGroupsValuesPerEntityId(): void
++    {
++        $shopConstraint = ShopConstraint::shop(1);
++        self::$writer->writeAll(self::ENTITY, self::PRIMARY_KEY, 101, [self::MODULE => [
++            'reader_common' => 'A',
++            'reader_lang' => [self::DEFAULT_LANG_ID => 'english A', self::$frenchLanguageId => 'french A'],
++        ]], $shopConstraint);
++        self::$writer->writeAll(self::ENTITY, self::PRIMARY_KEY, 102, [self::MODULE => ['reader_common' => 'B']], $shopConstraint);
++
++        $values = self::$reader->getMultipleExtraProperties(self::ENTITY, self::PRIMARY_KEY, [101, 102, 103], null, $shopConstraint);
++
++        // Entity 101: both scopes, the LANG value keyed by id_lang for every language.
++        $this->assertSame('A', $values[101][self::MODULE]['reader_common']);
++        $this->assertEqualsCanonicalizing(
++            [self::DEFAULT_LANG_ID => 'english A', self::$frenchLanguageId => 'french A'],
++            $values[101][self::MODULE]['reader_lang']
++        );
++        // Entity 102: only the COMMON value was written; LANG stays empty.
++        $this->assertSame('B', $values[102][self::MODULE]['reader_common']);
++        $this->assertSame([], $values[102][self::MODULE]['reader_lang']);
++        // The requested id with no row still appears, seeded with the (nullable) defaults.
++        $this->assertArrayHasKey(103, $values);
++        $this->assertNull($values[103][self::MODULE]['reader_common']);
++        $this->assertSame([], $values[103][self::MODULE]['reader_lang']);
++    }
++
++    public function testGetMultipleExtraPropertiesReturnsEmptyWhenNoIds(): void
++    {
++        $this->assertSame([], self::$reader->getMultipleExtraProperties(self::ENTITY, self::PRIMARY_KEY, [], null, ShopConstraint::shop(1)));
++    }
++
++    private static function commonDefinition(): ExtraPropertyDefinition
++    {
++        return new ExtraPropertyDefinition(
++            entityName: self::ENTITY,
++            propertyName: 'reader_common',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: self::MODULE,
++        );
++    }
++
++    private static function langDefinition(): ExtraPropertyDefinition
++    {
++        return new ExtraPropertyDefinition(
++            entityName: self::ENTITY,
++            propertyName: 'reader_lang',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::LANG,
++            moduleName: self::MODULE,
++        );
++    }
++}
+diff --git a/tests/Integration/Utility/ContextMocker.php b/tests/Integration/Utility/ContextMocker.php
+index 601c6ddd8964b..7d01ca530b409 100644
+--- a/tests/Integration/Utility/ContextMocker.php
++++ b/tests/Integration/Utility/ContextMocker.php
+@@ -124,7 +124,10 @@ public function mockContext()
+      */
+     public function backupContext(): void
+     {
+-        $this->backupContext = Context::getContext();
++        // Clone, do NOT keep a reference: tests mutate the live Context singleton in place
++        // (e.g. Context::getContext()->controller = ...). A reference backup would BE that mutated
++        // object, so resetContext() could not undo it and the mutation would leak into the next test class.
++        $this->backupContext = clone Context::getContext();
+     }
+ 
+     /**
+diff --git a/tests/Resources/modules_tests/extrapropertytest/config.xml b/tests/Resources/modules_tests/extrapropertytest/config.xml
+new file mode 100644
+index 0000000000000..bdab8d5b8d942
+--- /dev/null
++++ b/tests/Resources/modules_tests/extrapropertytest/config.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<module>
++	<name>extrapropertytest</name>
++	<displayName><![CDATA[Extra Property Test]]></displayName>
++	<version><![CDATA[1.0.0]]></version>
++	<description><![CDATA[A module to test extra properties on the Admin API]]></description>
++	<author><![CDATA[PrestaShop]]></author>
++	<tab><![CDATA[administration]]></tab>
++	<is_configurable>0</is_configurable>
++	<need_instance>0</need_instance>
++	<limited_countries></limited_countries>
++</module>
+diff --git a/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php b/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php
+new file mode 100644
+index 0000000000000..30cee3c1ed72f
+--- /dev/null
++++ b/tests/Resources/modules_tests/extrapropertytest/extrapropertytest.php
+@@ -0,0 +1,108 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++
++if (!defined('_PS_VERSION_')) {
++    exit;
++}
++
++class extrapropertytest extends Module
++{
++    public function __construct()
++    {
++        $this->name = 'extrapropertytest';
++        $this->tab = 'administration';
++        $this->version = '1.0.0';
++        $this->author = 'PrestaShop';
++        $this->need_instance = 0;
++        parent::__construct();
++        $this->displayName = $this->l('Extra Property Test');
++        $this->description = $this->l('A module to test extra properties on the Admin API');
++    }
++
++    public function install()
++    {
++        if (parent::install() == false) {
++            return false;
++        }
++
++        // product / api_flag — BOOL, COMMON scope, exposed on the product API endpoints AND the product grid.
++        // It is associated with the grid too so the API product list reuses the value fetched by the grid query
++        // and exposes it inline at the item root (only properties in associatedGrids ∩ associatedApis show in lists).
++        if (!$this->registerExtraProperty(new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'api_flag',
++            type: ExtraPropertyType::BOOL,
++            scope: ExtraPropertyScope::COMMON,
++            validator: 'isBool',
++            associatedGrids: ['product'],
++            associatedApis: ['/products', '/products/{productId}'],
++            labelWording: 'API flag',
++        ))) {
++            return false;
++        }
++
++        // product / api_note — STRING, LANG scope (per-language values), exposed on the product API endpoints and
++        // the product grid. In a list it surfaces as the single current-locale scalar fetched by the grid query.
++        if (!$this->registerExtraProperty(new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'api_note',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::LANG,
++            validator: 'isGenericName',
++            associatedGrids: ['product'],
++            associatedApis: ['/products', '/products/{productId}'],
++            labelWording: 'API note',
++        ))) {
++            return false;
++        }
++
++        // customer / api_score — INT, COMMON scope, exposed on the customer API endpoints
++        if (!$this->registerExtraProperty(new ExtraPropertyDefinition(
++            entityName: 'customer',
++            propertyName: 'api_score',
++            type: ExtraPropertyType::INT,
++            scope: ExtraPropertyScope::COMMON,
++            validator: 'isUnsignedInt',
++            associatedApis: ['/customers', '/customers/{customerId}'],
++        ))) {
++            return false;
++        }
++
++        return true;
++    }
++
++    public function uninstall()
++    {
++        $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'api_flag'), true);
++        $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'api_note'), true);
++        $this->unregisterExtraProperty(new ExtraPropertyDefinition('customer', 'api_score'), true);
++
++        return parent::uninstall();
++    }
++}
+diff --git a/tests/Resources/modules_tests/extrapropertytest2/config.xml b/tests/Resources/modules_tests/extrapropertytest2/config.xml
+new file mode 100644
+index 0000000000000..1d2b3e02d7da1
+--- /dev/null
++++ b/tests/Resources/modules_tests/extrapropertytest2/config.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<module>
++	<name>extrapropertytest2</name>
++	<displayName><![CDATA[Extra Property Test 2]]></displayName>
++	<version><![CDATA[1.0.0]]></version>
++	<description><![CDATA[A second module to test extra properties cohabitation on the Admin API]]></description>
++	<author><![CDATA[PrestaShop]]></author>
++	<tab><![CDATA[administration]]></tab>
++	<is_configurable>0</is_configurable>
++	<need_instance>0</need_instance>
++	<limited_countries></limited_countries>
++</module>
+diff --git a/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php b/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php
+new file mode 100644
+index 0000000000000..d7340794a91c0
+--- /dev/null
++++ b/tests/Resources/modules_tests/extrapropertytest2/extrapropertytest2.php
+@@ -0,0 +1,98 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyScope;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
++
++if (!defined('_PS_VERSION_')) {
++    exit;
++}
++
++/**
++ * A second extra-property test module, used to validate that two modules declaring extra properties on the same
++ * entity (product) for the Admin API cohabit correctly, each keyed under its own module name (no cross-contamination).
++ */
++class extrapropertytest2 extends Module
++{
++    public function __construct()
++    {
++        $this->name = 'extrapropertytest2';
++        $this->tab = 'administration';
++        $this->version = '1.0.0';
++        $this->author = 'PrestaShop';
++        $this->need_instance = 0;
++        parent::__construct();
++        $this->displayName = $this->l('Extra Property Test 2');
++        $this->description = $this->l('A second module to test extra properties cohabitation on the Admin API');
++    }
++
++    public function install()
++    {
++        if (parent::install() == false) {
++            return false;
++        }
++
++        // product / extra_tag — STRING, COMMON scope, exposed on the product API endpoints and grid. Declared by a
++        // SECOND module on the same entity as extrapropertytest, to prove two modules cohabit without clashing.
++        if (!$this->registerExtraProperty(new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'extra_tag',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::COMMON,
++            validator: 'isGenericName',
++            associatedGrids: ['product'],
++            associatedApis: ['/products', '/products/{productId}'],
++            labelWording: 'API extra tag',
++        ))) {
++            return false;
++        }
++
++        // product / api_only_note — STRING, LANG scope, exposed on the product API endpoints but on NO grid. The
++        // product grid never fetches it, so in the API product list it must be read through the batch reader rather
++        // than reused from the grid-record collector (this is the case the video_link bug was about).
++        if (!$this->registerExtraProperty(new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'api_only_note',
++            type: ExtraPropertyType::STRING,
++            scope: ExtraPropertyScope::LANG,
++            validator: 'isGenericName',
++            associatedApis: ['/products', '/products/{productId}'],
++            labelWording: 'API only note',
++        ))) {
++            return false;
++        }
++
++        return true;
++    }
++
++    public function uninstall()
++    {
++        $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'extra_tag'), true);
++        $this->unregisterExtraProperty(new ExtraPropertyDefinition('product', 'api_only_note'), true);
++
++        return parent::uninstall();
++    }
++}
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertiesGridCastTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertiesGridCastTest.php
+index 1a6729647d8b0..d49515e0fd4b2 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertiesGridCastTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertiesGridCastTest.php
+@@ -39,31 +39,31 @@ public function testGridRecordsAreCastToDeclaredTypes(): void
+         $records = $modifier->castExtraProperties([
+             [
+                 'id_product' => '7',
+-                $boolDef->getFormFieldName() => '1',
+-                $intDef->getFormFieldName() => '42',
+-                $dateDef->getFormFieldName() => '2026-06-11 10:00:00',
+-                $stringDef->getFormFieldName() => 'box',
++                $boolDef->getFieldName() => '1',
++                $intDef->getFieldName() => '42',
++                $dateDef->getFieldName() => '2026-06-11 10:00:00',
++                $stringDef->getFieldName() => 'box',
+             ],
+             [
+                 'id_product' => '8',
+-                $boolDef->getFormFieldName() => null,   // NOT NULL bool, missing row → false
+-                $intDef->getFormFieldName() => null,    // nullable int → stays null
+-                $dateDef->getFormFieldName() => null,
+-                $stringDef->getFormFieldName() => null,
++                $boolDef->getFieldName() => null,   // NOT NULL bool, missing row → false
++                $intDef->getFieldName() => null,    // nullable int → stays null
++                $dateDef->getFieldName() => null,
++                $stringDef->getFieldName() => null,
+             ],
+         ], self::GRID_ID);
+ 
+-        $this->assertTrue($records[0][$boolDef->getFormFieldName()]);
+-        $this->assertSame(42, $records[0][$intDef->getFormFieldName()]);
+-        $this->assertSame('2026-06-11 10:00:00', $records[0][$dateDef->getFormFieldName()]);
+-        $this->assertSame('box', $records[0][$stringDef->getFormFieldName()]);
++        $this->assertTrue($records[0][$boolDef->getFieldName()]);
++        $this->assertSame(42, $records[0][$intDef->getFieldName()]);
++        $this->assertSame('2026-06-11 10:00:00', $records[0][$dateDef->getFieldName()]);
++        $this->assertSame('box', $records[0][$stringDef->getFieldName()]);
+         // Non-extra columns are untouched.
+         $this->assertSame('7', $records[0]['id_product']);
+ 
+-        $this->assertFalse($records[1][$boolDef->getFormFieldName()]);
+-        $this->assertNull($records[1][$intDef->getFormFieldName()]);
+-        $this->assertNull($records[1][$dateDef->getFormFieldName()]);
+-        $this->assertNull($records[1][$stringDef->getFormFieldName()]);
++        $this->assertFalse($records[1][$boolDef->getFieldName()]);
++        $this->assertNull($records[1][$intDef->getFieldName()]);
++        $this->assertNull($records[1][$dateDef->getFieldName()]);
++        $this->assertNull($records[1][$stringDef->getFieldName()]);
+     }
+ 
+     public function testRecordsUntouchedWhenGridHasNoDefinitions(): void
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionNamingTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionNamingTest.php
+index 58880fd851da9..e65f24fb97f28 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionNamingTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionNamingTest.php
+@@ -54,35 +54,37 @@ public static function storageColumnNameProvider(): array
+     }
+ 
+     /**
+-     * @dataProvider formFieldNameProvider
++     * @dataProvider fieldNameProvider
+      */
+-    public function testGetFormFieldName(ExtraPropertyDefinition $definition, string $expected): void
++    public function testGetFieldName(ExtraPropertyDefinition $definition, string $expected): void
+     {
+-        $this->assertSame($expected, $definition->getFormFieldName());
++        $this->assertSame($expected, $definition->getFieldName());
+     }
+ 
+-    public static function formFieldNameProvider(): array
++    public static function fieldNameProvider(): array
+     {
++        // The scope is intentionally NOT part of the field name: the same module + property name yields the same
++        // identifier whatever the scope (a property is unique per module + name).
+         return [
+-            'module field common scope' => [
++            'module field, common scope' => [
+                 new ExtraPropertyDefinition(entityName: 'entity', propertyName: 'video_link', scope: ExtraPropertyScope::COMMON, moduleName: 'ps_mymodule'),
+-                'extra_common_ps_mymodule_video_link',
++                'extra_ps_mymodule_video_link',
+             ],
+-            'module field lang scope' => [
++            'module field, lang scope (same name as common)' => [
+                 new ExtraPropertyDefinition(entityName: 'entity', propertyName: 'video_link', scope: ExtraPropertyScope::LANG, moduleName: 'ps_mymodule'),
+-                'extra_lang_ps_mymodule_video_link',
++                'extra_ps_mymodule_video_link',
+             ],
+-            'module field shop scope' => [
++            'module field, shop scope (same name as common)' => [
+                 new ExtraPropertyDefinition(entityName: 'entity', propertyName: 'video_link', scope: ExtraPropertyScope::SHOP, moduleName: 'ps_mymodule'),
+-                'extra_shop_ps_mymodule_video_link',
++                'extra_ps_mymodule_video_link',
+             ],
+-            'core sentinel common scope' => [
++            'core sentinel module' => [
+                 new ExtraPropertyDefinition(entityName: 'entity', propertyName: 'my_field', scope: ExtraPropertyScope::COMMON, moduleName: ExtraPropertyDefinition::CORE_MODULE_KEY),
+-                'extra_common__core_my_field',
++                'extra__core_my_field',
+             ],
+             'null module treated as _core' => [
+                 new ExtraPropertyDefinition(entityName: 'entity', propertyName: 'my_field', scope: ExtraPropertyScope::COMMON, moduleName: null),
+-                'extra_common__core_my_field',
++                'extra__core_my_field',
+             ],
+         ];
+     }
+diff --git a/tests/Unit/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifierTest.php b/tests/Unit/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifierTest.php
+index 25913508cca4a..05c49f252bde2 100644
+--- a/tests/Unit/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifierTest.php
++++ b/tests/Unit/Core/ExtraProperty/Grid/ExtraPropertiesGridQueryBuilderModifierTest.php
+@@ -112,7 +112,7 @@ public function testCountBuilderWithoutBaseLangJoinGetsItsOwnFallbackJoin(): voi
+         // Only the search builder carries the base lang join — the typical grid shape.
+         $searchQb->leftJoin('p', 'ps_product_lang', 'pl', 'pl.`id_product` = p.`id_product` AND pl.`id_lang` = :langId AND pl.`id_shop` = :shopId');
+ 
+-        $modifier->apply($searchQb, $countQb, $this->criteria(['extra_lang_mymodule_promo' => 'sale']), 'product');
++        $modifier->apply($searchQb, $countQb, $this->criteria(['extra_mymodule_promo' => 'sale']), 'product');
+ 
+         // Search reuses its base lang join aliases.
+         $this->assertStringContainsString('extra_lang.`id_lang` = pl.`id_lang`', $searchQb->getSQL());
+@@ -172,7 +172,7 @@ public function testBooleanFilterUsesEqualityOnBothBuilders(): void
+         $modifier = $this->buildModifier($definition);
+         [$searchQb, $countQb] = $this->buildGridBuilders();
+ 
+-        $modifier->apply($searchQb, $countQb, $this->criteria(['extra_common_mymodule_flag' => '1']), 'product');
++        $modifier->apply($searchQb, $countQb, $this->criteria(['extra_mymodule_flag' => '1']), 'product');
+ 
+         foreach ([$searchQb, $countQb] as $qb) {
+             $this->assertStringContainsString('extra_entity.`mymodule_flag` = :extra_filter_', $qb->getSQL());

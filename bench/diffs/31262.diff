@@ -1,0 +1,144 @@
+diff --git a/src/Core/Domain/Product/Stock/Query/GetProductStockMovements.php b/src/Core/Domain/Product/Stock/Query/GetProductStockMovements.php
+index f299100b6eed3..359f807abe3a9 100644
+--- a/src/Core/Domain/Product/Stock/Query/GetProductStockMovements.php
++++ b/src/Core/Domain/Product/Stock/Query/GetProductStockMovements.php
+@@ -28,10 +28,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\Product\Stock\Query;
+ 
+-use LogicException;
+-use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+-use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopException;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ 
+@@ -64,11 +61,6 @@ class GetProductStockMovements
+      */
+     private $productId;
+ 
+-    /**
+-     * @throws ProductConstraintException
+-     * @throws ShopException
+-     * @throws LogicException
+-     */
+     public function __construct(
+         int $productId,
+         int $shopId,
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationStockType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationStockType.php
+index a54a6f0269b23..9c10accaa7c5f 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationStockType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Combination/CombinationStockType.php
+@@ -30,6 +30,7 @@
+ 
+ use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
+ use PrestaShop\PrestaShop\Core\Domain\Combination\CombinationSettings;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShopBundle\Form\Admin\Sell\Product\Stock\QuantityType;
+ use PrestaShopBundle\Form\Admin\Sell\Product\Stock\StockOptionsType;
+ use PrestaShopBundle\Form\Admin\Type\DatePickerType;
+@@ -50,6 +51,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         $builder
+             ->add('quantities', QuantityType::class, [
+                 'product_id' => $options['product_id'],
++                'product_type' => ProductType::TYPE_COMBINATIONS,
+             ])
+             ->add('options', StockOptionsType::class)
+             ->add('available_date', DatePickerType::class, [
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
+index 3d18e7c55b08e..cae83085e642d 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/QuantityType.php
+@@ -89,6 +89,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'label_tag_name' => 'h4',
+                     'layout' => 'table',
+                     'entry_type' => StockMovementType::class,
++                    'entry_options' => [
++                        'product_type' => $options['product_type'],
++                        'block_prefix' => 'entity_item',
++                    ],
+                     // No search input
+                     'allow_search' => false,
+                     // No delete button
+@@ -135,8 +139,10 @@ public function configureOptions(OptionsResolver $resolver)
+             ])
+             ->setRequired([
+                 'product_id',
++                'product_type',
+             ])
+             ->setAllowedTypes('product_id', 'int')
++            ->setAllowedTypes('product_type', 'string')
+         ;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
+index f15faf151ad22..648ee80f04544 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockMovementType.php
+@@ -29,6 +29,7 @@
+ namespace PrestaShopBundle\Form\Admin\Sell\Product\Stock;
+ 
+ use PrestaShop\PrestaShop\Core\Domain\Product\Stock\QueryResult\StockMovement;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+@@ -37,6 +38,7 @@
+ use Symfony\Component\Form\FormEvents;
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\Form\FormView;
++use Symfony\Component\OptionsResolver\OptionsResolver;
+ 
+ class StockMovementType extends TranslatorAwareType
+ {
+@@ -52,7 +54,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('type', HiddenType::class)
+             // Quantity field depends on the data, then it's added via form event
+-            ->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event) {
++            ->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event) use ($options) {
+                 $data = $event->getData();
+                 $form = $event->getForm();
+ 
+@@ -62,10 +64,12 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+ 
+                 // For orders, we display the kind of movements instead of the data range
+                 if ($type === StockMovement::ORDERS_TYPE) {
+-                    $dateData = $increasedQuantity ?
+-                        $this->trans('Returned products', 'Admin.Catalog.Feature') :
++                    $label = ProductType::TYPE_VIRTUAL === $options['product_type'] ?
++                        $this->trans('Sold products', 'Admin.Catalog.Feature') :
+                         $this->trans('Shipped products', 'Admin.Catalog.Feature')
+                     ;
++
++                    $dateData = $increasedQuantity ? $this->trans('Returned products', 'Admin.Catalog.Feature') : $label;
+                     $event->setData(array_merge($event->getData(), [
+                         'date' => $dateData,
+                     ]));
+@@ -95,4 +99,14 @@ public function buildView(FormView $view, FormInterface $form, array $options):
+             )
+         );
+     }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        parent::configureOptions($resolver);
++
++        $resolver
++            ->setRequired(['product_type'])
++            ->setAllowedTypes('product_type', 'string')
++        ;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockType.php
+index e6b4a62bf8998..0a2011a98a40a 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/StockType.php
+@@ -105,6 +105,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('quantities', QuantityType::class, [
+                 'product_id' => $options['product_id'],
++                'product_type' => $options['product_type'],
+             ])
+             ->add('options', StockOptionsType::class)
+             ->add('virtual_product_file', VirtualProductFileType::class, [

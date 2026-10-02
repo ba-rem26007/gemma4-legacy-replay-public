@@ -1,0 +1,108 @@
+diff --git a/src/PrestaShopBundle/ApiPlatform/OpenApi/Factory/CQRSOpenApiFactory.php b/src/PrestaShopBundle/ApiPlatform/OpenApi/Factory/CQRSOpenApiFactory.php
+index e9e127aa493b0..06757fc215ed5 100644
+--- a/src/PrestaShopBundle/ApiPlatform/OpenApi/Factory/CQRSOpenApiFactory.php
++++ b/src/PrestaShopBundle/ApiPlatform/OpenApi/Factory/CQRSOpenApiFactory.php
+@@ -35,6 +35,7 @@
+ use ApiPlatform\Metadata\Resource\Factory\ResourceNameCollectionFactoryInterface;
+ use ApiPlatform\OpenApi\Factory\OpenApiFactoryInterface;
+ use ApiPlatform\OpenApi\Model\Operation as OpenApiOperation;
++use ApiPlatform\OpenApi\Model\Parameter;
+ use ApiPlatform\OpenApi\Model\PathItem;
+ use ApiPlatform\OpenApi\Model\Paths;
+ use ApiPlatform\OpenApi\Model\Server;
+@@ -43,6 +44,7 @@
+ use DateTimeInterface;
+ use Exception;
+ use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Feature\MultistoreFeature;
+ use PrestaShopBundle\ApiPlatform\DomainObjectDetector;
+ use PrestaShopBundle\ApiPlatform\Metadata\LocalizedValue;
+ use ReflectionClass;
+@@ -79,6 +81,7 @@ public function __construct(
+         protected readonly ClassMetadataFactoryInterface $classMetadataFactory,
+         protected readonly DomainObjectDetector $domainObjectDetector,
+         protected readonly PropertyInfoExtractorInterface $propertyInfoExtractor,
++        protected readonly MultistoreFeature $multistoreFeature,
+         // No property promotion for this one since it's already defined in the ResourceMetadataTrait
+         ResourceMetadataCollectionFactoryInterface $resourceMetadataFactory,
+     ) {
+@@ -166,6 +169,12 @@ public function __invoke(array $context = []): OpenApi
+                         $updatedOperation = $updatedOperation->withSecurity([['oauth' => $scopesByUri[$path][$httpMethod]]]);
+                     }
+ 
++                    // Add multishop context parameters if needed
++                    if ($this->multistoreFeature->isActive()) {
++                        $existingParameters = $updatedOperation->getParameters() ?? [];
++                        $updatedOperation = $updatedOperation->withParameters(array_merge($existingParameters, $this->getMultiShopParameters()));
++                    }
++
+                     $setterMethod = 'with' . ucfirst($httpMethod);
+                     $updatedPathItem = $updatedPathItem->$setterMethod($updatedOperation);
+                 }
+@@ -283,6 +292,21 @@ protected function getPropertiesUsingReflection(string $resourceClass): array
+         }
+     }
+ 
++    /**
++     * Returns the list of multishop context parameters added to each operation.
++     *
++     * @return Parameter[]
++     */
++    protected function getMultiShopParameters(): array
++    {
++        return [
++            new Parameter('shopId', 'query', 'Shop identifier for multistore context', false, false, false, ['type' => 'integer']),
++            new Parameter('shopGroupId', 'query', 'Shop group identifier for multistore context', false, false, false, ['type' => 'integer']),
++            new Parameter('shopIds', 'query', 'Comma separated list of shop identifiers for multistore context', false, false, false, ['type' => 'string']),
++            new Parameter('allShops', 'query', 'Use all shops context', false, false, false, ['type' => 'integer', 'enum' => ['1']]),
++        ];
++    }
++
+     protected function getSchemaDefinition(OpenApi $openApi, Operation $operation): ?ArrayObject
+     {
+         $inputClass = $this->findOutputClass($operation->getClass(), Schema::TYPE_INPUT, $operation, []);
+diff --git a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+index 1173696805000..2e6e4d3f05a48 100644
+--- a/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
++++ b/tests/Integration/PrestaShopBundle/ApiPlatform/CQRSOpenApiFactoryTest.php
+@@ -141,6 +141,40 @@ public function provideEndpointScopes(): iterable
+         ];
+     }
+ 
++    public function testMultishopParametersAreDocumentedWhenFeatureActive(): void
++    {
++        $configuration = $this->getContainer()->get('prestashop.adapter.legacy.configuration');
++        $configuration->set('PS_MULTISHOP_FEATURE_ACTIVE', 1);
++
++        /** @var OpenApiFactoryInterface $openApiFactory */
++        $openApiFactory = $this->getContainer()->get(OpenApiFactoryInterface::class);
++        /** @var OpenApi $openApi */
++        $openApi = $openApiFactory->__invoke();
++        $operation = $openApi->getPaths()->getPath('/products')->getGet();
++        $parameterNames = array_map(static fn ($parameter) => $parameter->getName(), $operation->getParameters());
++        $this->assertContains('shopId', $parameterNames);
++        $this->assertContains('shopGroupId', $parameterNames);
++        $this->assertContains('shopIds', $parameterNames);
++        $this->assertContains('allShops', $parameterNames);
++    }
++
++    public function testMultishopParametersAreNotDocumentedWhenFeatureInactive(): void
++    {
++        $configuration = $this->getContainer()->get('prestashop.adapter.legacy.configuration');
++        $configuration->set('PS_MULTISHOP_FEATURE_ACTIVE', 0);
++
++        /** @var OpenApiFactoryInterface $openApiFactory */
++        $openApiFactory = $this->getContainer()->get(OpenApiFactoryInterface::class);
++        /** @var OpenApi $openApi */
++        $openApi = $openApiFactory->__invoke();
++        $operation = $openApi->getPaths()->getPath('/products')->getGet();
++        $parameterNames = array_map(static fn ($parameter) => $parameter->getName(), $operation->getParameters());
++        $this->assertNotContains('shopId', $parameterNames);
++        $this->assertNotContains('shopGroupId', $parameterNames);
++        $this->assertNotContains('shopIds', $parameterNames);
++        $this->assertNotContains('allShops', $parameterNames);
++    }
++
+     /**
+      * @dataProvider provideJsonSchemaFactoryCases
+      */

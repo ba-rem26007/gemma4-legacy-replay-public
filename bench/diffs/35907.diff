@@ -1,0 +1,966 @@
+diff --git a/app/config/admin-api/config.yml b/app/config/admin-api/config.yml
+index 812af2cb63cf5..8f074ed098ec6 100644
+--- a/app/config/admin-api/config.yml
++++ b/app/config/admin-api/config.yml
+@@ -20,6 +20,8 @@ api_platform:
+     json: [ 'application/json', 'application/merge-patch+json' ]
+     # Allow this format for other API endpoint than native endpoint (by default we will use json)
+     jsonld: [ 'application/ld+json' ]
++    # Multipart format for file upload
++    multipart: [ 'multipart/form-data' ]
+   patch_formats:
+     json: [ 'application/merge-patch+json' ]
+   error_formats:
+diff --git a/app/config/admin-api/services.yml b/app/config/admin-api/services.yml
+index 8e28527a2db28..ca700f3f8289f 100644
+--- a/app/config/admin-api/services.yml
++++ b/app/config/admin-api/services.yml
+@@ -50,3 +50,18 @@ services:
+       $isDebug: '%kernel.debug%'
+     tags:
+       - { name: kernel.event_listener, event: kernel.request, method: onKernelRequest }
++
++  # Serializer modifications, the following services are automatically injected in the serializer Symfony service,
++  # to limit their impact on the Admin they are only defined for the API context.
++
++  # This normalizer disables the denormalization process of File fields
++  PrestaShopBundle\ApiPlatform\Normalizer\UploadedFileNormalizer:
++    autowire: true
++    autoconfigure: true
++    # Tag to be injected in the DomainSerializer
++    tags: [ 'prestashop.api.normalizers' ]
++
++  # This is the encoder to handle multipart requests for API
++  PrestaShopBundle\ApiPlatform\Encoder\MultipartDecoder:
++    autowire: true
++    autoconfigure: true
+diff --git a/composer.json b/composer.json
+index ac7137eec9b12..810722b77b7ab 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/gsitemap": "^4",
+         "prestashop/pagesnotfound": "^2",
+         "prestashop/productcomments": "^6.0",
+-        "prestashop/ps_apiresources": "dev-Issue-35686-make-api-based-on-grid",
++        "prestashop/ps_apiresources": "dev-upload-product-image",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+@@ -254,7 +254,7 @@
+     "repositories": {
+         "ps_apiresources": {
+             "type": "vcs",
+-            "url": "https://github.com/tleon/ps_apiresources.git"
++            "url": "https://github.com/jolelievre/ps_apiresources.git"
+         }
+     },
+     "minimum-stability": "dev",
+diff --git a/composer.lock b/composer.lock
+index 04331d2d2efb8..f2a805ee933c5 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "1728f58b8070fdf93219e8469336cd3f",
++    "content-hash": "efd203e189d4e5a10f9fda3907bf67af",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5579,16 +5579,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "dev-Issue-35686-make-api-based-on-grid",
++            "version": "dev-upload-product-image",
+             "source": {
+                 "type": "git",
+-                "url": "https://github.com/tleon/ps_apiresources.git",
+-                "reference": "a2720b6365b33cf953e73a09822d55126e4b66f1"
++                "url": "https://github.com/jolelievre/ps_apiresources.git",
++                "reference": "1d7390558cab5597addfb49bf09e0afe660c7307"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/tleon/ps_apiresources/zipball/a2720b6365b33cf953e73a09822d55126e4b66f1",
+-                "reference": "a2720b6365b33cf953e73a09822d55126e4b66f1",
++                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/1d7390558cab5597addfb49bf09e0afe660c7307",
++                "reference": "1d7390558cab5597addfb49bf09e0afe660c7307",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5640,9 +5640,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/tleon/ps_apiresources/tree/Issue-35686-make-api-based-on-grid"
++                "source": "https://github.com/jolelievre/ps_apiresources/tree/upload-product-image"
+             },
+-            "time": "2024-04-11T14:37:35+00:00"
++            "time": "2024-04-16T17:27:57+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+@@ -17989,5 +17989,5 @@
+     "platform-overrides": {
+         "php": "8.1.0"
+     },
+-    "plugin-api-version": "2.3.0"
++    "plugin-api-version": "2.6.0"
+ }
+diff --git a/src/PrestaShopBundle/ApiPlatform/Encoder/MultipartDecoder.php b/src/PrestaShopBundle/ApiPlatform/Encoder/MultipartDecoder.php
+new file mode 100644
+index 0000000000000..12ea2f2027632
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Encoder/MultipartDecoder.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Encoder;
++
++use Symfony\Component\HttpFoundation\RequestStack;
++use Symfony\Component\Serializer\Encoder\DecoderInterface;
++
++/**
++ * Additional decoder to handle multipart form data requests.
++ */
++class MultipartDecoder implements DecoderInterface
++{
++    public const FORMAT = 'multipart';
++
++    public function __construct(
++        private RequestStack $requestStack
++    ) {
++    }
++
++    public function decode(string $data, string $format, array $context = [])
++    {
++        $request = $this->requestStack->getCurrentRequest();
++
++        if (!$request) {
++            return null;
++        }
++
++        return $request->request->all() + $request->files->all();
++    }
++
++    public function supportsDecoding(string $format)
++    {
++        return self::FORMAT === $format;
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+index 65e270b9063e1..ad367ed41cf59 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+@@ -29,7 +29,6 @@
+ namespace PrestaShopBundle\ApiPlatform\Metadata;
+ 
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+-use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ /**
+  * Class CQRSCommand handles parameters to ease the configuration of an operation relying on CommandProcessor
+@@ -132,11 +131,6 @@ public function __construct(
+             $passedArguments['extraProperties']['CQRSCommandMapping'] = $CQRSCommandMapping;
+         }
+ 
+-        // If a CQRSQuery is specified without a provider we use the QueryProvider by default
+-        if (!empty($CQRSQuery) || !empty($passedArguments['extraProperties']['CQRSQuery'])) {
+-            $passedArguments['provider'] = $provider ?? QueryProvider::class;
+-        }
+-
+         // Remove custom arguments
+         unset($passedArguments['CQRSCommand']);
+         unset($passedArguments['CQRSCommandMapping']);
+@@ -161,9 +155,6 @@ public function withCQRSQuery(string $CQRSQuery): static
+     {
+         $self = clone $this;
+         $self->extraProperties['CQRSQuery'] = $CQRSQuery;
+-        if (empty($self->provider)) {
+-            $self->provider = QueryProvider::class;
+-        }
+ 
+         return $self;
+     }
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
+similarity index 93%
+rename from src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php
+rename to src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
+index bcc2a172483bc..bf03618f99289 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollection.php
+@@ -32,11 +32,12 @@
+ use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ /**
+- * Class CQRSQuery is a custom operation that provides extra parameters to help configure an operation
+- * based on a CQRS query, it is custom tailed for read operations and forces using the GET method.
++ * Class CQRSGetCollection is a custom operation that provides extra parameters to help configure an operation
++ * based on a CQRS query, it is custom tailed for read operations and forces using the GET method it also expects
++ * the returned result to be a collection.
+  */
+ #[\Attribute(\Attribute::TARGET_CLASS | \Attribute::IS_REPEATABLE)]
+-class CQRSQueryCollection extends AbstractCQRSOperation implements CollectionOperationInterface
++class CQRSGetCollection extends AbstractCQRSOperation implements CollectionOperationInterface
+ {
+     public function __construct(
+         ?string $uriTemplate = null,
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+index 741647ae42253..200befb77eff1 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+@@ -31,7 +31,7 @@
+ /**
+  * Class CQRSPartialUpdate is a custom operation that provides extra parameters to help configure an operation
+  * based on a CQRS command, it is custom tailed for update operations and forces using the PATCH method, to use PUT
+- * method you should use CQRSUpdate instead.
++ * or POST method you should use CQRSUpdate instead.
+  */
+ #[\Attribute(\Attribute::TARGET_CLASS | \Attribute::IS_REPEATABLE)]
+ class CQRSPartialUpdate extends CQRSCommand
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+index ee2b29b9f5ae3..891566fc6a654 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+@@ -37,6 +37,7 @@
+ class CQRSUpdate extends CQRSCommand
+ {
+     public function __construct(
++        string $method = self::METHOD_PUT,
+         ?string $uriTemplate = null,
+         ?array $types = null,
+         $formats = null,
+@@ -118,7 +119,6 @@ public function __construct(
+         ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+-        $passedArguments['method'] = self::METHOD_PUT;
+         // Disable read listener because it is forced when using PUT method, but we don't need it since we rely on CQRS commands/queries
+         $passedArguments['read'] = $read ?? false;
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Normalizer/UploadedFileNormalizer.php b/src/PrestaShopBundle/ApiPlatform/Normalizer/UploadedFileNormalizer.php
+new file mode 100644
+index 0000000000000..d26b1ce0a4e85
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Normalizer/UploadedFileNormalizer.php
+@@ -0,0 +1,84 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Normalizer;
++
++use Symfony\Component\HttpFoundation\File\File;
++use Symfony\Component\Serializer\Exception\InvalidArgumentException;
++use Symfony\Component\Serializer\Normalizer\DenormalizerInterface;
++use Symfony\Component\Serializer\Normalizer\NormalizerInterface;
++
++/**
++ * This normalizer disables the normalization process of File fields in the ApiPlatform resources
++ * as recommended by ApiPlatform https://api-platform.com/docs/core/file-upload/.
++ *
++ * However, it does normalize and returns the content as an array so that we can use the miscellaneous
++ * fields in our command mapping.
++ */
++class UploadedFileNormalizer implements DenormalizerInterface, NormalizerInterface
++{
++    public function denormalize(mixed $data, string $type, ?string $format = null, array $context = [])
++    {
++        return $data;
++    }
++
++    public function supportsDenormalization(mixed $data, string $type, ?string $format = null)
++    {
++        return $data instanceof File;
++    }
++
++    public function normalize(mixed $object, ?string $format = null, array $context = [])
++    {
++        if (!($object instanceof File)) {
++            throw new InvalidArgumentException('Expected object to be a ' . File::class);
++        }
++
++        return [
++            'type' => $object->getType(),
++            'path' => $object->getPath(),
++            'pathName' => $object->getPathname(),
++            'realPath' => $object->getRealPath(),
++            'mimeType' => $object->getMimeType(),
++            'size' => $object->getSize(),
++        ];
++    }
++
++    public function supportsNormalization(mixed $data, ?string $format = null)
++    {
++        return $data instanceof File;
++    }
++
++    public function getSupportedTypes(?string $format): array
++    {
++        return [
++            'object' => null,
++            '*' => false,
++            File::class => true,
++        ];
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Processor/CommandProcessor.php b/src/PrestaShopBundle/ApiPlatform/Processor/CommandProcessor.php
+index 91f8034edb880..406d8dd7dcbce 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Processor/CommandProcessor.php
++++ b/src/PrestaShopBundle/ApiPlatform/Processor/CommandProcessor.php
+@@ -35,9 +35,9 @@
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShopBundle\ApiPlatform\ContextParametersTrait;
+-use PrestaShopBundle\ApiPlatform\DomainSerializer;
+ use PrestaShopBundle\ApiPlatform\Exception\CQRSCommandNotFoundException;
+ use PrestaShopBundle\ApiPlatform\QueryResultSerializerTrait;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ use ReflectionException;
+ use Symfony\Component\Serializer\Exception\ExceptionInterface;
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php b/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
+index 5d1120eb44882..ce4aea92d49c9 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
++++ b/src/PrestaShopBundle/ApiPlatform/Provider/QueryListProvider.php
+@@ -39,10 +39,10 @@
+ use PrestaShop\PrestaShop\Core\Search\Builder\FiltersBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Search\Filters;
+ use PrestaShopBundle\ApiPlatform\ContextParametersTrait;
+-use PrestaShopBundle\ApiPlatform\DomainSerializer;
+ use PrestaShopBundle\ApiPlatform\Exception\GridDataFactoryNotFoundException;
+ use PrestaShopBundle\ApiPlatform\Pagination\PaginationElements;
+ use PrestaShopBundle\ApiPlatform\QueryResultSerializerTrait;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ use Psr\Container\ContainerInterface;
+ use ReflectionException;
+ use Symfony\Component\HttpFoundation\RequestStack;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Provider/QueryProvider.php b/src/PrestaShopBundle/ApiPlatform/Provider/QueryProvider.php
+index b60592702809a..c3b0b89f59212 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Provider/QueryProvider.php
++++ b/src/PrestaShopBundle/ApiPlatform/Provider/QueryProvider.php
+@@ -35,9 +35,9 @@
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShopBundle\ApiPlatform\ContextParametersTrait;
+-use PrestaShopBundle\ApiPlatform\DomainSerializer;
+ use PrestaShopBundle\ApiPlatform\Exception\CQRSQueryNotFoundException;
+ use PrestaShopBundle\ApiPlatform\QueryResultSerializerTrait;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ use ReflectionException;
+ use Symfony\Component\Serializer\Exception\ExceptionInterface;
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/QueryResultSerializerTrait.php b/src/PrestaShopBundle/ApiPlatform/QueryResultSerializerTrait.php
+index f55025d4d1d40..858ae611fe224 100644
+--- a/src/PrestaShopBundle/ApiPlatform/QueryResultSerializerTrait.php
++++ b/src/PrestaShopBundle/ApiPlatform/QueryResultSerializerTrait.php
+@@ -30,6 +30,7 @@
+ 
+ use ApiPlatform\Metadata\CollectionOperationInterface;
+ use ApiPlatform\Metadata\Operation;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ 
+ trait QueryResultSerializerTrait
+ {
+diff --git a/src/PrestaShopBundle/ApiPlatform/DomainSerializer.php b/src/PrestaShopBundle/ApiPlatform/Serializer/DomainSerializer.php
+similarity index 99%
+rename from src/PrestaShopBundle/ApiPlatform/DomainSerializer.php
+rename to src/PrestaShopBundle/ApiPlatform/Serializer/DomainSerializer.php
+index 4948252d24539..39d36b03eb128 100644
+--- a/src/PrestaShopBundle/ApiPlatform/DomainSerializer.php
++++ b/src/PrestaShopBundle/ApiPlatform/Serializer/DomainSerializer.php
+@@ -25,7 +25,7 @@
+  */
+ declare(strict_types=1);
+ 
+-namespace PrestaShopBundle\ApiPlatform;
++namespace PrestaShopBundle\ApiPlatform\Serializer;
+ 
+ use ReflectionClass;
+ use ReflectionException;
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+index 56c8aeb7865e9..e69a65a3ba387 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+@@ -9,8 +9,8 @@ services:
+     tags: [ 'prestashop.api.normalizers' ]
+ 
+   # This is a custom serializer used by our custom providers/processors for ApiPlatform
+-  PrestaShopBundle\ApiPlatform\DomainSerializer:
+-    class: PrestaShopBundle\ApiPlatform\DomainSerializer
++  PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer:
++    class: PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer
+     arguments:
+       - !tagged_iterator { tag: prestashop.api.normalizers, default_priority_method: getNormalizerPriority }
+ 
+diff --git a/tests/Integration/ApiPlatform/DomainSerializerTest.php b/tests/Integration/ApiPlatform/Serializer/DomainSerializerTest.php
+similarity index 99%
+rename from tests/Integration/ApiPlatform/DomainSerializerTest.php
+rename to tests/Integration/ApiPlatform/Serializer/DomainSerializerTest.php
+index f47e5c73d59df..2d9427dcf9407 100644
+--- a/tests/Integration/ApiPlatform/DomainSerializerTest.php
++++ b/tests/Integration/ApiPlatform/Serializer/DomainSerializerTest.php
+@@ -26,12 +26,12 @@
+ 
+ declare(strict_types=1);
+ 
+-namespace Tests\Integration\ApiPlatform;
++namespace Tests\Integration\ApiPlatform\Serializer;
+ 
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\Module\APIResources\ApiPlatform\Resources\CustomerGroup;
+ use PrestaShop\Module\APIResources\ApiPlatform\Resources\Hook;
+-use PrestaShop\Module\APIResources\ApiPlatform\Resources\Product;
++use PrestaShop\Module\APIResources\ApiPlatform\Resources\Product\Product;
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\ValueObject\CreatedApiClient;
+ use PrestaShop\PrestaShop\Core\Domain\CartRule\Command\EditCartRuleCommand;
+ use PrestaShop\PrestaShop\Core\Domain\CartRule\ValueObject\CartRuleAction;
+@@ -44,7 +44,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductType;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+-use PrestaShopBundle\ApiPlatform\DomainSerializer;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+ 
+ class DomainSerializerTest extends KernelTestCase
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+index d2d45ddec64de..a74eb7416ce0d 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+@@ -32,7 +32,6 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSCommand;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+-use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ class CQRSCommandTest extends TestCase
+ {
+@@ -210,7 +209,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -219,7 +218,7 @@ public function testCQRSQuery(): void
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -229,7 +228,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -242,7 +241,6 @@ public function testCQRSQuery(): void
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+-        // New operation without query, the provider is forced when it is set
+         $operation = new CQRSCommand();
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+@@ -251,7 +249,7 @@ public function testCQRSQuery(): void
+ 
+         $operation3 = $operation->withCQRSQuery('My\\Namespace\\MyQuery');
+         $this->assertEquals(CommandProcessor::class, $operation3->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation3->getProvider());
++        $this->assertEquals(null, $operation3->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation3->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation3->getCQRSQuery());
+         // And initial operation as not modified of course
+@@ -398,7 +396,7 @@ public function testMultipleArguments(): void
+         );
+ 
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+         $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation->getCQRSCommandMapping());
+@@ -423,7 +421,7 @@ public function testMultipleArguments(): void
+ 
+         // Check first clone operation2
+         $this->assertEquals(CommandProcessor::class, $operation2->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation2->getProvider());
++        $this->assertEquals(null, $operation2->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation2->getCQRSQuery());
+         $this->assertEquals('My\\Namespace\\MyNewCommand', $operation2->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation2->getCQRSCommandMapping());
+@@ -441,7 +439,7 @@ public function testMultipleArguments(): void
+ 
+         // Check second clone operation3
+         $this->assertEquals(CommandProcessor::class, $operation3->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation3->getProvider());
++        $this->assertEquals(null, $operation3->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation3->getCQRSQuery());
+         $this->assertEquals('My\\Namespace\\MyNewCommand', $operation3->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation3->getCQRSCommandMapping());
+@@ -458,7 +456,7 @@ public function testMultipleArguments(): void
+         ], $operation3->getExtraProperties());
+ 
+         // The original object has not been modified
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+         $this->assertEquals('My\\Namespace\\MyCommand', $operation->getCQRSCommand());
+         $this->assertEquals($commandMapping, $operation->getCQRSCommandMapping());
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+index 495808913852e..c02174f6fde10 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+@@ -32,7 +32,6 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSCreate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+-use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ class CQRSCreateTest extends TestCase
+ {
+@@ -158,7 +157,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -167,7 +166,7 @@ public function testCQRSQuery(): void
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -177,7 +176,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -199,7 +198,7 @@ public function testCQRSQuery(): void
+ 
+         $operation3 = $operation->withCQRSQuery('My\\Namespace\\MyQuery');
+         $this->assertEquals(CommandProcessor::class, $operation3->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation3->getProvider());
++        $this->assertEquals(null, $operation3->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation3->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation3->getCQRSQuery());
+         // And initial operation as not modified of course
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
+similarity index 93%
+rename from tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php
+rename to tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
+index ce85ce7dacc08..9682138234195 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetCollectionTest.php
+@@ -30,29 +30,29 @@
+ 
+ use ApiPlatform\Exception\InvalidArgumentException;
+ use PHPUnit\Framework\TestCase;
+-use PrestaShopBundle\ApiPlatform\Metadata\CQRSQueryCollection;
++use PrestaShopBundle\ApiPlatform\Metadata\CQRSGetCollection;
+ use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+-class CQRSQueryCollectionTest extends TestCase
++class CQRSGetCollectionTest extends TestCase
+ {
+     public function testDefaultConstructor(): void
+     {
+         // Without any parameters
+-        $operation = new CQRSQueryCollection();
++        $operation = new CQRSGetCollection();
+         $this->assertEquals(QueryProvider::class, $operation->getProvider());
+-        $this->assertEquals(CQRSQueryCollection::METHOD_GET, $operation->getMethod());
++        $this->assertEquals(CQRSGetCollection::METHOD_GET, $operation->getMethod());
+         $this->assertEquals([], $operation->getExtraProperties());
+         $this->assertEquals(['json'], $operation->getFormats());
+ 
+         // With positioned parameters
+-        $operation = new CQRSQueryCollection('/uri');
++        $operation = new CQRSGetCollection('/uri');
+         $this->assertEquals(QueryProvider::class, $operation->getProvider());
+         $this->assertEquals('/uri', $operation->getUriTemplate());
+         $this->assertEquals([], $operation->getExtraProperties());
+         $this->assertEquals(['json'], $operation->getFormats());
+ 
+         // With named parameters
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             formats: ['json', 'html'],
+             extraProperties: ['scopes' => ['test']]
+         );
+@@ -64,21 +64,21 @@ public function testDefaultConstructor(): void
+     public function testScopes(): void
+     {
+         // Scopes parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             scopes: ['test', 'test2']
+         );
+         $this->assertEquals(['scopes' => ['test', 'test2']], $operation->getExtraProperties());
+         $this->assertEquals(['test', 'test2'], $operation->getScopes());
+ 
+         // Extra properties parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['scopes' => ['test']]
+         );
+         $this->assertEquals(['scopes' => ['test']], $operation->getExtraProperties());
+         $this->assertEquals(['test'], $operation->getScopes());
+ 
+         // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['scopes' => ['test', 'test1']],
+             scopes: ['test', 'test2'],
+         );
+@@ -98,21 +98,21 @@ public function testScopes(): void
+     public function testCQRSQuery(): void
+     {
+         // CQRS query parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+         // Extra properties parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+         );
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+         // Extra properties AND CQRS query parameters in constructor, both values are equals no problem
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+@@ -131,7 +131,7 @@ public function testCQRSQuery(): void
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+-            new CQRSQueryCollection(
++            new CQRSGetCollection(
+                 extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+                 CQRSQuery: 'My\\Namespace\\MyOtherQuery',
+             );
+@@ -148,7 +148,7 @@ public function testCQRSQueryMapping(): void
+     {
+         // CQRS query mapping parameters in constructor
+         $queryMapping = ['[id]' => '[queryId]'];
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             CQRSQueryMapping: $queryMapping,
+         );
+ 
+@@ -156,14 +156,14 @@ public function testCQRSQueryMapping(): void
+         $this->assertEquals($queryMapping, $operation->getCQRSQueryMapping());
+ 
+         // Extra properties parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['CQRSQueryMapping' => $queryMapping],
+         );
+         $this->assertEquals(['CQRSQueryMapping' => $queryMapping], $operation->getExtraProperties());
+         $this->assertEquals($queryMapping, $operation->getCQRSQueryMapping());
+ 
+         // Extra properties AND CQRS query mapping parameters in constructor, both values are equals no problem
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['CQRSQueryMapping' => $queryMapping],
+             CQRSQueryMapping: $queryMapping,
+         );
+@@ -183,7 +183,7 @@ public function testCQRSQueryMapping(): void
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+-            new CQRSQueryCollection(
++            new CQRSGetCollection(
+                 extraProperties: ['CQRSQueryMapping' => $queryMapping],
+                 CQRSQueryMapping: $newMapping,
+             );
+@@ -200,7 +200,7 @@ public function testApiResourceMapping(): void
+     {
+         // Api resource mapping parameters in constructor
+         $resourceMapping = ['[id]' => '[queryId]'];
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             ApiResourceMapping: $resourceMapping,
+         );
+ 
+@@ -208,14 +208,14 @@ public function testApiResourceMapping(): void
+         $this->assertEquals($resourceMapping, $operation->getApiResourceMapping());
+ 
+         // Extra properties parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['ApiResourceMapping' => $resourceMapping],
+         );
+         $this->assertEquals(['ApiResourceMapping' => $resourceMapping], $operation->getExtraProperties());
+         $this->assertEquals($resourceMapping, $operation->getApiResourceMapping());
+ 
+         // Extra properties AND Api resource mapping parameters in constructor, both values are equals no problem
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['ApiResourceMapping' => $resourceMapping],
+             ApiResourceMapping: $resourceMapping,
+         );
+@@ -235,7 +235,7 @@ public function testApiResourceMapping(): void
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+-            new CQRSQueryCollection(
++            new CQRSGetCollection(
+                 extraProperties: ['ApiResourceMapping' => $resourceMapping],
+                 ApiResourceMapping: $newMapping,
+             );
+@@ -252,7 +252,7 @@ public function testMultipleArguments(): void
+     {
+         $resourceMapping = ['[id]' => '[queryId]'];
+         $queryMapping = ['[id]' => '[queryId]'];
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: [
+                 'CQRSQuery' => 'My\\Namespace\\MyQuery',
+                 'scopes' => ['master_scope'],
+@@ -324,26 +324,26 @@ public function testMultipleArguments(): void
+     public function testExperimentalOperation(): void
+     {
+         // Default value is false (no extra property added)
+-        $operation = new CQRSQueryCollection();
++        $operation = new CQRSGetCollection();
+         $this->assertEquals([], $operation->getExtraProperties());
+         $this->assertEquals(false, $operation->getExperimentalOperation());
+ 
+         // Scopes parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             experimentalOperation: true,
+         );
+         $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
+         $this->assertEquals(true, $operation->getExperimentalOperation());
+ 
+         // Extra properties parameters in constructor
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['experimentalOperation' => false]
+         );
+         $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
+         $this->assertEquals(false, $operation->getExperimentalOperation());
+ 
+         // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
+-        $operation = new CQRSQueryCollection(
++        $operation = new CQRSGetCollection(
+             extraProperties: ['experimentalOperation' => true],
+             experimentalOperation: true,
+         );
+@@ -362,7 +362,7 @@ public function testExperimentalOperation(): void
+         // When both values are specified, but they are different trigger an exception
+         $caughtException = null;
+         try {
+-            new CQRSQueryCollection(
++            new CQRSGetCollection(
+                 extraProperties: ['experimentalOperation' => true],
+                 experimentalOperation: false,
+             );
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+index 93a947ce521f6..764cbc6cb0423 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+@@ -32,7 +32,6 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSPartialUpdate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+-use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ class CQRSPartialUpdateTest extends TestCase
+ {
+@@ -165,7 +164,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -174,7 +173,7 @@ public function testCQRSQuery(): void
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -184,7 +183,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -206,7 +205,7 @@ public function testCQRSQuery(): void
+ 
+         $operation3 = $operation->withCQRSQuery('My\\Namespace\\MyQuery');
+         $this->assertEquals(CommandProcessor::class, $operation3->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation3->getProvider());
++        $this->assertEquals(null, $operation3->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation3->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation3->getCQRSQuery());
+         // And initial operation as not modified of course
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+index b4d6e04959ab1..233169ecd66c7 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+@@ -32,7 +32,6 @@
+ use PHPUnit\Framework\TestCase;
+ use PrestaShopBundle\ApiPlatform\Metadata\CQRSUpdate;
+ use PrestaShopBundle\ApiPlatform\Processor\CommandProcessor;
+-use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
+ 
+ class CQRSUpdateTest extends TestCase
+ {
+@@ -48,10 +47,10 @@ public function testDefaultConstructor(): void
+         $this->assertEquals(['json'], $operation->getFormats());
+ 
+         // With positioned parameters
+-        $operation = new CQRSUpdate('/uri');
++        $operation = new CQRSUpdate(CQRSUpdate::METHOD_POST, '/uri');
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+         $this->assertNull($operation->getProvider());
+-        $this->assertEquals(CQRSUpdate::METHOD_PUT, $operation->getMethod());
++        $this->assertEquals(CQRSUpdate::METHOD_POST, $operation->getMethod());
+         $this->assertEquals('/uri', $operation->getUriTemplate());
+         $this->assertEquals([], $operation->getExtraProperties());
+         $this->assertEquals(['json'], $operation->getFormats());
+@@ -161,7 +160,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -170,7 +169,7 @@ public function testCQRSQuery(): void
+             extraProperties: ['CQRSQuery' => 'My\\Namespace\\MyQuery'],
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -180,7 +179,7 @@ public function testCQRSQuery(): void
+             CQRSQuery: 'My\\Namespace\\MyQuery',
+         );
+         $this->assertEquals(CommandProcessor::class, $operation->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation->getProvider());
++        $this->assertEquals(null, $operation->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation->getCQRSQuery());
+ 
+@@ -202,7 +201,7 @@ public function testCQRSQuery(): void
+ 
+         $operation3 = $operation->withCQRSQuery('My\\Namespace\\MyQuery');
+         $this->assertEquals(CommandProcessor::class, $operation3->getProcessor());
+-        $this->assertEquals(QueryProvider::class, $operation3->getProvider());
++        $this->assertEquals(null, $operation3->getProvider());
+         $this->assertEquals(['CQRSQuery' => 'My\\Namespace\\MyQuery'], $operation3->getExtraProperties());
+         $this->assertEquals('My\\Namespace\\MyQuery', $operation3->getCQRSQuery());
+         // And initial operation as not modified of course
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/StateProvider/QueryProviderTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/StateProvider/QueryProviderTest.php
+index c2a5f72472ddc..97fee33c1417a 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/StateProvider/QueryProviderTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/StateProvider/QueryProviderTest.php
+@@ -44,11 +44,11 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Query\SearchProducts;
+ use PrestaShop\PrestaShop\Core\Domain\Product\QueryResult\FoundProduct;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+-use PrestaShopBundle\ApiPlatform\DomainSerializer;
+ use PrestaShopBundle\ApiPlatform\Exception\CQRSQueryNotFoundException;
+ use PrestaShopBundle\ApiPlatform\Normalizer\CQRSApiNormalizer;
+ use PrestaShopBundle\ApiPlatform\Normalizer\DecimalNumberNormalizer;
+ use PrestaShopBundle\ApiPlatform\Provider\QueryProvider;
++use PrestaShopBundle\ApiPlatform\Serializer\DomainSerializer;
+ use RuntimeException;
+ 
+ class QueryProviderTest extends TestCase

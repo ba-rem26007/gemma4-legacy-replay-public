@@ -1,0 +1,2728 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index 1d455b2c14ce5..c7af10ba00312 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -105,6 +105,7 @@ class CartRuleCore extends ObjectModel
+     public $active = true;
+     public $date_add;
+     public $date_upd;
++    public ?string $type = null;
+ 
+     protected static $cartAmountCache = [];
+ 
+@@ -148,6 +149,7 @@ class CartRuleCore extends ObjectModel
+             'active' => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
+             'date_add' => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
+             'date_upd' => ['type' => self::TYPE_DATE, 'validate' => 'isDate'],
++            'type' => ['type' => self::TYPE_STRING, 'validate' => 'isString'],
+             /* Lang fields */
+             'name' => [
+                 'type' => self::TYPE_HTML,
+@@ -511,8 +513,8 @@ public static function getCustomerCartRules(
+                  * in the cart rule. So he will be able to use it.
+                  */
+                 $validAddressExists = Db::getInstance()->getValue('
+-                    SELECT crc.id_cart_rule 
+-                    FROM ' . _DB_PREFIX_ . 'cart_rule_country crc 
++                    SELECT crc.id_cart_rule
++                    FROM ' . _DB_PREFIX_ . 'cart_rule_country crc
+                     INNER JOIN ' . _DB_PREFIX_ . 'address a
+                     ON a.id_customer = ' . (int) $id_customer . ' AND
+                     a.deleted = 0 AND
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 91c8407089a3c..209e0ca6f6fc6 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -197,6 +197,7 @@ CREATE TABLE `PREFIX_cart_rule` (
+   `active` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `date_add` datetime NOT NULL,
+   `date_upd` datetime NOT NULL,
++  `type` varchar(128) DEFAULT NULL,
+   PRIMARY KEY (`id_cart_rule`),
+   KEY `id_customer` (
+     `id_customer`, `active`, `date_to`
+@@ -213,7 +214,8 @@ CREATE TABLE `PREFIX_cart_rule` (
+     `date_to`
+   ),
+   KEY `date_from` (`date_from`),
+-  KEY `date_to` (`date_to`)
++  KEY `date_to` (`date_to`),
++  KEY `type` (`type`)
+ ) ENGINE=ENGINE_TYPE DEFAULT CHARSET=utf8mb4 COLLATION;
+ 
+ /* Localized name assocatied with a promo code */
+diff --git a/src/Adapter/CartRule/CartRuleBuilder.php b/src/Adapter/CartRule/CartRuleBuilder.php
+new file mode 100644
+index 0000000000000..73941be8b300e
+--- /dev/null
++++ b/src/Adapter/CartRule/CartRuleBuilder.php
+@@ -0,0 +1,60 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\CartRule;
++
++use CartRule;
++use DateTimeImmutable;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
++
++class CartRuleBuilder
++{
++    public function build(AddDiscountCommand $command): CartRule
++    {
++        $cartRule = new CartRule();
++        $validFrom = $command->getValidFrom() ?: new DateTimeImmutable();
++        $validTo = $command->getValidTo() ?: $validFrom->modify('+1 month');
++
++        $cartRule->name = $command->getLocalizedNames();
++        $cartRule->description = $command->getDescription();
++        $cartRule->code = $command->getCode();
++        $cartRule->highlight = $command->isHighlightInCart();
++        $cartRule->partial_use = $command->allowPartialUse();
++        $cartRule->priority = $command->getPriority();
++        $cartRule->active = $command->isActive();
++        $cartRule->id_customer = $command->getCustomerId()?->getValue();
++        $cartRule->date_from = $validFrom->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT);
++        $cartRule->date_to = $validTo->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT);
++        $cartRule->quantity = $command->getTotalQuantity();
++        $cartRule->quantity_per_user = $command->getQuantityPerUser();
++        $cartRule->type = $command->getDiscountType()->getValue();
++        $cartRule->free_shipping = $command instanceof AddFreeShippingDiscountCommand;
++
++        return $cartRule;
++    }
++}
+diff --git a/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php
+new file mode 100644
+index 0000000000000..67cd635e2b954
+--- /dev/null
++++ b/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder;
++use PrestaShop\PrestaShop\Adapter\CartRule\Repository\CartRuleRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\AddFreeShippingDiscountHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++#[AsCommandHandler]
++class AddFreeShippingDiscountHandler implements AddFreeShippingDiscountHandlerInterface
++{
++    public function __construct(
++        private readonly CartRuleRepository $cartRuleRepository,
++        private readonly CartRuleBuilder $cartRuleBuilder
++    ) {
++    }
++
++    public function handle(AddFreeShippingDiscountCommand $command): DiscountId
++    {
++        $BuiltCartRule = $this->cartRuleBuilder->build($command);
++        $discount = $this->cartRuleRepository->add($BuiltCartRule);
++
++        return new DiscountId((int) $discount->id);
++    }
++}
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+new file mode 100644
+index 0000000000000..6c97f7816803c
+--- /dev/null
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -0,0 +1,70 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\QueryHandler;
++
++use DateTimeImmutable;
++use Exception;
++use PrestaShop\PrestaShop\Adapter\CartRule\Repository\CartRuleRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\CartRule\ValueObject\CartRuleId;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Discount\QueryHandler\GetDiscountForEditingHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
++
++#[AsQueryHandler]
++class GetDiscountForEditingHandler implements GetDiscountForEditingHandlerInterface
++{
++    public function __construct(
++        protected readonly CartRuleRepository $cartRuleRepository
++    ) {
++    }
++
++    /**
++     * @throws Exception
++     */
++    public function handle(GetDiscountForEditing $query): DiscountForEditing
++    {
++        $cartRuleId = new CartRuleId($query->discountId->getValue());
++        $cartRule = $this->cartRuleRepository->get($cartRuleId);
++
++        return new DiscountForEditing(
++            $query->discountId->getValue(),
++            $cartRule->priority,
++            $cartRule->active,
++            new DateTimeImmutable($cartRule->date_from),
++            new DateTimeImmutable($cartRule->date_to),
++            $cartRule->quantity,
++            $cartRule->quantity_per_user,
++            $cartRule->description,
++            $cartRule->code,
++            (int) $cartRule->id_customer,
++            $cartRule->highlight,
++            $cartRule->partial_use,
++            $cartRule->type
++        );
++    }
++}
+diff --git a/src/Core/Domain/Discount/Command/AddDiscountCommand.php b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+new file mode 100644
+index 0000000000000..26c74dbac22b5
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+@@ -0,0 +1,245 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use DateTimeImmutable;
++use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\CustomerId;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\Domain\Language\ValueObject\LanguageId;
++
++abstract class AddDiscountCommand
++{
++    private array $localizedNames = [];
++    private int $priority = 1;
++    private bool $active = true;
++    private ?DateTimeImmutable $validFrom = null;
++    private ?DateTimeImmutable $validTo = null;
++    private int $totalQuantity = 1;
++    private int $quantityPerUser = 1;
++    private string $description = '';
++    private string $code = '';
++    private ?CustomerId $customerId = null;
++    private bool $highlightInCart = false;
++    private bool $allowPartialUse = true;
++    private DiscountType $type;
++
++    public function __construct(
++        array $localizedNames,
++        string $type,
++    ) {
++        $this->type = new DiscountType($type);
++        $this->setLocalizedNames($localizedNames);
++    }
++
++    /**
++     * @param array<int, string> $localizedNames
++     */
++    private function setLocalizedNames(array $localizedNames): self
++    {
++        foreach ($localizedNames as $languageId => $name) {
++            $this->localizedNames[(new LanguageId($languageId))->getValue()] = $name;
++        }
++
++        return $this;
++    }
++
++    /**
++     * @return array<int, string>
++     */
++    public function getLocalizedNames(): array
++    {
++        return $this->localizedNames;
++    }
++
++    public function isActive(): bool
++    {
++        return $this->active;
++    }
++
++    public function setActive(bool $active): self
++    {
++        $this->active = $active;
++
++        return $this;
++    }
++
++    public function getValidFrom(): ?DateTimeImmutable
++    {
++        return $this->validFrom;
++    }
++
++    public function getValidTo(): ?DateTimeImmutable
++    {
++        return $this->validTo;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setValidityDateRange(DateTimeImmutable $from, DateTimeImmutable $to): self
++    {
++        $this->assertDateRangeIsValid($from, $to);
++        $this->validFrom = $from;
++        $this->validTo = $to;
++
++        return $this;
++    }
++
++    public function getPriority(): int
++    {
++        return $this->priority;
++    }
++
++    public function getDiscountType(): DiscountType
++    {
++        return $this->type;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setPriority(int $priority): self
++    {
++        if (0 >= $priority) {
++            throw new DiscountConstraintException(
++                sprintf('Invalid discount priority "%s". Must be a positive integer.', $priority),
++                DiscountConstraintException::INVALID_PRIORITY
++            );
++        }
++
++        $this->priority = $priority;
++
++        return $this;
++    }
++
++    public function getTotalQuantity(): int
++    {
++        return $this->totalQuantity;
++    }
++
++    public function isHighlightInCart(): bool
++    {
++        return $this->highlightInCart;
++    }
++
++    public function setHighlightInCart(bool $highlightInCart): void
++    {
++        $this->highlightInCart = $highlightInCart;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setTotalQuantity(int $quantity): self
++    {
++        if (0 > $quantity) {
++            throw new DiscountConstraintException(sprintf('Quantity cannot be lower than zero, %d given', $quantity), DiscountConstraintException::INVALID_QUANTITY);
++        }
++
++        $this->totalQuantity = $quantity;
++
++        return $this;
++    }
++
++    public function getQuantityPerUser(): int
++    {
++        return $this->quantityPerUser;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setQuantityPerUser(int $quantity): self
++    {
++        if (0 > $quantity) {
++            throw new DiscountConstraintException(sprintf('Quantity per user cannot be lower than zero, %d given', $quantity), DiscountConstraintException::INVALID_QUANTITY_PER_USER);
++        }
++
++        $this->quantityPerUser = $quantity;
++
++        return $this;
++    }
++
++    public function getDescription(): string
++    {
++        return $this->description;
++    }
++
++    public function setDescription(string $description): self
++    {
++        $this->description = $description;
++
++        return $this;
++    }
++
++    public function getCode(): string
++    {
++        return $this->code;
++    }
++
++    public function setCode(string $code): self
++    {
++        $this->code = $code;
++
++        return $this;
++    }
++
++    public function allowPartialUse(): bool
++    {
++        return $this->allowPartialUse;
++    }
++
++    public function setAllowPartialUse(bool $allow): self
++    {
++        $this->allowPartialUse = $allow;
++
++        return $this;
++    }
++
++    public function getCustomerId(): ?CustomerId
++    {
++        return $this->customerId;
++    }
++
++    public function setCustomerId(int $customerId): self
++    {
++        $this->customerId = new CustomerId($customerId);
++
++        return $this;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    private function assertDateRangeIsValid(DateTimeImmutable $dateFrom, DateTimeImmutable $dateTo): void
++    {
++        if ($dateFrom > $dateTo) {
++            throw new DiscountConstraintException('Date from cannot be greater than date to.', DiscountConstraintException::DATE_FROM_GREATER_THAN_DATE_TO);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php b/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php
+new file mode 100644
+index 0000000000000..1dcf41d034836
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++
++class AddFreeShippingDiscountCommand extends AddDiscountCommand
++{
++    public function __construct(array $localizedNames)
++    {
++        parent::__construct($localizedNames, DiscountType::FREE_SHIPPING);
++    }
++}
+diff --git a/src/Core/Domain/Discount/CommandHandler/AddFreeShippingDiscountHandlerInterface.php b/src/Core/Domain/Discount/CommandHandler/AddFreeShippingDiscountHandlerInterface.php
+new file mode 100644
+index 0000000000000..f40bf38cd5a77
+--- /dev/null
++++ b/src/Core/Domain/Discount/CommandHandler/AddFreeShippingDiscountHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++interface AddFreeShippingDiscountHandlerInterface
++{
++    public function handle(AddFreeShippingDiscountCommand $command): DiscountId;
++}
+diff --git a/src/Core/Domain/Discount/Exception/DiscountConstraintException.php b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+new file mode 100644
+index 0000000000000..fabf2cd8c0606
+--- /dev/null
++++ b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+@@ -0,0 +1,76 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Exception;
++
++class DiscountConstraintException extends DiscountException
++{
++    // @todo remove unused
++    public const MISSING_DISCOUNT_APPLICATION_PRODUCT = 1;
++    public const INVALID_DISCOUNT_APPLICATION_TYPE = 2;
++    public const INVALID_GIFT_PRODUCT_ATTRIBUTE = 3;
++    public const INVALID_PRIORITY = 4;
++    public const DATE_FROM_GREATER_THAN_DATE_TO = 5;
++    public const INVALID_QUANTITY = 6;
++    public const INVALID_QUANTITY_PER_USER = 7;
++    public const INVALID_GIFT_PRODUCT = 8;
++    public const MISSING_ACTION = 9;
++    public const INVALID_ID = 10;
++    public const INVALID_NAME = 11;
++    public const INVALID_STATUS = 12;
++    public const INVALID_CUSTOMER_ID = 13;
++    public const INVALID_DATE_FROM = 14;
++    public const INVALID_DATE_TO = 15;
++    public const INVALID_DESCRIPTION = 16;
++    public const INVALID_PARTIAL_USE = 17;
++    public const INVALID_CODE = 18;
++    public const INVALID_MINIMUM_AMOUNT = 19;
++    public const INVALID_MINIMUM_AMOUNT_TAX = 20;
++    public const INVALID_MINIMUM_AMOUNT_CURRENCY = 21;
++    public const INVALID_MINIMUM_AMOUNT_SHIPPING = 22;
++    public const INVALID_COUNTRY_RESTRICTION = 23;
++    public const INVALID_CARRIER_RESTRICTION = 24;
++    public const INVALID_GROUP_RESTRICTION = 25;
++    public const INVALID_CART_RULE_RESTRICTION = 26;
++    public const INVALID_PRODUCT_RESTRICTION = 27;
++    public const INVALID_SHOP_RESTRICTION = 28;
++    public const INVALID_FREE_SHIPPING = 29;
++    public const INVALID_REDUCTION_PERCENT = 30;
++    public const INVALID_REDUCTION_AMOUNT = 31;
++    public const INVALID_REDUCTION_TAX = 32;
++    public const INVALID_REDUCTION_CURRENCY = 33;
++    public const INVALID_REDUCTION_PRODUCT = 34;
++    public const INVALID_REDUCTION_EXCLUDE_SPECIAL = 35;
++    public const INVALID_HIGHLIGHT = 36;
++    public const INVALID_ACTIVE = 37;
++    public const NON_UNIQUE_CODE = 38;
++    public const INVALID_PRICE_DISCOUNT = 39;
++    public const INVALID_RESTRICTION_RULE_TYPE = 40;
++    public const INVALID_RESTRICTION_RULE_ID = 41;
++    public const EMPTY_RESTRICTION_RULE_IDS = 42;
++    public const EMPTY_RESTRICTION_RULES = 43;
++    public const INVALID_PROPERTY_FOR_TYPE = 44;
++}
+diff --git a/src/Core/Domain/Discount/Exception/DiscountException.php b/src/Core/Domain/Discount/Exception/DiscountException.php
+new file mode 100644
+index 0000000000000..d5985493e3516
+--- /dev/null
++++ b/src/Core/Domain/Discount/Exception/DiscountException.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainException;
++
++class DiscountException extends DomainException
++{
++}
+diff --git a/src/Core/Domain/Discount/Exception/DiscountNotFoundException.php b/src/Core/Domain/Discount/Exception/DiscountNotFoundException.php
+new file mode 100644
+index 0000000000000..1fe44123a476f
+--- /dev/null
++++ b/src/Core/Domain/Discount/Exception/DiscountNotFoundException.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Exception;
++
++class DiscountNotFoundException extends DiscountException
++{
++}
+diff --git a/src/Core/Domain/Discount/Query/GetDiscountForEditing.php b/src/Core/Domain/Discount/Query/GetDiscountForEditing.php
+new file mode 100644
+index 0000000000000..e004a3f0ed7a2
+--- /dev/null
++++ b/src/Core/Domain/Discount/Query/GetDiscountForEditing.php
+@@ -0,0 +1,39 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++class GetDiscountForEditing
++{
++    public readonly DiscountId $discountId;
++
++    public function __construct(int $discountId)
++    {
++        $this->discountId = new DiscountId($discountId);
++    }
++}
+diff --git a/src/Core/Domain/Discount/QueryHandler/GetDiscountForEditingHandlerInterface.php b/src/Core/Domain/Discount/QueryHandler/GetDiscountForEditingHandlerInterface.php
+new file mode 100644
+index 0000000000000..d88107b291976
+--- /dev/null
++++ b/src/Core/Domain/Discount/QueryHandler/GetDiscountForEditingHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
++
++interface GetDiscountForEditingHandlerInterface
++{
++    public function handle(GetDiscountForEditing $query): DiscountForEditing;
++}
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+new file mode 100644
+index 0000000000000..a662a791abcbf
+--- /dev/null
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -0,0 +1,115 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult;
++
++use DateTimeImmutable;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++
++class DiscountForEditing
++{
++    public function __construct(
++        private readonly int $id,
++        private readonly int $priority,
++        private readonly bool $active,
++        private readonly ?DateTimeImmutable $validFrom,
++        private readonly ?DateTimeImmutable $validTo,
++        private readonly int $totalQuantity,
++        private readonly int $quantityPerUser,
++        private readonly string $description,
++        private readonly string $code,
++        private readonly ?int $customerId,
++        private readonly bool $highlightInCart,
++        private readonly bool $allowPartialUse,
++        private readonly string $type,
++    ) {
++    }
++
++    public function getDiscountId(): int
++    {
++        return $this->id;
++    }
++
++    public function getPriority(): int
++    {
++        return $this->priority;
++    }
++
++    public function isActive(): bool
++    {
++        return $this->active;
++    }
++
++    public function getValidFrom(): ?DateTimeImmutable
++    {
++        return $this->validFrom;
++    }
++
++    public function getValidTo(): ?DateTimeImmutable
++    {
++        return $this->validTo;
++    }
++
++    public function getTotalQuantity(): int
++    {
++        return $this->totalQuantity;
++    }
++
++    public function getQuantityPerUser(): int
++    {
++        return $this->quantityPerUser;
++    }
++
++    public function getDescription(): string
++    {
++        return $this->description;
++    }
++
++    public function getCode(): string
++    {
++        return $this->code;
++    }
++
++    public function getCustomerId(): ?int
++    {
++        return $this->customerId;
++    }
++
++    public function isHighlightInCart(): bool
++    {
++        return $this->highlightInCart;
++    }
++
++    public function isAllowPartialUse(): bool
++    {
++        return $this->allowPartialUse;
++    }
++
++    public function getType(): DiscountType
++    {
++        return new DiscountType($this->type);
++    }
++}
+diff --git a/src/Core/Domain/Discount/ValueObject/DiscountId.php b/src/Core/Domain/Discount/ValueObject/DiscountId.php
+new file mode 100644
+index 0000000000000..88676c94a816b
+--- /dev/null
++++ b/src/Core/Domain/Discount/ValueObject/DiscountId.php
+@@ -0,0 +1,57 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++
++class DiscountId
++{
++    private int $discountId;
++
++    public function __construct(int $discountId)
++    {
++        $this->assertIsPositiveInt($discountId);
++        $this->discountId = $discountId;
++    }
++
++    public function getValue(): int
++    {
++        return $this->discountId;
++    }
++
++    /**
++     * @param int $value
++     *
++     * @throws DiscountConstraintException
++     */
++    private function assertIsPositiveInt(int $value): void
++    {
++        if (0 >= $value) {
++            throw new DiscountConstraintException(sprintf('Invalid discount id "%s".', $value), DiscountConstraintException::INVALID_ID);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Discount/ValueObject/DiscountType.php b/src/Core/Domain/Discount/ValueObject/DiscountType.php
+new file mode 100644
+index 0000000000000..8186c62ac5149
+--- /dev/null
++++ b/src/Core/Domain/Discount/ValueObject/DiscountType.php
+@@ -0,0 +1,44 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject;
++
++class DiscountType
++{
++    public const FREE_SHIPPING = 'free_shipping';
++    public const PERCENT_DISCOUNT = 'percent_discount';
++    public const AMOUNT_DISCOUNT = 'amount_discount';
++    public const FREE_GIFT = 'free_gift';
++
++    public function __construct(private readonly string $value)
++    {
++    }
++
++    public function getValue(): string
++    {
++        return $this->value;
++    }
++}
+diff --git a/src/Core/Domain/Discount/ValueObject/GiftedProduct.php b/src/Core/Domain/Discount/ValueObject/GiftedProduct.php
+new file mode 100644
+index 0000000000000..370e7459d7f16
+--- /dev/null
++++ b/src/Core/Domain/Discount/ValueObject/GiftedProduct.php
+@@ -0,0 +1,46 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject;
++
++class GiftedProduct
++{
++    public function __construct(
++        private readonly int $productId,
++        private readonly ?int $combinationId = null,
++    ) {
++    }
++
++    public function getProductId(): int
++    {
++        return $this->productId;
++    }
++
++    public function getCombinationId(): ?int
++    {
++        return $this->combinationId;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/cart_rule.yml b/src/PrestaShopBundle/Resources/config/services/adapter/cart_rule.yml
+index f32173a3fc13b..f8941b7720fa1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/cart_rule.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/cart_rule.yml
+@@ -12,6 +12,11 @@ services:
+     public: false
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder:
++    autowire: true
++    public: false
++    autoconfigure: true
++
+   prestashop.adapter.cart_rule.query_handler.search_cart_rules_handler:
+     class: PrestaShop\PrestaShop\Adapter\CartRule\QueryHandler\SearchCartRulesHandler
+     autoconfigure: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+new file mode 100644
+index 0000000000000..7a07cad44429a
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -0,0 +1,13 @@
++services:
++  _defaults:
++    public: true
++
++  PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\AddFreeShippingDiscountHandler:
++    autowire: true
++    public: false
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Discount\QueryHandler\GetDiscountForEditingHandler:
++    autowire: true
++    public: false
++    autoconfigure: true
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+new file mode 100644
+index 0000000000000..19d242cc118e1
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -0,0 +1,192 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain\Discount;
++
++use Behat\Gherkin\Node\TableNode;
++use DateTimeImmutable;
++use Exception;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
++use RuntimeException;
++use Tests\Integration\Behaviour\Features\Context\Domain\AbstractDomainFeatureContext;
++use Tests\Integration\Behaviour\Features\Context\Util\PrimitiveUtils;
++
++class DiscountFeatureContext extends AbstractDomainFeatureContext
++{
++    /**
++     * @When I create a free shipping discount :discountReference with following properties:
++     *
++     * @param string $discountReference
++     * @param TableNode $node
++     */
++    public function createFreeShippingDiscountIfNotExists(string $discountReference, TableNode $node): void
++    {
++        $data = $this->localizeByRows($node);
++        try {
++            $command = new AddFreeShippingDiscountCommand($data['name']);
++            $this->createDiscount($discountReference, $data, $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then discount :discountReference should have the following properties:
++     *
++     * @param string $cartRuleReference
++     * @param TableNode $tableNode
++     */
++    public function assertDiscount(string $cartRuleReference, TableNode $tableNode): void
++    {
++        $this->assertDiscountProperties(
++            $this->getDiscountForEditing($cartRuleReference),
++            $this->localizeByRows($tableNode)
++        );
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     * @throws Exception
++     */
++    protected function createDiscount(string $cartRuleReference, array $data, AddDiscountCommand $command): void
++    {
++        if (isset($data['highlight'])) {
++            $command->setHighlightInCart(PrimitiveUtils::castStringBooleanIntoBoolean($data['highlight']));
++        }
++        if (isset($data['allow_partial_use'])) {
++            $command->setAllowPartialUse(PrimitiveUtils::castStringBooleanIntoBoolean($data['allow_partial_use']));
++        }
++        if (isset($data['priority'])) {
++            $command->setPriority((int) $data['priority']);
++        }
++        if (isset($data['active'])) {
++            $command->setActive(PrimitiveUtils::castStringBooleanIntoBoolean($data['active']));
++        }
++        if (isset($data['valid_from'])) {
++            if (empty($data['valid_to'])) {
++                throw new RuntimeException('When setting cart rule range "valid_from" and "valid_to" must be provided');
++            }
++            $command->setValidityDateRange(
++                new DateTimeImmutable($data['valid_from']),
++                new DateTimeImmutable($data['valid_to']),
++            );
++        }
++        if (isset($data['total_quantity'])) {
++            $command->setTotalQuantity((int) $data['total_quantity']);
++        }
++
++        if (isset($data['quantity_per_user'])) {
++            $command->setQuantityPerUser((int) $data['quantity_per_user']);
++        }
++
++        $command->setDescription($data['description'] ?? '');
++        if (!empty($data['code'])) {
++            $command->setCode($data['code']);
++        }
++
++        /** @var DiscountId $discountId */
++        $discountId = $this->getCommandBus()->handle($command);
++        $this->getSharedStorage()->set($cartRuleReference, $discountId->getValue());
++    }
++
++    protected function assertDiscountProperties(DiscountForEditing $discountForEditing, array $expectedData): void
++    {
++        if (isset($expectedData['description'])) {
++            Assert::assertSame($expectedData['description'], $discountForEditing->getDescription(), 'Unexpected description');
++        }
++        if (isset($expectedData['highlight'])) {
++            Assert::assertSame(
++                PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['highlight']),
++                $discountForEditing->isHighlightInCart(),
++                'Unexpected highlight'
++            );
++        }
++        if (isset($expectedData['allow_partial_use'])) {
++            Assert::assertSame(
++                PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['allow_partial_use']),
++                $discountForEditing->isAllowPartialUse(),
++                'Unexpected partial use'
++            );
++        }
++        if (isset($expectedData['active'])) {
++            Assert::assertSame(
++                PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['active']),
++                $discountForEditing->isActive(),
++                'Unexpected active property'
++            );
++        }
++        if (isset($expectedData['code'])) {
++            Assert::assertSame($expectedData['code'], $discountForEditing->getCode(), 'Unexpected code');
++        }
++        if (isset($expectedData['customer'])) {
++            Assert::assertSame(
++                !empty($expectedData['customer']) ? $this->getSharedStorage()->get($expectedData['customer']) : 0,
++                $discountForEditing->getCustomerId(),
++                'Unexpected customer id'
++            );
++        }
++        if (isset($expectedData['priority'])) {
++            Assert::assertSame((int) $expectedData['priority'], $discountForEditing->getPriority(), 'Unexpected priority');
++        }
++        if (isset($expectedData['valid_from'])) {
++            Assert::assertEquals(
++                $expectedData['valid_from'],
++                $discountForEditing->getValidFrom()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT),
++                'Unexpected valid_from'
++            );
++        }
++        if (isset($expectedData['valid_to'])) {
++            Assert::assertEquals(
++                $expectedData['valid_to'],
++                $discountForEditing->getValidTo()->format(DateTimeUtil::DEFAULT_DATETIME_FORMAT),
++                'Unexpected valid_to'
++            );
++        }
++        if (isset($expectedData['total_quantity'])) {
++            Assert::assertSame((int) $expectedData['total_quantity'], $discountForEditing->getTotalQuantity(), 'Unexpected quantity');
++        }
++        if (isset($expectedData['quantity_per_user'])) {
++            Assert::assertSame((int) $expectedData['quantity_per_user'], $discountForEditing->getQuantityPerUser(), 'Unexpected quantity_per_user');
++        }
++    }
++
++    protected function getDiscountForEditing(string $discountReference): DiscountForEditing
++    {
++        /** @var DiscountForEditing $discountForEditing */
++        $discountForEditing = $this->getQueryBus()->handle(
++            new GetDiscountForEditing($this->getSharedStorage()->get($discountReference))
++        );
++
++        return $discountForEditing;
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/add_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/add_discount.feature
+new file mode 100644
+index 0000000000000..3b979d9545fbe
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/add_discount.feature
+@@ -0,0 +1,51 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount
++@restore-all-tables-before-feature
++@add-discount
++
++Feature: Add discount
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given there is a currency named "chf" with iso code "CHF" and exchange rate of 1.25
++    Given currency "usd" is the default one
++    And language with iso code "en" is the default one
++
++
++  Scenario: Create a simple discount with free shipping
++    When I create a free shipping discount "discount_1" with following properties:
++      | name[en-US]                      | Promotion              |
++      | free_shipping                    | true                   |
++    And discount "discount_1" should have the following properties:
++      | name[en-US]                      | Promotion              |
++      | free_shipping                    | true                   |
++  Scenario: Create a complete discount with free shipping
++    When I create a free shipping discount "discount_1" with following properties:
++      | name[en-US]                      | Promotion              |
++      | description                      | Promotion for holidays |
++      | highlight                        | false                  |
++      | is_active                        | true                   |
++      | allow_partial_use                | false                  |
++      | priority                         | 2                      |
++      | valid_from                       | 2019-01-01 11:05:00    |
++      | valid_to                         | 2019-12-01 00:00:00    |
++      | total_quantity                   | 10                     |
++      | quantity_per_user                | 1                      |
++      | free_shipping                    | true                   |
++      | code                             | PROMO_2019             |
++    And discount "discount_1" should have the following properties:
++      | name[en-US]                      | Promotion              |
++      | description                      | Promotion for holidays |
++      | highlight                        | false                  |
++      | is_active                        | true                   |
++      | allow_partial_use                | false                  |
++      | priority                         | 2                      |
++      | valid_from                       | 2019-01-01 11:05:00    |
++      | valid_to                         | 2019-12-01 00:00:00    |
++      | total_quantity                   | 10                     |
++      | quantity_per_user                | 1                      |
++      | free_shipping                    | true                   |
++      | code                             | PROMO_2019             |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 0eeb5cf2091bf..d7b680c4bf9e0 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -1,653 +1,663 @@
+ default:
+-    suites:
+-        contact:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Contact"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ContactFeatureContext
+-        database:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Database"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\SqlManagerFeatureContext
+-        state:
+-            paths:
+-                - "%paths.base%/Features/Scenario/State"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\StateFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\StateFeatureContext
+-        tax_rules_group:
+-            paths:
+-                - "%paths.base%/Features/Scenario/TaxRulesGroup"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        title:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Title"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TitleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\TitleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-        store:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Store"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\StoreFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\StoreFeatureContext
+-        customer:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Customer"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\RiskFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        customer_group:
+-            paths:
+-                - "%paths.base%/Features/Scenario/CustomerGroup"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        module:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Module"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ModuleFeatureContext
+-        category:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Category"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        cart:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Cart"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\PackConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingModeConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ContextFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\SpecificPriceRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\SqlManagerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\TaxFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        language:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Language"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        order:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Order"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\PriceDisplayMethodConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderCartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderCustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderPaymentFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderRefundFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        order_return_state:
+-            paths:
+-                - "%paths.base%/Features/Scenario/OrderReturnState"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderReturnStateFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        order_state:
+-            paths:
+-                - "%paths.base%/Features/Scenario/OrderState"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderStateFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        currency:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Currency"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        cldr:
+-            paths:
+-                - "%paths.base%/Features/Scenario/CLDR"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CLDRFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        webservice:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Webservice"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\WebserviceKeyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\WebserviceEndpointFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\WebserviceKeyFeatureContext
+-        tax:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Tax"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
+-        manufacturer:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Manufacturer"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+-        cms_page:
+-            paths:
+-                - "%paths.base%/Features/Scenario/CmsPage"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CmsPageFeatureContext
+-        cart_rule:
+-            paths:
+-                - "%paths.base%/Features/Scenario/CartRule"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\DeleteCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        catalog_price_rule:
+-            paths:
+-                - "%paths.base%/Features/Scenario/CatalogPriceRule"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CatalogPriceRuleContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureValuesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        meta:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Meta"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\MetaFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\MetaFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        feature:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Feature"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+-        order_message:
+-            paths:
+-                - "%paths.base%/Features/Scenario/OrderMessage"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
+-                - Tests\Integration\Behaviour\Features\Context\OrderMessageContext
+-        misc:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Misc"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\DebugModeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\EmployeeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ShowcaseCardFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ThemeMailTemplatesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        address:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Address"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+-        supplier:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Supplier"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\SupplierFeatureContext
+-        attachment:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Attachment"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttachmentFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-        # This is a special suite only for legacy product tests, it avoids using legacy context in product suite (LegacyProductFeatureContext),
+-        # thus the product suite is only centered and based on recent CQRS commands
+-        legacy_product:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Product"
+-            filters:
+-                tags: "@legacy-product-type"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        # This is a special suite only for product stock movement, it avoids adding other contexts (Order, Cart, ...) in the product suite which
+-        # could impact via their BeforeSuite/BeforeFeature/... tags and reduce the speed of regular product tests
+-        stock_movement_history:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Product/StockMovement"
+-            filters:
+-                tags: "@stock-movement-history"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationStockMovementsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockMovementsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+-        shop:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Shop"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        feature_flag:
+-            paths:
+-                - "%paths.base%/Features/Scenario/FeatureFlag"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
+-        security:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Security"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SecurityFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        zone:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Zone"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+-        attribute:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Attribute"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-        attribute_group:
+-            paths:
+-              - "%paths.base%/Features/Scenario/AttributeGroup"
+-            contexts:
+-              - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-              - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-              - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-              - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-              - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+-        search_engine:
+-            paths:
+-                - "%paths.base%/Features/Scenario/SearchEngine"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SearchEngineFeatureContext
+-        profile:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Profile"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ProfileFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\PermissionFeatureContext
+-        country:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Country"
+-            contexts:
+-               - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-               - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
+-               - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-        product:
+-            paths:
+-                - "%paths.base%/Features/Scenario/Product"
+-            filters:
+-                tags: "~@legacy-product-type&&~@stock-movement-history"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttachmentFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\DeleteCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GetCombinationIdsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchProductCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationImagesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationSuppliersFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\DuplicateProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\OptionsAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\PricesAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductImageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductTypeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\RelatedProductsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\SearchProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\SeoAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\ShippingAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\SpecificPriceContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\SpecificPricePrioritiesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateAttachmentFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdatePackFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdatePositionFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureValuesFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateShippingFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateTagsFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\Product\VirtualProductFileFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToArrayTransformContext
+-                - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        order_return:
+-            paths:
+-                - "%paths.base%/Features/Scenario/OrderReturn"
+-            contexts:
+-                - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\OrderReturnFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+-                - Tests\Integration\Behaviour\Features\Context\OrderReturnFeatureContext
+-        customer_service:
+-          paths:
+-            - "%paths.base%/Features/Scenario/CustomerService"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\CustomerServiceFeatureContext
+-        alias:
+-          paths:
+-            - "%paths.base%/Features/Scenario/Search"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\Domain\AliasFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+-        api-client:
+-          paths:
+-            - "%paths.base%/Features/Scenario/ApiClient"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
+-        image-settings:
+-          paths:
+-            - "%paths.base%/Features/Scenario/ImageSettings"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\ImageSettings\ImageTypeContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\ImageSettings\ImageSettingsContext
+-        carrier:
+-          paths:
+-            - "%paths.base%/Features/Scenario/Carrier"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-        employee:
+-          paths:
+-            - "%paths.base%/Features/Scenario/Employee"
+-          contexts:
+-            - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\EmployeeFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+-            - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+-            - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++  suites:
++    contact:
++      paths:
++        - "%paths.base%/Features/Scenario/Contact"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ContactFeatureContext
++    database:
++      paths:
++        - "%paths.base%/Features/Scenario/Database"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\SqlManagerFeatureContext
++    state:
++      paths:
++        - "%paths.base%/Features/Scenario/State"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\StateFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\StateFeatureContext
++    tax_rules_group:
++      paths:
++        - "%paths.base%/Features/Scenario/TaxRulesGroup"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    title:
++      paths:
++        - "%paths.base%/Features/Scenario/Title"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TitleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\TitleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++    store:
++      paths:
++        - "%paths.base%/Features/Scenario/Store"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\StoreFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\StoreFeatureContext
++    customer:
++      paths:
++        - "%paths.base%/Features/Scenario/Customer"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\RiskFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    customer_group:
++      paths:
++        - "%paths.base%/Features/Scenario/CustomerGroup"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    module:
++      paths:
++        - "%paths.base%/Features/Scenario/Module"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ModuleFeatureContext
++    category:
++      paths:
++        - "%paths.base%/Features/Scenario/Category"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    cart:
++      paths:
++        - "%paths.base%/Features/Scenario/Cart"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\PackConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingModeConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ContextFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\SpecificPriceRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\SqlManagerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\TaxFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    language:
++      paths:
++        - "%paths.base%/Features/Scenario/Language"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    order:
++      paths:
++        - "%paths.base%/Features/Scenario/Order"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\PriceDisplayMethodConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderCartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderCustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderPaymentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderRefundFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    order_return_state:
++      paths:
++        - "%paths.base%/Features/Scenario/OrderReturnState"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderReturnStateFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    order_state:
++      paths:
++        - "%paths.base%/Features/Scenario/OrderState"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderStateFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    currency:
++      paths:
++        - "%paths.base%/Features/Scenario/Currency"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    cldr:
++      paths:
++        - "%paths.base%/Features/Scenario/CLDR"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CLDRFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    webservice:
++      paths:
++        - "%paths.base%/Features/Scenario/Webservice"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\WebserviceKeyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\WebserviceEndpointFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\WebserviceKeyFeatureContext
++    tax:
++      paths:
++        - "%paths.base%/Features/Scenario/Tax"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
++    manufacturer:
++      paths:
++        - "%paths.base%/Features/Scenario/Manufacturer"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++    cms_page:
++      paths:
++        - "%paths.base%/Features/Scenario/CmsPage"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CmsPageFeatureContext
++    cart_rule:
++      paths:
++        - "%paths.base%/Features/Scenario/CartRule"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\DeleteCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    discount:
++      paths:
++        - "%paths.base%/Features/Scenario/Discount"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\Domain\Discount\DiscountFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++    catalog_price_rule:
++      paths:
++        - "%paths.base%/Features/Scenario/CatalogPriceRule"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CatalogPriceRuleContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureValuesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    meta:
++      paths:
++        - "%paths.base%/Features/Scenario/Meta"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\MetaFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\MetaFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    feature:
++      paths:
++        - "%paths.base%/Features/Scenario/Feature"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
++    order_message:
++      paths:
++        - "%paths.base%/Features/Scenario/OrderMessage"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
++        - Tests\Integration\Behaviour\Features\Context\OrderMessageContext
++    misc:
++      paths:
++        - "%paths.base%/Features/Scenario/Misc"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\DebugModeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShowcaseCardFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ThemeMailTemplatesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    address:
++      paths:
++        - "%paths.base%/Features/Scenario/Address"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++    supplier:
++      paths:
++        - "%paths.base%/Features/Scenario/Supplier"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\SupplierFeatureContext
++    attachment:
++      paths:
++        - "%paths.base%/Features/Scenario/Attachment"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttachmentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++    # This is a special suite only for legacy product tests, it avoids using legacy context in product suite (LegacyProductFeatureContext),
++    # thus the product suite is only centered and based on recent CQRS commands
++    legacy_product:
++      paths:
++        - "%paths.base%/Features/Scenario/Product"
++      filters:
++        tags: "@legacy-product-type"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    # This is a special suite only for product stock movement, it avoids adding other contexts (Order, Cart, ...) in the product suite which
++    # could impact via their BeforeSuite/BeforeFeature/... tags and reduce the speed of regular product tests
++    stock_movement_history:
++      paths:
++        - "%paths.base%/Features/Scenario/Product/StockMovement"
++      filters:
++        tags: "@stock-movement-history"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationStockMovementsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockMovementsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++    shop:
++      paths:
++        - "%paths.base%/Features/Scenario/Shop"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    feature_flag:
++      paths:
++        - "%paths.base%/Features/Scenario/FeatureFlag"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
++    security:
++      paths:
++        - "%paths.base%/Features/Scenario/Security"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SecurityFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    zone:
++      paths:
++        - "%paths.base%/Features/Scenario/Zone"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++    attribute:
++      paths:
++        - "%paths.base%/Features/Scenario/Attribute"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++    attribute_group:
++      paths:
++        - "%paths.base%/Features/Scenario/AttributeGroup"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
++    search_engine:
++      paths:
++        - "%paths.base%/Features/Scenario/SearchEngine"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SearchEngineFeatureContext
++    profile:
++      paths:
++        - "%paths.base%/Features/Scenario/Profile"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProfileFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\PermissionFeatureContext
++    country:
++      paths:
++        - "%paths.base%/Features/Scenario/Country"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++    product:
++      paths:
++        - "%paths.base%/Features/Scenario/Product"
++      filters:
++        tags: "~@legacy-product-type&&~@stock-movement-history"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttachmentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\FeatureValueFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ManufacturerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\DeleteCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GetCombinationIdsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\SearchProductCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationImagesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationSuppliersFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DuplicateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\OptionsAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\PricesAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductImageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\ProductTypeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\RelatedProductsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\SearchProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\SeoAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\ShippingAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\SpecificPriceContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\SpecificPricePrioritiesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateAttachmentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdatePackFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdatePositionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureValuesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductSuppliersFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateShippingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateTagsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\VirtualProductFileFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\SupplierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\LocalizedArrayTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToArrayTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    order_return:
++      paths:
++        - "%paths.base%/Features/Scenario/OrderReturn"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderReturnFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\OrderReturnFeatureContext
++    customer_service:
++      paths:
++        - "%paths.base%/Features/Scenario/CustomerService"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerServiceFeatureContext
++    alias:
++      paths:
++        - "%paths.base%/Features/Scenario/Search"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\Domain\AliasFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    api-client:
++      paths:
++        - "%paths.base%/Features/Scenario/ApiClient"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
++    image-settings:
++      paths:
++        - "%paths.base%/Features/Scenario/ImageSettings"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ImageSettings\ImageTypeContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ImageSettings\ImageSettingsContext
++    carrier:
++      paths:
++        - "%paths.base%/Features/Scenario/Carrier"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxRulesGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++    employee:
++      paths:
++        - "%paths.base%/Features/Scenario/Employee"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext

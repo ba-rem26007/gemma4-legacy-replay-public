@@ -1,0 +1,86 @@
+diff --git a/src/Adapter/Module/Tab/ModuleTabManagementSubscriber.php b/src/Adapter/Module/Tab/ModuleTabManagementSubscriber.php
+index ab441f205a2aa..a20f2678a3d93 100644
+--- a/src/Adapter/Module/Tab/ModuleTabManagementSubscriber.php
++++ b/src/Adapter/Module/Tab/ModuleTabManagementSubscriber.php
+@@ -55,8 +55,6 @@ public static function getSubscribedEvents()
+         return [
+             ModuleManagementEvent::INSTALL => 'onModuleInstall',
+             ModuleManagementEvent::UNINSTALL => 'onModuleUninstall',
+-            
+-            ModuleManagementEvent::RESET => 'onModuleReset',
+         ];
+     }
+ 
+@@ -65,12 +63,6 @@ public function onModuleInstall(ModuleManagementEvent $event)
+         $this->moduleTabRegister->registerTabs($event->getModule());
+     }
+     
+-    public function onModuleReset(ModuleManagementEvent $event)
+-    {
+-        $this->onModuleUninstall($event);
+-        $this->onModuleInstall($event);
+-    }
+-    
+     public function onModuleUninstall(ModuleManagementEvent $event)
+     {
+         $this->moduleTabUnregister->unregisterTabs($event->getModule());
+diff --git a/src/Adapter/Module/Tab/ModuleTabRegister.php b/src/Adapter/Module/Tab/ModuleTabRegister.php
+index 412338e734592..8d96b23277d89 100644
+--- a/src/Adapter/Module/Tab/ModuleTabRegister.php
++++ b/src/Adapter/Module/Tab/ModuleTabRegister.php
+@@ -135,6 +135,10 @@ protected function addUndeclaredTabs($moduleName, array $tabs)
+                 continue;
+             }
+ 
++            if ($this->tabRepository->findOneIdByClassName($adminControllerName)) {
++                continue;
++            }
++
+             $tabs[] = array(
+                 'class_name' => $adminControllerName,
+                 'visible' => false,
+@@ -161,6 +165,10 @@ protected function checkIsValid($moduleName, ParameterBag $data)
+         if (!in_array($className.'Controller.php', $this->getModuleAdminControllersFilename($moduleName))) {
+             throw new Exception(sprintf('Class "%sController" not found in controllers/admin', $className));
+         }
++        // Deprecation check
++        if ($data->has('ParentClassName') && !$data->has('parent_class_name')) {
++            $this->logger->warning('Tab attribute "ParentClassName" is deprecated. You must use "parent_class_name" instead.');
++        }
+         return true;
+     }
+ 
+@@ -246,7 +254,7 @@ protected function registerTab(Module $module, ParameterBag $data)
+         $tab->icon = $data->get('icon');
+ 
+         // Handle parent menu
+-        $parentClassName = $data->get('ParentClassName');
++        $parentClassName = $data->get('parent_class_name', $data->get('ParentClassName'));
+         if (!empty($parentClassName)) {
+             $tab->id_parent = (int)$this->tabRepository->findOneIdByClassName($parentClassName);
+         } elseif (true === $tab->active) {
+diff --git a/src/Core/Addon/Module/ModuleManager.php b/src/Core/Addon/Module/ModuleManager.php
+index cd2968ed9a5e5..96d447b10569f 100644
+--- a/src/Core/Addon/Module/ModuleManager.php
++++ b/src/Core/Addon/Module/ModuleManager.php
+@@ -493,9 +493,11 @@ public function reset($name, $keep_data = false)
+         $module = $this->moduleRepository->getModule($name);
+         try {
+             if ((bool)$keep_data && method_exists($this, 'reset')) {
++                $this->dispatch(ModuleManagementEvent::UNINSTALL, $module);
+                 $status = $module->onReset();
++                $this->dispatch(ModuleManagementEvent::INSTALL, $module);
+             } else {
+-                $status = ($module->onUninstall() && $module->onInstall());
++                $status = ($this->uninstall($name) && $this->install($name));
+             }
+         } catch (Exception $e) {
+             throw new Exception(
+@@ -508,7 +510,6 @@ public function reset($name, $keep_data = false)
+                 0, $e);
+         }
+ 
+-        $this->dispatch(ModuleManagementEvent::RESET, $module);
+         return $status;
+     }
+ 

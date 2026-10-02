@@ -1,0 +1,89 @@
+diff --git a/classes/Category.php b/classes/Category.php
+index c25ba17c8a560..d6d1bbf7e16ea 100644
+--- a/classes/Category.php
++++ b/classes/Category.php
+@@ -1967,7 +1967,8 @@ public function inShop(?Shop $shop = null)
+             $shop = Context::getContext()->shop;
+         }
+ 
+-        if (!$interval = Category::getInterval($shop->getCategory())) {
++        // Verify we got the interval of shop category
++        if (empty($interval = Category::getInterval($shop->getCategory()))) {
+             return false;
+         }
+ 
+@@ -1990,15 +1991,22 @@ public static function inShopStatic($idCategory, ?Shop $shop = null)
+             $shop = Context::getContext()->shop;
+         }
+ 
+-        if (!$interval = Category::getInterval($shop->getCategory())) {
++        // Verify we got the interval of shop category
++        if (empty($interval = Category::getInterval($shop->getCategory()))) {
+             return false;
+         }
++
+         $sql = new DbQuery();
+         $sql->select('c.`nleft`, c.`nright`');
+         $sql->from('category', 'c');
+         $sql->where('c.`id_category` = ' . (int) $idCategory);
+         $row = Db::getInstance(_PS_USE_SQL_SLAVE_)->getRow($sql);
+ 
++        // If it doesn't exist, we can end up right here
++        if (empty($row)) {
++            return false;
++        }
++
+         return $row['nleft'] >= $interval['nleft'] && $row['nright'] <= $interval['nright'];
+     }
+ 
+diff --git a/classes/Link.php b/classes/Link.php
+index b5eb13d614d75..d28482fed3259 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -45,6 +45,7 @@ class LinkCore
+     protected $ssl_enable;
+     protected $urlShopId = null;
+ 
++    // Categories that will not be used for URL rewriting
+     protected static $category_disable_rewrite = null;
+ 
+     /**
+@@ -67,6 +68,7 @@ public function __construct($protocolLink = null, $protocolContent = null)
+             define('_PS_BASE_URL_SSL_', Tools::getShopDomainSsl(true));
+         }
+ 
++        // Define categories that will not be used for URL rewriting
+         if (Link::$category_disable_rewrite === null) {
+             Link::$category_disable_rewrite = [
+                 Configuration::get('PS_HOME_CATEGORY'),
+@@ -229,9 +231,12 @@ public function getProductLink(
+             $product = $this->getProductObject($product, $idLang, $idShop);
+             $params['category'] = (!$category) ? $product->category : $category;
+             $cats = [];
++            /*
++             * We will use all categories in the path of the default category,
++             * with two exceptions - the root category and the home category.
++             */
+             foreach ($product->getParentCategories($idLang) as $cat) {
+                 if (!in_array($cat['id_category'], Link::$category_disable_rewrite)) {
+-                    // remove root and home category from the URL
+                     $cats[] = $cat['link_rewrite'];
+                 }
+             }
+diff --git a/classes/Product.php b/classes/Product.php
+index 2663bd03c7a6f..08cd943c91e88 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -7458,7 +7458,11 @@ public function getParentCategories($id_lang = null)
+             $id_lang = Context::getContext()->language->id;
+         }
+ 
+-        $interval = Category::getInterval($this->id_category_default);
++        // Verify we got the interval, the category may not exist at all
++        if (empty($interval = Category::getInterval($this->id_category_default))) {
++            return [];
++        }
++
+         $sql = new DbQuery();
+         $sql->from('category', 'c');
+         $sql->leftJoin('category_lang', 'cl', 'c.id_category = cl.id_category AND id_lang = ' . (int) $id_lang . Shop::addSqlRestrictionOnLang('cl'));

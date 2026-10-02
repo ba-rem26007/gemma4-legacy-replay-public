@@ -1,0 +1,108 @@
+diff --git a/.github/workflows/integration.yml b/.github/workflows/integration.yml
+index 1c487d5a7ff57..a9a47142d4758 100644
+--- a/.github/workflows/integration.yml
++++ b/.github/workflows/integration.yml
+@@ -56,8 +56,8 @@ jobs:
+             -   name: Build assets
+                 run: make assets
+ 
+-            -   name: Install PrestaShop
+-                run: php install-dev/index_cli.php --language=en --country=fr --domain=localhost --db_server=127.0.0.1 --db_password=password --db_name=prestashop --db_create=1 --name=prestashop.unit.test --email=demo@prestashop.com --password=prestashop_demo
++            -   name: Prepare PrestaShop parameters
++                run: cp .github/workflows/phpunit/parameters.php app/config/parameters.php
+ 
+             -   name: Run integration-tests
+                 run: composer run-script integration-tests --timeout=0
+diff --git a/.github/workflows/phpunit/parameters.php b/.github/workflows/phpunit/parameters.php
+new file mode 100644
+index 0000000000000..c883e1e0cd7a5
+--- /dev/null
++++ b/.github/workflows/phpunit/parameters.php
+@@ -0,0 +1,25 @@
++<?php return array (
++    'parameters' =>
++        array (
++            'database_host' => '127.0.0.1',
++            'database_port' => '',
++            'database_name' => 'prestashop',
++            'database_user' => 'root',
++            'database_password' => 'password',
++            'database_prefix' => 'ps_',
++            'database_engine' => 'InnoDB',
++            'mailer_transport' => 'smtp',
++            'mailer_host' => '127.0.0.1',
++            'mailer_user' => NULL,
++            'mailer_password' => NULL,
++            'secret' => 'Mf6zkVBCg695Tw7hYOTHBEWQEpdNLd1jonigbi3EQh0aI1857czKDwN3MpecM4Pp',
++            'ps_caching' => 'CacheMemcache',
++            'ps_cache_enable' => false,
++            'ps_creation_date' => '2021-07-12',
++            'locale' => 'en-US',
++            'use_debug_toolbar' => true,
++            'cookie_key' => 'cw399s5jwV58Wbz2VvIx5DjKBiu54pAP5YvAOasWAOwDo1REWXZLW6QncnjnNOfk',
++            'cookie_iv' => '8hw6IbWVusjdPSgUWOgoGMgaSGCFqm5E',
++            'new_cookie_key' => 'def00000a92a6f83ac259b6d7e5353a35a2af33614b268a8b781e4a4d8fcf2b658571b1a9ce281eb9916afdcf1d39359e439741a3f749f90c3db3f7d1c546328e14c508c',
++        ),
++);
+diff --git a/src/PrestaShopBundle/Install/DatabaseDump.php b/src/PrestaShopBundle/Install/DatabaseDump.php
+index 751c5451062bf..a0d6c710d8718 100644
+--- a/src/PrestaShopBundle/Install/DatabaseDump.php
++++ b/src/PrestaShopBundle/Install/DatabaseDump.php
+@@ -27,6 +27,7 @@
+ 
+ namespace PrestaShopBundle\Install;
+ 
++use AppKernel;
+ use Exception;
+ 
+ class DatabaseDump
+@@ -57,7 +58,7 @@ private function __construct($dumpFile = null)
+         }
+ 
+         if ($dumpFile === null) {
+-            $this->dumpFile = sys_get_temp_dir() . '/' . 'ps_dump.sql';
++            $this->dumpFile = sprintf('%s/ps_dump_%s.sql', sys_get_temp_dir(), AppKernel::VERSION);
+         } else {
+             $this->dumpFile = $dumpFile;
+         }
+diff --git a/tests-legacy/PrestaShopBundle/Utils/DatabaseCreator.php b/tests-legacy/PrestaShopBundle/Utils/DatabaseCreator.php
+index 2dcaa572d2c4f..018088bb16ee3 100644
+--- a/tests-legacy/PrestaShopBundle/Utils/DatabaseCreator.php
++++ b/tests-legacy/PrestaShopBundle/Utils/DatabaseCreator.php
+@@ -26,8 +26,10 @@
+ 
+ namespace LegacyTests\PrestaShopBundle\Utils;
+ 
++use AppKernel;
+ use Context;
+ use Doctrine\DBAL\DBALException;
++use Language;
+ use PrestaShopBundle\Install\DatabaseDump;
+ use PrestaShopBundle\Install\Install;
+ use Tests\Resources\ResourceResetter;
+@@ -66,7 +68,16 @@ public static function createTestDB()
+             'admin_email' => 'test@prestashop.com',
+             'configuration_agrement' => true,
+         ));
++
++        // Default language is forced as en, we need french translation package as well, we only need the catalog to
++        // be available for the Translator component but we do not want the Language in the DB
++        if (!Language::translationPackIsInCache('fr-FR')) {
++            Language::downloadXLFLanguagePack('fr-FR');
++        }
++        Language::installSfLanguagePack('fr-FR');
++
+         $install->installFixtures();
++
+         Tab::resetStaticCache();
+         $install->installTheme();
+         $install->installModules();
+@@ -85,7 +96,7 @@ public static function createTestDB()
+      */
+     public static function restoreTestDB()
+     {
+-        if (!file_exists(sys_get_temp_dir() . '/' . 'ps_dump.sql')) {
++        if (!file_exists(sprintf('%s/ps_dump_%s.sql', sys_get_temp_dir(), AppKernel::VERSION))) {
+             throw new DBALException('You need to run \'composer create-test-db\' to create the initial test database');
+         }
+ 

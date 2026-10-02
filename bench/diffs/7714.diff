@@ -1,0 +1,137 @@
+diff --git a/src/Adapter/Addons/AddonsDataProvider.php b/src/Adapter/Addons/AddonsDataProvider.php
+index c12e20e7c0f50..92a1217739dec 100644
+--- a/src/Adapter/Addons/AddonsDataProvider.php
++++ b/src/Adapter/Addons/AddonsDataProvider.php
+@@ -259,25 +259,6 @@ public function request($action, $params = array())
+         throw new Exception('Cannot execute request '.$action.' to Addons');
+     }
+ 
+-    /**
+-     * @param $moduleId
+-     * @return Module
+-     */
+-    public function getModuleById($moduleId)
+-    {
+-        $moduleAttributes = $this->request('module', array('id_module' => $moduleId));
+-
+-        $attributes = $this->moduleRepository->getModuleAttributes($moduleAttributes['name']);
+-
+-        foreach ($attributes->all() as $name => $value) {
+-            if (!array_key_exists($name, $moduleAttributes)) {
+-                $moduleAttributes[$name] = $value;
+-            }
+-        }
+-
+-        return new Module($moduleAttributes);
+-    }
+-
+     protected function getAddonsCredentials()
+     {
+         $request = Request::createFromGlobals();
+diff --git a/src/Core/Addon/Module/ModuleRepository.php b/src/Core/Addon/Module/ModuleRepository.php
+index 09596b811b549..a3764c4d24133 100644
+--- a/src/Core/Addon/Module/ModuleRepository.php
++++ b/src/Core/Addon/Module/ModuleRepository.php
+@@ -460,21 +460,22 @@ public function getModuleAttributes($name)
+     }
+ 
+     /**
++     * Send request to get module details on the marketplace, then merge the data received in Module instance
+      * @param $moduleId
+      * @return Module
+      */
+     public function getModuleById($moduleId)
+     {
+         $moduleAttributes = $this->adminModuleProvider->getModuleAttributesById($moduleId);
+-        $attributes = $this->getModuleAttributes($moduleAttributes['name']);
++        $module = $this->getModule($moduleAttributes['name']);
+ 
+-        foreach ($attributes->all() as $name => $value) {
+-            if (!array_key_exists($name, $moduleAttributes)) {
+-                $moduleAttributes[$name] = $value;
++        foreach ($moduleAttributes as $name => $value) {
++            if (!$module->attributes->has($name)) {
++                $module->attributes->set($name, $value);
+             }
+         }
+ 
+-        return new Module($moduleAttributes);
++        return $module;
+     }
+ 
+     /**
+@@ -524,45 +525,9 @@ private function getModulesOnDisk($skip_main_class_attributes = false)
+ 
+         return $modules;
+     }
+-    /*
+-     * PROTECTED FUNCTIONS
+-     */
+-
+-    /**
+-     * In order to avoid class parsing, we generate a cache file which will keep mandatory data of modules.
+-     *
+-     * @param string $name The technical module name to find
+-     *
+-     * @return array Module data stored in file
+-     */
+-    private function generateCacheFile($data)
+-    {
+-        if (!$data) {
+-            return;
+-        }
+-        $encoded_data = json_encode($data);
+-        file_put_contents($this->cacheFilePath, $encoded_data);
+-
+-        return $data;
+-    }
+-
+-    /**
+-     * We load the file which contains cached data.
+-     *
+-     * @return array Module data loaded in file
+-     */
+-    private function readCacheFile()
+-    {
+-        // JSON file not found ? Generate it
+-        if (!file_exists($this->cacheFilePath)) {
+-            return array();
+-        }
+-        $data = json_decode(file_get_contents($this->cacheFilePath), true);
+-
+-        return ($data == null) ? array() : $data;
+-    }
+ 
+     /**
++     * Function loading all installed modules on the shop. Can be used as example for AddonListFilter use.
+      * @return array
+      */
+     public function getInstalledModules()
+diff --git a/src/PrestaShopBundle/Controller/Admin/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+index 7ef98ce50a85b..2f8a06b0a5205 100755
+--- a/src/PrestaShopBundle/Controller/Admin/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/ModuleController.php
+@@ -758,8 +758,8 @@ private function getAddonsConnectToolbar()
+ 
+     public function getModuleCartAction($moduleId)
+     {
+-        $adminModuleRepository = $this->get('prestashop.core.admin.module.repository');
+-        $module = $adminModuleRepository->getModuleById($moduleId);
++        $moduleRepository = $this->get('prestashop.core.admin.module.repository');
++        $module = $moduleRepository->getModuleById($moduleId);
+ 
+         $addOnsAdminDataProvider = $this->get('prestashop.core.admin.data_provider.module_interface');
+         $addOnsAdminDataProvider->generateAddonsUrls(array($module));
+diff --git a/src/PrestaShopBundle/Twig/LayoutExtension.php b/src/PrestaShopBundle/Twig/LayoutExtension.php
+index 26392a43f1d43..1e8895cdee1e9 100644
+--- a/src/PrestaShopBundle/Twig/LayoutExtension.php
++++ b/src/PrestaShopBundle/Twig/LayoutExtension.php
+@@ -222,7 +222,7 @@ public function getAdminLink($controllerName, $withToken = true, $extraParams =
+      */
+     public function getYoutubeLink($watchUrl)
+     {
+-        $embedUrl = str_replace('watch?v=', 'embed/', $watchUrl);
++        $embedUrl = str_replace(array('watch?v=', 'youtu.be/'), array('embed/', 'youtube.com/embed/'), $watchUrl);
+ 
+         return '<iframe width="560" height="315" src="'.$embedUrl.
+             '" frameborder="0" allowfullscreen class="youtube-iframe m-x-auto"></iframe>';

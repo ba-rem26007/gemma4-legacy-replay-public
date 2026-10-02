@@ -1,0 +1,417 @@
+diff --git a/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+new file mode 100644
+index 0000000000000..be88c97d8ccc0
+--- /dev/null
++++ b/src/Adapter/Shipment/CommandHandler/SplitShipmentHandler.php
+@@ -0,0 +1,73 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SplitShipment;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\SplitShipmentHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use PrestaShopBundle\Entity\ShipmentProduct;
++use Throwable;
++
++#[AsCommandHandler()]
++class SplitShipmentHandler implements SplitShipmentHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $repository,
++    ) {
++    }
++
++    /**
++     * @param SplitShipment $command
++     */
++    public function handle(SplitShipment $command): void
++    {
++        $carrierId = $command->getCarrierId()->getValue();
++        $shipmentToRemoveProductId = $command->getShipmentId()->getValue();
++        $products = $command->getOrderDetailQuantity()->getValue();
++        $findShipment = $this->repository->findOneBy(['id' => $shipmentToRemoveProductId]);
++
++        if (!$findShipment) {
++            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentToRemoveProductId));
++        }
++
++        $shipmentProducts = array_map(function ($product) {
++            $shipmentProduct = new ShipmentProduct();
++            $shipmentProduct->setOrderDetailId($product['id_order_detail']);
++            $shipmentProduct->setQuantity($product['quantity']);
++
++            return $shipmentProduct;
++        }, $products);
++
++        try {
++            $this->repository->splitShipment($carrierId, $findShipment, $shipmentProducts);
++        } catch (Throwable $e) {
++            throw new ShipmentNotFoundException();
++        }
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Command/SplitShipment.php b/src/Core/Domain/Shipment/Command/SplitShipment.php
+new file mode 100644
+index 0000000000000..09956f4bc9cda
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Command/SplitShipment.php
+@@ -0,0 +1,73 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\OrderDetailQuantity;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\ShipmentId;
++
++class SplitShipment
++{
++    /**
++     * @var ShipmentId
++     */
++    private $shipmentId;
++
++    /**
++     * @var OrderDetailQuantity
++     */
++    private $orderDetailQuantity;
++
++    /**
++     * @var CarrierId
++     */
++    private $carrierId;
++
++    public function __construct(
++        int $shipmentId,
++        array $orderDetailQuantity,
++        int $carrierId
++    ) {
++        $this->shipmentId = new ShipmentId($shipmentId);
++        $this->orderDetailQuantity = new OrderDetailQuantity(
++            $orderDetailQuantity,
++        );
++        $this->carrierId = new CarrierId($carrierId);
++    }
++
++    public function getShipmentId(): ShipmentId
++    {
++        return $this->shipmentId;
++    }
++
++    public function getOrderDetailQuantity(): OrderDetailQuantity
++    {
++        return $this->orderDetailQuantity;
++    }
++
++    public function getCarrierId(): CarrierId
++    {
++        return $this->carrierId;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/CommandHandler/SplitShipmentHandlerInterface.php b/src/Core/Domain/Shipment/CommandHandler/SplitShipmentHandlerInterface.php
+new file mode 100644
+index 0000000000000..954a39c262b81
+--- /dev/null
++++ b/src/Core/Domain/Shipment/CommandHandler/SplitShipmentHandlerInterface.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SplitShipment;
++
++interface SplitShipmentHandlerInterface
++{
++    /**
++     * @param SplitShipment $command
++     */
++    public function handle(SplitShipment $command): void;
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index 882535a855795..f3feba058770e 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -113,4 +113,57 @@ private function getShipmentProductByOrderDetailId(Shipment $shipment): array
+             return $carry;
+         }, []);
+     }
++
++    /**
++     * @param int $carrierId
++     * @param Shipment $shipmentToRemoveProduct
++     * @param ShipmentProduct[] $shipmentProductsToMove
++     */
++    public function splitShipment(int $carrierId, Shipment $shipmentToRemoveProduct, array $shipmentProductsToMove): void
++    {
++        $shipmentProductsByOrderDetailId = array_reduce($shipmentToRemoveProduct->getProducts()->toArray(), function ($carry, ShipmentProduct $product) {
++            $carry[$product->getOrderDetailId()] = $product;
++
++            return $carry;
++        }, []);
++
++        $shipmentProducts = [];
++
++        $newShipment = new Shipment();
++        $newShipment->setCarrierId($carrierId);
++        $newShipment->setOrderId($shipmentToRemoveProduct->getOrderId());
++        $newShipment->setTrackingNumber(null);
++        $newShipment->setAddressId($shipmentToRemoveProduct->getAddressId());
++        $newShipment->setShippingCostTaxExcluded($shipmentToRemoveProduct->getShippingCostTaxExcluded());
++        $newShipment->setShippingCostTaxIncluded($shipmentToRemoveProduct->getShippingCostTaxIncluded());
++
++        foreach ($shipmentProductsToMove as $shipmentProductToMove) {
++            $orderDetailId = $shipmentProductToMove->getOrderDetailId();
++            $quantity = $shipmentProductToMove->getQuantity();
++            $existingProduct = $shipmentProductsByOrderDetailId[$orderDetailId] ?? null;
++            if ($existingProduct) {
++                $remainingQty = $existingProduct->getQuantity() - $quantity;
++                if ($remainingQty <= 0) {
++                    $shipmentToRemoveProduct->removeProduct($existingProduct);
++                } else {
++                    $existingProduct->setQuantity($remainingQty);
++                }
++            } else {
++                throw new ShipmentException(sprintf('Cannot find product with order detail id %s', $orderDetailId));
++            }
++            $shipmentProducts[] = (new ShipmentProduct())
++                ->setOrderDetailId($orderDetailId)
++                ->setQuantity($quantity)
++                ->setShipment($newShipment);
++        }
++
++        foreach ($shipmentProducts as $shipmentProduct) {
++            $newShipment->addShipmentProduct($shipmentProduct);
++        }
++        $this->save($newShipment);
++
++        if ($shipmentToRemoveProduct->getProducts()->isEmpty()) {
++            $this->delete($shipmentToRemoveProduct);
++        }
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+index a43b85c933287..ea8c941668a3d 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+@@ -15,3 +15,5 @@ services:
+   PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\ListAvailableShipmentsHandler:
+ 
+   PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\GetShipmentForViewingHandler:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\SplitShipmentHandler:
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index 4bbbcddfddc38..3e95fee2dffad 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -35,6 +35,7 @@
+ use OrderDetail;
+ use PHPUnit\Framework\Assert;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SplitShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SwitchShipmentCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentForViewing;
+@@ -93,9 +94,9 @@ public function verifyOrderShipment(string $orderReference, TableNode $table)
+                 throw new RuntimeException('Shipment [' . $shipment->getId() . '] does not belong to order [' . $orderId . ']');
+             }
+ 
+-            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number'], 'Wrong tracking number for ' . $carrierReference);
++            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number']);
+             Assert::assertEquals($shipment->getCarrierId(), $carrierId, 'Wrong carrier ID for ' . $carrierReference);
+-            Assert::assertEquals($shipment->getAddressId(), $addressId, 'Wrong address ID for ' . $carrierReference);
++            Assert::assertEquals($shipment->getAddressId(), $addressId);
+             Assert::assertEquals($shipment->getShippingCostTaxExcluded(), $shipmentData['shipping_cost_tax_excl'], 'Wrong shipping cast tax excluded for ' . $carrierReference);
+             Assert::assertEquals($shipment->getShippingCostTaxIncluded(), $shipmentData['shipping_cost_tax_incl'], 'Wrong shipping cast tax included for ' . $carrierReference);
+             SharedStorage::getStorage()->set($shipmentData['shipment'], $shipment->getId());
+@@ -223,4 +224,56 @@ public function assertShipmentForViewing(string $shipmentReference, TableNode $t
+         Assert::assertEquals($expected['state'], $address->getStateName(), 'State mismatch');
+         Assert::assertEquals($expected['country'], $address->getCountry(), 'Country mismatch');
+     }
++
++    /**
++     * @Given I split the shipment :shipmentReference to create a new shipment with :carrierReference with following products:
++     *
++     * @param string $shipmentReference
++     * @param TableNode $table
++     */
++    public function splitShipment(string $shipmentReference, string $carrierReference, TableNode $table): void
++    {
++        $data = $table->getColumnsHash();
++        $orderDetailQuantities = [];
++        $shipmentId = SharedStorage::getStorage()->get($shipmentReference);
++        $carrierId = $this->referenceToId($carrierReference);
++        $getShipmentProducts = $this->getQueryBus()->handle(
++            new GetShipmentProducts($shipmentId)
++        );
++
++        foreach ($getShipmentProducts as $sourceShipmentProduct) {
++            $orderDetail = new OrderDetail($sourceShipmentProduct->getOrderDetailId());
++            foreach ($data as $value) {
++                if ($orderDetail->product_name === $value['product_name']) {
++                    $orderDetailQuantities[] = [
++                        'id_order_detail' => $orderDetail->id,
++                        'quantity' => $value['quantity'],
++                    ];
++                }
++            }
++        }
++
++        $this->getCommandBus()->handle(
++            new SplitShipment($shipmentId, $orderDetailQuantities, $carrierId)
++        );
++    }
++
++    /**
++     * @Then the order :orderReference should have :shipmentNumberReference shipments:
++     *
++     * @param string $orderReference
++     * @param string $nbrShipment
++     */
++    public function assertShipmentForOrder(string $orderReference, string $nbrShipment): void
++    {
++        $orderId = $this->referenceToId($orderReference);
++        $shipments = $this->getQueryBus()->handle(
++            new GetOrderShipments($orderId)
++        );
++
++        Assert::assertEquals(count($shipments), (int) $nbrShipment);
++        $getLastShipment = end($shipments);
++
++        SharedStorage::getStorage()->set('shipment' . $getLastShipment->getId(), $getLastShipment->getId());
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+index bc4e0dfe591ee..b6307495835c5 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+@@ -95,6 +95,32 @@ Feature: Product associated with different carriers
+       | product_name | quantity |
+       | saucisson    | 2        |
+ 
++  Scenario: Retrieve available shipments for merge action
++    Then order "bo_order1" should get available shipments for product "bottle of beer":
++      | shipment_name                  | can_handle_merge |
++      | Shipment 1 Beer carrier        | 1             |
++      | Shipment 2 Saucisson carrier   | 0             |
++    Then order "bo_order1" should get available shipments for product "saucisson":
++      | shipment_name                  | can_handle_merge |
++      | Shipment 1 Beer carrier        | 0             |
++      | Shipment 2 Saucisson carrier   | 1             |
++
++  Scenario: Splitting a shipment
++    Given I create carrier "pickup_carrier" with specified properties:
++      | name | Pickup |
++    And I assign product "saucisson" with following carriers:
++      | pickup_carrier |
++    And I split the shipment "shipment2" to create a new shipment with "pickup_carrier" with following products:
++      | product_name | quantity |
++      | saucisson    | 1        |
++    And the shipment "shipment2" should have the following products:
++      | product_name | quantity |
++      | saucisson    | 1        |
++    And the order "bo_order1" should have "3" shipments:
++    Then the shipment "shipment3" should have the following products:
++      | product_name | quantity |
++      | saucisson    | 1        |
++
+   Scenario: Merge product into a shipment with specified quantity
+     Given I merge product from "shipment2" into "shipment1" with following information:
+       | product_name | quantity |
+@@ -106,23 +132,13 @@ Feature: Product associated with different carriers
+     And the shipment "shipment2" should have the following products:
+       | product_name   | quantity |
+       | saucisson      | 1        |
++    And the shipment "shipment2" should be deleted
+ 
+   Scenario: Merge product into a shipment with full quantity
+-    Given I merge product from "shipment2" into "shipment1" with following information:
++    Given I merge product from "shipment3" into "shipment1" with following information:
+       | product_name | quantity |
+       | saucisson    | 1        |
+     Then the shipment "shipment1" should have the following products:
+       | product_name   | quantity |
+       | bottle of beer | 1        |
+       | saucisson      | 2        |
+-    And the shipment "shipment2" should be deleted
+-
+-  Scenario: Retrieve available shipments for merge action
+-    Then order "bo_order1" should get available shipments for product "bottle of beer":
+-      | shipment_name                  | can_handle_merge |
+-      | Shipment 1 Beer carrier        | 1             |
+-      | Shipment 2 Saucisson carrier   | 0             |
+-    Then order "bo_order1" should get available shipments for product "saucisson":
+-      | shipment_name                  | can_handle_merge |
+-      | Shipment 1 Beer carrier        | 0             |
+-      | Shipment 2 Saucisson carrier   | 1             |

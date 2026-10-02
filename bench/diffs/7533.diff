@@ -1,0 +1,95 @@
+diff --git a/classes/Dispatcher.php b/classes/Dispatcher.php
+index 842fe0f367b44..9c6f378de7003 100644
+--- a/classes/Dispatcher.php
++++ b/classes/Dispatcher.php
+@@ -112,7 +112,7 @@ class DispatcherCore
+             'keywords' => array(
+                 'id' =>            array('regexp' => '[0-9]+', 'param' => 'id_product'),
+                 'id_product_attribute' => array('regexp' => '[0-9]+', 'param' => 'id_product_attribute'),
+-                'rewrite' =>        array('regexp' => '[_a-zA-Z0-9\pL\pS-]*'),
++                'rewrite' =>        array('regexp' => '[_a-zA-Z0-9\pL\pS-]*', 'param' => 'rewrite'),
+                 'ean13' =>        array('regexp' => '[0-9\pL]*'),
+                 'category' =>        array('regexp' => '[_a-zA-Z0-9-\pL]*'),
+                 'categories' =>        array('regexp' => '[/_a-zA-Z0-9-\pL]*'),
+diff --git a/classes/Product.php b/classes/Product.php
+index 71fe0d60c3ce3..13adc8da27dfd 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -5753,6 +5753,18 @@ public static function getAttributesInformationsByProduct($id_product)
+         return $result;
+     }
+ 
++    /**
++     * @return bool
++     */
++    public function hasCombinations()
++    {
++        if (is_null($this->id) || 0 >= $this->id) {
++            return false;
++        }
++        $attributes = self::getAttributesInformationsByProduct($this->id);
++        return !empty($attributes);
++    }
++
+     public static function getIdProductAttributesByIdAttributes($id_product, $id_attributes, $find_best = false)
+     {
+         if (!is_array($id_attributes)) {
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 0fbca9a322aff..bc21a43f19a4e 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -119,6 +119,9 @@ class FrontControllerCore extends Controller
+     /** @var bool If true, forces display to maintenance page. */
+     protected $maintenance = false;
+ 
++    /** @var string[] Adds excluded $_GET keys for redirection */
++    protected $redirectionExtraExcludedKeys = array();
++
+     /**
+      * True if controller has already been initialized.
+      * Prevents initializing controller more than once.
+@@ -771,6 +774,7 @@ protected function canonicalRedirection($canonical_url = '')
+                 }
+             }
+             $excluded_key = array('isolang', 'id_lang', 'controller', 'fc', 'id_product', 'id_category', 'id_manufacturer', 'id_supplier', 'id_cms');
++            $excluded_key = array_merge($excluded_key, $this->redirectionExtraExcludedKeys);
+             foreach ($_GET as $key => $value) {
+                 if (!in_array($key, $excluded_key) && Validate::isUrl($key) && Validate::isUrl($value)) {
+                     $params[Tools::safeOutput($key)] = Tools::safeOutput($value);
+diff --git a/controllers/front/ProductController.php b/controllers/front/ProductController.php
+index b923103b81013..59bbf9f9cc684 100644
+--- a/controllers/front/ProductController.php
++++ b/controllers/front/ProductController.php
+@@ -40,6 +40,8 @@ class ProductControllerCore extends ProductPresentingFrontControllerCore
+     /** @var Category */
+     protected $category;
+ 
++    protected $redirectionExtraExcludedKeys = ['id_product_attribute', 'rewrite'];
++
+     /**
+      * @var array
+      */
+@@ -50,8 +52,13 @@ class ProductControllerCore extends ProductPresentingFrontControllerCore
+ 
+     public function canonicalRedirection($canonical_url = '')
+     {
+-        $id_product_attribute = Tools::getValue('id_product_attribute');
+         if (Validate::isLoadedObject($this->product)) {
++            if (!$this->product->hasCombinations()) {
++                unset($_GET['id_product_attribute']);
++            } else if (!Tools::getValue('id_product_attribute') || Tools::getValue('rewrite') !== $this->product->link_rewrite) {
++                $_GET['id_product_attribute'] = Product::getDefaultAttribute($this->product->id);
++            }
++            $id_product_attribute = Tools::getValue('id_product_attribute');
+             parent::canonicalRedirection($this->context->link->getProductLink(
+                 $this->product,
+                 null,
+@@ -594,7 +601,7 @@ protected function assignAttributesGroups($product_for_template = null)
+                     }
+                 }
+             }
+-            
++
+             // wash attributes list depending on available attributes depending on selected preceding attributes
+             $current_selected_attributes = array();
+             $count = 0;

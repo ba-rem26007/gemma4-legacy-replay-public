@@ -1,0 +1,104 @@
+diff --git a/classes/Product.php b/classes/Product.php
+index f3f41df3b37ce..6f6df4ea3a849 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -509,7 +509,7 @@ class ProductCore extends ObjectModel
+             'available_for_order' => ['type' => self::TYPE_BOOL, 'shop' => true, 'validate' => 'isBool'],
+             'available_date' => ['type' => self::TYPE_DATE, 'shop' => true, 'validate' => 'isDateFormat'],
+             'show_condition' => ['type' => self::TYPE_BOOL, 'shop' => true, 'validate' => 'isBool'],
+-            'condition' => ['type' => self::TYPE_STRING, 'shop' => true, 'validate' => 'isGenericName', 'values' => ['new', 'used', 'refurbished'], 'default' => 'new'],
++            'condition' => ['type' => self::TYPE_STRING, 'shop' => true, 'validate' => 'isGenericName', 'values' => ['new', 'used', 'refurbished', 'open_box', 'damaged', 'new_with_defects'], 'default' => 'new'],
+             'show_price' => ['type' => self::TYPE_BOOL, 'shop' => true, 'validate' => 'isBool'],
+             'indexed' => ['type' => self::TYPE_BOOL, 'shop' => true, 'validate' => 'isBool'],
+             'visibility' => ['type' => self::TYPE_STRING, 'shop' => true, 'validate' => 'isProductVisibility', 'values' => ['both', 'catalog', 'search', 'none'], 'default' => 'both'],
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index d7b9484a54331..c81992f87716e 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -1661,7 +1661,7 @@ CREATE TABLE `PREFIX_product` (
+   `available_for_order` tinyint(1) NOT NULL DEFAULT '1',
+   `available_date` date DEFAULT NULL,
+   `show_condition` tinyint(1) NOT NULL DEFAULT '0',
+-  `condition` ENUM('new', 'used', 'refurbished') NOT NULL DEFAULT 'new',
++  `condition` ENUM('new', 'used', 'refurbished', 'open_box', 'damaged', 'new_with_defects') NOT NULL DEFAULT 'new',
+   `show_price` tinyint(1) NOT NULL DEFAULT '1',
+   `indexed` tinyint(1) NOT NULL DEFAULT '0',
+   `visibility` ENUM(
+@@ -1721,7 +1721,7 @@ CREATE TABLE IF NOT EXISTS `PREFIX_product_shop` (
+   `available_for_order` tinyint(1) NOT NULL DEFAULT '1',
+   `available_date` date DEFAULT NULL,
+   `show_condition` tinyint(1) NOT NULL DEFAULT '1',
+-  `condition` enum('new', 'used', 'refurbished') NOT NULL DEFAULT 'new',
++  `condition` enum('new', 'used', 'refurbished', 'open_box', 'damaged', 'new_with_defects') NOT NULL DEFAULT 'new',
+   `show_price` tinyint(1) NOT NULL DEFAULT '1',
+   `indexed` tinyint(1) NOT NULL DEFAULT '0',
+   `visibility` enum(
+diff --git a/src/Adapter/Presenter/Product/ProductLazyArray.php b/src/Adapter/Presenter/Product/ProductLazyArray.php
+index aebc96f4722e5..de9fc51138549 100644
+--- a/src/Adapter/Presenter/Product/ProductLazyArray.php
++++ b/src/Adapter/Presenter/Product/ProductLazyArray.php
+@@ -310,6 +310,24 @@ public function getCondition()
+                     ),
+                     'schema_url' => 'https://schema.org/RefurbishedCondition',
+                 ];
++            case 'damaged':
++                return [
++                    'type' => 'damaged',
++                    'label' => $this->translator->trans('Damaged', [], 'Shop.Theme.Catalog'),
++                    'schema_url' => 'https://schema.org/DamagedCondition',
++                ];
++            case 'open_box':
++                return [
++                    'type' => 'open_box',
++                    'label' => $this->translator->trans('New, open box', [], 'Shop.Theme.Catalog'),
++                    'schema_url' => 'https://schema.org/NewCondition',
++                ];
++            case 'new_with_defects':
++                return [
++                    'type' => 'new_with_defects',
++                    'label' => $this->translator->trans('New, minor defects', [], 'Shop.Theme.Catalog'),
++                    'schema_url' => 'https://schema.org/NewCondition',
++                ];
+             default:
+                 return false;
+         }
+diff --git a/src/Core/Domain/Product/ValueObject/ProductCondition.php b/src/Core/Domain/Product/ValueObject/ProductCondition.php
+index 7da344bde232a..10bc9a5c22553 100644
+--- a/src/Core/Domain/Product/ValueObject/ProductCondition.php
++++ b/src/Core/Domain/Product/ValueObject/ProductCondition.php
+@@ -38,6 +38,9 @@ class ProductCondition
+     public const NEW = 'new';
+     public const USED = 'used';
+     public const REFURBISHED = 'refurbished';
++    public const OPEN_BOX = 'open_box';
++    public const DAMAGED = 'damaged';
++    public const NEW_WITH_DEFECTS = 'new_with_defects';
+ 
+     /**
+      * A list of available values
+@@ -46,6 +49,9 @@ class ProductCondition
+         self::NEW,
+         self::USED,
+         self::REFURBISHED,
++        self::OPEN_BOX,
++        self::DAMAGED,
++        self::NEW_WITH_DEFECTS,
+     ];
+ 
+     /**
+diff --git a/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php b/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
+index 216a7e44709be..a772335042e65 100644
+--- a/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
++++ b/src/Core/Form/ChoiceProvider/ProductConditionChoiceProvider.php
+@@ -55,8 +55,11 @@ public function getChoices()
+     {
+         return [
+             $this->translator->trans('New', [], 'Admin.Catalog.Feature') => ProductCondition::NEW,
++            $this->translator->trans('New, open box', [], 'Admin.Catalog.Feature') => ProductCondition::OPEN_BOX,
++            $this->translator->trans('New, minor defects', [], 'Admin.Catalog.Feature') => ProductCondition::NEW_WITH_DEFECTS,
+             $this->translator->trans('Used', [], 'Admin.Catalog.Feature') => ProductCondition::USED,
+             $this->translator->trans('Refurbished', [], 'Admin.Catalog.Feature') => ProductCondition::REFURBISHED,
++            $this->translator->trans('Damaged', [], 'Admin.Catalog.Feature') => ProductCondition::DAMAGED,
+         ];
+     }
+ }

@@ -1,0 +1,214 @@
+diff --git a/src/PrestaShopBundle/Controller/Admin/TranslationsController.php b/src/PrestaShopBundle/Controller/Admin/TranslationsController.php
+index da091110703a2..970c837616320 100644
+--- a/src/PrestaShopBundle/Controller/Admin/TranslationsController.php
++++ b/src/PrestaShopBundle/Controller/Admin/TranslationsController.php
+@@ -208,7 +208,7 @@ public function exportThemeAction(Request $request)
+         $locale = $langRepository->getLocaleByIsoCode($isoCode);
+ 
+         $themeExporter = $this->get('prestashop.translation.theme.exporter');
+-        $zipFile = $themeExporter->createZipArchive($themeName, $locale);
++        $zipFile = $themeExporter->createZipArchive($themeName, $locale, _PS_ROOT_DIR_.DIRECTORY_SEPARATOR);
+ 
+         $response = new BinaryFileResponse($zipFile);
+         $response->deleteFileAfterSend(true);
+diff --git a/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php b/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
+index 932c4c56b52fd..ce03bde3bb08f 100644
+--- a/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
++++ b/src/PrestaShopBundle/Translation/Exporter/ThemeExporter.php
+@@ -76,11 +76,12 @@ public function __construct(
+     /**
+      * @param $themeName
+      * @param $locale
++     * @param $rootDir
+      * @return string
+      */
+-    public function createZipArchive($themeName, $locale)
++    public function createZipArchive($themeName, $locale, $rootDir = false)
+     {
+-        $archiveParentDirectory = $this->exportCatalogues($themeName, $locale);
++        $archiveParentDirectory = $this->exportCatalogues($themeName, $locale, $rootDir);
+         $zipFilename = $this->makeZipFilename($themeName, $locale);
+         $this->zipManager->createArchive($zipFilename, $archiveParentDirectory);
+ 
+@@ -90,14 +91,15 @@ public function createZipArchive($themeName, $locale)
+     /**
+      * @param $themeName
+      * @param $locale
++     * @param $rootDir
+      * @return string
+      */
+-    public function exportCatalogues($themeName, $locale)
++    public function exportCatalogues($themeName, $locale, $rootDir = false)
+     {
+         $this->themeProvider->setLocale($locale);
+         $this->themeProvider->setThemeName($themeName);
+ 
+-        $mergedTranslations = $this->getCatalogueExtractedFromTemplates($themeName, $locale);
++        $mergedTranslations = $this->getCatalogueExtractedFromTemplates($themeName, $locale, $rootDir);
+         try {
+             $themeCatalogue = $this->themeProvider->getThemeCatalogue();
+         } catch (\Exception $exception) {
+@@ -125,7 +127,8 @@ public function exportCatalogues($themeName, $locale)
+ 
+         $this->dumper->dump($mergedTranslations, array(
+             'path' => $archiveParentDirectory,
+-            'default_locale' => $locale
++            'default_locale' => $locale,
++            'root_dir' => $rootDir,
+         ));
+ 
+         $this->renameCatalogues($locale, $archiveParentDirectory);
+@@ -152,9 +155,10 @@ protected function ensureFileBelongsToExportDirectory($filePath)
+     /**
+      * @param $themeName
+      * @param $locale
++     * @param $rootDir
+      * @return \Symfony\Component\Translation\MessageCatalogue
+      */
+-    protected function getCatalogueExtractedFromTemplates($themeName, $locale)
++    protected function getCatalogueExtractedFromTemplates($themeName, $locale, $rootDir = false)
+     {
+         $tmpFolderPath = $this->getTemporaryExtractionFolder($themeName);
+         $folderPath = $this->getFlattenizationFolder($themeName);
+@@ -168,7 +172,7 @@ protected function getCatalogueExtractedFromTemplates($themeName, $locale)
+         $theme = $this->themeRepository->getInstanceByName($themeName);
+         $this->themeExtractor
+             ->setOutputPath($tmpFolderPath)
+-            ->extract($theme, $locale);
++            ->extract($theme, $locale, $rootDir);
+ 
+         Flattenizer::flatten($tmpFolderPath . '/' . $locale, $folderPath . '/' . $locale, $locale);
+ 
+@@ -262,38 +266,95 @@ protected function makeZipFilename($themeName, $locale)
+     protected function makeArchiveParentDirectory($themeName, $locale)
+     {
+         $zipFilename = $this->makeZipFilename($themeName, $locale);
+-        $archiveParentDirectory = dirname($zipFilename);
+ 
+-        return $archiveParentDirectory;
++        return dirname($zipFilename);
++    }
++
++    /**
++     * @param MessageCatalogue $catalogue
++     */
++    protected function updateCatalogueMetadata(MessageCatalogue $catalogue)
++    {
++        foreach ($catalogue->all() as $domain => $messages) {
++            $this->ensureCatalogueHasRequiredMetadata($catalogue, $messages, $domain);
++        }
+     }
+ 
+     /**
+-     * @param MessageCatalogue $mergedTranslations
++     * @param MessageCatalogue $catalogue
++     * @param $messages
++     * @param $domain
+      */
+-    protected function updateCatalogueMetadata(MessageCatalogue $mergedTranslations)
++    protected function ensureCatalogueHasRequiredMetadata(
++        MessageCatalogue $catalogue,
++        $messages,
++        $domain
++    )
+     {
+-        foreach ($mergedTranslations->all() as $domain => $messages) {
+-            foreach ($messages as $translationKey => $translationValue) {
+-                $metadata = $mergedTranslations->getMetadata($translationKey, $domain);
+-                if (is_null($metadata) || !array_key_exists('file', $metadata)) {
+-                    $mergedTranslations->setMetadata($translationKey, array('line' => '', 'file' => ''), $domain);
+-                }
++        foreach ($messages as $id => $translation) {
++            $metadata = $catalogue->getMetadata($id, $domain);
++            if ($this->shouldAddFileMetadata($metadata)) {
++                $catalogue->setMetadata($id, $this->parseMetadataNotes($metadata), $domain);
+             }
+         }
+     }
+ 
++    /**
++     * @param array $metadata
++     * @return bool
++     */
++    protected function metadataContainNotes(array $metadata = null)
++    {
++        return !is_null($metadata) && array_key_exists('notes', $metadata) && is_array($metadata['notes']) &&
++            array_key_exists(0, $metadata['notes']) && is_array($metadata['notes'][0]) &&
++            array_key_exists('content', $metadata['notes'][0])
++        ;
++    }
++
++    /**
++     * @param $metadata
++     * @return bool
++     */
++    protected function shouldAddFileMetadata($metadata)
++    {
++        return is_null($metadata) || !array_key_exists('file', $metadata);
++    }
++
+     /**
+      * @param $locale
+-     * @param MessageCatalogue $databaseCatalogue
++     * @param MessageCatalogue $sourceCatalogue
+      * @return MessageCatalogue
+      */
+-    protected function addLocaleToDomain($locale, MessageCatalogue $databaseCatalogue)
++    protected function addLocaleToDomain($locale, MessageCatalogue $sourceCatalogue)
+     {
+         $catalogue = new MessageCatalogue($locale, array());
+-        foreach ($databaseCatalogue->all() as $domain => $messages) {
++        foreach ($sourceCatalogue->all() as $domain => $messages) {
+             $catalogue->add($messages, $domain . '.' . $locale);
+         }
+ 
+         return $catalogue;
+     }
++
++    /**
++     * @param array|null $metadata
++     * @return array
++     */
++    protected function parseMetadataNotes(array $metadata = null)
++    {
++        $defaultMetadata = array('file' => '', 'line' => '');
++
++        if (!$this->metadataContainNotes($metadata)) {
++            return $defaultMetadata;
++        }
++
++        $notes = $metadata['notes'][0]['content'];
++        if (1 !== preg_match('/(?<file>\S+):(?<line>\S+)/m', $notes, $matches)) {
++            return $defaultMetadata;
++        }
++
++        return array(
++            'file' => $matches['file'],
++            'line' => $matches['line'],
++        );
++    }
+ }
+diff --git a/src/PrestaShopBundle/Translation/Extractor/ThemeExtractor.php b/src/PrestaShopBundle/Translation/Extractor/ThemeExtractor.php
+index 90e30585b81b6..18ffbd79bdc6f 100644
+--- a/src/PrestaShopBundle/Translation/Extractor/ThemeExtractor.php
++++ b/src/PrestaShopBundle/Translation/Extractor/ThemeExtractor.php
+@@ -63,7 +63,7 @@ public function setThemeProvider(ThemeProvider $themeProvider)
+         return $this;
+     }
+ 
+-    public function extract(Theme $theme, $locale = 'en-US')
++    public function extract(Theme $theme, $locale = 'en-US', $rootDir = false)
+     {
+         $this->catalog = new MessageCatalogue($locale);
+         // remove the last "/"
+@@ -72,8 +72,9 @@ public function extract(Theme $theme, $locale = 'en-US')
+         $options = array(
+             'path' => $themeDirectory,
+             'default_locale' => $locale,
++            'root_dir' => $rootDir,
+         );
+-        $this->smartyExtractor->extract($themeDirectory, $this->catalog);
++        $this->smartyExtractor->extract($themeDirectory, $this->catalog, $options['root_dir']);
+ 
+         if ($this->overrideFromDatabase) {
+             $this->overrideFromDatabase($theme->getName(), $locale, $this->catalog);

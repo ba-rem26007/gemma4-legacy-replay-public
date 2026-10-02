@@ -1,0 +1,103 @@
+diff --git a/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php b/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
+index e90b8b5069b08..5bb66731f451c 100644
+--- a/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/AddProductToOrderHandler.php
+@@ -46,6 +46,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Product\Command\AddProductToOrderCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Product\CommandHandler\AddProductToOrderHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductOutOfStockException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use Product;
+ use Shop;
+@@ -99,6 +100,8 @@ public function handle(AddProductToOrderCommand $command)
+         $product = $this->getProductObject($command->getProductId(), (int) $order->id_lang);
+         $combination = $this->getCombination($command->getCombinationId());
+ 
++        $this->checkProductInStock($command->getProductId()->getValue(), $command->getCombinationId(), $command->getProductQuantity());
++
+         $cart = $this->createNewCart($order);
+ 
+         $specificPrice = $this->createSpecificPriceIfNeeded(
+@@ -522,4 +525,23 @@ private function updateExistingInvoice($orderInvoiceId, Cart $cart)
+ 
+         return $invoice;
+     }
++
++    /**
++     * @param int $productId
++     * @param int $combinationId
++     * @param int $expectedQuantity
++     *
++     * @throws ProductOutOfStockException
++     */
++    private function checkProductInStock(int $productId, int $combinationId, int $expectedQuantity): void
++    {
++        //check if product is available in stock
++        if (!Product::isAvailableWhenOutOfStock(StockAvailable::outOfStock($productId))) {
++            $availableQuantity = StockAvailable::getQuantityAvailableByProduct($productId, $combinationId);
++
++            if ($availableQuantity < $expectedQuantity) {
++                throw new ProductOutOfStockException('Not enough products in stock');
++            }
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index 89b4d0615198e..fe20301cc92f9 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -49,6 +49,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Order\QueryResult\OrderInvoiceAddressForViewing;
+ use PrestaShop\PrestaShop\Core\Domain\Order\QueryResult\OrderProductForViewing;
+ use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductOutOfStockException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Query\SearchProducts;
+ use PrestaShop\PrestaShop\Core\Form\ChoiceProvider\OrderStateByIdChoiceProvider;
+ use Product;
+@@ -169,6 +170,8 @@ public function addProductsToOrderWithNewInvoiceAndTheFollowingDetails(string $o
+             );
+         } catch (InvalidProductQuantityException $e) {
+             $this->lastException = $e;
++        } catch (ProductOutOfStockException $e) {
++            $this->lastException = $e;
+         }
+     }
+ 
+@@ -262,6 +265,14 @@ public function assertLastErrorIsNegativeProductQuantity()
+         $this->assertLastErrorIs(InvalidProductQuantityException::class);
+     }
+ 
++    /**
++     * @Then I should get error that product is out of stock
++     */
++    public function assertLastErrorIsProductOutOfStock()
++    {
++        $this->assertLastErrorIs(ProductOutOfStockException::class);
++    }
++
+     /**
+      * @When I generate invoice for :invoiceReference order
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+index 778321458b98c..cb815253771e9 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+@@ -160,6 +160,17 @@ Feature: Order from Back Office (BO)
+     Then I should get error that product quantity is invalid
+     Then order "bo_order1" should contain 2 products "Mug Today is a good day"
+ 
++  @order-from-bo
++  Scenario: Add product with quantity higher than stock is forbidden
++    Given order with reference "bo_order1" does not contain product "Mug Today is a good day"
++    When I add products to order "bo_order1" with new invoice and the following products details:
++      | name          | Mug Today is a good day |
++      | amount        | 1500                    |
++      | price         | 16                      |
++      | free_shipping | true                    |
++    Then I should get error that product is out of stock
++    Then order "bo_order1" should contain 0 products "Mug Today is a good day"
++
+   @order-from-bo
+   Scenario: Update product in order
+     When I edit product "Mug The best is yet to come" to order "bo_order1" with following products details:

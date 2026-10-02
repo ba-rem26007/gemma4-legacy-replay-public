@@ -1,0 +1,837 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index c7af10ba00312..8e3ee58e31a6e 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -154,8 +154,9 @@ class CartRuleCore extends ObjectModel
+             'name' => [
+                 'type' => self::TYPE_HTML,
+                 'lang' => true,
+-                'required' => true,
++                'required' => false,
+                 'size' => CartRuleSettings::NAME_MAX_LENGTH,
++                'validate' => 'defaultLanguageRequiredWhenActive',
+             ],
+         ],
+     ];
+diff --git a/classes/ObjectModel.php b/classes/ObjectModel.php
+index 0915571e1b0aa..c22337fa254cb 100644
+--- a/classes/ObjectModel.php
++++ b/classes/ObjectModel.php
+@@ -540,7 +540,16 @@ public function add($auto_date = true, $null_values = false)
+             $this->id_shop_default = (in_array(Configuration::get('PS_SHOP_DEFAULT'), $id_shop_list) == true) ? Configuration::get('PS_SHOP_DEFAULT') : min($id_shop_list);
+         }
+ 
+-        if (!$result = Db::getInstance()->insert($this->def['table'], $this->getFields(), $null_values)) {
++        // We get the fields before any insertion, because the validation is called inside those methods and in case of invalid value nothing
++        // should be inserted at all
++        $entityFields = $this->getFields();
++        if (!empty($this->def['multilang'])) {
++            $entityMultiLangFields = $this->getFieldsLang();
++        } else {
++            $entityMultiLangFields = [];
++        }
++
++        if (!$result = Db::getInstance()->insert($this->def['table'], $entityFields, $null_values)) {
+             return false;
+         }
+ 
+@@ -565,27 +574,24 @@ public function add($auto_date = true, $null_values = false)
+         }
+ 
+         // Database insertion for multilingual fields related to the object
+-        if (!empty($this->def['multilang'])) {
+-            $fields = $this->getFieldsLang();
+-            if ($fields && is_array($fields)) {
+-                $shops = Shop::getCompleteListOfShopsID();
+-                $asso = Shop::getAssoTable($this->def['table'] . '_lang');
+-                foreach ($fields as $field) {
+-                    foreach (array_keys($field) as $key) {
+-                        if (!Validate::isTableOrIdentifier($key)) {
+-                            throw new PrestaShopException('key ' . $key . ' is not table or identifier');
+-                        }
++        if (!empty($entityMultiLangFields)) {
++            $shops = Shop::getCompleteListOfShopsID();
++            $asso = Shop::getAssoTable($this->def['table'] . '_lang');
++            foreach ($entityMultiLangFields as $field) {
++                foreach (array_keys($field) as $key) {
++                    if (!Validate::isTableOrIdentifier($key)) {
++                        throw new PrestaShopException('key ' . $key . ' is not table or identifier');
+                     }
+-                    $field[$this->def['primary']] = (int) $this->id;
++                }
++                $field[$this->def['primary']] = (int) $this->id;
+ 
+-                    if ($asso !== false && $asso['type'] == 'fk_shop') {
+-                        foreach ($shops as $id_shop) {
+-                            $field['id_shop'] = (int) $id_shop;
+-                            $result &= Db::getInstance()->insert($this->def['table'] . '_lang', $field);
+-                        }
+-                    } else {
++                if ($asso !== false && $asso['type'] == 'fk_shop') {
++                    foreach ($shops as $id_shop) {
++                        $field['id_shop'] = (int) $id_shop;
+                         $result &= Db::getInstance()->insert($this->def['table'] . '_lang', $field);
+                     }
++                } else {
++                    $result &= Db::getInstance()->insert($this->def['table'] . '_lang', $field);
+                 }
+             }
+         }
+@@ -721,8 +727,17 @@ public function update($null_values = false)
+             /* @phpstan-ignore-next-line */
+             $this->id_shop_default = (in_array(Configuration::get('PS_SHOP_DEFAULT'), $id_shop_list) == true) ? Configuration::get('PS_SHOP_DEFAULT') : min($id_shop_list);
+         }
++
+         // Database update
+         $fieldsToUpdate = $this->getFields();
++        // Multi lang fields must be fetched before any updates is done, because if they are invalid the whole update should be blocked
++        // and validation process is performed in getFieldsLang
++        if (isset($this->def['multilang']) && $this->def['multilang']) {
++            $multiLangFieldsToUpdate = $this->getFieldsLang();
++        } else {
++            $multiLangFieldsToUpdate = [];
++        }
++
+         if (!$result = Db::getInstance()->update($this->def['table'], $fieldsToUpdate, '`' . pSQL($this->def['primary']) . '` = ' . (int) $this->id, 0, $null_values)) {
+             return false;
+         }
+@@ -760,7 +775,7 @@ public function update($null_values = false)
+         }
+ 
+         // Database update for multilingual fields related to the object
+-        if (isset($this->def['multilang']) && $this->def['multilang']) {
++        if (!empty($multiLangFieldsToUpdate)) {
+             $multiLangFieldsToUpdate = $this->getFieldsLang();
+             if (is_array($multiLangFieldsToUpdate)) {
+                 foreach ($multiLangFieldsToUpdate as $field) {
+@@ -1034,16 +1049,11 @@ public function validateFieldsLang($die = true, $errorReturn = false)
+     public function validateField($field, $value, $id_lang = null, $skip = [], $human_errors = false)
+     {
+         static $ps_lang_default = null;
+-        static $ps_allow_html_iframe = null;
+ 
+         if ($ps_lang_default === null) {
+             $ps_lang_default = Configuration::get('PS_LANG_DEFAULT');
+         }
+ 
+-        if ($ps_allow_html_iframe === null) {
+-            $ps_allow_html_iframe = (int) Configuration::get('PS_ALLOW_HTML_IFRAME');
+-        }
+-
+         $this->cacheFieldsRequiredDatabase();
+         $data = $this->def['fields'][$field];
+ 
+@@ -1128,17 +1138,10 @@ public function validateField($field, $value, $id_lang = null, $skip = [], $huma
+                 throw new PrestaShopException($this->trans('Validation function not found: %s.', [$data['validate']], 'Admin.Notifications.Error'));
+             }
+ 
+-            if (!empty($value)) {
+-                $res = true;
+-                if (Tools::strtolower($data['validate']) === 'iscleanhtml') {
+-                    if (!call_user_func(['Validate', $data['validate']], $value, $ps_allow_html_iframe)) {
+-                        $res = false;
+-                    }
+-                } else {
+-                    if (!call_user_func(['Validate', $data['validate']], $value)) {
+-                        $res = false;
+-                    }
+-                }
++            // isRequiredWhenActive and defaultLanguageRequiredWhenActive validators must be called especially when the value is empty
++            $isEmptyValidationMethod = Tools::strtolower($data['validate']) === 'isrequiredwhenactive' || Tools::strtolower($data['validate']) === 'defaultlanguagerequiredwhenactive';
++            if (!empty($value) || $isEmptyValidationMethod) {
++                $res = $this->callValidateMethod($data['validate'], $value, isset($id_lang) ? (int) $id_lang : null);
+                 if (!$res) {
+                     if ($human_errors) {
+                         return $this->trans('The %s field is invalid.', [$this->displayFieldName($field, get_class($this))], 'Admin.Notifications.Error');
+@@ -1152,6 +1155,29 @@ public function validateField($field, $value, $id_lang = null, $skip = [], $huma
+         return true;
+     }
+ 
++    protected function callValidateMethod(string $validateMethod, mixed $value, ?int $langId = null): bool
++    {
++        static $ps_allow_html_iframe = null;
++
++        if (!method_exists('Validate', $validateMethod)) {
++            throw new PrestaShopException($this->trans('Validation function not found: %s.', [$validateMethod], 'Admin.Notifications.Error'));
++        }
++
++        if (Tools::strtolower($validateMethod) === 'iscleanhtml') {
++            if ($ps_allow_html_iframe === null) {
++                $ps_allow_html_iframe = (int) Configuration::get('PS_ALLOW_HTML_IFRAME');
++            }
++
++            return Validate::isCleanHtml($value, $ps_allow_html_iframe);
++        } elseif (Tools::strtolower($validateMethod) === 'isrequiredwhenactive') {
++            return Validate::isRequiredWhenActive($value, $this);
++        } elseif (Tools::strtolower($validateMethod) === 'defaultlanguagerequiredwhenactive') {
++            return Validate::defaultLanguageRequiredWhenActive($value, $langId, $this);
++        }
++
++        return call_user_func(['Validate', $validateMethod], $value);
++    }
++
+     /**
+      * Returns the human readable, translated field name.
+      *
+@@ -1221,7 +1247,7 @@ public function validateController($htmlentities = true)
+             // Checking for fields validity
+             // Hack for postcode required for country which does not have postcodes
+             if (!empty($value) || $value === '0' || ($field == 'postcode' && $value == '0')) {
+-                if (isset($data['validate']) && (!call_user_func('Validate::' . $data['validate'], $value) && (!empty($value) || $data['required']))) {
++                if (isset($data['validate']) && (!$this->callValidateMethod($data['validate'], $value) && (!empty($value) || $data['required']))) {
+                     $errors[$field] = $this->trans(
+                         '%s is invalid.',
+                         [
+diff --git a/classes/Validate.php b/classes/Validate.php
+index 1fe25a356b800..d264a9c8f4831 100644
+--- a/classes/Validate.php
++++ b/classes/Validate.php
+@@ -1333,6 +1333,25 @@ public static function isThemeName($theme_name)
+         return (bool) preg_match('/^[\w-]{3,255}$/u', $theme_name);
+     }
+ 
++    public static function isRequiredWhenActive($value, ObjectModelCore $object): bool
++    {
++        $isActive = property_exists($object, 'active') ? $object->active : true;
++
++        return !$isActive || !empty($value);
++    }
++
++    public static function defaultLanguageRequiredWhenActive($value, ?int $langId, ObjectModelCore $object): bool
++    {
++        static $defaultLangId = null;
++        if (null === $defaultLangId) {
++            $defaultLangId = (int) Configuration::get('PS_LANG_DEFAULT');
++        }
++
++        $isActive = property_exists($object, 'active') ? $object->active : true;
++
++        return !$isActive || !empty($value) || $langId !== $defaultLangId;
++    }
++
+     /**
+      * Check if enable_insecure_rsh exists in
+      * this PHP version otherwise disable the
+diff --git a/src/Adapter/AbstractObjectModelValidator.php b/src/Adapter/AbstractObjectModelValidator.php
+index 3ab932428601b..c3d4fedd53388 100644
+--- a/src/Adapter/AbstractObjectModelValidator.php
++++ b/src/Adapter/AbstractObjectModelValidator.php
+@@ -28,6 +28,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter;
+ 
++use Configuration;
+ use ObjectModel;
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShopException;
+@@ -78,9 +79,15 @@ protected function validateObjectModelProperty(ObjectModel $objectModel, string
+      */
+     protected function validateObjectModelLocalizedProperty(ObjectModel $objectModel, string $propertyName, string $exceptionClass, int $errorCode = 0)
+     {
+-        $localizedValues = $objectModel->{$propertyName};
++        $localizedValues = $objectModel->{$propertyName} ?? [];
+ 
+         try {
++            $defaultLang = (int) Configuration::get('PS_LANG_DEFAULT');
++            if (!isset($localizedValues[$defaultLang])) {
++                // The value for the default must always be set, so we put an empty string if it does not exist
++                $localizedValues[$defaultLang] = '';
++            }
++
+             foreach ($localizedValues as $langId => $value) {
+                 if (true !== $objectModel->validateField($propertyName, $value, $langId)) {
+                     throw new $exceptionClass(
+diff --git a/src/Adapter/CartRule/Repository/CartRuleRepository.php b/src/Adapter/CartRule/Repository/CartRuleRepository.php
+index dd491cfc421b7..a5d993f38725a 100644
+--- a/src/Adapter/CartRule/Repository/CartRuleRepository.php
++++ b/src/Adapter/CartRule/Repository/CartRuleRepository.php
+@@ -43,6 +43,10 @@
+ use PrestaShop\PrestaShop\Core\Exception\InvalidArgumentException;
+ use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
+ 
++/**
++ * @deprecated in favor of DiscountRepository this one is kept until we probably migrate all to the new Discount domain
++ *  and clean this namespace
++ */
+ class CartRuleRepository extends AbstractObjectModelRepository
+ {
+     public function __construct(
+diff --git a/src/Adapter/CartRule/Validate/CartRuleValidator.php b/src/Adapter/CartRule/Validate/CartRuleValidator.php
+index 37a81b75b89d5..64c9d702ed1a4 100644
+--- a/src/Adapter/CartRule/Validate/CartRuleValidator.php
++++ b/src/Adapter/CartRule/Validate/CartRuleValidator.php
+@@ -33,6 +33,10 @@
+ use PrestaShop\PrestaShop\Core\Exception\CoreException;
+ use PrestaShopException;
+ 
++/**
++ * @deprecated in favor of DiscountValidator this one is kept until we probably migrate all to the new Discount domain
++ * and clean this namespace
++ */
+ class CartRuleValidator extends AbstractObjectModelValidator
+ {
+     public function validate(CartRule $cartRule): void
+diff --git a/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php
+index 67cd635e2b954..aae50adbe8e2e 100644
+--- a/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php
++++ b/src/Adapter/Discount/CommandHandler/AddFreeShippingDiscountHandler.php
+@@ -27,7 +27,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
+ 
+ use PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder;
+-use PrestaShop\PrestaShop\Adapter\CartRule\Repository\CartRuleRepository;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\AddFreeShippingDiscountHandlerInterface;
+@@ -37,7 +37,7 @@
+ class AddFreeShippingDiscountHandler implements AddFreeShippingDiscountHandlerInterface
+ {
+     public function __construct(
+-        private readonly CartRuleRepository $cartRuleRepository,
++        private readonly DiscountRepository $discountRepository,
+         private readonly CartRuleBuilder $cartRuleBuilder
+     ) {
+     }
+@@ -45,7 +45,7 @@ public function __construct(
+     public function handle(AddFreeShippingDiscountCommand $command): DiscountId
+     {
+         $BuiltCartRule = $this->cartRuleBuilder->build($command);
+-        $discount = $this->cartRuleRepository->add($BuiltCartRule);
++        $discount = $this->discountRepository->add($BuiltCartRule);
+ 
+         return new DiscountId((int) $discount->id);
+     }
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index 6c97f7816803c..c53fa095d0dfd 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -28,9 +28,8 @@
+ 
+ use DateTimeImmutable;
+ use Exception;
+-use PrestaShop\PrestaShop\Adapter\CartRule\Repository\CartRuleRepository;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
+-use PrestaShop\PrestaShop\Core\Domain\CartRule\ValueObject\CartRuleId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\QueryHandler\GetDiscountForEditingHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
+@@ -39,7 +38,7 @@
+ class GetDiscountForEditingHandler implements GetDiscountForEditingHandlerInterface
+ {
+     public function __construct(
+-        protected readonly CartRuleRepository $cartRuleRepository
++        protected readonly DiscountRepository $discountRepository
+     ) {
+     }
+ 
+@@ -48,8 +47,7 @@ public function __construct(
+      */
+     public function handle(GetDiscountForEditing $query): DiscountForEditing
+     {
+-        $cartRuleId = new CartRuleId($query->discountId->getValue());
+-        $cartRule = $this->cartRuleRepository->get($cartRuleId);
++        $cartRule = $this->discountRepository->get($query->discountId);
+ 
+         return new DiscountForEditing(
+             $query->discountId->getValue(),
+diff --git a/src/Adapter/Discount/Repository/DiscountRepository.php b/src/Adapter/Discount/Repository/DiscountRepository.php
+new file mode 100644
+index 0000000000000..ee60e18e8b4d3
+--- /dev/null
++++ b/src/Adapter/Discount/Repository/DiscountRepository.php
+@@ -0,0 +1,68 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\Repository;
++
++use CartRule;
++use Doctrine\DBAL\Connection;
++use PrestaShop\PrestaShop\Adapter\Discount\Validate\DiscountValidator;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\CannotAddDiscountException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++use PrestaShop\PrestaShop\Core\Repository\AbstractObjectModelRepository;
++
++/**
++ * This repository is used for the new Discount domain, but it still relies on the legacy CartRule ObjectModel.
++ */
++class DiscountRepository extends AbstractObjectModelRepository
++{
++    public function __construct(
++        protected readonly DiscountValidator $cartRuleValidator,
++        protected readonly Connection $connection,
++        protected readonly string $dbPrefix
++    ) {
++    }
++
++    public function add(CartRule $cartRule): CartRule
++    {
++        $this->cartRuleValidator->validate($cartRule);
++        $this->addObjectModel($cartRule, CannotAddDiscountException::class);
++
++        return $cartRule;
++    }
++
++    public function get(DiscountId $discountId): CartRule
++    {
++        /** @var CartRule $cartRule */
++        $cartRule = $this->getObjectModel(
++            $discountId->getValue(),
++            CartRule::class,
++            DiscountNotFoundException::class
++        );
++
++        return $cartRule;
++    }
++}
+diff --git a/src/Adapter/Discount/Validate/DiscountValidator.php b/src/Adapter/Discount/Validate/DiscountValidator.php
+new file mode 100644
+index 0000000000000..a8dc05f0d078d
+--- /dev/null
++++ b/src/Adapter/Discount/Validate/DiscountValidator.php
+@@ -0,0 +1,115 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\Validate;
++
++use CartRule;
++use PrestaShop\PrestaShop\Adapter\AbstractObjectModelValidator;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Exception\CoreException;
++use PrestaShopException;
++
++/**
++ * This validator is used for the new Discount domain, but it still relies on the legacy CartRule ObjectModel.
++ */
++class DiscountValidator extends AbstractObjectModelValidator
++{
++    public function validate(CartRule $cartRule): void
++    {
++        $this->validateCartRuleProperty($cartRule, 'id_customer', DiscountConstraintException::INVALID_CUSTOMER_ID);
++        $this->validateCartRuleProperty($cartRule, 'date_from', DiscountConstraintException::INVALID_DATE_FROM);
++        $this->validateCartRuleProperty($cartRule, 'date_to', DiscountConstraintException::INVALID_DATE_TO);
++        $this->validateCartRuleProperty($cartRule, 'description', DiscountConstraintException::INVALID_DESCRIPTION);
++        $this->validateCartRuleProperty($cartRule, 'quantity', DiscountConstraintException::INVALID_QUANTITY);
++        $this->validateCartRuleProperty($cartRule, 'quantity_per_user', DiscountConstraintException::INVALID_QUANTITY_PER_USER);
++        $this->validateCartRuleProperty($cartRule, 'priority', DiscountConstraintException::INVALID_PRIORITY);
++        $this->validateCartRuleProperty($cartRule, 'partial_use', DiscountConstraintException::INVALID_PARTIAL_USE);
++        $this->validateCartRuleProperty($cartRule, 'code', DiscountConstraintException::INVALID_CODE);
++        $this->validateCartRuleProperty($cartRule, 'minimum_amount', DiscountConstraintException::INVALID_MINIMUM_AMOUNT);
++        $this->validateCartRuleProperty($cartRule, 'minimum_amount_tax', DiscountConstraintException::INVALID_MINIMUM_AMOUNT_TAX);
++        $this->validateCartRuleProperty($cartRule, 'minimum_amount_currency', DiscountConstraintException::INVALID_MINIMUM_AMOUNT_CURRENCY);
++        $this->validateCartRuleProperty($cartRule, 'minimum_amount_shipping', DiscountConstraintException::INVALID_MINIMUM_AMOUNT_SHIPPING);
++        $this->validateCartRuleProperty($cartRule, 'country_restriction', DiscountConstraintException::INVALID_COUNTRY_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'carrier_restriction', DiscountConstraintException::INVALID_CARRIER_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'group_restriction', DiscountConstraintException::INVALID_GROUP_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'cart_rule_restriction', DiscountConstraintException::INVALID_CART_RULE_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'product_restriction', DiscountConstraintException::INVALID_PRODUCT_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'shop_restriction', DiscountConstraintException::INVALID_SHOP_RESTRICTION);
++        $this->validateCartRuleProperty($cartRule, 'free_shipping', DiscountConstraintException::INVALID_FREE_SHIPPING);
++        $this->validateCartRuleProperty($cartRule, 'reduction_percent', DiscountConstraintException::INVALID_REDUCTION_PERCENT);
++        $this->validateCartRuleProperty($cartRule, 'reduction_amount', DiscountConstraintException::INVALID_REDUCTION_AMOUNT);
++        $this->validateCartRuleProperty($cartRule, 'reduction_tax', DiscountConstraintException::INVALID_REDUCTION_TAX);
++        $this->validateCartRuleProperty($cartRule, 'reduction_currency', DiscountConstraintException::INVALID_REDUCTION_CURRENCY);
++        $this->validateCartRuleProperty($cartRule, 'reduction_product', DiscountConstraintException::INVALID_REDUCTION_PRODUCT);
++        $this->validateCartRuleProperty($cartRule, 'reduction_exclude_special', DiscountConstraintException::INVALID_REDUCTION_EXCLUDE_SPECIAL);
++        $this->validateCartRuleProperty($cartRule, 'gift_product', DiscountConstraintException::INVALID_GIFT_PRODUCT);
++        $this->validateCartRuleProperty($cartRule, 'gift_product_attribute', DiscountConstraintException::INVALID_GIFT_PRODUCT_ATTRIBUTE);
++        $this->validateCartRuleProperty($cartRule, 'highlight', DiscountConstraintException::INVALID_HIGHLIGHT);
++        $this->validateCartRuleProperty($cartRule, 'active', DiscountConstraintException::INVALID_ACTIVE);
++
++        $this->validateObjectModelLocalizedProperty(
++            $cartRule,
++            'name',
++            DiscountConstraintException::class,
++            DiscountConstraintException::INVALID_NAME
++        );
++
++        $this->assertCodeIsUnique($cartRule);
++    }
++
++    private function validateCartRuleProperty(CartRule $cartRule, string $propertyName, int $code): void
++    {
++        $this->validateObjectModelProperty(
++            $cartRule,
++            $propertyName,
++            DiscountConstraintException::class,
++            $code
++        );
++    }
++
++    private function assertCodeIsUnique(CartRule $cartRule): void
++    {
++        $code = $cartRule->code;
++
++        if (empty($code)) {
++            return;
++        }
++
++        try {
++            $duplicateCodeCartRuleId = (int) CartRule::getIdByCode($code);
++        } catch (PrestaShopException $e) {
++            throw new CoreException('Error occurred when trying to check if cart rule code is unique', 0, $e);
++        }
++
++        if ($duplicateCodeCartRuleId && $duplicateCodeCartRuleId !== (int) $cartRule->id) {
++            throw new DiscountConstraintException(
++                sprintf('Cart rule with code "%s" already exists', $code),
++                DiscountConstraintException::NON_UNIQUE_CODE
++            );
++        }
++    }
++}
+diff --git a/src/Core/Domain/CartRule/Exception/CartRuleConstraintException.php b/src/Core/Domain/CartRule/Exception/CartRuleConstraintException.php
+index 275f76fcb065c..beee4ed32efe1 100644
+--- a/src/Core/Domain/CartRule/Exception/CartRuleConstraintException.php
++++ b/src/Core/Domain/CartRule/Exception/CartRuleConstraintException.php
+@@ -26,8 +26,12 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\CartRule\Exception;
+ 
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++
+ /**
+  * Thrown when validating cart rule's data
++ *
++ * @deprecated is replaced by DiscountConstraintException this exception should be cleaned once the domain has been fully refactored
+  */
+ class CartRuleConstraintException extends CartRuleException
+ {
+diff --git a/src/Core/Domain/Discount/Command/AddDiscountCommand.php b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+index 26c74dbac22b5..1ee9fefb7917a 100644
+--- a/src/Core/Domain/Discount/Command/AddDiscountCommand.php
++++ b/src/Core/Domain/Discount/Command/AddDiscountCommand.php
+@@ -36,7 +36,7 @@ abstract class AddDiscountCommand
+ {
+     private array $localizedNames = [];
+     private int $priority = 1;
+-    private bool $active = true;
++    private bool $active = false;
+     private ?DateTimeImmutable $validFrom = null;
+     private ?DateTimeImmutable $validTo = null;
+     private int $totalQuantity = 1;
+@@ -49,17 +49,15 @@ abstract class AddDiscountCommand
+     private DiscountType $type;
+ 
+     public function __construct(
+-        array $localizedNames,
+         string $type,
+     ) {
+         $this->type = new DiscountType($type);
+-        $this->setLocalizedNames($localizedNames);
+     }
+ 
+     /**
+      * @param array<int, string> $localizedNames
+      */
+-    private function setLocalizedNames(array $localizedNames): self
++    public function setLocalizedNames(array $localizedNames): self
+     {
+         foreach ($localizedNames as $languageId => $name) {
+             $this->localizedNames[(new LanguageId($languageId))->getValue()] = $name;
+diff --git a/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php b/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php
+index 1dcf41d034836..70000f5097bab 100644
+--- a/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php
++++ b/src/Core/Domain/Discount/Command/AddFreeShippingDiscountCommand.php
+@@ -30,8 +30,8 @@
+ 
+ class AddFreeShippingDiscountCommand extends AddDiscountCommand
+ {
+-    public function __construct(array $localizedNames)
++    public function __construct()
+     {
+-        parent::__construct($localizedNames, DiscountType::FREE_SHIPPING);
++        parent::__construct(DiscountType::FREE_SHIPPING);
+     }
+ }
+diff --git a/src/Core/Domain/Discount/Exception/CannotAddDiscountException.php b/src/Core/Domain/Discount/Exception/CannotAddDiscountException.php
+new file mode 100644
+index 0000000000000..6793a07607451
+--- /dev/null
++++ b/src/Core/Domain/Discount/Exception/CannotAddDiscountException.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Exception;
++
++class CannotAddDiscountException extends DiscountException
++{
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index 7a07cad44429a..fcc2372641026 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -11,3 +11,14 @@ services:
+     autowire: true
+     public: false
+     autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Discount\Validate\DiscountValidator:
++    autowire: true
++    public: false
++
++  PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository:
++    autowire: true
++    public: false
++    arguments:
++      $connection: '@doctrine.dbal.default_connection'
++      $dbPrefix: '%database_prefix%'
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index f93b69bbdda09..c38248eaa0e79 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -50,17 +50,45 @@ class DiscountFeatureContext extends AbstractDomainFeatureContext
+      * @param string $discountReference
+      * @param TableNode $node
+      */
+-    public function createFreeShippingDiscountIfNotExists(string $discountReference, TableNode $node): void
++    public function createFreeShippingDiscount(string $discountReference, TableNode $node): void
+     {
+         $data = $this->localizeByRows($node);
+         try {
+-            $command = new AddFreeShippingDiscountCommand($data['name']);
++            $command = new AddFreeShippingDiscountCommand();
+             $this->createDiscount($discountReference, $data, $command);
+         } catch (DiscountConstraintException $e) {
+             $this->setLastException($e);
+         }
+     }
+ 
++    /**
++     * @When I create a free shipping discount :discountReference
++     *
++     * @param string $discountReference
++     */
++    public function createFreeShippingDiscountIWithNoParameters(string $discountReference): void
++    {
++        try {
++            $command = new AddFreeShippingDiscountCommand();
++            $this->createDiscount($discountReference, [], $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @Then I should get error that discount field :field is invalid
++     */
++    public function assertDiscountInvalidField(string $field): void
++    {
++        $errorCode = match ($field) {
++            'name' => DiscountConstraintException::INVALID_NAME,
++            default => null,
++        };
++
++        $this->assertLastErrorIs(DiscountConstraintException::class, $errorCode);
++    }
++
+     /**
+      * @Then discount :discountReference should have the following properties:
+      *
+@@ -86,6 +114,9 @@ public function assertDiscount(string $discountReference, TableNode $tableNode):
+      */
+     protected function createDiscount(string $cartRuleReference, array $data, AddDiscountCommand $command): void
+     {
++        if (isset($data['name'])) {
++            $command->setLocalizedNames($data['name']);
++        }
+         if (isset($data['highlight'])) {
+             $command->setHighlightInCart(PrimitiveUtils::castStringBooleanIntoBoolean($data['highlight']));
+         }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature
+index 3b979d9545fbe..0f9259b1529b4 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature
+@@ -1,7 +1,7 @@
+ # ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount
+ @restore-all-tables-before-feature
++@restore-languages-after-feature
+ @add-discount
+-
+ Feature: Add discount
+   PrestaShop allows BO users to create discounts
+   As a BO user
+@@ -13,39 +13,53 @@ Feature: Add discount
+     Given there is a currency named "chf" with iso code "CHF" and exchange rate of 1.25
+     Given currency "usd" is the default one
+     And language with iso code "en" is the default one
+-
++    And language "french" with locale "fr-FR" exists
+ 
+   Scenario: Create a simple discount with free shipping
+-    When I create a free shipping discount "discount_1" with following properties:
+-      | name[en-US]                      | Promotion              |
+-      | free_shipping                    | true                   |
+-    And discount "discount_1" should have the following properties:
+-      | name[en-US]                      | Promotion              |
+-      | free_shipping                    | true                   |
++    When I create a free shipping discount "basic_free_shipping_discount"
++    Then discount "basic_free_shipping_discount" should have the following properties:
++      | free_shipping | true  |
++      | active        | false |
++
+   Scenario: Create a complete discount with free shipping
+-    When I create a free shipping discount "discount_1" with following properties:
+-      | name[en-US]                      | Promotion              |
+-      | description                      | Promotion for holidays |
+-      | highlight                        | false                  |
+-      | is_active                        | true                   |
+-      | allow_partial_use                | false                  |
+-      | priority                         | 2                      |
+-      | valid_from                       | 2019-01-01 11:05:00    |
+-      | valid_to                         | 2019-12-01 00:00:00    |
+-      | total_quantity                   | 10                     |
+-      | quantity_per_user                | 1                      |
+-      | free_shipping                    | true                   |
+-      | code                             | PROMO_2019             |
+-    And discount "discount_1" should have the following properties:
+-      | name[en-US]                      | Promotion              |
+-      | description                      | Promotion for holidays |
+-      | highlight                        | false                  |
+-      | is_active                        | true                   |
+-      | allow_partial_use                | false                  |
+-      | priority                         | 2                      |
+-      | valid_from                       | 2019-01-01 11:05:00    |
+-      | valid_to                         | 2019-12-01 00:00:00    |
+-      | total_quantity                   | 10                     |
+-      | quantity_per_user                | 1                      |
+-      | free_shipping                    | true                   |
+-      | code                             | PROMO_2019             |
++    When I create a free shipping discount "complete_free_shipping_discount" with following properties:
++      | name[en-US]       | Promotion              |
++      | name[fr-FR]       | Promotion fr           |
++      | description       | Promotion for holidays |
++      | highlight         | false                  |
++      | active            | true                   |
++      | allow_partial_use | false                  |
++      | priority          | 2                      |
++      | valid_from        | 2019-01-01 11:05:00    |
++      | valid_to          | 2019-12-01 00:00:00    |
++      | total_quantity    | 10                     |
++      | quantity_per_user | 1                      |
++      | code              | PROMO_2019             |
++    Then discount "complete_free_shipping_discount" should have the following properties:
++      | name[en-US]       | Promotion              |
++      | name[fr-FR]       | Promotion fr           |
++      | description       | Promotion for holidays |
++      | highlight         | false                  |
++      | active            | true                   |
++      | allow_partial_use | false                  |
++      | priority          | 2                      |
++      | valid_from        | 2019-01-01 11:05:00    |
++      | valid_to          | 2019-12-01 00:00:00    |
++      | total_quantity    | 10                     |
++      | quantity_per_user | 1                      |
++      | free_shipping     | true                   |
++      | code              | PROMO_2019             |
++
++  Scenario: Create a discount with free shipping online but without names should be forbidden
++    When I create a free shipping discount "invalid_free_shipping_discount" with following properties:
++      | active | true |
++    Then I should get error that discount field name is invalid
++    # Discount online with name only in default language is valid though
++    When I create a free shipping discount "default_language_free_shipping_discount" with following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
++    Then discount "default_language_free_shipping_discount" should have the following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature
+index 9a4fccecac4a1..ce7a16b6d1356 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature
+@@ -20,7 +20,7 @@ Feature: Full UX discount test
+       | name[en-US]       | Promotion              |
+       | description       | Promotion for holidays |
+       | highlight         | false                  |
+-      | is_active         | true                   |
++      | active            | true                   |
+       | allow_partial_use | false                  |
+       | priority          | 2                      |
+       | valid_from        | 2025-01-01 11:05:00    |
+@@ -33,7 +33,7 @@ Feature: Full UX discount test
+       | name[en-US]       | Promotion              |
+       | description       | Promotion for holidays |
+       | highlight         | false                  |
+-      | is_active         | true                   |
++      | active            | true                   |
+       | allow_partial_use | false                  |
+       | priority          | 2                      |
+       | valid_from        | 2025-01-01 11:05:00    |

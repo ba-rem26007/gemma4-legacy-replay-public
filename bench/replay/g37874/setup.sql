@@ -1,0 +1,1 @@
+-- Aucun setup nécessaire : le bug est déclenché par une recherche sans résultat.

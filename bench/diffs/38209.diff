@@ -1,0 +1,612 @@
+diff --git a/src/Adapter/CartRule/CartRuleBuilder.php b/src/Adapter/CartRule/CartRuleBuilder.php
+index 215a1197f85c3..9d167d78ab239 100644
+--- a/src/Adapter/CartRule/CartRuleBuilder.php
++++ b/src/Adapter/CartRule/CartRuleBuilder.php
+@@ -30,6 +30,7 @@
+ use DateTimeImmutable;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
+@@ -69,6 +70,9 @@ public function build(AddDiscountCommand $command): CartRule
+                 $cartRule->reduction_currency = $command->getAmountDiscount()->getCurrencyId()->getValue();
+                 $cartRule->reduction_tax = $command->getAmountDiscount()->isTaxIncluded();
+             }
++        } elseif ($command instanceof AddFreeGiftDiscountCommand) {
++            $cartRule->gift_product = $command->getProductId()?->getValue() ?? 0;
++            $cartRule->gift_product_attribute = $command->getCombinationId()?->getValue() ?? 0;
+         }
+ 
+         if ($command instanceof AddProductLevelDiscountCommand) {
+diff --git a/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php
+index 034964b188705..5c8bd923ecf5d 100644
+--- a/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php
++++ b/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php
+@@ -44,8 +44,8 @@ public function __construct(
+ 
+     public function handle(AddCartLevelDiscountCommand $command): DiscountId
+     {
+-        $BuiltCartRule = $this->cartRuleBuilder->build($command);
+-        $discount = $this->discountRepository->add($BuiltCartRule);
++        $builtCartRule = $this->cartRuleBuilder->build($command);
++        $discount = $this->discountRepository->add($builtCartRule);
+ 
+         return new DiscountId((int) $discount->id);
+     }
+diff --git a/src/Adapter/Discount/CommandHandler/AddFreeGiftDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddFreeGiftDiscountHandler.php
+new file mode 100644
+index 0000000000000..9f1ed23d440eb
+--- /dev/null
++++ b/src/Adapter/Discount/CommandHandler/AddFreeGiftDiscountHandler.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\AddFreeGiftDiscountHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++#[AsCommandHandler]
++class AddFreeGiftDiscountHandler implements AddFreeGiftDiscountHandlerInterface
++{
++    public function __construct(
++        private readonly DiscountRepository $discountRepository,
++        private readonly CartRuleBuilder $cartRuleBuilder
++    ) {
++    }
++
++    public function handle(AddFreeGiftDiscountCommand $command): DiscountId
++    {
++        $builtCartRule = $this->cartRuleBuilder->build($command);
++        $discount = $this->discountRepository->add($builtCartRule);
++
++        return new DiscountId((int) $discount->id);
++    }
++}
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index a27f5687d401f..ee88668f6f8e3 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -69,6 +69,8 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+             $cartRule->reduction_currency,
+             $cartRule->reduction_tax,
+             $cartRule->reduction_product,
++            $cartRule->gift_product,
++            $cartRule->gift_product_attribute,
+         );
+     }
+ }
+diff --git a/src/Core/Domain/Discount/Command/AddFreeGiftDiscountCommand.php b/src/Core/Domain/Discount/Command/AddFreeGiftDiscountCommand.php
+new file mode 100644
+index 0000000000000..ef3f44c51b543
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/AddFreeGiftDiscountCommand.php
+@@ -0,0 +1,88 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationIdInterface;
++use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\NoCombinationId;
++use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
++
++class AddFreeGiftDiscountCommand extends AddDiscountCommand
++{
++    private ?ProductId $productId = null;
++    private ?CombinationIdInterface $combinationId = null;
++
++    public function __construct()
++    {
++        parent::__construct(DiscountType::FREE_GIFT);
++    }
++
++    /**
++     * @return ProductId
++     */
++    public function getProductId(): ?ProductId
++    {
++        return $this->productId;
++    }
++
++    /**
++     * @param int $productId
++     *
++     * @return $this
++     */
++    public function setProductId(int $productId): self
++    {
++        $this->productId = new ProductId($productId);
++
++        return $this;
++    }
++
++    /**
++     * @return CombinationIdInterface
++     */
++    public function getCombinationId(): ?CombinationIdInterface
++    {
++        return $this->combinationId;
++    }
++
++    /**
++     * @param int $combinationId
++     *
++     * @return $this
++     */
++    public function setCombinationId(int $combinationId): self
++    {
++        if (NoCombinationId::NO_COMBINATION_ID === $combinationId) {
++            $this->combinationId = new NoCombinationId();
++        } else {
++            $this->combinationId = new CombinationId($combinationId);
++        }
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/Discount/CommandHandler/AddFreeGiftDiscountHandlerInterface.php b/src/Core/Domain/Discount/CommandHandler/AddFreeGiftDiscountHandlerInterface.php
+new file mode 100644
+index 0000000000000..1f8e346b04586
+--- /dev/null
++++ b/src/Core/Domain/Discount/CommandHandler/AddFreeGiftDiscountHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++interface AddFreeGiftDiscountHandlerInterface
++{
++    public function handle(AddFreeGiftDiscountCommand $command): DiscountId;
++}
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index 0dcb5af958e1a..86eb30b65da84 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -51,6 +51,8 @@ public function __construct(
+         private readonly ?int $currencyId,
+         private readonly ?bool $taxIncluded,
+         private readonly ?int $reductionProduct,
++        private readonly ?int $giftProductId,
++        private readonly ?int $giftProductAttributeId,
+     ) {
+     }
+ 
+@@ -143,4 +145,14 @@ public function getReductionProduct(): ?int
+     {
+         return $this->reductionProduct;
+     }
++
++    public function getGiftProductId(): ?int
++    {
++        return $this->giftProductId;
++    }
++
++    public function getGiftProductAttributeId(): ?int
++    {
++        return $this->giftProductAttributeId;
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 55a9a5d57f09a..e45e7f4356939 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -31,6 +31,7 @@
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
+@@ -41,6 +42,9 @@
+ 
+ class DiscountFormDataHandler implements FormDataHandlerInterface
+ {
++    public const PRODUCT_ID = 1;
++    public const COMBINATION_ID = 2;
++
+     public function __construct(
+         protected readonly CommandBusInterface $commandBus,
+         #[Autowire(service: 'prestashop.default.language.context')]
+@@ -66,6 +70,12 @@ public function create(array $data)
+                 $command = new AddProductLevelDiscountCommand();
+                 $name = $this->translator->trans('On products amount', [], 'Admin.Catalog.Feature');
+                 break;
++            case DiscountType::FREE_GIFT:
++                $command = new AddFreeGiftDiscountCommand();
++                $command->setProductId(self::PRODUCT_ID);
++                $command->setCombinationId(self::COMBINATION_ID);
++                $name = $this->translator->trans('On free gift', [], 'Admin.Catalog.Feature');
++                break;
+             default:
+                 throw new RuntimeException('Unknown discount type ' . $discountType);
+         }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index 16a567e8abc94..5edd9f7a9bf84 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -17,6 +17,11 @@ services:
+     public: false
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\AddFreeGiftDiscountHandler:
++    autowire: true
++    public: false
++    autoconfigure: true
++
+   PrestaShop\PrestaShop\Adapter\Discount\QueryHandler\GetDiscountForEditingHandler:
+     autowire: true
+     public: false
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index 2849949f4c794..5c67894b9c60d 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -35,6 +35,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeGiftDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddProductLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
+@@ -151,7 +152,7 @@ public function createSimpleProductLevelDiscountIfNotExists(string $discountRefe
+      *
+      * @param string $discountReference
+      */
+-    public function createFreeShippingDiscountIWithNoParameters(string $discountReference): void
++    public function createFreeShippingDiscountWithNoParameters(string $discountReference): void
+     {
+         try {
+             $command = new AddFreeShippingDiscountCommand();
+@@ -161,6 +162,42 @@ public function createFreeShippingDiscountIWithNoParameters(string $discountRefe
+         }
+     }
+ 
++    /**
++     * @When I create a free gift discount :discountReference
++     *
++     * @param string $discountReference
++     */
++    public function createFreeGiftDiscountWithNoParameters(string $discountReference): void
++    {
++        try {
++            $command = new AddFreeGiftDiscountCommand();
++            $this->createDiscount($discountReference, [], $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I create a free gift discount :discountReference with following properties:
++     *
++     * @param string $discountReference
++     * @param TableNode $node
++     *
++     * @return void
++     *
++     * @throws Exception
++     */
++    public function createFreeGiftDiscountIfNotExists(string $discountReference, TableNode $node): void
++    {
++        $data = $this->localizeByRows($node);
++        try {
++            $command = new AddFreeGiftDiscountCommand();
++            $this->createDiscount($discountReference, $data, $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
+     /**
+      * @Then I should get error that discount field :field is invalid
+      */
+@@ -268,6 +305,16 @@ protected function createDiscount(string $cartRuleReference, array $data, AddDis
+             }
+         }
+ 
++        if ($command instanceof AddFreeGiftDiscountCommand) {
++            if (!empty($data['gift_product'])) {
++                $command->setProductId($this->referenceToId($data['gift_product']));
++            }
++
++            if (!empty($data['gift_combination'])) {
++                $command->setCombinationId($this->referenceToId($data['gift_combination']));
++            }
++        }
++
+         /** @var DiscountId $discountId */
+         $discountId = $this->getCommandBus()->handle($command);
+         $this->getSharedStorage()->set($cartRuleReference, $discountId->getValue());
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_gift_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_gift_discount.feature
+new file mode 100644
+index 0000000000000..247d41d33c00e
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_gift_discount.feature
+@@ -0,0 +1,55 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-free-gift-discount
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-free-gift-discount
++Feature: Add discount
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given there is a currency named "chf" with iso code "CHF" and exchange rate of 1.25
++    Given currency "usd" is the default one
++    And language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++
++  Scenario: Create a simple discount with free gift
++    When I create a free gift discount "basic_free_gift_discount"
++    Then discount "basic_free_gift_discount" should have the following properties:
++      | active           | false |
++
++  Scenario: Create a complete discount with free gift
++    Given there is a product in the catalog named "Free Product" with a price of 20.0 and 1000 items in stock
++    Given there is a product "hummingbird-tshirt" with name "Hummingbird printed t-shirt"
++    When I create a free gift discount "complete_free_gift_discount" with following properties:
++      | name[en-US]      | Promotion              |
++      | name[fr-FR]      | Promotion fr           |
++      | active           | true                   |
++      | valid_from       | 2019-01-01 11:05:00    |
++      | valid_to         | 2019-12-01 00:00:00    |
++      | code             | FREE_GIFT_2019         |
++      | gift_product     | hummingbird-tshirt     |
++    Then discount "complete_free_gift_discount" should have the following properties:
++      | name[en-US]      | Promotion              |
++      | name[fr-FR]      | Promotion fr           |
++      | active           | true                   |
++      | valid_from       | 2019-01-01 11:05:00    |
++      | valid_to         | 2019-12-01 00:00:00    |
++      | code             | FREE_GIFT_2019         |
++      | gift_product     | hummingbird-tshirt     |
++
++  Scenario: Create a discount with free gift online but without names should be forbidden
++    When I create a free gift discount "invalid_free_gift_discount" with following properties:
++      | active | true |
++    Then I should get error that discount field name is invalid
++    # Discount online with name only in default language is valid though
++    When I create a free gift discount "default_language_free_gift_discount" with following properties:
++      | active           | true      |
++      | name[en-US]      | Promotion |
++      | name[fr-FR]      |           |
++    Then discount "default_language_free_gift_discount" should have the following properties:
++      | active           | true      |
++      | name[en-US]      | Promotion |
++      | name[fr-FR]      |           |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_gift.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_gift.feature
+new file mode 100644
+index 0000000000000..948dc2018a0c1
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_gift.feature
+@@ -0,0 +1,119 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags full-ux-discount-test-free-gift
++@restore-all-tables-before-feature
++@full-ux-discount-test-free-gift
++
++Feature: Full UX discount test
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts using the new discounts
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given there is a customer named "testCustomer2" whose email is "pub2@prestashop.com"
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++
++  Scenario: Create a complete discount with free gift using new CQRS
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    Given there is a product "hummingbird-tshirt-simple" with name "Hummingbird printed t-shirt"
++    And there is a product in the catalog named "product1" with a price of 20.0 and 1000 items in stock
++    When I create a free gift discount "complete_free_gift_discount" with following properties:
++      | name[en-US]       | Promotion                 |
++      | active            | true                      |
++      | valid_from        | 2025-01-01 11:05:00       |
++      | valid_to          | 2025-12-01 00:00:00       |
++      | code              | FREE_GIFT_2025            |
++      | gift_product      | hummingbird-tshirt-simple |
++    And discount "complete_free_gift_discount" should have the following properties:
++      | name[en-US]       | Promotion                 |
++      | active            | true                      |
++      | valid_from        | 2025-01-01 11:05:00       |
++      | valid_to          | 2025-12-01 00:00:00       |
++      | code              | FREE_GIFT_2025            |
++      | gift_product      | hummingbird-tshirt-simple |
++    And I add 1 product "product1" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$27.00'
++    And I use a voucher "complete_free_gift_discount" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$27.00'
++    Then my cart "dummy_cart" should have the following details:
++      | total_products | $20.00  |
++      | total_discount | $0.00   |
++      | shipping       | $7.00   |
++      | total          | $27.00  |
++    Then gifted product "Hummingbird printed t-shirt" quantity in cart "dummy_cart" should be 1
++
++  Scenario: Create a complete discount with free gift with combination using new CQRS
++    Given I create an empty cart "dummy_cart_combination" for customer "testCustomer"
++    And attribute group "Size" named "Size" in en language exists
++    And attribute group "Color" named "Color" in en language exists
++    And attribute "S" named "S" in en language exists
++    And attribute "M" named "M" in en language exists
++    And attribute "White" named "White" in en language exists
++    And attribute "Blue" named "Blue" in en language exists
++    And I add product "hummingbird-tshirt" with following information:
++      | name[en-US] | Hummingbird printed t-shirt new |
++      | type        | combinations                |
++    And product "hummingbird-tshirt" type should be combinations
++    And product "hummingbird-tshirt" does not have a default combination
++    And I enable product "hummingbird-tshirt"
++    And I generate combinations for product "hummingbird-tshirt" using following attributes:
++      | Size  | [S,M]              |
++      | Color | [White,Blue] |
++    And product "hummingbird-tshirt" should have following combinations:
++      | id reference   | combination name        | reference | attributes           | impact on price | quantity | is default |
++      | product1SWhite | Size - S, Color - White |           | [Size:S,Color:White] | 0               | 0        | true       |
++      | product1SBlue  | Size - S, Color - Blue  |           | [Size:S,Color:Blue]  | 0               | 0        | false      |
++      | product1MWhite | Size - M, Color - White |           | [Size:M,Color:White] | 0               | 0        | false      |
++      | product1MBlue  | Size - M, Color - Blue  |           | [Size:M,Color:Blue]  | 0               | 0        | false      |
++    And product "hummingbird-tshirt" default combination should be "product1SWhite"
++    And product "hummingbird-tshirt" should have the following combination ids:
++      | id reference   |
++      | product1SWhite |
++      | product1SBlue  |
++      | product1MWhite |
++      | product1MBlue  |
++    When I update combination "product1MWhite" with following values:
++      | minimal quantity           | 1          |
++      | low stock threshold        | 1          |
++      | low stock alert is enabled | true        |
++      | available date             | 2021-10-10  |
++    And I update combination "product1MWhite" stock with following details:
++      | delta quantity             | 1         |
++      | location                   | Storage nr1 |
++    Then combination "product1MWhite" should have following stock details:
++      | combination stock detail   | value       |
++      | quantity                   | 1         |
++      | minimal quantity           | 1          |
++      | low stock threshold        | 1          |
++      | low stock alert is enabled | true        |
++      | location                   | Storage nr1 |
++      | available date             | 2021-10-10  |
++    And there is a product in the catalog named "product1" with a price of 20.0 and 1000 items in stock
++    When I create a free gift discount "complete_free_combination_discount" with following properties:
++      | name[en-US]       | Promotion 2             |
++      | active            | true                   |
++      | valid_from        | 2025-01-01 11:05:00    |
++      | valid_to          | 2025-12-01 00:00:00    |
++      | code              | FREE_COMBI_2025        |
++      | gift_product      | hummingbird-tshirt     |
++      | gift_combination  | product1MWhite         |
++    And discount "complete_free_combination_discount" should have the following properties:
++      | name[en-US]       | Promotion 2             |
++      | active            | true                   |
++      | valid_from        | 2025-01-01 11:05:00    |
++      | valid_to          | 2025-12-01 00:00:00    |
++      | code              | FREE_COMBI_2025        |
++      | gift_product      | hummingbird-tshirt     |
++      | gift_combination  | product1MWhite          |
++    And I add 1 product "product1" to the cart "dummy_cart_combination"
++    And cart "dummy_cart_combination" total with tax included should be '$27.00'
++    And I use a voucher "complete_free_combination_discount" on the cart "dummy_cart_combination"
++    And cart "dummy_cart_combination" total with tax included should be '$27.00'
++    Then my cart "dummy_cart_combination" should have the following details:
++      | total_products | $20.00  |
++      | total_discount | $0.00   |
++      | shipping       | $7.00   |
++      | total          | $27.00  |
++    Then gifted product "Hummingbird printed t-shirt new" quantity in cart "dummy_cart_combination" should be 1
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 6b6d489e0b9eb..af690302ae3d6 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -308,6 +308,18 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ContextFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\AttributeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GenerateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\GetCombinationIdsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationListingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStatusFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\CombinationAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\Combination\UpdateCombinationStockFeatureContext
+ 
+     catalog_price_rule:
+       paths:

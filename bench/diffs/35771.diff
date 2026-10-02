@@ -1,0 +1,127 @@
+diff --git a/src/Core/Grid/Query/AttributeGroupQueryBuilder.php b/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
+index b49f262c7743f..4e5d5ebb2f8bd 100644
+--- a/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
++++ b/src/Core/Grid/Query/AttributeGroupQueryBuilder.php
+@@ -29,7 +29,6 @@
+ use Doctrine\DBAL\Connection;
+ use Doctrine\DBAL\Query\QueryBuilder;
+ use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
+-use PrestaShop\PrestaShop\Core\Multistore\MultistoreContextCheckerInterface;
+ 
+ /**
+  * Provides sql for attributes group list
+@@ -46,11 +45,6 @@ final class AttributeGroupQueryBuilder extends AbstractDoctrineQueryBuilder
+      */
+     private $searchCriteriaApplicator;
+ 
+-    /**
+-     * @var MultistoreContextCheckerInterface
+-     */
+-    private $multistoreContextChecker;
+-
+     /**
+      * @var int[]
+      */
+@@ -61,7 +55,6 @@ final class AttributeGroupQueryBuilder extends AbstractDoctrineQueryBuilder
+      * @param string $dbPrefix
+      * @param DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator
+      * @param int $contextLangId
+-     * @param MultistoreContextCheckerInterface $multistoreContextChecker
+      * @param int[] $contextShopIds
+      */
+     public function __construct(
+@@ -69,13 +62,11 @@ public function __construct(
+         $dbPrefix,
+         DoctrineSearchCriteriaApplicatorInterface $searchCriteriaApplicator,
+         $contextLangId,
+-        MultistoreContextCheckerInterface $multistoreContextChecker,
+         array $contextShopIds
+     ) {
+         parent::__construct($connection, $dbPrefix);
+         $this->contextLangId = $contextLangId;
+         $this->searchCriteriaApplicator = $searchCriteriaApplicator;
+-        $this->multistoreContextChecker = $multistoreContextChecker;
+         $this->contextShopIds = $contextShopIds;
+     }
+ 
+@@ -89,7 +80,7 @@ public function __construct(
+     public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria)
+     {
+         $qb = $this->getQueryBuilder($searchCriteria->getFilters())
+-            ->select('DISTINCT ag.id_attribute_group, agl.name, ag.position, acount.values');
++            ->select('DISTINCT ag.id_attribute_group, agl.*, ag.*, COUNT(a.id_attribute) as `values`');
+ 
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+@@ -120,33 +111,18 @@ public function getCountQueryBuilder(SearchCriteriaInterface $searchCriteria)
+      */
+     private function getQueryBuilder(array $filters)
+     {
+-        $subQuery = $this->connection->createQueryBuilder()
+-            ->select('COUNT(DISTINCT a.id_attribute) AS `values`, a.id_attribute_group')
++        $qb = $this->connection->createQueryBuilder()
+             ->from($this->dbPrefix . 'attribute', 'a')
+-            ->groupBy('a.id_attribute_group');
+-
+-        if (!$this->multistoreContextChecker->isAllShopContext()) {
+-            $subQuery->andWhere('attrShop.id_shop IN (:contextShopIds)');
+-        }
++            ->setParameter('contextLangId', $this->contextLangId)
++            ->setParameter('contextShopIds', $this->contextShopIds, Connection::PARAM_INT_ARRAY);
+ 
+-        $subQuery->leftJoin(
++        $qb->leftJoin(
+             'a',
+-            $this->dbPrefix . 'attribute_shop',
+-            'attrShop',
+-            'a.id_attribute = attrShop.id_attribute'
++            $this->dbPrefix . 'attribute_group',
++            'ag',
++            'a.id_attribute_group = ag.id_attribute_group'
+         );
+ 
+-        $qb = $this->connection->createQueryBuilder()
+-            ->from($this->dbPrefix . 'attribute_group', 'ag')
+-            ->leftJoin(
+-                'ag',
+-                '(' . $subQuery->getSQL() . ')',
+-                'acount',
+-                'acount.id_attribute_group = ag.id_attribute_group'
+-            )
+-            ->setParameter('contextLangId', $this->contextLangId)
+-            ->setParameter('contextShopIds', $this->contextShopIds, Connection::PARAM_INT_ARRAY);
+-
+         $qb->leftJoin(
+             'ag',
+             $this->dbPrefix . 'attribute_group_lang',
+@@ -155,12 +131,13 @@ private function getQueryBuilder(array $filters)
+         );
+ 
+         $qb->leftJoin(
+-            'ag',
+-            $this->dbPrefix . 'attribute_group_shop',
+-            'ags',
+-            'ag.id_attribute_group = ags.id_attribute_group'
++            'a',
++            $this->dbPrefix . 'attribute_shop',
++            'ash',
++            'ash.id_attribute = a.id_attribute'
+         );
+-        $qb->andWhere('ags.id_shop IN (:contextShopIds)');
++        $qb->andWhere('ash.id_shop IN (:contextShopIds)');
++        $qb->groupBy('ag.id_attribute_group');
+ 
+         $this->applyFilters($filters, $qb);
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
+index 4aeed61306666..a17f4b6e6d8d6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/grid/doctrine_query_builder.yml
+@@ -338,7 +338,6 @@ services:
+     arguments:
+       - '@prestashop.core.query.doctrine_search_criteria_applicator'
+       - '@=service("prestashop.adapter.legacy.context").getContext().language.id'
+-      - '@prestashop.adapter.shop.context'
+       - '@=service("prestashop.adapter.shop.context").getContextListShopID()'
+     public: true
+ 

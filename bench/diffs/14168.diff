@@ -1,0 +1,451 @@
+diff --git a/src/Adapter/CMS/Page/CommandHandler/AbstractCmsPageHandler.php b/src/Adapter/CMS/Page/CommandHandler/AbstractCmsPageHandler.php
+index f9a8ff0affa94..df5e726f17a91 100644
+--- a/src/Adapter/CMS/Page/CommandHandler/AbstractCmsPageHandler.php
++++ b/src/Adapter/CMS/Page/CommandHandler/AbstractCmsPageHandler.php
+@@ -30,6 +30,8 @@
+ use PrestaShop\PrestaShop\Adapter\Domain\AbstractObjectModelHandler;
+ use PrestaShop\PrestaShop\Core\Domain\CmsPage\Exception\CmsPageException;
+ use PrestaShop\PrestaShop\Core\Domain\CmsPage\Exception\CmsPageNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\CmsPageCategory\Exception\CmsPageCategoryException;
++use PrestaShop\PrestaShop\Core\Domain\CmsPageCategory\Exception\CmsPageCategoryNotFoundException;
+ use PrestaShopException;
+ 
+ /**
+@@ -47,7 +49,6 @@ abstract class AbstractCmsPageHandler extends AbstractObjectModelHandler
+      * @return CMS
+      *
+      * @throws CmsPageException
+-     * @throws CmsPageNotFoundException
+      */
+     protected function getCmsPageIfExistsById($cmsId)
+     {
+@@ -67,4 +68,28 @@ protected function getCmsPageIfExistsById($cmsId)
+ 
+         return $cms;
+     }
++
++    /**
++     * Checks whether cms page category exists by provided id.
++     *
++     * @param $cmsCategoryId
++     *
++     * @throws CmsPageCategoryException
++     */
++    protected function assertCmsCategoryExists($cmsCategoryId)
++    {
++        try {
++            $cmsCategory = new CMS($cmsCategoryId);
++
++            if (0 >= $cmsCategory->id) {
++                throw new CmsPageCategoryNotFoundException(
++                    sprintf('Cms page category with id "%s" not found', $cmsCategoryId)
++                );
++            }
++        } catch (PrestaShopException $exception) {
++            throw new CmsPageCategoryException(
++                sprintf('An error occurred when trying to get cms page category with id %s', $cmsCategoryId)
++            );
++        }
++    }
+ }
+diff --git a/src/Adapter/CMS/Page/CommandHandler/AddCmsPageHandler.php b/src/Adapter/CMS/Page/CommandHandler/AddCmsPageHandler.php
+index 670fa9d4c957c..74ace09fd02f1 100644
+--- a/src/Adapter/CMS/Page/CommandHandler/AddCmsPageHandler.php
++++ b/src/Adapter/CMS/Page/CommandHandler/AddCmsPageHandler.php
+@@ -41,9 +41,6 @@ final class AddCmsPageHandler extends AbstractCmsPageHandler implements AddCmsPa
+ {
+     /**
+      * {@inheritdoc}
+-     *
+-     * @throws CmsPageException
+-     * @throws PrestaShopException
+      */
+     public function handle(AddCmsPageCommand $command)
+     {
+@@ -75,15 +72,16 @@ public function handle(AddCmsPageCommand $command)
+      * @param AddCmsPageCommand $command
+      *
+      * @return CMS
+-     *
+-     * @throws PrestaShopException
+      */
+     protected function createCmsFromCommand(AddCmsPageCommand $command)
+     {
++        $cmsCategoryId = $command->getCmsPageCategory()->getValue();
++        $this->assertCmsCategoryExists($cmsCategoryId);
++
+         $cms = new CMS();
++        $cms->id_cms_category = $cmsCategoryId;
+         $cms->meta_title = $command->getLocalizedTitle();
+         $cms->head_seo_title = $command->getLocalizedMetaTitle();
+-        $cms->id_cms_category = $command->getCmsPageCategory()->getValue();
+         $cms->meta_description = $command->getLocalizedMetaDescription();
+         $cms->meta_keywords = $command->getLocalizedMetaKeyword();
+         $cms->link_rewrite = $command->getLocalizedFriendlyUrl();
+diff --git a/src/Adapter/CMS/Page/CommandHandler/EditCmsPageHandler.php b/src/Adapter/CMS/Page/CommandHandler/EditCmsPageHandler.php
+index d3fb7037b08b1..522523f7f43ab 100644
+--- a/src/Adapter/CMS/Page/CommandHandler/EditCmsPageHandler.php
++++ b/src/Adapter/CMS/Page/CommandHandler/EditCmsPageHandler.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\CmsPage\Exception\CannotEditCmsPageException;
+ use PrestaShop\PrestaShop\Core\Domain\CmsPage\Exception\CmsPageException;
+ use PrestaShop\PrestaShop\Core\Domain\CmsPage\Exception\CmsPageNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\CmsPageCategory\Exception\CmsPageCategoryException;
+ use PrestaShopException;
+ 
+ /**
+@@ -43,6 +44,7 @@ final class EditCmsPageHandler extends AbstractCmsPageHandler implements EditCms
+      * {@inheritdoc}
+      *
+      * @throws CmsPageException
++     * @throws CmsPageCategoryException
+      */
+     public function handle(EditCmsPageCommand $command)
+     {
+@@ -79,10 +81,16 @@ public function handle(EditCmsPageCommand $command)
+      *
+      * @throws CmsPageException
+      * @throws CmsPageNotFoundException
++     * @throws CmsPageCategoryException
+      */
+     private function createCmsFromCommand(EditCmsPageCommand $command)
+     {
+         $cms = $this->getCmsPageIfExistsById($command->getCmsPageId()->getValue());
++        $cmsCategoryId = $command->getCmsPageCategoryId()->getValue();
++
++        if (null !== $cmsCategoryId && $this->assertCmsCategoryExists($cmsCategoryId)) {
++            $cms->id_cms_category = $cmsCategoryId;
++        }
+ 
+         if (null !== $command->getLocalizedTitle()) {
+             $cms->meta_title = $command->getLocalizedTitle();
+@@ -92,10 +100,6 @@ private function createCmsFromCommand(EditCmsPageCommand $command)
+             $cms->head_seo_title = $command->getLocalizedMetaTitle();
+         }
+ 
+-        if (null !== $command->getCmsPageCategoryId()) {
+-            $cms->id_cms_category = $command->getCmsPageCategoryId()->getValue();
+-        }
+-
+         if (null !== $command->getLocalizedMetaDescription()) {
+             $cms->meta_description = $command->getLocalizedMetaDescription();
+         }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/Design/CmsPageController.php b/src/PrestaShopBundle/Controller/Admin/Improve/Design/CmsPageController.php
+index c149c2404d384..f3e7ee8461f08 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/Design/CmsPageController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/Design/CmsPageController.php
+@@ -97,7 +97,7 @@ public function indexAction(CmsPageCategoryFilters $categoryFilters, CmsPageFilt
+                 ->get('prestashop.core.cms_page.data_provider.cms_page_view')
+                 ->getView($cmsCategoryParentId)
+             ;
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -251,12 +251,26 @@ public function editAction(Request $request, $cmsPageId)
+         $cmsPageId = (int) $cmsPageId;
+ 
+         try {
++            /** @var EditableCmsPage $editableCmsPage */
++            $editableCmsPage = $this->getQueryBus()->handle(new GetCmsPageForEditing($cmsPageId));
++            $previewUrl = $editableCmsPage->getPreviewUrl();
++
+             $form = $this->getCmsPageFormBuilder()->getFormFor($cmsPageId, [], [
+                 'action' => $this->generateUrl('admin_cms_pages_edit', [
+                     'cmsPageId' => $cmsPageId,
+                 ]),
+             ]);
+             $form->handleRequest($request);
++        } catch (Exception $e) {
++            $this->addFlash(
++                'error',
++                $this->getErrorMessageForException($e, $this->getErrorMessages())
++            );
++
++            return $this->redirectToRoute('admin_cms_pages_index');
++        }
++
++        try {
+             $result = $this->getCmsPageFormHandler()->handleFor($cmsPageId, $form);
+ 
+             if ($result->isSubmitted() && $result->isValid()) {
+@@ -274,19 +288,11 @@ public function editAction(Request $request, $cmsPageId)
+ 
+                 return $this->redirectToParentIndexPageByCmsPageId($cmsPageId);
+             }
+-
+-            /** @var EditableCmsPage $editableCmsPage */
+-            $editableCmsPage = $this->getQueryBus()->handle(new GetCmsPageForEditing($cmsPageId));
+-            $previewUrl = $editableCmsPage->getPreviewUrl();
+         } catch (Exception $e) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($e, $this->getErrorMessages())
+             );
+-
+-            if ($e instanceof CmsPageNotFoundException) {
+-                return $this->redirectToRoute('admin_cms_pages_index');
+-            }
+         }
+ 
+         return $this->render(
+@@ -298,7 +304,7 @@ public function editAction(Request $request, $cmsPageId)
+                 'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
+                 'previewUrl' => $previewUrl,
+                 'cmsUrl' => $this->get('prestashop.adapter.shop.url.cms_provider')
+-                ->getUrl($cmsPageId, '{friendy-url}'),
++                    ->getUrl($cmsPageId, '{friendy-url}'),
+             ]
+         );
+     }
+@@ -335,7 +341,7 @@ public function createCmsCategoryAction(Request $request)
+ 
+                 return $this->redirectToIndexPageById($result->getIdentifiableObjectId());
+             }
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -364,8 +370,6 @@ public function createCmsCategoryAction(Request $request)
+      * @param Request $request
+      *
+      * @return Response
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function editCmsCategoryAction($cmsCategoryId, Request $request)
+     {
+@@ -383,7 +387,7 @@ public function editCmsCategoryAction($cmsCategoryId, Request $request)
+                 return $this->redirectToIndexPageById($result->getIdentifiableObjectId());
+             }
+             $cmsCategoryParentId = $this->getParentCategoryId((int) $cmsCategoryId)->getValue();
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -420,12 +424,9 @@ public function editCmsCategoryAction($cmsCategoryId, Request $request)
+      * @param int $cmsCategoryId
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function deleteCmsCategoryAction($cmsCategoryId)
+     {
+-        $redirectResponse = $this->redirectToParentIndexPage((int) $cmsCategoryId);
+         try {
+             $this->getCommandBus()->handle(
+                 new DeleteCmsPageCategoryCommand((int) $cmsCategoryId)
+@@ -435,14 +436,14 @@ public function deleteCmsCategoryAction($cmsCategoryId)
+                 'success',
+                 $this->trans('Successful deletion.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+             );
+         }
+ 
+-        return $redirectResponse;
++        return $this->redirectToParentIndexPage((int) $cmsCategoryId);
+     }
+ 
+     /**
+@@ -462,13 +463,10 @@ public function deleteCmsCategoryAction($cmsCategoryId)
+      * @param Request $request
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function deleteBulkCmsCategoryAction(Request $request)
+     {
+         $cmsCategoriesToDelete = $request->request->get('cms_page_category_bulk');
+-        $redirectResponse = $this->redirectToParentIndexPageByCategoryBulkIds($cmsCategoriesToDelete);
+ 
+         try {
+             $cmsCategoriesToDelete = array_map(function ($item) { return (int) $item; }, $cmsCategoriesToDelete);
+@@ -481,14 +479,14 @@ public function deleteBulkCmsCategoryAction(Request $request)
+                 'success',
+                 $this->trans('The selection has been successfully deleted.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+             );
+         }
+ 
+-        return $redirectResponse;
++        return $this->redirectToParentIndexPageByCategoryBulkIds($cmsCategoriesToDelete);
+     }
+ 
+     /**
+@@ -508,8 +506,6 @@ public function deleteBulkCmsCategoryAction(Request $request)
+      * @param Request $request
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function updateCmsCategoryPositionAction(Request $request)
+     {
+@@ -563,8 +559,6 @@ public function updateCmsCategoryPositionAction(Request $request)
+      * )
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function updateCmsPositionAction(Request $request)
+     {
+@@ -619,8 +613,6 @@ public function updateCmsPositionAction(Request $request)
+      * @param int $cmsCategoryId
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function toggleCmsCategoryAction($cmsCategoryId)
+     {
+@@ -633,7 +625,7 @@ public function toggleCmsCategoryAction($cmsCategoryId)
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -660,8 +652,6 @@ public function toggleCmsCategoryAction($cmsCategoryId)
+      * @param Request $request
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function bulkCmsPageCategoryStatusEnableAction(Request $request)
+     {
+@@ -678,7 +668,7 @@ public function bulkCmsPageCategoryStatusEnableAction(Request $request)
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -705,8 +695,6 @@ public function bulkCmsPageCategoryStatusEnableAction(Request $request)
+      * @param Request $request
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     public function bulkCmsPageCategoryStatusDisableAction(Request $request)
+     {
+@@ -726,7 +714,7 @@ function ($item) {
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageCategoryException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -763,7 +751,7 @@ public function toggleCmsAction($cmsId)
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -806,7 +794,7 @@ public function bulkDisableCmsPageStatusAction(Request $request)
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -854,7 +842,7 @@ function ($item) {
+                 'success',
+                 $this->trans('The status has been successfully updated.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -904,7 +892,7 @@ function ($item) {
+                 'success',
+                 $this->trans('The selection has been successfully deleted.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -943,7 +931,7 @@ public function deleteCmsAction($cmsId)
+                 'success',
+                 $this->trans('Successful deletion.', 'Admin.Notifications.Success')
+             );
+-        } catch (CmsPageException $exception) {
++        } catch (Exception $exception) {
+             $this->addFlash(
+                 'error',
+                 $this->getErrorMessageForException($exception, $this->getErrorMessages())
+@@ -978,8 +966,6 @@ private function getCmsPageCategoryFormHandler()
+      * @param array $cmsPageCategoryIds
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     private function redirectToParentIndexPageByCategoryBulkIds(array $cmsPageCategoryIds)
+     {
+@@ -1012,14 +998,16 @@ private function redirectToParentIndexPageByBulkIds(array $cmsPageIds)
+      * @param int $cmsPageCategoryId
+      *
+      * @return RedirectResponse
+-     *
+-     * @throws CmsPageCategoryException
+      */
+     private function redirectToParentIndexPage($cmsPageCategoryId)
+     {
+-        $cmsPageCategoryParentId = $this->getParentCategoryId($cmsPageCategoryId);
++        try {
++            $cmsPageCategoryParentId = $this->getParentCategoryId($cmsPageCategoryId)->getValue();
++        } catch (CmsPageCategoryException $e) {
++            $cmsPageCategoryParentId = CmsPageCategoryId::ROOT_CMS_PAGE_CATEGORY_ID;
++        }
+ 
+-        return $this->redirectToIndexPageById($cmsPageCategoryParentId->getValue());
++        return $this->redirectToIndexPageById($cmsPageCategoryParentId);
+     }
+ 
+     /**
+@@ -1030,12 +1018,12 @@ private function redirectToParentIndexPage($cmsPageCategoryId)
+     private function redirectToParentIndexPageByCmsPageId($cmsPageId)
+     {
+         try {
+-            $cmsCategoryId = $this->getQueryBus()->handle(new GetCmsCategoryIdForRedirection((int) $cmsPageId));
++            $cmsCategoryId = $this->getQueryBus()->handle(new GetCmsCategoryIdForRedirection((int) $cmsPageId))->getValue();
+         } catch (CmsPageException $e) {
+             $cmsCategoryId = CmsPageCategoryId::ROOT_CMS_PAGE_CATEGORY_ID;
+         }
+ 
+-        return $this->redirectToIndexPageById($cmsCategoryId->getValue());
++        return $this->redirectToIndexPageById($cmsCategoryId);
+     }
+ 
+     /**

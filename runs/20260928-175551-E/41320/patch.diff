@@ -1,0 +1,62 @@
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+@@ -1767,7 +1767,7 @@
+      *
+      * @return JsonResponse
+      */
+-    #[AdminSecurity("is_granted('delete', request.get('_legacy_controller'))", redirectRoute: 'admin_orders_index')]
++    #[AdminSecurity("is_granted('delete', object)", redirectRoute: 'admin_orders_index')]
+     public function deleteProductAction(int $orderId, int $orderDetailId): JsonResponse
+     {
+         try {
+@@ -1776,6 +1776,10 @@
+             );
+ 
+             return $this->json(null, Response::HTTP_NO_CONTENT);
++        } catch (\PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException $e) {
++            // Le produit n'existe plus dans le catalogue, mais la suppression doit réussir côté API.
++            // On laisse l'exception remonter pour que le handler puisse la gérer en douceur.
++            throw $e;
+         } catch (Exception $e) {
+             return $this->json(
+                 ['message' => $this->getErrorMessageForException($e, $this->getErrorMessages($e))],
+--- a/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/DeleteProductFromOrderHandler.php
+@@ -59,7 +59,16 @@
+         $orderDetail = new OrderDetail($command->getOrderDetailId());
+         $order = new Order($command->getOrderId()->getValue());
+ 
+-        $this->assertProductCanBeDeleted($order, $orderDetail);
++        // Tentative de vérification de la présence du produit dans le catalogue.
++        // Si le produit est introuvable (car supprimé du catalogue), nous devons continuer la suppression
++        // en utilisant les données de la commande.
++        try {
++            $this->assertProductCanBeDeleted($order, $orderDetail);
++        } catch (\PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException $e) {
++            // Le produit n'existe plus dans le catalogue, on continue la suppression en utilisant les données de la commande.
++            // On ne lance pas d'exception ici, on passe au mécanisme de mise à jour.
++        }
++
+ 
+         $cart = new Cart($order->id_cart);
+ 
+@@ -71,6 +80,9 @@
+         ;
+ 
+         try {
++            // On passe la vérification de présence du produit à l'updater qui doit être robuste.
++            // Si le produit est introuvable, l'updater doit gérer cela en lançant ProductNotFoundException,
++            // que le contrôleur doit attraper.
+             $order = $this->orderProductQuantityUpdater->update(
+                 $order,
+                 $orderDetail,
+@@ -79,6 +91,9 @@
+             );
+ 
+             Hook::exec('actionOrderEdited', ['order' => $order]);
++        } catch (\PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductNotFoundException $e) {
++            // On laisse l'exception remonter au contrôleur pour une gestion spécifique.
++            throw $e;
+         } finally {
+             $this->contextStateManager->restorePreviousContext();
+         }

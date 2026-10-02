@@ -1,0 +1,395 @@
+diff --git a/.gitignore b/.gitignore
+index d1a24dbf75a7f..a0ac4486a8fa9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -235,3 +235,6 @@ docker-compose.override.yml
+ 
+ # Claude Code - personal settings (commands are shared, settings are not)
+ .claude/settings.local.json
++
++# Marker left in a theme by ./tools/assets/build.sh --watch
++.ps-dev-build
+diff --git a/Makefile b/Makefile
+index bb40ab95fc5e7..740920116aa33 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,13 +1,22 @@
+ # Executables (local)
+ DOCKER_COMP = docker compose
++DOCKER_AS_WWW = prestashop-git runuser -u www-data -g www-data --
+ PHP_CONT =
+ PHP_CONT_WITH_LOGIN = bash
++WATCH_CONT = bash
+ 
+ # Determine if we are using docker
+ DOCKER_RUNNING := $(shell docker compose ps -q 2>/dev/null)
+ ifneq ($(strip $(DOCKER_RUNNING)),)
+-	PHP_CONT = $(DOCKER_COMP) exec -T prestashop-git runuser -u www-data -g www-data --
+-	PHP_CONT_WITH_LOGIN = $(DOCKER_COMP) exec -T prestashop-git runuser -u www-data -g www-data -- bash -l
++	PHP_CONT = $(DOCKER_COMP) exec -T $(DOCKER_AS_WWW)
++	PHP_CONT_WITH_LOGIN = $(DOCKER_COMP) exec -T $(DOCKER_AS_WWW) bash -l
++	# Watch targets are long lived, and `docker exec` has no signal proxying: Ctrl+C only
++	# reaches webpack through the pty line discipline inside the container, so a TTY is
++	# allocated whenever there is one to attach. Without it (CI, IDE tasks) -t would make
++	# the target fail outright, so we fall back to -i alone -- and there an interrupt kills
++	# the local client only, leaving the watcher running inside the container.
++	WATCH_TTY := $(shell [ -t 0 ] && printf %s -it || printf %s -i)
++	WATCH_CONT = $(DOCKER_COMP) exec $(WATCH_TTY) $(DOCKER_AS_WWW) bash -l
+ endif
+ 
+ # Executables (local or docker)
+@@ -17,7 +26,7 @@ SYMFONY  = $(PHP_CONT) bin/console
+ 
+ # Misc
+ .DEFAULT_GOAL = install
+-.PHONY        : help docker-build docker-up docker-start docker-restart docker-down docker-logs docker-sh composer cc test test-unit test-integration test-integration-behaviour test-api-module assets assets-clean wait-assets admin front admin-default admin-new-theme front-core front-classic front-hummingbird install install-prestashop cs-fixer cs-fixer-dry phpstan scss-fixer es-linter
++.PHONY        : help docker-build docker-up docker-start docker-restart docker-down docker-logs docker-sh composer cc test test-unit test-integration test-integration-behaviour test-api-module assets assets-clean wait-assets admin front admin-default admin-new-theme front-core front-classic front-hummingbird watch-admin-default watch-admin-new-theme watch-front-core watch-front-classic watch-front-hummingbird install install-prestashop cs-fixer cs-fixer-dry phpstan scss-fixer es-linter
+ 
+ ## —— 🎵 🐳 PrestaShop Docker Makefile 🐳 🎵 ———————————————————————————————————
+ help: ## Outputs this help screen
+@@ -83,6 +92,23 @@ front-classic: ## Build assets for classic theme
+ front-hummingbird: ## Build assets for hummingbird theme
+ 	$(PHP_CONT_WITH_LOGIN) ./tools/assets/build.sh front-hummingbird --force
+ 
++# Ctrl+C is the expected way to stop a watch: it surfaces as exit code 130, which is not
++# a failure.
++watch-admin-default: ## Watch and rebuild assets for default admin theme
++	$(WATCH_CONT) ./tools/assets/build.sh admin-default --watch || [ $$? -eq 130 ]
++
++watch-admin-new-theme: ## Watch and rebuild assets for new admin theme
++	$(WATCH_CONT) ./tools/assets/build.sh admin-new-theme --watch || [ $$? -eq 130 ]
++
++watch-front-core: ## Watch and rebuild assets for core theme
++	$(WATCH_CONT) ./tools/assets/build.sh front-core --watch || [ $$? -eq 130 ]
++
++watch-front-classic: ## Watch and rebuild assets for classic theme
++	$(WATCH_CONT) ./tools/assets/build.sh front-classic --watch || [ $$? -eq 130 ]
++
++watch-front-hummingbird: ## Watch and rebuild assets for hummingbird theme
++	$(WATCH_CONT) ./tools/assets/build.sh front-hummingbird --watch || [ $$? -eq 130 ]
++
+ ## —— Composer & Symfony 🧙 ————————————————————————————————————————————————————
+ composer: ## Install PHP dependencies
+ 	$(COMPOSER) install --no-interaction
+diff --git a/admin-dev/themes/default/package.json b/admin-dev/themes/default/package.json
+index a5fb2ad1f9cc2..d2b8ed924513c 100644
+--- a/admin-dev/themes/default/package.json
++++ b/admin-dev/themes/default/package.json
+@@ -7,7 +7,7 @@
+         "scss-lint": "stylelint \"**/*.scss\" --formatter verbose",
+         "scss-fix": "stylelint \"**/*.scss\" --fix",
+         "build": "webpack --bail --progress",
+-        "watch": "webpack --bail --progress --watch --mode development",
++        "watch": "webpack --progress --watch --mode development",
+         "lint": "eslint -c .eslintrc.js --ext .js,.vue .",
+         "lint-fix": "eslint -c .eslintrc.js --ext .js,.vue . --fix",
+         "example": "http-server ./example -o example.html -p 1000 & http-server ./public -p 1010 --cors"
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index 6debabeb905e2..fe12c441c2953 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -85,15 +85,30 @@ make help # Show all available commands
+ | Command | Description |
+ |---------|-------------|
+ | `make assets` | Build all assets (admin + front) |
+-| `make assets-dev` | Start development servers for all themes |
++| `make assets-clean` | Build all assets, forcing a clean reinstall of `node_modules` |
+ | `make wait-assets` | Wait for assets to finish building |
+ | `make admin` | Build admin assets (default + new theme) |
+-| `make front` | Build front assets (core + classic) |
++| `make front` | Build front assets (core + classic + hummingbird) |
+ | `make admin-default` | Build default admin theme assets |
+ | `make admin-new-theme` | Build new admin theme assets |
+ | `make front-core` | Build core front theme assets |
+ | `make front-classic` | Build classic front theme assets |
+ | `make front-hummingbird` | Build hummingbird theme assets |
++| `make watch-admin-default` | Watch and rebuild default admin theme assets |
++| `make watch-admin-new-theme` | Watch and rebuild new admin theme assets |
++| `make watch-front-core` | Watch and rebuild core front theme assets |
++| `make watch-front-classic` | Watch and rebuild classic front theme assets |
++| `make watch-front-hummingbird` | Watch and rebuild hummingbird theme assets |
++
++The `watch-*` targets rebuild one theme on every change and stay in the foreground until
++you stop them with `Ctrl+C`. They write **unminified development assets**, and leave a
++`.ps-dev-build` marker in the theme so the next build knows the assets on disk are not a
++finished build: run the matching build target before committing or releasing.
++
++> Stop a watch with `Ctrl+C` from the terminal that started it. `docker exec` does not
++> forward signals, so interrupting a watch started without a terminal attached (CI, an IDE
++> task runner) leaves the watcher running inside the container, where it will keep
++> overwriting the built assets.
+ 
+ ### PrestaShop Installation
+ 
+@@ -193,6 +208,8 @@ make assets
+ make assets-clean
+ # Build Admin default theme
+ make admin-default
++# Watch and rebuild the core front theme on every change (Ctrl+C to stop)
++make watch-front-core
+ 
+ # Direct script usage (dry-run by default. Use --force to force rebuild)
+ 
+@@ -207,6 +224,9 @@ make admin-default
+ # Force a clean reinstall of node_modules (implies --force)
+ ./tools/assets/build.sh --force-install
+ ./tools/assets/build.sh admin-default --force-install
++
++# Watch a single asset (development build)
++./tools/assets/build.sh admin-default --watch
+ ```
+ 
+ ### Performance Tips
+diff --git a/themes/webpack.config.js b/themes/webpack.config.js
+index 6c873cbc41195..69ca1948262af 100644
+--- a/themes/webpack.config.js
++++ b/themes/webpack.config.js
+@@ -33,7 +33,9 @@ module.exports = (env, argv) => {
+     },
+     devtool: mode === 'production' ? false : 'source-map',
+     optimization: {
+-      minimize: true,
++      // Development builds (npm run watch) skip minification: it is the dominant cost
++      // of a rebuild and the output is never shipped.
++      minimize: mode === 'production',
+       minimizer: [new TerserPlugin({
+         extractComments: false
+       })],
+diff --git a/tools/assets/build.sh b/tools/assets/build.sh
+index b3c996f7bb6db..7ce6c8af91d5e 100755
+--- a/tools/assets/build.sh
++++ b/tools/assets/build.sh
+@@ -2,10 +2,12 @@
+ 
+ ###
+ # This script rebuilds all the static assets, reinstalling dependencies when they changed
+-# Usage: ./tools/assets/build.sh [asset-name] [--force] [--force-install]
++# Usage: ./tools/assets/build.sh [asset-name] [--force] [--force-install] [--watch]
+ #   asset-name: admin-default, admin-new-theme, front-core, front-classic, front-hummingbird, or all
+ #   --force: Force rebuild even if assets already exist
+ #   --force-install: Force a clean reinstall of node_modules (implies --force)
++#   --watch: Rebuild the given asset on every change instead of building once.
++#            Requires a single asset name, and writes development assets.
+ #
+ 
+ #http://redsymbol.net/articles/unofficial-bash-strict-mode/
+@@ -16,6 +18,7 @@ ADMIN_DIR="${PROJECT_PATH}/${ADMIN_DIR:-admin-dev}"
+ # Parse command line arguments
+ FORCE_BUILD=false
+ FORCE_INSTALL=false
++WATCH_MODE=false
+ ASSET_NAME=""
+ 
+ for arg in "$@"; do
+@@ -23,15 +26,25 @@ for arg in "$@"; do
+     --force)
+       FORCE_BUILD=true
+       ;;
++    --watch)
++      WATCH_MODE=true
++      ;;
+     --force-install)
+       FORCE_INSTALL=true
+       # Dependencies are only installed as part of a build, and reinstalling them
+       # without rebuilding would leave the previous assets in place, so this implies --force.
+       FORCE_BUILD=true
+       ;;
++    --*)
++      echo "Unknown option $arg"
++      exit 1
++      ;;
+     *)
+       if [[ -z "$ASSET_NAME" ]]; then
+         ASSET_NAME="$arg"
++      else
++        echo "Unexpected argument $arg, only one asset name is accepted"
++        exit 1
+       fi
+       ;;
+   esac
+@@ -108,6 +121,65 @@ function install_dependencies {
+   fi
+ }
+ 
++# Maps an asset name to the directory holding its package.json.
++function asset_dir {
++  case $1 in
++    admin-default)     echo "$ADMIN_DIR/themes/default" ;;
++    admin-new-theme)   echo "$ADMIN_DIR/themes/new-theme" ;;
++    front-core)        echo "$PROJECT_PATH/themes" ;;
++    front-classic)     echo "$PROJECT_PATH/themes/classic/_dev" ;;
++    front-hummingbird) echo "$PROJECT_PATH/themes/hummingbird" ;;
++    *) return 1 ;;
++  esac
++}
++
++ASSET_NAMES="admin-default, admin-new-theme, front-core, front-classic, front-hummingbird"
++
++# Watch mode leaves development assets on disk. This marker records that, so the
++# "already built" check below does not mistake them for a finished build.
++#
++# It lives at the theme root, not under node_modules: `npm ci` wipes node_modules, which
++# would drop the marker while the development assets it describes are still in place.
++DEV_BUILD_MARKER=".ps-dev-build"
++
++# Rebuild one asset on every change.
++#
++# Deliberately does not go through build(): a watch never returns, so it must not create
++# buildLock, which wait-build.sh and the container entrypoint wait on.
++function watch_asset {
++  local dir
++  if ! dir=$(asset_dir "${1:-}"); then
++    echo "--watch needs a single asset name among: $ASSET_NAMES"
++    exit 1
++  fi
++  if [[ ! -d $dir ]]; then
++    echo "$dir folder not found"
++    exit 1
++  fi
++
++  pushd "$dir"
++  install_dependencies
++  touch "$DEV_BUILD_MARKER"
++  echo ">>> Watching $1 — press Ctrl+C to stop"
++  echo "!!! Watch produces unminified development assets. Run a normal build before committing or releasing."
++
++  # NODE_ENV is scoped to this command on purpose. The classic theme resolves its mode
++  # from NODE_ENV rather than from --mode, so without this a shell exporting
++  # NODE_ENV=production would silently run a minified watch. The other themes pin --mode
++  # on the command line, which wins, so this is a no-op for them.
++  #
++  # Exporting it instead would change install_stamp_value and make every switch between
++  # build and watch reinstall node_modules.
++  local status=0
++  NODE_ENV=development npm run watch || status=$?
++  popd
++
++  # 130 is Ctrl+C, which is how a watch is meant to end.
++  if [[ "$status" -ne 0 && "$status" -ne 130 ]]; then
++    return "$status"
++  fi
++}
++
+ function build {
+   if [[ -z "$1" ]]; then
+     echo "Parameter is empty"
+@@ -122,20 +194,35 @@ function build {
+ 
+   touch buildLock
+   chmod 664 buildLock
++  # wait-build.sh and the container entrypoint block until this file disappears, so it
++  # must not survive a failed install or build.
++  local lock="$PWD/buildLock"
++  trap "rm -f '$lock'" EXIT
++
+   install_dependencies
+   npm run build
+-  rm buildLock
++  rm -f "$DEV_BUILD_MARKER"
++  rm -f "$lock"
++  trap - EXIT
+   popd
+ }
+ 
+ # Check if asset needs to be built
+ should_build_asset() {
+   local asset_type=$1
+-  
++
+   if [[ "$FORCE_BUILD" == "true" ]]; then
+     return 0
+   fi
+-  
++
++  # Assets left by a watch are development builds; the sentinel files below exist but
++  # must not count as finished output.
++  local dir
++  if dir=$(asset_dir "$asset_type") && [[ -f "$dir/$DEV_BUILD_MARKER" ]]; then
++    echo "> $asset_type currently holds a development build from --watch, rebuilding"
++    return 0
++  fi
++
+   case $asset_type in
+     admin-default)
+       [[ ! -f "$ADMIN_DIR/themes/default/public/theme.css" ]]
+@@ -152,65 +239,36 @@ should_build_asset() {
+     front-hummingbird)
+       [[ ! -f "$PROJECT_PATH/themes/hummingbird/assets/css/theme.css" ]]
+       ;;
+-    *)
+-      return 0
+-      ;;
+   esac
+ }
+ 
+ build_asset() {
+   case $1 in
+-    admin-default)
+-      if should_build_asset "admin-default"; then
+-        echo ">>> Building admin default theme..."
+-        build "$ADMIN_DIR/themes/default"
+-      else
+-        echo "> Admin default theme already exists (use --force to rebuild)"
+-      fi
+-    ;;
+-    admin-new-theme)
+-      if should_build_asset "admin-new-theme"; then
+-        echo ">>> Building admin new theme..."
+-        build "$ADMIN_DIR/themes/new-theme"
+-      else
+-        echo "> Admin new theme already exists (use --force to rebuild)"
+-      fi
+-    ;;
+-    front-core)
+-      if should_build_asset "front-core"; then
+-        echo ">>> Building core theme assets..."
+-        build "$PROJECT_PATH/themes"
+-      else
+-        echo "> Front core already exists (use --force to rebuild)"
+-      fi
+-    ;;
+-    front-classic)
+-      if should_build_asset "front-classic"; then
+-        echo ">>> Building classic theme assets..."
+-        build "$PROJECT_PATH/themes/classic/_dev"
+-      else
+-        echo "> Front classic already exists (use --force to rebuild)"
+-      fi
++    all)
++      build_asset admin-default & build_asset admin-new-theme & build_asset front-core & build_asset front-classic & build_asset front-hummingbird
+     ;;
+-    front-hummingbird)
+-      if should_build_asset "front-hummingbird"; then
+-        echo ">>> Building hummingbird theme assets..."
+-        build "$PROJECT_PATH/themes/hummingbird"
++    admin-default|admin-new-theme|front-core|front-classic|front-hummingbird)
++      if should_build_asset "$1"; then
++        echo ">>> Building $1 assets..."
++        build "$(asset_dir "$1")"
+       else
+-        echo "> Front hummingbird already exists (use --force to rebuild)"
++        echo "> $1 already built (use --force to rebuild)"
+       fi
+     ;;
+-    all)
+-      build_asset admin-default & build_asset admin-new-theme & build_asset front-core & build_asset front-classic & build_asset front-hummingbird
+-    ;;
+     *)
+       echo "Unknown asset to build $1"
+-      echo "Available assets: admin-default, admin-new-theme, front-core, front-classic, front-hummingbird, all"
++      echo "Available assets: $ASSET_NAMES, all"
+       echo "Use --force to rebuild even if assets already exist"
+-      ;;
++      exit 1
++    ;;
+   esac
+ }
+ 
++if [[ "$WATCH_MODE" == "true" ]]; then
++  watch_asset "$ASSET_NAME"
++  exit 0
++fi
++
+ if [[ -n "$ASSET_NAME" ]]; then
+   build_asset "$ASSET_NAME"
+ else

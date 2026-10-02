@@ -1,0 +1,423 @@
+diff --git a/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+index ab5818cfa6858..586d826a454ed 100644
+--- a/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
++++ b/src/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculator.php
+@@ -8,20 +8,14 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator;
+ 
+-use PrestaShop\Decimal\DecimalNumber;
+-use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
+-use PrestaShop\PrestaShop\Adapter\Tools;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Calculator\ShippingCostCalculatorInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
+-use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ 
+ class FreeShippingCalculator implements ShippingCostCalculatorInterface
+ {
+     public function __construct(
+         private readonly FreeShippingCriteriaProviderInterface $criteriaProvider,
+-        private readonly Tools $tools,
+-        private readonly CurrencyRepository $currencyRepository,
+     ) {
+     }
+ 
+@@ -31,19 +25,12 @@ public function compute(ShippingCostPriceInterface $context): void
+             return;
+         }
+ 
+-        $thresholds = $this->criteriaProvider->getCriteria();
++        $thresholds = $this->criteriaProvider->getCriteria($context);
+ 
+-        if ($thresholds->hasFreePrice()) {
+-            $convertedPrice = new DecimalNumber((string) $this->tools->convertPrice(
+-                (float) (string) $thresholds->getFreePrice(),
+-                $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()))
+-            ));
+-
+-            if ($context->getShipmentTotal()->isGreaterOrEqualThan($convertedPrice)) {
+-                $context->setFreeShipping(true);
++        if ($thresholds->hasFreePrice() && $context->getShipmentTotal()->isGreaterOrEqualThan($thresholds->getFreePrice())) {
++            $context->setFreeShipping(true);
+ 
+-                return;
+-            }
++            return;
+         }
+ 
+         if ($thresholds->hasFreeWeight() && $context->getTotalWeight()->isGreaterOrEqualThan($thresholds->getFreeWeight())) {
+diff --git a/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php b/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php
+index 05b2aaefe795f..9603429ef2a42 100644
+--- a/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php
++++ b/src/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProvider.php
+@@ -10,24 +10,52 @@
+ 
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\HookManager;
++use PrestaShop\PrestaShop\Adapter\Tools;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteria;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ 
+ class ConfigFreeShippingCriteriaProvider implements FreeShippingCriteriaProviderInterface
+ {
+     public function __construct(
++        private readonly HookManager $hookManager,
+         private readonly AdapterConfiguration $configuration,
++        private readonly Tools $tools,
++        private readonly CurrencyRepository $currencyRepository,
+     ) {
+     }
+ 
+-    public function getCriteria(): FreeShippingCriteria
++    public function getCriteria(ShippingCostPriceInterface $context): FreeShippingCriteria
+     {
+         $freePrice = $this->configuration->get('PS_SHIPPING_FREE_PRICE');
++        if ($freePrice !== false && (float) $freePrice > 0) {
++            $freePrice = $this->tools->convertPrice(
++                (float) $freePrice,
++                $this->currencyRepository->get(new CurrencyId($context->getCurrencyId()))
++            );
++        }
++
++        $zoneId = $context->getResolvedZoneId() ?? $context->getCountryZoneId();
++
++        $this->hookManager->exec('actionOverrideShippingFreePrice', [
++            'shippingFreePrice' => &$freePrice,
++            'id_zone' => $zoneId,
++            'id_currency' => $context->getCurrencyId(),
++        ]);
++
+         $freeWeight = $this->configuration->get('PS_SHIPPING_FREE_WEIGHT');
++        $this->hookManager->exec('actionOverrideShippingFreeWeight', [
++            'shippingFreeWeight' => &$freeWeight,
++            'id_zone' => $zoneId,
++            'id_currency' => $context->getCurrencyId(),
++        ]);
+ 
+         return new FreeShippingCriteria(
+-            $freePrice !== false && $freePrice > 0 ? new DecimalNumber((string) $freePrice) : null,
+-            $freeWeight !== false && $freeWeight > 0 ? new DecimalNumber((string) $freeWeight) : null,
++            $freePrice !== false && (float) $freePrice > 0 ? new DecimalNumber((string) $freePrice) : null,
++            $freeWeight !== false && (float) $freeWeight > 0 ? new DecimalNumber((string) $freeWeight) : null,
+         );
+     }
+ }
+diff --git a/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php
+index 12a13b5eb214b..ce45d41d6543d 100644
+--- a/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php
++++ b/src/Core/Domain/Carrier/ShippingCost/Provider/FreeShippingCriteriaProviderInterface.php
+@@ -8,7 +8,9 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider;
+ 
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++
+ interface FreeShippingCriteriaProviderInterface extends ShippingCostProviderInterface
+ {
+-    public function getCriteria(): FreeShippingCriteria;
++    public function getCriteria(ShippingCostPriceInterface $context): FreeShippingCriteria;
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+index 39e302bf59c6b..4b7fb20b02066 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+@@ -5,6 +5,8 @@ services:
+ 
+   PrestaShop\PrestaShop\Adapter\Configuration: ~
+ 
++  PrestaShop\PrestaShop\Adapter\HookManager: ~
++
+   prestashop.adapter.legacy.configuration:
+     alias: PrestaShop\PrestaShop\Adapter\Configuration
+ 
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+index bc551fa951939..8526e72d38e38 100644
+--- a/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Calculator/FreeShippingCalculatorTest.php
+@@ -8,42 +8,28 @@
+ 
+ namespace Tests\Unit\Adapter\Carrier\ShippingCost\Calculator;
+ 
+-use Currency;
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Calculator\FreeShippingCalculator;
+-use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
+-use PrestaShop\PrestaShop\Adapter\Tools;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteria;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\Provider\FreeShippingCriteriaProviderInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
+-use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ 
+ class FreeShippingCalculatorTest extends TestCase
+ {
+     /** @var FreeShippingCriteriaProviderInterface|\PHPUnit\Framework\MockObject\MockObject */
+     private $criteriaProvider;
+ 
+-    /** @var Tools|\PHPUnit\Framework\MockObject\MockObject */
+-    private $tools;
+-
+-    /** @var CurrencyRepository|\PHPUnit\Framework\MockObject\MockObject */
+-    private $currencyRepository;
+-
+     /** @var FreeShippingCalculator */
+     private $calculator;
+ 
+     protected function setUp(): void
+     {
+         $this->criteriaProvider = $this->createMock(FreeShippingCriteriaProviderInterface::class);
+-        $this->tools = $this->createMock(Tools::class);
+-        $this->currencyRepository = $this->createMock(CurrencyRepository::class);
+         $this->calculator = new FreeShippingCalculator(
+-            $this->criteriaProvider,
+-            $this->tools,
+-            $this->currencyRepository
++            $this->criteriaProvider
+         );
+     }
+ 
+@@ -71,23 +57,39 @@ public function testItSetsFreeShippingIfPriceThresholdIsMet(): void
+     {
+         $context = $this->createContext(1, new DecimalNumber('50'));
+         $criteria = new FreeShippingCriteria(new DecimalNumber('40'), null);
+-        $this->criteriaProvider->method('getCriteria')->willReturn($criteria);
+-
+-        $currency = $this->createMock(Currency::class);
+-        $this->currencyRepository->method('get')->with(new CurrencyId(1))->willReturn($currency);
+-        $this->tools->method('convertPrice')->willReturn(40.0);
++        $this->criteriaProvider->expects($this->once())
++            ->method('getCriteria')
++            ->with($context)
++            ->willReturn($criteria);
+ 
+         $this->calculator->compute($context);
+ 
+         $this->assertTrue($context->isFreeShipping());
+     }
+ 
++    public function testItDoesNotSetFreeShippingIfPriceThresholdIsNotMet(): void
++    {
++        $context = $this->createContext(1, new DecimalNumber('30'));
++        $criteria = new FreeShippingCriteria(new DecimalNumber('40'), null);
++        $this->criteriaProvider->expects($this->once())
++            ->method('getCriteria')
++            ->with($context)
++            ->willReturn($criteria);
++
++        $this->calculator->compute($context);
++
++        $this->assertFalse($context->isFreeShipping());
++    }
++
+     public function testItSetsFreeShippingIfWeightThresholdIsMet(): void
+     {
+         $context = $this->createContext(1, new DecimalNumber('10'));
+         $context->setTotalWeight(new DecimalNumber('10'));
+         $criteria = new FreeShippingCriteria(null, new DecimalNumber('5'));
+-        $this->criteriaProvider->method('getCriteria')->willReturn($criteria);
++        $this->criteriaProvider->expects($this->once())
++            ->method('getCriteria')
++            ->with($context)
++            ->willReturn($criteria);
+ 
+         $this->calculator->compute($context);
+ 
+diff --git a/tests/Unit/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProviderTest.php b/tests/Unit/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProviderTest.php
+new file mode 100644
+index 0000000000000..4167b1c8a646c
+--- /dev/null
++++ b/tests/Unit/Adapter/Carrier/ShippingCost/Provider/ConfigFreeShippingCriteriaProviderTest.php
+@@ -0,0 +1,186 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Carrier\ShippingCost\Provider;
++
++use Currency;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Adapter\Carrier\ShippingCost\Provider\ConfigFreeShippingCriteriaProvider;
++use PrestaShop\PrestaShop\Adapter\Configuration as AdapterConfiguration;
++use PrestaShop\PrestaShop\Adapter\Currency\Repository\CurrencyRepository;
++use PrestaShop\PrestaShop\Adapter\HookManager;
++use PrestaShop\PrestaShop\Adapter\Tools;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPrice;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ShippingCost\ShippingCostPriceInterface;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\ShippingCalculationRequest;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++
++class ConfigFreeShippingCriteriaProviderTest extends TestCase
++{
++    /** @var HookManager|\PHPUnit\Framework\MockObject\MockObject */
++    private $hookManager;
++
++    /** @var AdapterConfiguration|\PHPUnit\Framework\MockObject\MockObject */
++    private $configuration;
++
++    /** @var Tools|\PHPUnit\Framework\MockObject\MockObject */
++    private $tools;
++
++    /** @var CurrencyRepository|\PHPUnit\Framework\MockObject\MockObject */
++    private $currencyRepository;
++
++    /** @var ConfigFreeShippingCriteriaProvider */
++    private $provider;
++
++    protected function setUp(): void
++    {
++        $this->hookManager = $this->createMock(HookManager::class);
++        $this->configuration = $this->createMock(AdapterConfiguration::class);
++        $this->tools = $this->createMock(Tools::class);
++        $this->currencyRepository = $this->createMock(CurrencyRepository::class);
++
++        $this->provider = new ConfigFreeShippingCriteriaProvider(
++            $this->hookManager,
++            $this->configuration,
++            $this->tools,
++            $this->currencyRepository
++        );
++    }
++
++    public function testGetCriteriaConvertsPriceBeforeHookAndUsesResolvedZoneId(): void
++    {
++        $context = $this->createContext(2, 5); // currencyId = 2, zoneId = 5
++
++        $this->configuration->method('get')->willReturnCallback(function ($key) {
++            if ($key === 'PS_SHIPPING_FREE_PRICE') {
++                return '100.00';
++            }
++            if ($key === 'PS_SHIPPING_FREE_WEIGHT') {
++                return '10.5';
++            }
++
++            return false;
++        });
++
++        $currency = $this->createMock(Currency::class);
++        $this->currencyRepository->expects($this->once())
++            ->method('get')
++            ->with(new CurrencyId(2))
++            ->willReturn($currency);
++
++        $this->tools->expects($this->once())
++            ->method('convertPrice')
++            ->with(100.0, $currency)
++            ->willReturn(120.0);
++
++        $this->hookManager->expects($this->exactly(2))
++            ->method('exec')
++            ->willReturnCallback(function (string $hookName, array $params) {
++                if ($hookName === 'actionOverrideShippingFreePrice') {
++                    $this->assertEquals(120.0, $params['shippingFreePrice']);
++                    $this->assertEquals(5, $params['id_zone']);
++                    $this->assertEquals(2, $params['id_currency']);
++                } elseif ($hookName === 'actionOverrideShippingFreeWeight') {
++                    $this->assertEquals('10.5', $params['shippingFreeWeight']);
++                    $this->assertEquals(5, $params['id_zone']);
++                    $this->assertEquals(2, $params['id_currency']);
++                }
++            });
++
++        $criteria = $this->provider->getCriteria($context);
++
++        $this->assertTrue($criteria->hasFreePrice());
++        $this->assertEquals(new DecimalNumber('120'), $criteria->getFreePrice());
++        $this->assertTrue($criteria->hasFreeWeight());
++        $this->assertEquals(new DecimalNumber('10.5'), $criteria->getFreeWeight());
++    }
++
++    public function testGetCriteriaFallsBackToCountryZoneIdWhenResolvedZoneIdIsNull(): void
++    {
++        $context = $this->createContext(2, null, 7); // zoneId = null (unresolved), countryZoneId = 7
++
++        $this->configuration->method('get')->willReturn(false);
++
++        $zoneIdsPassedToHooks = [];
++        $this->hookManager->expects($this->exactly(2))
++            ->method('exec')
++            ->willReturnCallback(function (string $hookName, array $params) use (&$zoneIdsPassedToHooks) {
++                $zoneIdsPassedToHooks[$hookName] = $params['id_zone'];
++            });
++
++        $this->provider->getCriteria($context);
++
++        $this->assertSame(7, $zoneIdsPassedToHooks['actionOverrideShippingFreePrice']);
++        $this->assertSame(7, $zoneIdsPassedToHooks['actionOverrideShippingFreeWeight']);
++    }
++
++    public function testGetCriteriaDoesNotConvertPriceWhenFreePriceIsDisabled(): void
++    {
++        $context = $this->createContext(2, 5);
++
++        $this->configuration->method('get')->willReturn(false);
++
++        $this->currencyRepository->expects($this->never())->method('get');
++        $this->tools->expects($this->never())->method('convertPrice');
++
++        $criteria = $this->provider->getCriteria($context);
++
++        $this->assertFalse($criteria->hasFreePrice());
++        $this->assertFalse($criteria->hasFreeWeight());
++    }
++
++    public function testGetCriteriaAppliesModuleOverrideThroughHookReferenceParameters(): void
++    {
++        $context = $this->createContext(2, 5);
++
++        $this->configuration->method('get')->willReturnCallback(function ($key) {
++            if ($key === 'PS_SHIPPING_FREE_PRICE') {
++                return '100.00';
++            }
++            if ($key === 'PS_SHIPPING_FREE_WEIGHT') {
++                return '10.5';
++            }
++
++            return false;
++        });
++
++        $currency = $this->createMock(Currency::class);
++        $this->currencyRepository->method('get')->willReturn($currency);
++        $this->tools->method('convertPrice')->willReturn(120.0);
++
++        $this->hookManager->method('exec')->willReturnCallback(function (string $hookName, array $params) {
++            if ($hookName === 'actionOverrideShippingFreePrice') {
++                $params['shippingFreePrice'] = 42.0;
++            } elseif ($hookName === 'actionOverrideShippingFreeWeight') {
++                $params['shippingFreeWeight'] = 7.0;
++            }
++        });
++
++        $criteria = $this->provider->getCriteria($context);
++
++        $this->assertEquals(new DecimalNumber('42'), $criteria->getFreePrice());
++        $this->assertEquals(new DecimalNumber('7'), $criteria->getFreeWeight());
++    }
++
++    private function createContext(int $currencyId, ?int $zoneId = null, int $countryZoneId = 0): ShippingCostPriceInterface
++    {
++        $request = new ShippingCalculationRequest(
++            [], // products
++            1, // carrierId
++            $zoneId,
++            null, // addressId
++            $countryZoneId,
++            $currencyId,
++            null, // customerId
++            100.0 // orderTotal
++        );
++
++        return ShippingCostPrice::createFromRequest($request);
++    }
++}

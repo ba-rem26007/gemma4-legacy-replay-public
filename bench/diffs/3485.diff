@@ -1,0 +1,127 @@
+diff --git a/classes/module/Module.php b/classes/module/Module.php
+index 4a0fbcf0e545c..8829f98b8040f 100644
+--- a/classes/module/Module.php
++++ b/classes/module/Module.php
+@@ -262,8 +262,7 @@ public function __construct($name = null, Context $context = null)
+         if ($this->name != null) {
+             // If cache is not generated, we generate it
+             if (self::$modules_cache == null && !is_array(self::$modules_cache)) {
+-                $id_shop = (Validate::isLoadedObject($this->context->shop) ? $this->context->shop->id : 1);
+-                self::$modules_cache = array();
++                $id_shop = (Validate::isLoadedObject($this->context->shop) ? $this->context->shop->id : Configuration::get('PS_SHOP_DEFAULT'));
+                 // Join clause is done to check if the module is activated in current shop context
+                 $result = Db::getInstance()->executeS('
+ 				SELECT m.`id_module`, m.`name`, (
+@@ -292,6 +291,9 @@ public function __construct($name = null, Context $context = null)
+                 }
+                 $this->_path = __PS_BASE_URI__.'modules/'.$this->name.'/';
+             }
++            if (!$this->context->controller instanceof Controller) {
++                self::$modules_cache = null;
++            }
+             $this->local_path = _PS_MODULE_DIR_.$this->name.'/';
+         }
+     }
+diff --git a/tests/Integration/PrestaShopSecurityTest.php b/tests/Integration/PrestaShopSecurityTest.php
+index 250e976f693fb..fadc0408438dc 100644
+--- a/tests/Integration/PrestaShopSecurityTest.php
++++ b/tests/Integration/PrestaShopSecurityTest.php
+@@ -43,41 +43,49 @@ class PrestaShopSecurityTest extends IntegrationTestCase
+     public static function setupBeforeClass()
+     {
+         parent::setUpBeforeClass();
++    }
++
++    public function testInstall()
++    {
+         if (!file_exists(_PS_MODULE_DIR_.'/prestafraud/prestafraud.php')) {
+             $download = file_put_contents(_PS_CACHE_DIR_.'sandbox/prestafraud.zip', Tools::addonsRequest('module', array('id_module' => 4181)));
+-            Assert::assertGreaterThan(20000, $download, 'Fail download module from Addons');
++            $this->assertGreaterThan(20000, $download, 'Fail download module from Addons');
+             $extract = Tools::ZipExtract(_PS_CACHE_DIR_.'sandbox/prestafraud.zip', _PS_MODULE_DIR_);
+-            Assert::assertTrue($extract, 'Fail extract module');
++            $this->assertTrue($extract, 'Fail extract module');
+             unlink(_PS_CACHE_DIR_.'sandbox/prestafraud.zip');
+         }
+-    
+-        self::$prestafraud = Module::getInstanceByName('prestafraud');
+ 
+-        Assert::assertTrue(is_object(self::$prestafraud), 'Fail Module::getInstanceByName(\'prestafraud\')');
+-        Assert::assertEquals('prestafraud', self::$prestafraud->name);
++        if (!file_exists(_PS_MODULE_DIR_.'/cheque/cheque.php')) {
++            $download = file_put_contents(_PS_CACHE_DIR_.'sandbox/cheque.zip', Tools::addonsRequest('module', array('id_module' => 4181)));
++            $this->assertGreaterThan(20000, $download, 'Fail download module from Addons');
++            $extract = Tools::ZipExtract(_PS_CACHE_DIR_.'sandbox/cheque.zip', _PS_MODULE_DIR_);
++            $this->assertTrue($extract, 'Fail extract module');
++            unlink(_PS_CACHE_DIR_.'sandbox/cheque.zip');
++        }
++
++        self::$prestafraud = Module::getInstanceByName('prestafraud');
++        $this->assertTrue(is_object(self::$prestafraud), 'Fail Module::getInstanceByName(\'prestafraud\')');
++        $this->assertEquals('prestafraud', self::$prestafraud->name);
+         if (!Module::isInstalled('prestafraud')) {
+-            Assert::assertTrue((bool)self::$prestafraud->install());
++            $this->assertTrue((bool)self::$prestafraud->install());
++        }
++
++        if (!Module::isInstalled('cheque')) {
++            $this->assertTrue((bool)Module::getInstanceByName('cheque')->install());
+         }
+-            
+-        Assert::assertTrue((bool)self::$prestafraud->isRegisteredInHook('actionValidateOrder'), 'Fail Module::isRegisteredInHook(\'actionValidateOrder\')');
+-        
++
+         $uniqid = uniqid().time();
+         $email = 'prestabot+'.$uniqid.'@gmail.com';
+         $shop_url = 'http://www.prestashop-unit-test-'.$uniqid.'.com/';
+         $result = self::$prestafraud->_createAccount($email, $shop_url);
+-        
+-        Assert::assertTrue($result, implode(', ', self::$prestafraud->_errors));
+-    }
+-    
+-    public static function tearDownAfterClass()
+-    {
+-        Assert::assertTrue((bool)self::$prestafraud->uninstall());
++
++        $this->assertTrue($result, implode(', ', self::$prestafraud->_errors));
+     }
+ 
+     public function testScoreExistingOrder()
+     {
+         $id_order = 1;
+-        $order = new Order($id_order);
++        $order = new Order($id_order);        
+         $this->assertTrue(self::$prestafraud->hookNewOrder(array('order' => $order)), 'Fail Prestafraud::hookNewOrder()');
+         $scoring = self::$prestafraud->_getScoring($id_order, Configuration::get('PS_LANG_DEFAULT'));
+         $this->assertGreaterThan(0, (int)$scoring['scoring']);
+@@ -90,4 +98,9 @@ public function testScoreFakeOrder()
+         $this->assertEquals(0, (int)$scoring['scoring']);
+         $this->assertEquals('', (string)$scoring['comment']);
+     }
++
++    public function testUninstall()
++    {
++        $this->assertTrue((bool)self::$prestafraud->uninstall());
++    }
+ }
+diff --git a/tests/Integration/classes/module/ModulesInstallUninstallTest.php b/tests/Integration/classes/module/ModulesInstallUninstallTest.php
+index dece0cf293c6a..5767febae985c 100644
+--- a/tests/Integration/classes/module/ModulesInstallUninstallTest.php
++++ b/tests/Integration/classes/module/ModulesInstallUninstallTest.php
+@@ -35,6 +35,7 @@ class ModulesInstallUninstallTest extends IntegrationTestCase
+ {
+     public static function setUpBeforeClass()
+     {
++        parent::setUpBeforeClass();
+         Module::updateTranslationsAfterInstall(false);
+         Context::getContext()->employee = new Employee();
+         Context::getContext()->employee->id = 1;
+@@ -62,7 +63,7 @@ public function listModulesOnDisk()
+      */
+     public function testInstallationAndUnInstallation($moduleName)
+     {
+-        $module = Module::getInstanceByName($moduleName);
++        $module = Module::getInstanceByName($moduleName);        
+         if ($module->id) {
+             $this->assertTrue((bool)$module->uninstall(), 'Module uninstall failed : '.$moduleName);
+             $this->assertTrue((bool)$module->install(), 'Module install failed : '.$moduleName);

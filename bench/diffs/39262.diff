@@ -1,0 +1,199 @@
+diff --git a/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php b/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php
+index c9088edab0af3..29c06b04ada59 100644
+--- a/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php
++++ b/src/Adapter/Carrier/QueryHandler/GetAvailableCarriersHandler.php
+@@ -41,6 +41,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopId;
+ use Product;
+ use RuntimeException;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
+ 
+ #[AsQueryHandler]
+ class GetAvailableCarriersHandler implements GetAvailableCarriersHandlerInterface
+@@ -49,6 +50,8 @@ public function __construct(
+         private readonly CarrierRepository $carrierRepository,
+         private readonly ProductRepository $productRepository,
+         private readonly LanguageContext $languageContext,
++        #[Autowire(service: 'prestashop.default.language.context')]
++        private readonly LanguageContext $defaultLanguageContext,
+         private readonly ShopContext $shopContext,
+     ) {
+     }
+@@ -161,16 +164,28 @@ private function mapCarrierToProducts(array $carriersMapping): array
+      */
+     private function getProductName(Product $product): string
+     {
+-        if (is_array($product->name)) {
+-            $languageId = $this->languageContext->getId();
++        $name = $product->name;
+ 
+-            if (!isset($product->name[$languageId])) {
+-                throw new RuntimeException(sprintf('Product name not found for product ID %d and language ID %d.', $product->id, $languageId));
+-            }
++        if (!is_array($name)) {
++            return $name;
++        }
++
++        $languageId = $this->languageContext->getId();
++        $defaultLanguageId = $this->defaultLanguageContext->getId();
++
++        if (isset($name[$languageId])) {
++            return $name[$languageId];
++        }
+ 
+-            return $product->name[$languageId];
++        if (isset($name[$defaultLanguageId])) {
++            return $name[$defaultLanguageId];
+         }
+ 
+-        return $product->name;
++        throw new RuntimeException(sprintf(
++            'Product name not found for product ID %d in current (%d) or default (%d) language.',
++            $product->id,
++            $languageId,
++            $defaultLanguageId
++        ));
+     }
+ }
+diff --git a/src/Adapter/Carrier/Repository/CarrierRepository.php b/src/Adapter/Carrier/Repository/CarrierRepository.php
+index 4cc17b207f1a1..e7ea1afb6e7b1 100644
+--- a/src/Adapter/Carrier/Repository/CarrierRepository.php
++++ b/src/Adapter/Carrier/Repository/CarrierRepository.php
+@@ -375,20 +375,63 @@ public function getLastPosition(): ?int
+      *  - name: The carrier name.
+      */
+     public function findCarriersByProductIds(array $productIds, ShopId $shopId): array
++    {
++        // Step 1: Get all active carriers once
++        $allCarriers = $this->getAllActiveCarriers();
++
++        // Step 2: Initialize mapping with all carriers for each product
++        $mapping = [];
++        foreach ($productIds as $productId) {
++            $mapping[$productId] = $allCarriers;
++        }
++
++        // Step 3: Get restricted carriers for certain products
++        $productCarriers = $this->getProductCarriers($productIds, $shopId);
++        $restricted = $this->mapProductCarriers($productCarriers);
++
++        // Step 4: Override default mapping with restricted carriers where applicable
++        foreach ($restricted as $productId => $carriers) {
++            $mapping[$productId] = $carriers;
++        }
++
++        return $mapping;
++    }
++
++    private function getProductCarriers(array $productIds, ShopId $shopId): array
+     {
+         $qb = $this->connection->createQueryBuilder();
+-        $qb->select('pc.id_product as product_id, c.id_carrier AS id_carrier, c.name')
++
++        return $qb->select('pc.id_product as product_id', 'c.id_carrier', 'c.name')
+             ->from($this->prefix . 'product_carrier', 'pc')
+-            ->innerJoin('pc', $this->prefix . 'carrier', 'c', 'c.id_reference = pc.id_carrier_reference AND c.deleted = 0')
++            ->innerJoin(
++                'pc',
++                $this->prefix . 'carrier',
++                'c',
++                'c.id_reference = pc.id_carrier_reference AND c.deleted = 0'
++            )
+             ->where($qb->expr()->in('pc.id_product', ':product_ids'))
+             ->andWhere('pc.id_shop = :shop_id')
+             ->setParameter('product_ids', $productIds, ArrayParameterType::INTEGER)
+-            ->setParameter('shop_id', $shopId->getValue());
++            ->setParameter('shop_id', $shopId->getValue())
++            ->executeQuery()
++            ->fetchAllAssociative();
++    }
+ 
+-        $results = $qb->executeQuery()->fetchAllAssociative();
++    private function getAllActiveCarriers(): array
++    {
++        return $this->connection->createQueryBuilder()
++            ->select('id_carrier', 'name')
++            ->from($this->prefix . 'carrier')
++            ->where('deleted = 0')
++            ->executeQuery()
++            ->fetchAllAssociative();
++    }
+ 
++    private function mapProductCarriers(array $rows): array
++    {
+         $mapping = [];
+-        foreach ($results as $row) {
++
++        foreach ($rows as $row) {
+             $mapping[$row['product_id']][] = [
+                 'id_carrier' => $row['id_carrier'],
+                 'name' => $row['name'],
+diff --git a/tests/Integration/Behaviour/Features/Context/LanguageFeatureContext.php b/tests/Integration/Behaviour/Features/Context/LanguageFeatureContext.php
+index e615af26d8c80..0feecbfb6d4ef 100644
+--- a/tests/Integration/Behaviour/Features/Context/LanguageFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/LanguageFeatureContext.php
+@@ -29,6 +29,7 @@
+ use Configuration;
+ use Language;
+ use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Context\LanguageContextBuilder;
+ use RuntimeException;
+ use Tests\Resources\Resetter\LanguageResetter;
+ 
+@@ -77,6 +78,10 @@ public function languageWithIsoCodeIsTheDefaultOne($isoCode)
+         Configuration::updateValue('PS_LANG_DEFAULT', (string) $languageId);
+ 
+         SharedStorage::getStorage()->set('default_language_id', $languageId);
++
++        /** @var LanguageContextBuilder $languageBuilder */
++        $languageBuilder = CommonFeatureContext::getContainer()->get('test_language_context_builder');
++        $languageBuilder->setDefaultLanguageId($languageId);
+     }
+ 
+     /**
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature
+index 8b3b9de462d62..80226c673fa92 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_available.feature
+@@ -8,13 +8,19 @@ Feature: Carrier available
+   Background:
+     Given shop "shop1" with name "test_shop" exists
+     And I set up shop context to single shop shop1
+-    And language "language1" with locale "en-US" exists
+-    And language "language2" with locale "fr-FR" exists
++    And language "fr" with locale "fr-FR" exists
++    And language "en" with locale "en-US" exists
++    And language with iso code "en" is the default one
+     And I add product "product1" with following information:
+-      | name[en-US] | bottle of beer |
+-      | type        | standard       |
++      | name[fr-FR] | bouteille de bière |
++      | name[en-US] | bottle of beer     |
++      | type        | standard           |
+     And I add product "product2" with following information:
+       | name[fr-FR] | bouteille de rhum |
++      | name[en-US] | bottle of rhum    |
++      | type        | standard          |
++    And I add product "product3" with following information:
++      | name[en-US] | bottle of whiskey |
+       | type        | standard       |
+     And I create carrier "standard_carrier" with specified properties:
+       | name | Standard |
+@@ -31,8 +37,12 @@ Feature: Carrier available
+     And I assign product "product2" with following carriers:
+       | standard_carrier |
+       | pickup_carrier |
+-    Then the products "product1, product2" should have the following carriers:
+-      | carrier  | state     | products       |
+-      | Standard | available |                |
+-      | Pickup   | available |                |
+-      | Express  | filtered  | bottle of beer |
++    Then the products "product1, product2, product3" should have the following carriers:
++      | carrier           | state     | products                          |
++      | Standard          | available |                                   |
++      | Pickup            | available |                                   |
++      | Express           | filtered  | bottle of beer, bottle of whiskey |
++      | My cheap carrier  | filtered  | bottle of whiskey                 |
++      | My light carrier  | filtered  | bottle of whiskey                 |
++      | Click and collect | filtered  | bottle of whiskey                 |
++      | My carrier        | filtered  | bottle of whiskey                 |

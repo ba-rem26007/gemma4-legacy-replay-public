@@ -1,0 +1,171 @@
+diff --git a/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php b/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
+index 38a6d5347ccc2..cfc9ee2b21715 100644
+--- a/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
++++ b/src/Core/Domain/Order/Command/AddOrderFromBackOfficeCommand.php
+@@ -28,7 +28,8 @@
+ 
+ use PrestaShop\PrestaShop\Core\Domain\Cart\ValueObject\CartId;
+ use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\EmployeeId;
+-use PrestaShop\PrestaShop\Core\Domain\Order\Exception\OrderException;
++use PrestaShop\PrestaShop\Core\Domain\Order\Exception\InvalidOrderStateException;
++use PrestaShopBundle\Exception\InvalidModuleException;
+ 
+ /**
+  * Adds new order from given cart.
+@@ -122,24 +123,27 @@ public function getEmployeeId()
+     /**
+      * @param string $moduleName
+      *
+-     * @throws OrderException
++     * @throws InvalidModuleException
+      */
+     private function assertIsModuleName($moduleName)
+     {
+         if (!is_string($moduleName) || !preg_match('/^[a-zA-Z0-9_-]+$/', $moduleName)) {
+-            throw new OrderException('Payment module name is invalid');
++            throw new InvalidModuleException();
+         }
+     }
+ 
+     /**
+      * @param int $orderStateId
+      *
+-     * @throws OrderException
++     * @throws InvalidOrderStateException
+      */
+     private function assertOrderStateIsPositiveInt($orderStateId)
+     {
+         if (!is_int($orderStateId) || 0 >= $orderStateId) {
+-            throw new OrderException('Invalid order state id');
++            throw new InvalidOrderStateException(
++                InvalidOrderStateException::INVALID_ID,
++                'Invalid order state id'
++            );
+         }
+     }
+ }
+diff --git a/src/Core/Domain/Order/Exception/InvalidOrderStateException.php b/src/Core/Domain/Order/Exception/InvalidOrderStateException.php
+index 264d591afb405..bbeab41946691 100644
+--- a/src/Core/Domain/Order/Exception/InvalidOrderStateException.php
++++ b/src/Core/Domain/Order/Exception/InvalidOrderStateException.php
+@@ -51,6 +51,10 @@ class InvalidOrderStateException extends OrderException
+      * Used when the order has been delivered (and it shouldn't have)
+      */
+     const UNEXPECTED_DELIVERY = 4;
++    /**
++     * Used when the order state is not found
++     */
++    const INVALID_ID = 5;
+ 
+     /**
+      * @param int $code
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+index 08195b8980e94..9bac9c7d9ece5 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Order/OrderController.php
+@@ -78,6 +78,7 @@
+ use PrestaShop\PrestaShop\Core\Search\Filters\OrderFilters;
+ use PrestaShopBundle\Component\CsvResponse;
+ use PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController;
++use PrestaShopBundle\Exception\InvalidModuleException;
+ use PrestaShopBundle\Form\Admin\Sell\Customer\PrivateNoteType;
+ use PrestaShopBundle\Form\Admin\Sell\Order\AddOrderCartRuleType;
+ use PrestaShopBundle\Form\Admin\Sell\Order\AddProductRowType;
+@@ -1499,6 +1500,10 @@ private function getErrorMessages(Exception $e)
+                     'Admin.Orderscustomers.Notification'
+                 ),
+             ],
++            InvalidModuleException::class => $this->trans(
++                'You must choose a payment module to create the order.',
++                'Admin.Orderscustomers.Notification'
++            ),
+             ProductOutOfStockException::class => $this->trans(
+                 'There are not enough products in stock.',
+                 'Admin.Catalog.Notification'
+@@ -1524,6 +1529,10 @@ private function getErrorMessages(Exception $e)
+                     'Invalid action: this order has not been paid.',
+                     'Admin.Notifications.Error'
+                 ),
++                InvalidOrderStateException::INVALID_ID => $this->trans(
++                    'You must choose an order status to create the order.',
++                    'Admin.Orderscustomers.Notification'
++                ),
+             ],
+             InvalidProductQuantityException::class => $this->trans(
+                 'Positive product quantity is required.',
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Order/CartSummaryType.php b/src/PrestaShopBundle/Form/Admin/Sell/Order/CartSummaryType.php
+index be42f0343a696..f9b4975933a8b 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Order/CartSummaryType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Order/CartSummaryType.php
+@@ -32,6 +32,7 @@
+ use Symfony\Component\Form\Extension\Core\Type\HiddenType;
+ use Symfony\Component\Form\Extension\Core\Type\TextareaType;
+ use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Translation\TranslatorInterface;
+ 
+ /**
+  * Form type for cart summary block of order create page
+@@ -48,16 +49,24 @@ class CartSummaryType extends AbstractType
+      */
+     private $paymentModulesChoiceProvider;
+ 
++    /**
++     * @var TranslatorInterface
++     */
++    private $translator;
++
+     /**
+      * @param FormChoiceProviderInterface $orderStatesChoiceProvider
+      * @param FormChoiceProviderInterface $paymentModulesChoiceProvider
++     * @param TranslatorInterface $translator
+      */
+     public function __construct(
+         FormChoiceProviderInterface $orderStatesChoiceProvider,
+-        FormChoiceProviderInterface $paymentModulesChoiceProvider
++        FormChoiceProviderInterface $paymentModulesChoiceProvider,
++        TranslatorInterface $translator
+     ) {
+         $this->orderStatesChoiceProvider = $orderStatesChoiceProvider;
+         $this->paymentModulesChoiceProvider = $paymentModulesChoiceProvider;
++        $this->translator = $translator;
+     }
+ 
+     /**
+@@ -74,13 +83,21 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('payment_module', ChoiceType::class, [
+                 'choices' => $this->getPaymentModuleChoices(),
+-                'required' => false,
+-                'placeholder' => false,
++                'required' => true,
++                'placeholder' => $this->translator->trans(
++                    '-- Choose --',
++                    [],
++                    'Admin.Actions'
++                ),
+             ])
+             ->add('order_state', ChoiceType::class, [
+                 'choices' => $this->orderStatesChoiceProvider->getChoices(),
+-                'required' => false,
+-                'placeholder' => false,
++                'required' => true,
++                'placeholder' => $this->translator->trans(
++                    '-- Choose --',
++                    [],
++                    'Admin.Actions'
++                ),
+             ]);
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index bbe7f5121ea76..829953b4a11bb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -1135,6 +1135,7 @@ services:
+         arguments:
+             - '@prestashop.core.form.choice_provider.order_state_by_id'
+             - '@prestashop.adapter.form.choice_provider.installed_payment_modules'
++            - '@translator'
+         tags:
+             - { name: form.type }
+ 

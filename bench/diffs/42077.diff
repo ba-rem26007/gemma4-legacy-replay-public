@@ -1,0 +1,358 @@
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index 8e9a75eb739f8..beeeb28d67e00 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -32,5 +32,6 @@
+     <feature_flag id="hook_module_v2" name="hook_module_v2" type="env,dotenv,db" label_wording="Hook a module" label_domain="Admin.Design.Feature" description_wording="Enable / Disable the migrated Hook a module form page." description_domain="Admin.Design.Help" state="1" stability="stable" />
+     <feature_flag id="quick_access" name="quick_access" type="env,dotenv,db" label_wording="Quick access" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated quick access page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+     <feature_flag id="stats" name="stats" type="env,dotenv,db" label_wording="Stats" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated stats page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
++    <feature_flag id="dashboard" name="dashboard" type="env,dotenv,db" label_wording="Dashboard page" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated Symfony dashboard page. Native dashboard modules are not yet compatible with the new page and will not display until they are migrated." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+   </entities>
+ </entity_feature_flag>
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index 232b762660ce4..ca5ccb9a75893 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -771,6 +771,36 @@
+       <title>Dashboard Top</title>
+       <description>Displays the content in the dashboard's top area</description>
+     </hook>
++    <hook id="displayAdminDashboardZoneOne">
++      <name>displayAdminDashboardZoneOne</name>
++      <title>Symfony Dashboard - Zone one</title>
++      <description>Displays module content in the first column of the migrated (Symfony) dashboard page. Modern counterpart of the legacy dashboardZoneOne hook.</description>
++    </hook>
++    <hook id="displayAdminDashboardZoneTwo">
++      <name>displayAdminDashboardZoneTwo</name>
++      <title>Symfony Dashboard - Zone two</title>
++      <description>Displays module content in the second column of the migrated (Symfony) dashboard page. Modern counterpart of the legacy dashboardZoneTwo hook.</description>
++    </hook>
++    <hook id="displayAdminDashboardZoneThree">
++      <name>displayAdminDashboardZoneThree</name>
++      <title>Symfony Dashboard - Zone three</title>
++      <description>Displays module content in the third column of the migrated (Symfony) dashboard page. Modern counterpart of the legacy dashboardZoneThree hook.</description>
++    </hook>
++    <hook id="displayAdminDashboardTop">
++      <name>displayAdminDashboardTop</name>
++      <title>Symfony Dashboard - Top</title>
++      <description>Displays module content in the top area of the migrated (Symfony) dashboard page. Modern counterpart of the legacy displayDashboardTop hook.</description>
++    </hook>
++    <hook id="displayAdminDashboardBottom">
++      <name>displayAdminDashboardBottom</name>
++      <title>Symfony Dashboard - Bottom</title>
++      <description>Displays module content in a full-width area at the bottom of the migrated (Symfony) dashboard page.</description>
++    </hook>
++    <hook id="displayAdminDashboardToolbar">
++      <name>displayAdminDashboardToolbar</name>
++      <title>Symfony Dashboard - Toolbar</title>
++      <description>Displays module content in the toolbar area of the migrated (Symfony) dashboard page. Modern counterpart of the legacy displayDashboardToolbarTopMenu hook.</description>
++    </hook>
+     <hook id="actionUpdateLangAfter">
+       <name>actionUpdateLangAfter</name>
+       <title>Update "lang" tables</title>
+diff --git a/src/PrestaShopBundle/Controller/Admin/DashboardController.php b/src/PrestaShopBundle/Controller/Admin/DashboardController.php
+new file mode 100644
+index 0000000000000..328e6d00fc424
+--- /dev/null
++++ b/src/PrestaShopBundle/Controller/Admin/DashboardController.php
+@@ -0,0 +1,118 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Controller\Admin;
++
++use DateTime;
++use Doctrine\ORM\EntityManagerInterface;
++use PrestaShop\PrestaShop\Adapter\Hook\HookInformationProvider;
++use PrestaShopBundle\Entity\Employee\Employee;
++use PrestaShopBundle\Form\Admin\Dashboard\DashboardDateRangeType;
++use PrestaShopBundle\Security\Attribute\AdminSecurity;
++use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++/**
++ * Responsible for the Symfony (migrated) "Dashboard" page.
++ *
++ * Unlike the legacy page, this controller makes no assumption about module internals:
++ * it neither registers Smarty template directories nor shims the legacy controller for
++ * `get_class()` checks. Instead a new, dedicated hook family is dispatched (from the Twig
++ * layout, via `renderhook`) so a module knows which architecture it integrates with
++ * purely from which hook is called.
++ */
++class DashboardController extends PrestaShopAdminController
++{
++    /**
++     * Dashboard hooks that receive the date range as parameters. The date range selector
++     * is only displayed when at least one module is registered on one of them.
++     */
++    private const DATE_RANGE_HOOKS = [
++        'displayAdminDashboardZoneOne',
++        'displayAdminDashboardZoneTwo',
++        'displayAdminDashboardZoneThree',
++        'displayAdminDashboardTop',
++        'displayAdminDashboardBottom',
++    ];
++
++    /**
++     * Display the migrated dashboard: resolve the per-employee date range and render the
++     * Twig layout, which dispatches the dashboard hooks.
++     */
++    #[AdminSecurity("is_granted('read', request.get('_legacy_controller'))")]
++    public function indexAction(
++        Request $request,
++        EntityManagerInterface $entityManager,
++        HookInformationProvider $hookInformationProvider,
++    ): Response {
++        $legacyController = $request->attributes->get('_legacy_controller');
++
++        $employeeId = $this->getEmployeeContext()->getEmployee()?->getId();
++        $employee = null !== $employeeId
++            ? $entityManager->getRepository(Employee::class)->find($employeeId)
++            : null;
++
++        // Effective range: the employee's stored stats range, or the same default as the
++        // legacy page (last month → today) when none has been set yet.
++        $dateFrom = $employee?->getStatsDateFrom() ?? new DateTime('-1 month');
++        $dateTo = $employee?->getStatsDateTo() ?? new DateTime();
++
++        // Only offer the date range selector when a module actually consumes the range,
++        // i.e. is registered on one of the date-aware hooks. A dashboard made only of, say,
++        // a toolbar banner should not display a useless date picker.
++        $dateRangeFormView = null;
++        if ($this->isDateRangeUsed($hookInformationProvider)) {
++            $dateRangeForm = $this->createForm(DashboardDateRangeType::class, [
++                'date_from' => $dateFrom,
++                'date_to' => $dateTo,
++            ]);
++            $dateRangeForm->handleRequest($request);
++
++            // Persist a submitted range on the employee so the page reflects it (skipped in
++            // demo mode; Doctrine's flush is a no-op when nothing actually changed).
++            if (
++                $dateRangeForm->isSubmitted()
++                && $dateRangeForm->isValid()
++                && null !== $employee
++                && !$this->isDemoModeEnabled()
++            ) {
++                $data = $dateRangeForm->getData();
++                $dateFrom = $data['date_from'];
++                $dateTo = $data['date_to'];
++                $employee->setStatsDateFrom($dateFrom);
++                $employee->setStatsDateTo($dateTo);
++                $entityManager->flush();
++            }
++
++            $dateRangeFormView = $dateRangeForm->createView();
++        }
++
++        return $this->render('@PrestaShop/Admin/Dashboard/index.html.twig', [
++            'layoutTitle' => $this->trans('Dashboard', [], 'Admin.Navigation.Menu'),
++            'enableSidebar' => true,
++            'help_link' => $this->generateSidebarLink($legacyController),
++            'dateRangeForm' => $dateRangeFormView,
++            'dateFrom' => $dateFrom->format('Y-m-d'),
++            'dateTo' => $dateTo->format('Y-m-d'),
++        ]);
++    }
++
++    /**
++     * Whether at least one module is registered on a hook that consumes the date range.
++     */
++    private function isDateRangeUsed(HookInformationProvider $hookInformationProvider): bool
++    {
++        foreach (self::DATE_RANGE_HOOKS as $hookName) {
++            if (!empty($hookInformationProvider->getRegisteredModulesByHookName($hookName))) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Dashboard/DashboardDateRangeType.php b/src/PrestaShopBundle/Form/Admin/Dashboard/DashboardDateRangeType.php
+new file mode 100644
+index 0000000000000..e75c8644554bb
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Dashboard/DashboardDateRangeType.php
+@@ -0,0 +1,40 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Dashboard;
++
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\DateType;
++use Symfony\Component\Form\FormBuilderInterface;
++
++/**
++ * Date range selector of the dashboard page (per-employee stats range).
++ *
++ * Submitted with POST so the admin security token is preserved (a GET form would drop
++ * it from the query string). Kept intentionally simple; it can be extended by modules
++ * through the form-building hooks like any other admin form.
++ */
++class DashboardDateRangeType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $builder
++            ->add('date_from', DateType::class, [
++                'label' => $this->trans('From', 'Admin.Global'),
++                'widget' => 'single_text',
++                'input' => 'datetime',
++                'html5' => true,
++            ])
++            ->add('date_to', DateType::class, [
++                'label' => $this->trans('To', 'Admin.Global'),
++                'widget' => 'single_text',
++                'input' => 'datetime',
++                'html5' => true,
++            ]);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin.yml b/src/PrestaShopBundle/Resources/config/routing/admin.yml
+index 2c88ccd5f0bbc..d83c1672757c0 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin.yml
+@@ -1,3 +1,7 @@
++_admin_dashboard_routing:
++  resource: "admin/dashboard.yml"
++  prefix: /dashboard
++
+ _admin_common_routing:
+   resource: "admin/_common.yml"
+   prefix: /common
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/dashboard.yml b/src/PrestaShopBundle/Resources/config/routing/admin/dashboard.yml
+new file mode 100644
+index 0000000000000..9f6955bcb4f41
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/dashboard.yml
+@@ -0,0 +1,10 @@
++admin_dashboard_index:
++  path: /
++  methods: [ GET, POST ]
++  defaults:
++    _controller: 'PrestaShopBundle\Controller\Admin\DashboardController::indexAction'
++    _legacy_controller: AdminDashboard
++    _legacy_link: AdminDashboard
++    _legacy_feature_flag: dashboard
++  options:
++    expose: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 651e4e661a12a..832b9a413f6b5 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -136,6 +136,7 @@ services:
+     arguments:
+       $localizationPackChoices: '@=service("prestashop.core.form.choice_provider.localization_pack_by_iso_code").getChoices()'
+ 
++  PrestaShopBundle\Form\Admin\Dashboard\DashboardDateRangeType:
+   PrestaShopBundle\Form\Admin\Improve\International\Localization\LocalUnitsType:
+   PrestaShopBundle\Form\Admin\Improve\International\Localization\AdvancedConfigurationType:
+   PrestaShopBundle\Form\Admin\Improve\International\Geolocation\GeolocationByIpAddressType:
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Dashboard/form_theme.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/form_theme.html.twig
+new file mode 100644
+index 0000000000000..f7e2dd4b8e348
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/form_theme.html.twig
+@@ -0,0 +1,18 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/TwigTemplateForm/bootstrap_4_horizontal_layout.html.twig' %}
++
++{#
++ # Render each row inline (label next to the field) so the date range fits on a single
++ # line, instead of the stacked layout of the default admin form theme.
++ #}
++{%- block form_row -%}
++  <div class="form-group d-inline-flex align-items-center mb-2 mr-3">
++    {#- min-width keeps the inputs aligned when the fields wrap on narrow screens -#}
++    {{- form_label(form, null, {label_attr: {class: 'mb-0 mr-2', style: 'min-width: 3rem'}}) -}}
++    {{- form_widget(form) -}}
++    {{- form_errors(form) -}}
++  </div>
++{%- endblock -%}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig
+new file mode 100644
+index 0000000000000..b3205e4e8e1f5
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig
+@@ -0,0 +1,66 @@
++{#
++ # For the full copyright and license information, please view the
++ # docs/licenses/LICENSE.txt file that was distributed with this source code.
++ #}
++{% extends '@PrestaShop/Admin/layout.html.twig' %}
++
++{% block content %}
++  {% set toolbarContent = renderhook('displayAdminDashboardToolbar') %}
++  {% set topContent = renderhook('displayAdminDashboardTop', {date_from: dateFrom, date_to: dateTo}) %}
++  {% set bottomContent = renderhook('displayAdminDashboardBottom', {date_from: dateFrom, date_to: dateTo}) %}
++  {% set zoneOneContent = renderhook('displayAdminDashboardZoneOne', {date_from: dateFrom, date_to: dateTo}) %}
++  {% set zoneTwoContent = renderhook('displayAdminDashboardZoneTwo', {date_from: dateFrom, date_to: dateTo}) %}
++  {% set zoneThreeContent = renderhook('displayAdminDashboardZoneThree', {date_from: dateFrom, date_to: dateTo}) %}
++
++  {% set hasZoneOne = zoneOneContent|trim is not empty %}
++  {% set hasZoneTwo = zoneTwoContent|trim is not empty %}
++  {% set hasZoneThree = zoneThreeContent|trim is not empty %}
++
++  <div id="dashboard">
++    {% if toolbarContent|trim is not empty %}
++      <div class="row">
++        <div class="col-lg-12" id="displayAdminDashboardToolbar">{{ toolbarContent|raw }}</div>
++      </div>
++    {% endif %}
++
++    {% if dateRangeForm is not null %}
++      <div class="row">
++        <div class="col-lg-12">
++          <div id="dashboard-calendar" class="panel mb-3">
++            {% form_theme dateRangeForm '@PrestaShop/Admin/Dashboard/form_theme.html.twig' %}
++            {{ form_start(dateRangeForm, {attr: {class: 'form-inline'}}) }}
++              {{ form_widget(dateRangeForm) }}
++              <button type="submit" class="btn btn-primary mb-2">{{ 'Apply'|trans({}, 'Admin.Actions') }}</button>
++            {{ form_end(dateRangeForm) }}
++          </div>
++        </div>
++      </div>
++    {% endif %}
++
++    {% if topContent|trim is not empty %}
++      <div class="row">
++        <div class="col-lg-12" id="displayAdminDashboardTop">{{ topContent|raw }}</div>
++      </div>
++    {% endif %}
++
++    {% if hasZoneOne or hasZoneTwo or hasZoneThree %}
++      <div class="row">
++        {% if hasZoneOne %}
++          <div class="col-12 col-xl-3" id="displayAdminDashboardZoneOne">{{ zoneOneContent|raw }}</div>
++        {% endif %}
++        {% if hasZoneTwo %}
++          <div class="col-12 col-xl-{{ hasZoneThree ? 7 : 9 }}" id="displayAdminDashboardZoneTwo">{{ zoneTwoContent|raw }}</div>
++        {% endif %}
++        {% if hasZoneThree %}
++          <div class="col-12 col-xl-2" id="displayAdminDashboardZoneThree">{{ zoneThreeContent|raw }}</div>
++        {% endif %}
++      </div>
++    {% endif %}
++
++    {% if bottomContent|trim is not empty %}
++      <div class="row">
++        <div class="col-12" id="displayAdminDashboardBottom">{{ bottomContent|raw }}</div>
++      </div>
++    {% endif %}
++  </div>
++{% endblock %}

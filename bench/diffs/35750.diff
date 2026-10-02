@@ -1,0 +1,1683 @@
+diff --git a/.github/workflows/symfony-console.yml b/.github/workflows/symfony-console.yml
+index 7f749884abc58..7c1d27f53a585 100644
+--- a/.github/workflows/symfony-console.yml
++++ b/.github/workflows/symfony-console.yml
+@@ -13,6 +13,7 @@ jobs:
+     strategy:
+       matrix:
+         app-id: [ admin, admin-api, front ]
++      fail-fast: false
+     permissions:
+       contents: read  # for actions/checkout to fetch code
+     name: Symfony Console
+diff --git a/composer.json b/composer.json
+index bdb984765faa2..1f550a0243a8c 100644
+--- a/composer.json
++++ b/composer.json
+@@ -71,7 +71,7 @@
+         "prestashop/gsitemap": "^4",
+         "prestashop/pagesnotfound": "^2",
+         "prestashop/productcomments": "^6.0",
+-        "prestashop/ps_apiresources": "dev-module-endpoint",
++        "prestashop/ps_apiresources": "dev-experimental-endpoint",
+         "prestashop/ps_banner": "^2",
+         "prestashop/ps_bestsellers": "^1.0",
+         "prestashop/ps_brandlist": "^1.0",
+diff --git a/composer.lock b/composer.lock
+index 56b30ee9d5253..f176c8c376a64 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "02928d8728ffeb508e357c9a8a7e6633",
++    "content-hash": "ef9ebfc365e2cf600ab13b3187f49561",
+     "packages": [
+         {
+             "name": "api-platform/core",
+@@ -5579,16 +5579,16 @@
+         },
+         {
+             "name": "prestashop/ps_apiresources",
+-            "version": "dev-module-endpoint",
++            "version": "dev-experimental-endpoint",
+             "source": {
+                 "type": "git",
+                 "url": "https://github.com/jolelievre/ps_apiresources.git",
+-                "reference": "959b5ffaed7e6b1855a0ab3e5fb36cd7eba6bcdf"
++                "reference": "e4b444522ad0dc07b74614d1c5794f49bb67a846"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/959b5ffaed7e6b1855a0ab3e5fb36cd7eba6bcdf",
+-                "reference": "959b5ffaed7e6b1855a0ab3e5fb36cd7eba6bcdf",
++                "url": "https://api.github.com/repos/jolelievre/ps_apiresources/zipball/e4b444522ad0dc07b74614d1c5794f49bb67a846",
++                "reference": "e4b444522ad0dc07b74614d1c5794f49bb67a846",
+                 "shasum": ""
+             },
+             "require": {
+@@ -5597,7 +5597,7 @@
+             "require-dev": {
+                 "czproject/git-php": "^4.2",
+                 "phpunit/phpunit": "^9.6",
+-                "prestashop/php-dev-tools": "^4.2"
++                "prestashop/php-dev-tools": "^4.3"
+             },
+             "type": "prestashop-module",
+             "autoload": {
+@@ -5640,9 +5640,9 @@
+             "description": "PrestaShop - API Resources",
+             "homepage": "https://github.com/PrestaShop/ps_apiresources",
+             "support": {
+-                "source": "https://github.com/jolelievre/ps_apiresources/tree/module-endpoint"
++                "source": "https://github.com/jolelievre/ps_apiresources/tree/experimental-endpoint"
+             },
+-            "time": "2024-03-26T12:51:38+00:00"
++            "time": "2024-03-27T13:51:05+00:00"
+         },
+         {
+             "name": "prestashop/ps_banner",
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 467e42b6d4e33..9189f89491d97 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -891,5 +891,8 @@ Country</value>
+     <configuration id="PS_PRODUCT_BREADCRUMB_CATEGORY" name="PS_PRODUCT_BREADCRUMB_CATEGORY">
+       <value>default</value>
+     </configuration>
++    <configuration id="PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS" name="PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS">
++      <value>0</value>
++    </configuration>
+   </entities>
+ </entity_configuration>
+diff --git a/src/Adapter/AuthorizationServer/AuthorizationServerConfiguration.php b/src/Adapter/AuthorizationServer/AuthorizationServerConfiguration.php
+new file mode 100644
+index 0000000000000..f62ffc3042e6a
+--- /dev/null
++++ b/src/Adapter/AuthorizationServer/AuthorizationServerConfiguration.php
+@@ -0,0 +1,85 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\AuthorizationServer;
++
++use PrestaShop\PrestaShop\Adapter\Cache\Clearer\SymfonyCacheClearer;
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Core\Configuration\DataConfigurationInterface;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class AuthorizationServerConfiguration implements DataConfigurationInterface
++{
++    public function __construct(
++        private readonly Configuration $configuration,
++        private readonly TranslatorInterface $translator,
++        private readonly SymfonyCacheClearer $cacheClearer,
++    ) {
++    }
++
++    public function getConfiguration()
++    {
++        return [
++            'enable_experimental_endpoints' => $this->configuration->getBoolean('PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS'),
++        ];
++    }
++
++    public function updateConfiguration(array $configuration)
++    {
++        $errors = $this->getConfigurationErrors($configuration);
++        if (!empty($errors)) {
++            return $errors;
++        }
++
++        $this->configuration->set('PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS', $configuration['enable_experimental_endpoints']);
++
++        // Clear cache so that Swagger and roles extraction are refreshed
++        $this->cacheClearer->clear();
++
++        return [];
++    }
++
++    public function validateConfiguration(array $configuration)
++    {
++        return empty($this->getConfigurationErrors($configuration));
++    }
++
++    private function getConfigurationErrors(array $configuration): array
++    {
++        $errors = [];
++        if (!is_bool($configuration['enable_experimental_endpoints'])) {
++            $errors[] = $this->translator->trans(
++                'The %s field is invalid.',
++                [$this->translator->trans('Enable experimental endpoints', [], 'Admin.Advparameters.Feature')],
++                'Admin.Notifications.Error'
++            );
++        }
++
++        return $errors;
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
+index f9c0d3892e834..28919b6f29e45 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/AbstractCQRSOperation.php
+@@ -111,6 +111,7 @@ public function __construct(
+         array $scopes = [],
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+ 
+@@ -134,11 +135,17 @@ public function __construct(
+             $passedArguments['extraProperties']['ApiResourceMapping'] = $ApiResourceMapping;
+         }
+ 
++        if (null !== $experimentalOperation) {
++            $this->checkArgumentAndExtraParameterValidity('experimentalOperation', $experimentalOperation, $passedArguments['extraProperties']);
++            $passedArguments['extraProperties']['experimentalOperation'] = $experimentalOperation;
++        }
++
+         // Remove custom arguments
+         unset($passedArguments['scopes']);
+         unset($passedArguments['CQRSQuery']);
+         unset($passedArguments['CQRSQueryMapping']);
+         unset($passedArguments['ApiResourceMapping']);
++        unset($passedArguments['experimentalOperation']);
+ 
+         // Unless especially specified we only handle JSON format by default
+         $passedArguments['formats'] = $formats ?? ['json'];
+@@ -198,6 +205,19 @@ public function withApiResourceMapping(array $CQRSQuery): static
+         return $self;
+     }
+ 
++    public function getExperimentalOperation(): bool
++    {
++        return $this->extraProperties['experimentalOperation'] ?? false;
++    }
++
++    public function withExperimentalOperation(bool $experimentalOperation): static
++    {
++        $self = clone $this;
++        $self->extraProperties['experimentalOperation'] = $experimentalOperation;
++
++        return $self;
++    }
++
+     protected function checkArgumentAndExtraParameterValidity(string $extraParameterName, $constructorParameterValue, array $extraProperties): void
+     {
+         if (!empty($extraProperties[$extraParameterName]) && $extraProperties[$extraParameterName] !== $constructorParameterValue) {
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+index aa6e89f9e4589..65e270b9063e1 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommand.php
+@@ -116,6 +116,7 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?array $CQRSCommandMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+ 
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
+index 3c9f4ed9f244a..92527cc137fc5 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreate.php
+@@ -114,6 +114,7 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?array $CQRSCommandMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_POST;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
+index f46ea0f7522d9..64b5abc36582a 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSDelete.php
+@@ -115,6 +115,7 @@ public function __construct(
+         array $scopes = [],
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_DELETE;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
+index 1528fb85b49fd..1370d6c1d2009 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSGet.php
+@@ -114,6 +114,7 @@ public function __construct(
+         array $scopes = [],
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+index f9f74283e845a..741647ae42253 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdate.php
+@@ -115,6 +115,7 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?array $CQRSCommandMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_PATCH;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php
+index 7c39b98eaa147..bcc2a172483bc 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollection.php
+@@ -115,6 +115,7 @@ public function __construct(
+         array $scopes = [],
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+index 7a7c22ffc3c96..ee2b29b9f5ae3 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdate.php
+@@ -115,6 +115,7 @@ public function __construct(
+         ?array $CQRSQueryMapping = null,
+         ?array $ApiResourceMapping = null,
+         ?array $CQRSCommandMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_PUT;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedList.php b/src/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedList.php
+index 246a91cf05e1b..b86b6a7e7e8e0 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedList.php
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedList.php
+@@ -116,6 +116,7 @@ public function __construct(
+         ?string $queryBuilder = null,
+         ?string $filtersClass = null,
+         ?array $filtersMapping = null,
++        ?bool $experimentalOperation = null,
+     ) {
+         $passedArguments = \get_defined_vars();
+         $passedArguments['method'] = self::METHOD_GET;
+diff --git a/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+new file mode 100644
+index 0000000000000..5e856c5ad8369
+--- /dev/null
++++ b/src/PrestaShopBundle/ApiPlatform/Metadata/Resource/Factory/ExperimentalOperationsMetadataCollectionFactoryDecorator.php
+@@ -0,0 +1,98 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory;
++
++use ApiPlatform\Metadata\ApiResource;
++use ApiPlatform\Metadata\Operation;
++use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
++use ApiPlatform\Metadata\Resource\ResourceMetadataCollection;
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++use Throwable;
++
++/**
++ * This factory decorates the ApiPlatform default resource factory. It looks into each operation and checks
++ * if the extra property experimentalOperation is set to true, if its is then the operation should be filtered out
++ * in production environment. This means the operation is not visible in Swagger, and it's not used to generate the
++ * api routing, so it's not usable at all.
++ *
++ * Scope extraction is also impacted by this filtering, meaning if a scope is only associated to experimental operations
++ * it won't be available in prod mode at all.
++ *
++ * In dev mode all operations are kept though.
++ */
++class ExperimentalOperationsMetadataCollectionFactoryDecorator implements ResourceMetadataCollectionFactoryInterface
++{
++    public function __construct(
++        private readonly ResourceMetadataCollectionFactoryInterface $innerFactory,
++        private readonly bool $isDebug,
++        private readonly ConfigurationInterface $configuration,
++    ) {
++    }
++
++    public function create(string $resourceClass): ResourceMetadataCollection
++    {
++        // We call the original method since we only want to alter the result of this method.
++        $resourceMetadataCollection = $this->innerFactory->create($resourceClass);
++
++        // In debug mode we filter nothing, in prod mode we do unless the forcing configuration is enabled
++        if ($this->isDebug || $this->areExperimentalEndpointsEnabled()) {
++            return $resourceMetadataCollection;
++        }
++
++        /** @var ApiResource $resourceMetadata */
++        foreach ($resourceMetadataCollection as $resourceMetadata) {
++            $operations = $resourceMetadata->getOperations();
++            /** @var Operation $operation */
++            foreach ($operations as $key => $operation) {
++                $extraProperties = $operation->getExtraProperties();
++                if (isset($extraProperties['experimentalOperation']) && $extraProperties['experimentalOperation'] === true) {
++                    $operations->remove($key);
++                }
++            }
++        }
++
++        return $resourceMetadataCollection;
++    }
++
++    /**
++     * This decorator is implied during cache clearing which would fail when the shop is not installed
++     * because the DB config is not set up yet. So we protected the configuration fetching in a try/catch
++     * and return false (default recommended value) in case of an error.
++     *
++     * @return bool
++     */
++    private function areExperimentalEndpointsEnabled(): bool
++    {
++        try {
++            return (bool) $this->configuration->get('PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS');
++        } catch (Throwable) {
++            return false;
++        }
++    }
++}
+diff --git a/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php b/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
+index 709417079fe30..61c3fbcdef1c7 100644
+--- a/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
++++ b/src/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractor.php
+@@ -33,6 +33,7 @@
+ use ApiPlatform\Metadata\Resource\Factory\AttributesResourceNameCollectionFactory;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceMetadataCollectionFactoryInterface;
+ use ApiPlatform\Metadata\Resource\Factory\ResourceNameCollectionFactoryInterface;
++use PrestaShop\PrestaShop\Core\EnvironmentInterface;
+ 
+ /**
+  * This service manually extracts data from the ApiResource classes to get the scopes associated
+@@ -48,6 +49,7 @@ class ApiResourceScopesExtractor implements ApiResourceScopesExtractorInterface
+ {
+     public function __construct(
+         private readonly ResourceMetadataCollectionFactoryInterface $resourceMetadataCollectionFactory,
++        private readonly EnvironmentInterface $environment,
+         private readonly string $moduleDir,
+         private readonly array $installedModules,
+         private readonly array $enabledModules,
+@@ -80,9 +82,21 @@ private function getCoreAndModulesResources(array $modules): array
+         $resourceScopes = [];
+ 
+         // First extract scopes from the core
+-        $coreScopes = $this->extractScopes(new AttributesResourceNameCollectionFactory([
++        $coreMappingPaths = [
+             rtrim($this->projectDir, '/') . '/src/PrestaShopBundle/ApiPlatform/Resources',
+-        ]));
++        ];
++
++        // In test environment an additional mapping folder is added, but we can't inject api_platform configuration
++        // in this service easily to make it fully dynamic so the extra path is hard-coded here but only in test environment
++        // This could be refactored if we find a ay to properly inject the api_platform config (at least the mapping.paths part)
++        if ($this->environment->getName() === 'test') {
++            $testResources = rtrim($this->projectDir, '/') . '/tests/Resources/ApiPlatform/Resources';
++            if (is_dir($testResources)) {
++                $coreMappingPaths[] = $testResources;
++            }
++        }
++
++        $coreScopes = $this->extractScopes(new AttributesResourceNameCollectionFactory($coreMappingPaths));
+         if (!empty($coreScopes)) {
+             $resourceScopes[] = ApiResourceScopes::createCoreScopes($coreScopes);
+         }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClientController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClientController.php
+index 4829002a12f8a..4006a44ce1627 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClientController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClientController.php
+@@ -43,11 +43,13 @@
+ use PrestaShop\PrestaShop\Core\Domain\ApiClient\ValueObject\CreatedApiClient;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagManager;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\Form\FormHandlerInterface as ConfigurationFormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Search\Filters\ApiClientFilters;
+ use PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
++use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\HttpFoundation\JsonResponse;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\HttpFoundation\Response;
+@@ -63,29 +65,33 @@ public function __construct(
+     ) {
+     }
+ 
+-    /**
+-     * @return Response
+-     */
+     #[AdminSecurity("is_granted('create', request.get('_legacy_controller')) || is_granted('update', request.get('_legacy_controller')) || is_granted('delete', request.get('_legacy_controller')) || is_granted('read', request.get('_legacy_controller'))")]
+     public function indexAction(ApiClientFilters $apiClientFilters, Request $request): Response
+     {
+-        $apiClientGridFactory = $this->get('prestashop.core.grid.factory.api_client');
+-        $apiClientGrid = $apiClientGridFactory->getGrid($apiClientFilters);
+-        $isAuthorizationServerMultistoreDisabled = $this->isAuthorizationServerMultistoreDisabled();
++        return $this->renderIndex($apiClientFilters, $request);
++    }
+ 
+-        $oauthApiBaseUrl = $this->getOAuthApiBaseUrl($request);
+-        $htmlDocUrl = $oauthApiBaseUrl . '/docs.html';
+-        $jsonDocUrl = $oauthApiBaseUrl . '/docs.json';
++    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))")]
++    public function processConfigurationAction(ApiClientFilters $apiClientFilters, Request $request): Response
++    {
++        $formHandler = $this->getConfigurationFormHandler();
++        $configurationForm = $formHandler->getForm();
++        $configurationForm->handleRequest($request);
+ 
+-        return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig', [
+-            'apiClientGrid' => $this->presentGrid($apiClientGrid),
+-            'help_link' => $this->generateSidebarLink('AdminAuthorizationServer'),
+-            'layoutTitle' => $this->trans('API Clients', 'Admin.Navigation.Menu'),
+-            'layoutHeaderToolbarBtn' => $this->getApiClientsToolbarButtons(),
+-            'isAuthorizationServerMultistoreDisabled' => $isAuthorizationServerMultistoreDisabled,
+-            'htmlDocUrl' => $htmlDocUrl,
+-            'jsonDocUrl' => $jsonDocUrl,
+-        ]);
++        if ($configurationForm->isSubmitted() && $configurationForm->isValid()) {
++            $data = $configurationForm->getData();
++            $configurationErrors = $formHandler->save($data);
++
++            if (empty($configurationErrors)) {
++                $this->addFlash('success', $this->trans('Successful update', 'Admin.Notifications.Success'));
++
++                return $this->redirectToRoute('admin_api_clients_index');
++            }
++
++            $this->flashErrors($configurationErrors);
++        }
++
++        return $this->renderIndex($apiClientFilters, $request, $configurationForm);
+     }
+ 
+     #[AdminSecurity("is_granted('create', request.get('_legacy_controller'))", redirectRoute: 'admin_api_clients_index')]
+@@ -251,6 +257,32 @@ private function getOAuthApiBaseUrl(Request $request): string
+         return $rootUrl . '/admin-api';
+     }
+ 
++    private function renderIndex(ApiClientFilters $apiClientFilters, Request $request, ?FormInterface $configurationForm = null): Response
++    {
++        $apiClientGridFactory = $this->get('prestashop.core.grid.factory.api_client');
++        $apiClientGrid = $apiClientGridFactory->getGrid($apiClientFilters);
++        $isAuthorizationServerMultistoreDisabled = $this->isAuthorizationServerMultistoreDisabled();
++
++        $oauthApiBaseUrl = $this->getOAuthApiBaseUrl($request);
++        $htmlDocUrl = $oauthApiBaseUrl . '/docs.html';
++        $jsonDocUrl = $oauthApiBaseUrl . '/docs.json';
++
++        if (null === $configurationForm) {
++            $configurationForm = $this->getConfigurationFormHandler()->getForm();
++        }
++
++        return $this->render('@PrestaShop/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig', [
++            'apiClientGrid' => $this->presentGrid($apiClientGrid),
++            'help_link' => $this->generateSidebarLink('AdminAuthorizationServer'),
++            'layoutTitle' => $this->trans('API Clients', 'Admin.Navigation.Menu'),
++            'layoutHeaderToolbarBtn' => $this->getApiClientsToolbarButtons(),
++            'isAuthorizationServerMultistoreDisabled' => $isAuthorizationServerMultistoreDisabled,
++            'htmlDocUrl' => $htmlDocUrl,
++            'jsonDocUrl' => $jsonDocUrl,
++            'configurationForm' => $configurationForm,
++        ]);
++    }
++
+     private function getFormHandler(): FormHandlerInterface
+     {
+         return $this->get('prestashop.core.form.identifiable_object.api_client_form_handler');
+@@ -261,6 +293,11 @@ private function getFormBuilder(): FormBuilderInterface
+         return $this->get('prestashop.core.form.identifiable_object.builder.api_client_form_builder');
+     }
+ 
++    private function getConfigurationFormHandler(): ConfigurationFormHandlerInterface
++    {
++        return $this->get('prestashop.adapter.autorization_server.form_handler');
++    }
++
+     /**
+      * @return array
+      */
+diff --git a/src/PrestaShopBundle/EventListener/API/SSLMiddlewareListener.php b/src/PrestaShopBundle/EventListener/API/SSLMiddlewareListener.php
+index e3881fcda6d1d..653a4d9b39e80 100644
+--- a/src/PrestaShopBundle/EventListener/API/SSLMiddlewareListener.php
++++ b/src/PrestaShopBundle/EventListener/API/SSLMiddlewareListener.php
+@@ -44,6 +44,13 @@ class SSLMiddlewareListener
+ {
+     private const AVAILABLE_SECURE_PROTOCOLS = ['tls/1.2', 'tls/1.3'];
+ 
++    private const NOT_PROTECTED_ROUTES = [
++        '/^api_doc$/',
++        '/^_wdt$/',
++        '/^_profiler.*$/',
++        '/^_preview_error$/',
++    ];
++
+     public function __construct(
+         private readonly ConfigurationInterface $configuration
+     ) {
+@@ -58,6 +65,21 @@ public function __construct(
+      */
+     public function onKernelRequest(RequestEvent $event): void
+     {
++        // Only main request are protected, this way sub requests like partial fragments work correctly
++        if (!$event->isMainRequest()) {
++            return;
++        }
++
++        // Some routes don't need to be protected by HTTPs (Swagger doc, profiler and debugging routes, ...)
++        $route = $event->getRequest()->attributes->get('_route');
++        if (!empty($route)) {
++            foreach (self::NOT_PROTECTED_ROUTES as $routePattern) {
++                if (preg_match($routePattern, $route)) {
++                    return;
++                }
++            }
++        }
++
+         // If constant that forces the check is disabled ignore the protection
+         if ($this->configuration->get('_PS_API_FORCE_TLS_VERSION_') === false) {
+             return;
+diff --git a/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AuthorizationServer/ConfigurationType.php b/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AuthorizationServer/ConfigurationType.php
+new file mode 100644
+index 0000000000000..32942c3818ac1
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/AdvancedParameters/AuthorizationServer/ConfigurationType.php
+@@ -0,0 +1,48 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\AdvancedParameters\AuthorizationServer;
++
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\FormBuilderInterface;
++
++class ConfigurationType extends TranslatorAwareType
++{
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        parent::buildForm($builder, $options);
++        $builder
++            ->add('enable_experimental_endpoints', SwitchType::class, [
++                'label' => $this->trans('Enable experimental endpoints', 'Admin.Advparameters.Feature'),
++                'help' => $this->trans('Experimental API endpoints are disabled by default in prod environment, this configuration allows to forcefully enable them (not recommended).', 'Admin.Advparameters.Feature'),
++                'required' => true,
++            ])
++        ;
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/AuthorizationServer/FormDataProvider.php b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/AuthorizationServer/FormDataProvider.php
+new file mode 100644
+index 0000000000000..84e03b2a229b0
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Configure/AdvancedParameters/AuthorizationServer/FormDataProvider.php
+@@ -0,0 +1,56 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\AuthorizationServer;
++
++use PrestaShop\PrestaShop\Core\Configuration\DataConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Form\FormDataProviderInterface;
++
++class FormDataProvider implements FormDataProviderInterface
++{
++    public function __construct(
++        private readonly DataConfigurationInterface $dataConfiguration
++    ) {
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function getData()
++    {
++        return $this->dataConfiguration->getConfiguration();
++    }
++
++    /**
++     * {@inheritdoc}
++     */
++    public function setData(array $data)
++    {
++        return $this->dataConfiguration->updateConfiguration($data);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/authorization_server.yml b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/authorization_server.yml
+index 8075dd96a37bf..62a951eb2efd4 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/authorization_server.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/configure/advanced_parameters/authorization_server.yml
+@@ -6,6 +6,14 @@ admin_api_clients_index:
+     _legacy_controller: AdminAuthorizationServer
+     _legacy_link: AdminAuthorizationServer
+ 
++admin_api_clients_process_configuration:
++  path: /api-clients
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters\AuthorizationServer\ApiClientController::processConfigurationAction
++    _legacy_controller: AdminAuthorizationServer
++    _legacy_link: AdminAuthorizationServer
++
+ admin_api_clients_create:
+   path: /api-clients/create
+   methods: [ GET, POST, PATCH ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+index cc40253e4ba3f..061d6d977ead1 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+@@ -298,3 +298,6 @@ services:
+   PrestaShop\PrestaShop\Adapter\Admin\ImageConfiguration:
+     arguments:
+       - '@prestashop.adapter.legacy.configuration'
++
++  PrestaShop\PrestaShop\Adapter\AuthorizationServer\AuthorizationServerConfiguration:
++    autowire: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+new file mode 100644
+index 0000000000000..56c8aeb7865e9
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/api_platform.yml
+@@ -0,0 +1,60 @@
++# These are services related to ApiPlatform integration, like decorators or services that depend on the ApiPlatform framework
++services:
++  _defaults:
++    public: false
++
++  # Configuration to automatically inject normalizers into DomainSerializer
++  PrestaShopBundle\ApiPlatform\Normalizer\:
++    resource: "../../../../ApiPlatform/Normalizer/*"
++    tags: [ 'prestashop.api.normalizers' ]
++
++  # This is a custom serializer used by our custom providers/processors for ApiPlatform
++  PrestaShopBundle\ApiPlatform\DomainSerializer:
++    class: PrestaShopBundle\ApiPlatform\DomainSerializer
++    arguments:
++      - !tagged_iterator { tag: prestashop.api.normalizers, default_priority_method: getNormalizerPriority }
++
++  # Customer provider for CQRS queries
++  PrestaShopBundle\ApiPlatform\Provider\QueryProvider:
++    tags: [ 'api_platform.state_provider' ]
++    autowire: true
++    arguments:
++      - '@prestashop.core.query_bus'
++
++  # Custom processor for CQRS commands
++  PrestaShopBundle\ApiPlatform\Processor\CommandProcessor:
++    tags: [ 'api_platform.state_processor' ]
++    autowire: true
++    arguments:
++      - '@prestashop.core.command_bus'
++
++  # Custom provider for paginated listing
++  PrestaShopBundle\ApiPlatform\Provider\QueryListProvider:
++    tags: [ 'api_platform.state_provider' ]
++    autowire: true
++    arguments:
++      $filtersBuilder: '@prestashop.core.api.search.builder'
++      $requestStack: '@request_stack'
++
++  # This decorator allows modifying the available ApiPlatform resources based on their configuration (using a custom extra property)
++  PrestaShopBundle\ApiPlatform\Metadata\Resource\Factory\ExperimentalOperationsMetadataCollectionFactoryDecorator:
++    decorates: api_platform.metadata.resource.metadata_collection_factory
++    autowire: true
++    arguments:
++      $innerFactory: '@.inner'
++      $isDebug: '%kernel.debug%'
++
++  # This service depends on ResourceMetadataCollectionFactoryInterface (auto wired) and can extract the scopes defined on operations
++  PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor:
++    autowire: true
++    arguments:
++      $moduleDir: '%prestashop.module_dir%'
++      $installedModules: '%prestashop.installed_modules%'
++      $enabledModules: '%prestashop.active_modules%'
++      $projectDir: '%kernel.project_dir%'
++
++  PrestaShopBundle\ApiPlatform\Scopes\CachedApiResourceScopesExtractor:
++    autowire: true
++    decorates: PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor
++
++  PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractorInterface: '@PrestaShopBundle\ApiPlatform\Scopes\CachedApiResourceScopesExtractor'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
+index 26ef0eed82892..6575e807946c7 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_data_provider.yml
+@@ -301,3 +301,8 @@ services:
+     arguments:
+       - '@prestashop.core.query_bus'
+       - '@prestashop.core.command_bus'
++
++  prestashop.adapter.authorization_server.form_provider:
++    class: 'PrestaShopBundle\Form\Admin\Configure\AdvancedParameters\AuthorizationServer\FormDataProvider'
++    arguments:
++      - '@PrestaShop\PrestaShop\Adapter\AuthorizationServer\AuthorizationServerConfiguration'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+index 322d72f692213..e2fdadce405bb 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_handler.yml
+@@ -580,3 +580,12 @@ services:
+       - 'PrestaShopBundle\Form\Admin\Improve\Design\ImageSettings\ImageSettingsType'
+       - 'ImageSettingsPage'
+       - 'image_settings'
++
++  prestashop.adapter.autorization_server.form_handler:
++    class: 'PrestaShop\PrestaShop\Core\Form\Handler'
++    arguments:
++      - '@form.factory'
++      - '@prestashop.core.hook.dispatcher'
++      - '@prestashop.adapter.authorization_server.form_provider'
++      - 'PrestaShopBundle\Form\Admin\AdvancedParameters\AuthorizationServer\ConfigurationType'
++      - 'AuthorizationServer'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/oauth.yml b/src/PrestaShopBundle/Resources/config/services/bundle/oauth.yml
+index 929aa4f8833a1..ab6ac22d65d24 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/oauth.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/oauth.yml
+@@ -72,12 +72,3 @@ services:
+   PrestaShopBundle\Controller\Api\OAuth2\AccessTokenController:
+     autowire: true
+     autoconfigure: true
+-
+-  PrestaShopBundle\ApiPlatform\Normalizer\:
+-    resource: "../../../../ApiPlatform/Normalizer/*"
+-    tags: [ 'prestashop.api.normalizers' ]
+-
+-  PrestaShopBundle\ApiPlatform\DomainSerializer:
+-    class: PrestaShopBundle\ApiPlatform\DomainSerializer
+-    arguments:
+-      - !tagged_iterator { tag: prestashop.api.normalizers, default_priority_method: getNormalizerPriority }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+index 26a457181aae2..990fd44c1cc6e 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+@@ -96,28 +96,6 @@ services:
+     public: false
+     tags: [ 'container.env_var_processor' ]
+ 
+-  PrestaShopBundle\ApiPlatform\Provider\QueryProvider:
+-    tags: [ 'api_platform.state_provider' ]
+-    public: false
+-    autowire: true
+-    arguments:
+-      - '@prestashop.core.query_bus'
+-
+-  PrestaShopBundle\ApiPlatform\Processor\CommandProcessor:
+-    tags: [ 'api_platform.state_processor' ]
+-    public: false
+-    autowire: true
+-    arguments:
+-      - '@prestashop.core.command_bus'
+-
+-  PrestaShopBundle\ApiPlatform\Provider\QueryListProvider:
+-    tags: [ 'api_platform.state_provider' ]
+-    public: false
+-    autowire: true
+-    arguments:
+-      $filtersBuilder: '@prestashop.core.api.search.builder'
+-      $requestStack: '@request_stack'
+-
+   PrestaShopBundle\Security\Admin\SessionRenewer:
+     arguments:
+       $storage: "@security.csrf.token_storage"
+@@ -135,19 +113,3 @@ services:
+       - '@doctrine.orm.entity_manager'
+ 
+   PrestaShop\PrestaShop\Core\Repository\TransactionManagerInterface: '@PrestaShopBundle\Service\Database\TransactionManager'
+-
+-  PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor:
+-    public: false
+-    autowire: true
+-    arguments:
+-      $moduleDir: '%prestashop.module_dir%'
+-      $installedModules: '%prestashop.installed_modules%'
+-      $enabledModules: '%prestashop.active_modules%'
+-      $projectDir: '%kernel.project_dir%'
+-
+-  PrestaShopBundle\ApiPlatform\Scopes\CachedApiResourceScopesExtractor:
+-    public: false
+-    autowire: true
+-    decorates: PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor
+-
+-  PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractorInterface: '@PrestaShopBundle\ApiPlatform\Scopes\CachedApiResourceScopesExtractor'
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig
+index 47cac1f15db3b..ab6461106dce3 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/AdvancedParameters/AuthorizationServer/ApiClient/index.html.twig
+@@ -59,6 +59,28 @@
+   {% block api_client_listing %}
+     {% include '@PrestaShop/Admin/Common/Grid/grid_panel.html.twig' with {'grid': apiClientGrid} %}
+   {% endblock %}
++
++  {# Configuration form #}
++  {{ form_start(configurationForm, {attr : {class: 'form'}, action: path('admin_api_clients_process_configuration') }) }}
++  {% block administration_form_general %}
++    <div class="card" id="configuration_fieldset_general">
++      <h3 class="card-header">
++        <i class="material-icons">settings</i>
++        {{ 'Configuration'|trans({}, 'Admin.Global') }}
++      </h3>
++      <div class="card-body">
++        <div class="form-wrapper">
++          {{ form_widget(configurationForm) }}
++        </div>
++      </div>
++      <div class="card-footer">
++        <div class="d-flex justify-content-end">
++          <button type="submit" class="btn btn-primary">{{ 'Save'|trans({}, 'Admin.Actions') }}</button>
++        </div>
++      </div>
++    </div>
++  {% endblock %}
++  {{ form_end(configurationForm) }}
+ {% endblock %}
+ 
+ {% block javascripts %}
+diff --git a/tests/Integration/ApiPlatform/DisabledEndpointsTest.php b/tests/Integration/ApiPlatform/DisabledEndpointsTest.php
+new file mode 100644
+index 0000000000000..1be935d1fc97c
+--- /dev/null
++++ b/tests/Integration/ApiPlatform/DisabledEndpointsTest.php
+@@ -0,0 +1,130 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\ApiPlatform;
++
++use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor;
++use Tests\Integration\ApiPlatform\EndPoint\ApiTestCase;
++
++/**
++ * These tests muste be executed independently because their variants have impact on the cache,
++ * that is also hy the cache must be cleared before, after the tests and in between them.
++ *
++ * @group isolatedProcess
++ */
++class DisabledEndpointsTest extends ApiTestCase
++{
++    public static function tearDownAfterClass(): void
++    {
++        parent::tearDownAfterClass();
++        self::clearCache();
++    }
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++        self::clearCache();
++    }
++
++    /**
++     * Since the variant configurations influence the cache we MUST clear it between each tests,
++     * and clear it again after to avoid impacting the following tests in the suite
++     */
++    protected static function clearCache(): void
++    {
++        $kernel = static::bootKernel();
++        $baseCommandLine = 'php -d memory_limit=-1 ' . $kernel->getProjectDir() . '/bin/console ';
++        $commandLine = $baseCommandLine . 'cache:clear --no-warmup --no-interaction --env=test --app-id=admin-api --quiet';
++        $result = 0;
++        system($commandLine, $result);
++        if ($result !== 0) {
++            throw new \RuntimeException('Could not clear the cache');
++        }
++    }
++
++    /**
++     * @dataProvider getConfigurations
++     *
++     * @param bool $isDebug
++     * @param bool $expectedEndpointStatus
++     * @param bool $forceExperimentalEndpoints
++     */
++    public function testDisabledEndpoints(bool $isDebug, bool $forceExperimentalEndpoints, bool $expectedEndpointStatus): void
++    {
++        // Boot kernel with appropriate configuration, exceptionally we force the environment, so we have
++        // distinct cache and adapted data/behaviour for each use case
++        $kernelOptions = ['debug' => $isDebug];
++        static::bootKernel($kernelOptions);
++
++        // Update the configuration
++        $this->updateConfiguration('PS_ENABLE_EXPERIMENTAL_API_ENDPOINTS', (int) $forceExperimentalEndpoints);
++
++        // Scope experimental_scope only exists when the endpoint is enabled
++        $bearerToken = $this->getBearerToken($expectedEndpointStatus ? ['experimental_scope'] : [], $kernelOptions);
++
++        static::createClient($kernelOptions)->request('GET', '/test/experimental/product/1', [
++            'headers' => [
++                'Authorization' => 'Bearer ' . $bearerToken,
++            ],
++        ]);
++        self::assertResponseStatusCodeSame($expectedEndpointStatus ? 200 : 404);
++
++        /** @var ApiResourceScopesExtractor $scopesExtractor */
++        $scopesExtractor = static::createClient($kernelOptions)->getContainer()->get(ApiResourceScopesExtractor::class);
++        $resourceScopes = $scopesExtractor->getAllApiResourceScopes();
++        $foundScope = false;
++        foreach ($resourceScopes as $resourceScope) {
++            if (in_array('experimental_scope', $resourceScope->getScopes())) {
++                $foundScope = true;
++                break;
++            }
++        }
++        $this->assertEquals($expectedEndpointStatus, $foundScope);
++    }
++
++    public function getConfigurations(): iterable
++    {
++        yield 'debug mode on, force config is off (not relevant anyway), endpoint is enabled' => [
++            true,
++            false,
++            true,
++        ];
++
++        yield 'debug mode off, force config is off, endpoint is disabled' => [
++            false,
++            false,
++            false,
++        ];
++
++        yield 'debug mode off, force config is on, endpoint is enabled' => [
++            false,
++            true,
++            true,
++        ];
++    }
++}
+diff --git a/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php b/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
+index 36a0c2145e0a7..b19a5a70bc6b4 100644
+--- a/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
++++ b/tests/Integration/ApiPlatform/EndPoint/ApiTestCase.php
+@@ -83,7 +83,7 @@ protected static function createClient(array $kernelOptions = [], array $default
+         return parent::createClient($kernelOptions, $defaultOptions);
+     }
+ 
+-    protected function getBearerToken(array $scopes = []): string
++    protected function getBearerToken(array $scopes = [], array $kernelOptions = []): string
+     {
+         if (null === self::$clientSecret) {
+             self::createApiClient($scopes);
+@@ -101,7 +101,7 @@ protected function getBearerToken(array $scopes = []): string
+                 'content-type' => 'application/x-www-form-urlencoded',
+             ],
+         ];
+-        $response = static::createClient()->request('POST', '/access_token', $options);
++        $response = static::createClient($kernelOptions)->request('POST', '/access_token', $options);
+ 
+         return json_decode($response->getContent())->access_token;
+     }
+diff --git a/tests/Resources/ApiPlatform/Resources/ApiTest.php b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+index 30c8e073c15a7..3de5ce2210af9 100644
+--- a/tests/Resources/ApiPlatform/Resources/ApiTest.php
++++ b/tests/Resources/ApiPlatform/Resources/ApiTest.php
+@@ -47,6 +47,13 @@
+             scopes: ['product_read'],
+             CQRSQueryMapping: ApiTest::QUERY_MAPPING,
+         ),
++        new CQRSGet(
++            uriTemplate: '/test/experimental/product/{productId}',
++            CQRSQuery: GetProductForEditing::class,
++            scopes: ['experimental_scope'],
++            CQRSQueryMapping: ApiTest::QUERY_MAPPING,
++            experimentalOperation: true,
++        ),
+     ],
+ )]
+ class ApiTest
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+index 38796e6781026..d2d45ddec64de 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCommandTest.php
+@@ -474,4 +474,58 @@ public function testMultipleArguments(): void
+             'CQRSCommandMapping' => $commandMapping,
+         ], $operation->getExtraProperties());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSCommand();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSCommand(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSCommand(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSCommand(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCommand(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+index ce127a96ceb19..495808913852e 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSCreateTest.php
+@@ -327,4 +327,58 @@ public function testApiResourceMapping(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property ApiResourceMapping and a ApiResourceMapping argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSCreate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSCreate(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSCreate(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSCreate(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSCreate(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
+index ccfdc7db149ae..079fcc468a523 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSDeleteTest.php
+@@ -279,4 +279,58 @@ public function testApiResourceMapping(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property ApiResourceMapping and a ApiResourceMapping argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSDelete();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSDelete(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSDelete(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSDelete(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSDelete(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
+index fc4cf6db196e0..b71f5c7cfb50c 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSGetTest.php
+@@ -320,4 +320,58 @@ public function testMultipleArguments(): void
+             'ApiResourceMapping' => $resourceMapping,
+         ], $operation->getExtraProperties());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSGet();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSGet(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSGet(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSGet(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSGet(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+index b9c65d78d8a58..93a947ce521f6 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSPartialUpdateTest.php
+@@ -334,4 +334,58 @@ public function testApiResourceMapping(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property ApiResourceMapping and a ApiResourceMapping argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSPartialUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSPartialUpdate(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSPartialUpdate(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSPartialUpdate(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php
+index b8e17e7731c8d..ce85ce7dacc08 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSQueryCollectionTest.php
+@@ -320,4 +320,58 @@ public function testMultipleArguments(): void
+             'ApiResourceMapping' => $resourceMapping,
+         ], $operation->getExtraProperties());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSQueryCollection();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSQueryCollection(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSQueryCollection(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSQueryCollection(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSQueryCollection(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+index 78453239fa220..b4d6e04959ab1 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/CQRSUpdateTest.php
+@@ -330,4 +330,58 @@ public function testApiResourceMapping(): void
+         $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
+         $this->assertEquals('Specifying an extra property ApiResourceMapping and a ApiResourceMapping argument that are different is invalid', $caughtException->getMessage());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new CQRSUpdate();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new CQRSUpdate(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new CQRSUpdate(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new CQRSUpdate(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new CQRSUpdate(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedListTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedListTest.php
+index c9ffc2d7c2adb..8d72d32027cd9 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedListTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Metadata/DQBPaginatedListTest.php
+@@ -341,4 +341,58 @@ public function testMultipleArguments(): void
+             'queryBuilder' => 'prestashop.core.api.query_builder.hook',
+         ], $operation->getExtraProperties());
+     }
++
++    public function testExperimentalOperation(): void
++    {
++        // Default value is false (no extra property added)
++        $operation = new DQBPaginatedList();
++        $this->assertEquals([], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Scopes parameters in constructor
++        $operation = new DQBPaginatedList(
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Extra properties parameters in constructor
++        $operation = new DQBPaginatedList(
++            extraProperties: ['experimentalOperation' => false]
++        );
++        $this->assertEquals(['experimentalOperation' => false], $operation->getExtraProperties());
++        $this->assertEquals(false, $operation->getExperimentalOperation());
++
++        // Extra properties AND scopes parameters in constructor, both values get merged but remain unique
++        $operation = new DQBPaginatedList(
++            extraProperties: ['experimentalOperation' => true],
++            experimentalOperation: true,
++        );
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // Use with method, returned object is a clone All values are replaced
++        $operation2 = $operation->withExperimentalOperation(false);
++        $this->assertNotEquals($operation2, $operation);
++        $this->assertEquals(['experimentalOperation' => false], $operation2->getExtraProperties());
++        $this->assertEquals(false, $operation2->getExperimentalOperation());
++        // Initial operation not modified of course
++        $this->assertEquals(['experimentalOperation' => true], $operation->getExtraProperties());
++        $this->assertEquals(true, $operation->getExperimentalOperation());
++
++        // When both values are specified, but they are different trigger an exception
++        $caughtException = null;
++        try {
++            new DQBPaginatedList(
++                extraProperties: ['experimentalOperation' => true],
++                experimentalOperation: false,
++            );
++        } catch (InvalidArgumentException $e) {
++            $caughtException = $e;
++        }
++
++        $this->assertNotNull($caughtException);
++        $this->assertInstanceOf(InvalidArgumentException::class, $caughtException);
++        $this->assertEquals('Specifying an extra property experimentalOperation and a experimentalOperation argument that are different is invalid', $caughtException->getMessage());
++    }
+ }
+diff --git a/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php b/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
+index dc102a980e6f5..68571c0dfec93 100644
+--- a/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
++++ b/tests/Unit/PrestaShopBundle/ApiPlatform/Scopes/ApiResourceScopesExtractorTest.php
+@@ -30,6 +30,7 @@
+ 
+ use ApiPlatform\Metadata\Resource\Factory\AttributesResourceMetadataCollectionFactory;
+ use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\EnvironmentInterface;
+ use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopes;
+ use PrestaShopBundle\ApiPlatform\Scopes\ApiResourceScopesExtractor;
+ 
+@@ -73,8 +74,12 @@ public function testGetEnabledResourceScopes(): void
+ 
+     private function buildExtractor(): ApiResourceScopesExtractor
+     {
++        $environment = $this->createMock(EnvironmentInterface::class);
++        $environment->method('getName')->willReturn('test');
++
+         return new ApiResourceScopesExtractor(
+             new AttributesResourceMetadataCollectionFactory(),
++            $environment,
+             $this->moduleDir,
+             ['fake_module', 'disabled_fake_module'],
+             ['fake_module'],

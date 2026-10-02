@@ -1,0 +1,99 @@
+diff --git a/classes/ObjectModel.php b/classes/ObjectModel.php
+index 17f5f92874136..456db9489ffbf 100644
+--- a/classes/ObjectModel.php
++++ b/classes/ObjectModel.php
+@@ -1355,6 +1355,27 @@ public function getFieldsRequiredDatabase($all = false)
+ 		'.(!$all ? 'WHERE object_name = \''.pSQL(get_class($this)).'\'' : ''));
+     }
+ 
++    /**
++     * Returns true if required field exists
++     *
++     * @param string $field_name to search
++     * @param bool $all If true, returns required fields of all object classes.
++     *
++     * @return boolean
++     */
++    public function isFieldRequired($field_name, $all = false)
++    {
++        if (empty($field_name)) {
++            return false;
++        } else {
++            return (bool) Db::getInstance()->getValue('
++            SELECT id_required_field
++            FROM '._DB_PREFIX_.'required_field
++            WHERE field_name = "'. Db::getInstance()->escape($field_name) .'"
++            '.(!$all ? ' AND object_name = \''.pSQL(get_class($this)).'\'' : ''));
++        }
++    }
++
+     /**
+      * Caches data about required objects fields in memory
+      *
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 0656fd4ad657b..6aa7a9c97c8ca 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -1643,9 +1643,12 @@ protected function makeCustomerFormatter()
+             $this->context->language
+         );
+ 
++        $customer = new Customer();
++
+         $formatter
+             ->setAskForPartnerOptin(Configuration::get('PS_CUSTOMER_OPTIN'))
+             ->setAskForBirthdate(Configuration::get('PS_CUSTOMER_BIRTHDATE'))
++            ->setPartnerOptinRequired($customer->isFieldRequired('optin'))
+         ;
+ 
+         return $formatter;
+diff --git a/classes/form/CustomerFormatter.php b/classes/form/CustomerFormatter.php
+index 308028ef379d2..a9ee4b4e85b52 100644
+--- a/classes/form/CustomerFormatter.php
++++ b/classes/form/CustomerFormatter.php
+@@ -8,6 +8,7 @@ class CustomerFormatterCore implements FormFormatterInterface
+ 
+     private $ask_for_birthdate              = true;
+     private $ask_for_partner_optin          = true;
++    private $partner_optin_is_required      = true;
+     private $ask_for_password               = true;
+     private $password_is_required           = true;
+     private $ask_for_new_password           = false;
+@@ -32,6 +33,12 @@ public function setAskForPartnerOptin($ask_for_partner_optin)
+         return $this;
+     }
+ 
++    public function setPartnerOptinRequired($partner_optin_is_required)
++    {
++        $this->partner_optin_is_required = $partner_optin_is_required;
++        return $this;
++    }
++
+     public function setAskForPassword($ask_for_password)
+     {
+         $this->ask_for_password = $ask_for_password;
+@@ -171,6 +178,7 @@ public function getFormat()
+                         'Receive offers from our partners', [], 'Shop.Theme.CustomerAccount'
+                     )
+                 )
++                ->setRequired($this->partner_optin_is_required)
+             ;
+         }
+ 
+diff --git a/controllers/front/IdentityController.php b/controllers/front/IdentityController.php
+index 85e2ae05a7e3e..cf3ecacdb4ca0 100644
+--- a/controllers/front/IdentityController.php
++++ b/controllers/front/IdentityController.php
+@@ -41,10 +41,12 @@ public function initContent()
+         parent::initContent();
+ 
+         $customer_form = $this->makeCustomerForm();
++        $customer = new Customer();
+ 
+         $customer_form->getFormatter()
+             ->setAskForNewPassword(true)
+             ->setPasswordRequired(true)
++            ->setPartnerOptinRequired($customer->isFieldRequired('optin'))
+         ;
+ 
+         if (Tools::isSubmit('submitCreate')) {

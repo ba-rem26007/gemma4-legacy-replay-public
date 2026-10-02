@@ -1,0 +1,321 @@
+diff --git a/admin-dev/themes/new-theme/.webpack/common.js b/admin-dev/themes/new-theme/.webpack/common.js
+index fca532960e7ad..269cf2a55dd3c 100644
+--- a/admin-dev/themes/new-theme/.webpack/common.js
++++ b/admin-dev/themes/new-theme/.webpack/common.js
+@@ -62,6 +62,7 @@ module.exports = {
+     catalog_product: './js/pages/catalog/product',
+     category: './js/pages/category',
+     category_edit: './js/pages/category/edit',
++    chartjs: './js/libs/chartjs',
+     cldr: './js/app/cldr',
+     cms_page: './js/pages/cms-page',
+     cms_page_form: './js/pages/cms-page/form',
+diff --git a/admin-dev/themes/new-theme/js/libs/chartjs.ts b/admin-dev/themes/new-theme/js/libs/chartjs.ts
+new file mode 100644
+index 0000000000000..052ac0a6244b7
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/libs/chartjs.ts
+@@ -0,0 +1,160 @@
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++import Chart from 'chart.js/auto';
++import type {Plugin} from 'chart.js';
++
++/**
++ * PrestaShop chart palette, mirroring the modern PrestaShop branding as published on
++ * prestashop.com: one entry per `--color-N` custom property backing the `.b-color-*`
++ * blocks, in the same order. Most brand colors already exist as design-kit tokens
++ * shipped by prestakit (some as the exact hex, some as the nearest step), so values
++ * are read from the --cdk-* custom properties and follow the design kit; the hex
++ * fallbacks mirror the current token values. Colors with no design-kit counterpart
++ * (`paleGray`, `teal`) are hard-coded until a token exists.
++ *
++ * The pastel brand colors sit below the usual contrast thresholds for thin marks but
++ * are kept for brand fidelity: charts must keep legends and tooltips enabled
++ * (Chart.js defaults) so series identity never relies on color alone, and line
++ * strokes should prefer the darker `teal` / `gray` tokens.
++ */
++const TOKENS = {
++  white: ['--cdk-white', '#ffffff'], // prestashop.com --color-1
++  black: ['--cdk-black', '#000000'], // prestashop.com --color-2
++  blue: ['--cdk-ocean-blue-500', '#a4dbe8'], // prestashop.com --color-3
++  green: ['--cdk-green-100', '#bde9c9'], // prestashop.com --color-4
++  purple: ['--cdk-purple-500', '#decde7'], // prestashop.com --color-5
++  yellow: ['--cdk-amber-500', '#f8e08e'], // prestashop.com --color-6
++  lightGray: ['--cdk-primary-200', '#f7f7f7'], // prestashop.com --color-7 (#f4f4f4)
++  gray: ['--cdk-primary-600', '#5e5e5e'], // prestashop.com --color-8 (#595959)
++  paleGray: ['', '#dadada'], // prestashop.com --color-9
++  teal: ['', '#268095'], // prestashop.com --color-10
++  lightBlue: ['--cdk-ocean-blue-50', '#e4f4f8'], // prestashop.com --color-11 (#e8f6f9)
++  midGray: ['--cdk-primary-500', '#bbbbbb'], // prestashop.com --color-12
++  offWhite: ['--cdk-primary-100', '#fafafa'], // prestashop.com --color-13 (#f7fbfc)
++  borderGray: ['--cdk-primary-400', '#dddddd'], // prestashop.com --color-14
++} as const;
++
++type TokenName = keyof typeof TOKENS;
++type PaletteColors = Record<TokenName, string>;
++
++// Categorical ramp used to auto-color chart series: the brand pastels interleaved
++// with the darker accents so every adjacent pair stays distinguishable for
++// color-blind readers — the prestashop.com slider sequence (--color-4, -5, -3, -6)
++// puts purple next to blue, which protanopia cannot tell apart on chart marks.
++// Series identity must still never rely on color alone (legends and tooltips
++// stay enabled).
++const SERIES_ORDER: TokenName[] = ['green', 'teal', 'blue', 'yellow', 'gray', 'purple'];
++
++let cachedColors: PaletteColors | null = null;
++
++function getColors(): PaletteColors {
++  if (cachedColors === null) {
++    const styles = getComputedStyle(document.documentElement);
++    const colors: Partial<PaletteColors> = {};
++
++    (Object.keys(TOKENS) as TokenName[]).forEach((name) => {
++      const [cssVar, fallback] = TOKENS[name];
++      colors[name] = (cssVar && styles.getPropertyValue(cssVar).trim()) || fallback;
++    });
++    cachedColors = colors as PaletteColors;
++  }
++
++  return cachedColors;
++}
++
++function getSeries(): string[] {
++  const colors = getColors();
++
++  return SERIES_ORDER.map((name) => colors[name]);
++}
++
++function withAlpha(color: string, alpha: number): string {
++  const match = color.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
++
++  if (!match) {
++    return color;
++  }
++
++  let hex = match[1];
++
++  if (hex.length === 3) {
++    hex = hex.replace(/./g, '$&$&');
++  }
++
++  const red = parseInt(hex.slice(0, 2), 16);
++  const green = parseInt(hex.slice(2, 4), 16);
++  const blue = parseInt(hex.slice(4, 6), 16);
++
++  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
++}
++
++/**
++ * Applies the PrestaShop palette to every chart whose datasets do not define their
++ * own colors, mirroring the semantics of the built-in `colors` plugin it replaces:
++ * doughnut-like charts are colored per data point, other types per dataset.
++ */
++/* eslint-disable no-param-reassign */
++const psColors: Plugin = {
++  id: 'psColors',
++  beforeLayout(chart) {
++    const {datasets} = chart.config.data;
++
++    if (datasets.some((dataset) => dataset.backgroundColor !== undefined || dataset.borderColor !== undefined)) {
++      return;
++    }
++
++    const series = getSeries();
++    let colorIndex = 0;
++
++    datasets.forEach((dataset, datasetIndex) => {
++      const {type} = chart.getDatasetMeta(datasetIndex);
++
++      if (type === 'doughnut' || type === 'pie' || type === 'polarArea') {
++        dataset.backgroundColor = dataset.data.map(() => {
++          const color = series[colorIndex % series.length];
++          colorIndex += 1;
++
++          return color;
++        });
++      } else {
++        const color = series[colorIndex % series.length];
++        colorIndex += 1;
++
++        if (type === 'line' || type === 'radar') {
++          dataset.borderColor = color;
++          dataset.backgroundColor = withAlpha(color, 0.15);
++        } else {
++          dataset.backgroundColor = color;
++          dataset.borderColor = color;
++        }
++      }
++    });
++  },
++};
++/* eslint-enable no-param-reassign */
++
++Chart.defaults.set('plugins.colors', {enabled: false});
++Chart.register(psColors);
++
++Chart.defaults.color = getColors().gray;
++Chart.defaults.borderColor = getColors().borderGray; // grid lines and axis borders
++Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
++
++const psChart = {
++  get colors(): PaletteColors {
++    return {...getColors()};
++  },
++  get series(): string[] {
++    return getSeries();
++  },
++  withAlpha,
++};
++
++export type PsChart = typeof psChart;
++
++const globalScope = window as unknown as {Chart: typeof Chart; psChart: PsChart};
++globalScope.Chart = Chart;
++globalScope.psChart = psChart;
+diff --git a/admin-dev/themes/new-theme/package-lock.json b/admin-dev/themes/new-theme/package-lock.json
+index fae166c079814..7dcac1cb8dab4 100644
+--- a/admin-dev/themes/new-theme/package-lock.json
++++ b/admin-dev/themes/new-theme/package-lock.json
+@@ -16,6 +16,7 @@
+         "bootstrap-colorpicker": "^3.4.0",
+         "bootstrap-tokenfield": "^0.12.0",
+         "bourbon": "^7.3.0",
++        "chart.js": "^4.5.1",
+         "dropzone": "^5.9.3",
+         "email-validator": "^2.0.4",
+         "eonasdan-bootstrap-datetimepicker": "^4.17.49",
+@@ -2228,6 +2229,12 @@
+         "tslib": "2"
+       }
+     },
++    "node_modules/@kurkle/color": {
++      "version": "0.3.4",
++      "resolved": "https://registry.npmjs.org/@kurkle/color/-/color-0.3.4.tgz",
++      "integrity": "sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==",
++      "license": "MIT"
++    },
+     "node_modules/@leichtgewicht/ip-codec": {
+       "version": "2.0.5",
+       "resolved": "https://registry.npmjs.org/@leichtgewicht/ip-codec/-/ip-codec-2.0.5.tgz",
+@@ -4269,6 +4276,18 @@
+         "node": ">=4"
+       }
+     },
++    "node_modules/chart.js": {
++      "version": "4.5.1",
++      "resolved": "https://registry.npmjs.org/chart.js/-/chart.js-4.5.1.tgz",
++      "integrity": "sha512-GIjfiT9dbmHRiYi6Nl2yFCq7kkwdkp1W/lp2J99rX0yo9tgJGn3lKQATztIjb5tVtevcBtIdICNWqlq5+E8/Pw==",
++      "license": "MIT",
++      "dependencies": {
++        "@kurkle/color": "^0.3.0"
++      },
++      "engines": {
++        "pnpm": ">=8"
++      }
++    },
+     "node_modules/check-error": {
+       "version": "1.0.3",
+       "resolved": "https://registry.npmjs.org/check-error/-/check-error-1.0.3.tgz",
+@@ -16617,6 +16636,11 @@
+       "dev": true,
+       "requires": {}
+     },
++    "@kurkle/color": {
++      "version": "0.3.4",
++      "resolved": "https://registry.npmjs.org/@kurkle/color/-/color-0.3.4.tgz",
++      "integrity": "sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w=="
++    },
+     "@leichtgewicht/ip-codec": {
+       "version": "2.0.5",
+       "resolved": "https://registry.npmjs.org/@leichtgewicht/ip-codec/-/ip-codec-2.0.5.tgz",
+@@ -18126,6 +18150,14 @@
+         "supports-color": "^5.3.0"
+       }
+     },
++    "chart.js": {
++      "version": "4.5.1",
++      "resolved": "https://registry.npmjs.org/chart.js/-/chart.js-4.5.1.tgz",
++      "integrity": "sha512-GIjfiT9dbmHRiYi6Nl2yFCq7kkwdkp1W/lp2J99rX0yo9tgJGn3lKQATztIjb5tVtevcBtIdICNWqlq5+E8/Pw==",
++      "requires": {
++        "@kurkle/color": "^0.3.0"
++      }
++    },
+     "check-error": {
+       "version": "1.0.3",
+       "resolved": "https://registry.npmjs.org/check-error/-/check-error-1.0.3.tgz",
+diff --git a/admin-dev/themes/new-theme/package.json b/admin-dev/themes/new-theme/package.json
+index 46fe58d7ebebc..d30cceb7ebe97 100644
+--- a/admin-dev/themes/new-theme/package.json
++++ b/admin-dev/themes/new-theme/package.json
+@@ -21,6 +21,7 @@
+     "bootstrap-colorpicker": "^3.4.0",
+     "bootstrap-tokenfield": "^0.12.0",
+     "bourbon": "^7.3.0",
++    "chart.js": "^4.5.1",
+     "dropzone": "^5.9.3",
+     "email-validator": "^2.0.4",
+     "eonasdan-bootstrap-datetimepicker": "^4.17.49",
+diff --git a/classes/lang/KeysReference/FeatureFlagLang.php b/classes/lang/KeysReference/FeatureFlagLang.php
+index 7c04d8309527f..27d0fd806fc24 100644
+--- a/classes/lang/KeysReference/FeatureFlagLang.php
++++ b/classes/lang/KeysReference/FeatureFlagLang.php
+@@ -76,3 +76,7 @@
+ // Stats feature flag
+ trans('Stats', 'Admin.Advparameters.Feature');
+ trans('Enable / Disable the migrated stats page.', 'Admin.Advparameters.Help');
++
++// Dashboard feature flag
++trans('Dashboard', 'Admin.Advparameters.Feature');
++trans('Enable / Disable the migrated Symfony dashboard page. Native dashboard modules are not yet compatible with the new page and will not display until they are migrated.', 'Admin.Advparameters.Help');
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index 05dea9ccf81f5..f38a679300602 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -33,6 +33,6 @@
+     <feature_flag id="quick_access" name="quick_access" type="env,dotenv,db" label_wording="Quick access" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated quick access page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+     <feature_flag id="combination_feature_values" name="combination_feature_values" type="env,dotenv,db" label_wording="Combination feature values" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable feature values at combination level, in addition to product level." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="stats" name="stats" type="env,dotenv,db" label_wording="Stats" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated stats page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+-    <feature_flag id="dashboard" name="dashboard" type="env,dotenv,db" label_wording="Dashboard page" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated Symfony dashboard page. Native dashboard modules are not yet compatible with the new page and will not display until they are migrated." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
++    <feature_flag id="dashboard" name="dashboard" type="env,dotenv,db" label_wording="Dashboard" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated Symfony dashboard page. Native dashboard modules are not yet compatible with the new page and will not display until they are migrated." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+   </entities>
+ </entity_feature_flag>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig
+index b3205e4e8e1f5..335aca54b6e03 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Dashboard/index.html.twig
+@@ -4,6 +4,11 @@
+  #}
+ {% extends '@PrestaShop/Admin/layout.html.twig' %}
+ 
++{% block javascripts %}
++  {{ parent() }}
++  <script src="{{ asset('themes/new-theme/public/chartjs.bundle.js') }}"></script>
++{% endblock %}
++
+ {% block content %}
+   {% set toolbarContent = renderhook('displayAdminDashboardToolbar') %}
+   {% set topContent = renderhook('displayAdminDashboardTop', {date_from: dateFrom, date_to: dateTo}) %}
+@@ -44,15 +49,15 @@
+     {% endif %}
+ 
+     {% if hasZoneOne or hasZoneTwo or hasZoneThree %}
+-      <div class="row">
++      <div class="row mx-n2">
+         {% if hasZoneOne %}
+-          <div class="col-12 col-xl-3" id="displayAdminDashboardZoneOne">{{ zoneOneContent|raw }}</div>
++          <div class="col-12 col-xl-3 px-2" id="displayAdminDashboardZoneOne">{{ zoneOneContent|raw }}</div>
+         {% endif %}
+         {% if hasZoneTwo %}
+-          <div class="col-12 col-xl-{{ hasZoneThree ? 7 : 9 }}" id="displayAdminDashboardZoneTwo">{{ zoneTwoContent|raw }}</div>
++          <div class="col-12 col-xl-{{ hasZoneThree ? 7 : 9 }} px-2" id="displayAdminDashboardZoneTwo">{{ zoneTwoContent|raw }}</div>
+         {% endif %}
+         {% if hasZoneThree %}
+-          <div class="col-12 col-xl-2" id="displayAdminDashboardZoneThree">{{ zoneThreeContent|raw }}</div>
++          <div class="col-12 col-xl-2 px-2" id="displayAdminDashboardZoneThree">{{ zoneThreeContent|raw }}</div>
+         {% endif %}
+       </div>
+     {% endif %}

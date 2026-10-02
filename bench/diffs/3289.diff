@@ -1,0 +1,125 @@
+diff --git a/classes/ImageManager.php b/classes/ImageManager.php
+index 377096acc3aa9..a4388f5a6ae4c 100644
+--- a/classes/ImageManager.php
++++ b/classes/ImageManager.php
+@@ -120,19 +120,23 @@ public static function checkImageMemoryLimit($image)
+ 	/**
+ 	 * Resize, cut and optimize image
+ 	 *
+-	 * @param string  $src_file   Image object from $_FILE
+-	 * @param string  $dst_file   Destination filename
+-	 * @param int $dst_width  Desired width (optional)
+-	 * @param int $dst_height Desired height (optional)
+-	 * @param string  $file_type
+-	 * @param bool    $force_type
+-	 * @param int     $error
+-	 * @param int     $width
+-	 * @param int     $height
+-	 * @param int     $quality
++	 * @param string $src_file   Image object from $_FILE
++	 * @param string $dst_file   Destination filename
++	 * @param int    $dst_width  Desired width (optional)
++	 * @param int    $dst_height Desired height (optional)
++	 * @param string $file_type
++	 * @param bool   $force_type
++	 * @param int    $error
++	 * @param int    $tgt_width
++	 * @param int    $tgt_height
++	 * @param int    $quality
++	 * @param int    $src_width
++	 * @param int    $src_height
+ 	 * @return bool Operation result
+ 	 */
+-	public static function resize($src_file, $dst_file, $dst_width = null, $dst_height = null, $file_type = 'jpg', $force_type = false, &$error = 0, &$width = null, &$height = null, $quality = 5)
++	public static function resize($src_file, $dst_file, $dst_width = null, $dst_height = null, $file_type = 'jpg',
++								$force_type = false, &$error = 0, &$tgt_width = null, &$tgt_height = null, $quality = 5,
++								&$src_width = null, &$src_height = null)
+ 	{
+ 		if (PHP_VERSION_ID < 50300)
+ 			clearstatcache();
+@@ -229,8 +233,8 @@ public static function resize($src_file, $dst_file, $dst_width = null, $dst_heig
+ 		if (!ImageManager::checkImageMemoryLimit($src_file))
+ 			return !($error = self::ERROR_MEMORY_LIMIT);
+ 
+-		$width = $dst_width;
+-		$height = $dst_height;
++		$tgt_width  = $dst_width;
++		$tgt_height = $dst_height;
+ 
+ 		$dest_image = imagecreatetruecolor($dst_width, $dst_height);
+ 
+diff --git a/controllers/admin/AdminImportController.php b/controllers/admin/AdminImportController.php
+index 9b34d9f41e173..4aaa5fd1c1174 100644
+--- a/controllers/admin/AdminImportController.php
++++ b/controllers/admin/AdminImportController.php
+@@ -1048,27 +1048,36 @@ protected static function copyImg($id_entity, $id_image = null, $url, $entity =
+ 		if (!ImageManager::checkImageMemoryLimit($url))
+ 			return false;
+ 
++		$orig_tmpfile = $tmpfile;
++
+ 		// 'file_exists' doesn't work on distant file, and getimagesize makes the import slower.
+ 		// Just hide the warning, the processing will be the same.
+ 		if (Tools::copy($url, $tmpfile))
+ 		{
+-			$last_width = $last_height = 0;
++			$tgt_width = $tgt_height = 0;
++			$src_width = $src_height = 0;
+ 			$error = 0;
+-			ImageManager::resize($tmpfile, $path.'.jpg', null, null, 'jpg', false, $error, $last_width, $last_height);
++			ImageManager::resize($tmpfile, $path.'.jpg', null, null, 'jpg', false, $error, $tgt_width, $tgt_height, 5,
++								 $src_width, $src_height);
+ 			$images_types = ImageType::getImagesTypes($entity, true);
+ 
+ 			if ($regenerate)
+ 			{
+ 				$previous_path = null;
+ 				$path_infos = array();
+-				$path_infos[] = array(PHP_INT_MAX, PHP_INT_MAX, $tmpfile);
++				$path_infos[] = array($tgt_width, $tgt_height, $path.'.jpg');
+ 				foreach ($images_types as $image_type)
+ 				{
+ 					$tmpfile = self::get_best_path($image_type['width'], $image_type['height'], $path_infos);
+ 
+-					ImageManager::resize($tmpfile, $path.'-'.stripslashes($image_type['name']).'.jpg', $image_type['width'], $image_type['height'], 'jpg', false, $error, $last_width, $last_height);
+-
+-					$path_infos[] = array($last_width, $last_height, $path.'-'.stripslashes($image_type['name']).'.jpg');
++					if (ImageManager::resize($tmpfile, $path.'-'.stripslashes($image_type['name']).'.jpg', $image_type['width'],
++										 $image_type['height'], 'jpg', false, $error, $tgt_width, $tgt_height, 5,
++										 $src_width, $src_height))
++					{
++						// the last image should not be added in the candidate list if it's bigger than the original image
++						if ($tgt_width <= $src_width && $tgt_height <= $src_height)
++							$path_infos[] = array($tgt_width, $tgt_height, $path.'-'.stripslashes($image_type['name']).'.jpg');
++					}
+ 					if (in_array($image_type['id_image_type'], $watermark_types))
+ 						Hook::exec('actionWatermark', array('id_image' => $id_image, 'id_product' => $id_entity));
+ 				}
+@@ -1076,23 +1085,24 @@ protected static function copyImg($id_entity, $id_image = null, $url, $entity =
+ 		}
+ 		else
+ 		{
+-			unlink($tmpfile);
++			@unlink($orig_tmpfile);
+ 			return false;
+ 		}
+-		unlink($tmpfile);
++		unlink($orig_tmpfile);
+ 		return true;
+ 	}
+ 
+ 	private static function get_best_path($tgt_width, $tgt_height, $path_infos)
+ 	{
+ 		$path_infos = array_reverse($path_infos);
++		$path = '';
+ 		foreach($path_infos as $path_info)
+ 		{
+ 			list($width, $height, $path) = $path_info;
+ 			if ($width >= $tgt_width && $height >= $tgt_height)
+ 				return $path;
+ 		}
+-		return '';
++		return $path;
+ 	}
+ 
+ 	public function categoryImport()

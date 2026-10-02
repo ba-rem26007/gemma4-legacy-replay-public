@@ -1,0 +1,601 @@
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+index bc9f5945b4583..a2148b2c57e0f 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+@@ -390,7 +390,6 @@ private function getOrderDocuments(Order $order): OrderDocumentsForViewing
+             $amount = null;
+             $numericAmount = null;
+             $amountMismatch = null;
+-            $availableAction = null;
+             $isAddPaymentAllowed = false;
+ 
+             if ($document instanceof OrderInvoice) {
+@@ -438,10 +437,10 @@ private function getOrderDocuments(Order $order): OrderDocumentsForViewing
+                     $document->delivery_number
+                 );
+                 $amount = $this->locale->formatPrice(
+-                    $document->total_shipping_tax_incl,
++                    $document->total_paid_tax_incl,
+                     $currency->iso_code
+                 );
+-                $numericAmount = $document->total_shipping_tax_incl;
++                $numericAmount = $document->total_paid_tax_incl;
+             } elseif (OrderDocumentType::CREDIT_SLIP === $type) {
+                 $conf = $this->configuration->get('PS_CREDIT_SLIP_PREFIX');
+                 $number = sprintf(
+@@ -519,8 +518,8 @@ private function getOrderShipping(Order $order): OrderShippingForViewing
+                 $trackingUrl = null;
+                 $trackingNumber = $item['tracking_number'];
+ 
+-                if ($item['url'] && $item['tracking_number']) {
+-                    $trackingUrl = str_replace('@', $item['tracking_number'], $item['url']);
++                if ($item['url'] && $trackingNumber) {
++                    $trackingUrl = str_replace('@', $trackingNumber, $item['url']);
+                 }
+ 
+                 $weight = sprintf('%.3f %s', $item['weight'], $this->configuration->get('PS_WEIGHT_UNIT'));
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php b/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
+index 7128c43a0aa01..f1efd087569a9 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
+@@ -166,14 +166,14 @@ private function getShippingDetails(Order $order): OrderPreviewShippingDetails
+         $carrierName = $trackingUrl = null;
+         $stateName = Validate::isLoadedObject($state) ? $state->name : null;
+ 
++        $orderCarrierId = $order->getIdOrderCarrier();
++        $orderCarrier = new OrderCarrier($orderCarrierId);
++
+         if (Validate::isLoadedObject($carrier)) {
+             $carrierName = $carrier->name;
+-            $trackingUrl = $carrier->url;
++            $trackingUrl = str_replace('@', $orderCarrier->tracking_number ?: '@', $carrier->url);
+         }
+ 
+-        $orderCarrierId = $order->getIdOrderCarrier();
+-        $orderCarrier = new OrderCarrier($orderCarrierId);
+-
+         $dni = Address::dniRequired($address->id_country) ? $address->dni : null;
+ 
+         return new OrderPreviewShippingDetails(
+diff --git a/src/Adapter/OrderMessage/CommandHandler/AddOrderMessageHandler.php b/src/Adapter/OrderMessage/CommandHandler/AddOrderMessageHandler.php
+index 9ca2850425e47..3139cfd05e66b 100644
+--- a/src/Adapter/OrderMessage/CommandHandler/AddOrderMessageHandler.php
++++ b/src/Adapter/OrderMessage/CommandHandler/AddOrderMessageHandler.php
+@@ -30,6 +30,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\AddOrderMessageCommand;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\CommandHandler\AddOrderMessageHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageException;
++use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageNameAlreadyUsedException;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\ValueObject\OrderMessageId;
+ use PrestaShopException;
+ 
+@@ -47,6 +48,8 @@ final class AddOrderMessageHandler implements AddOrderMessageHandlerInterface
+      */
+     public function handle(AddOrderMessageCommand $command): OrderMessageId
+     {
++        $this->assertNameIsNotAlreadyUsed($command);
++
+         $orderMessage = new OrderMessage();
+ 
+         $orderMessage->name = $command->getLocalizedName();
+@@ -69,4 +72,23 @@ public function handle(AddOrderMessageCommand $command): OrderMessageId
+ 
+         return new OrderMessageId((int) $orderMessage->id);
+     }
++
++    private function assertNameIsNotAlreadyUsed(AddOrderMessageCommand $command): void
++    {
++        foreach ($command->getLocalizedName() as $langId => $langName) {
++            $orderMessages = OrderMessage::getOrderMessages($langId);
++            if (!is_array($orderMessages)) {
++                continue;
++            }
++            foreach ($orderMessages as $orderMessage) {
++                if ($orderMessage['name'] === $langName) {
++                    throw new OrderMessageNameAlreadyUsedException(
++                        $langName,
++                        $langId,
++                        'An order message already exists for this name'
++                    );
++                }
++            }
++        }
++    }
+ }
+diff --git a/src/Adapter/OrderMessage/CommandHandler/EditOrderMessageHandler.php b/src/Adapter/OrderMessage/CommandHandler/EditOrderMessageHandler.php
+index 88080e027cfc1..af98153157410 100644
+--- a/src/Adapter/OrderMessage/CommandHandler/EditOrderMessageHandler.php
++++ b/src/Adapter/OrderMessage/CommandHandler/EditOrderMessageHandler.php
+@@ -26,10 +26,12 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\OrderMessage\CommandHandler;
+ 
++use OrderMessage;
+ use PrestaShop\PrestaShop\Adapter\OrderMessage\AbstractOrderMessageHandler;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\EditOrderMessageCommand;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\CommandHandler\EditOrderMessageHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageException;
++use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageNameAlreadyUsedException;
+ use PrestaShopException;
+ 
+ /**
+@@ -44,6 +46,8 @@ final class EditOrderMessageHandler extends AbstractOrderMessageHandler implemen
+      */
+     public function handle(EditOrderMessageCommand $command): void
+     {
++        $this->assertNameIsNotAlreadyUsed($command);
++
+         $orderMessage = $this->getOrderMessage($command->getOrderMessageId());
+ 
+         if (null !== $command->getLocalizedName()) {
+@@ -69,4 +73,26 @@ public function handle(EditOrderMessageCommand $command): void
+             throw new OrderMessageException(sprintf('Failed to update order message with id "%s"', $command->getOrderMessageId()->getValue()), 0, $e);
+         }
+     }
++
++    private function assertNameIsNotAlreadyUsed(EditOrderMessageCommand $command): void
++    {
++        foreach ($command->getLocalizedName() as $langId => $langName) {
++            $orderMessages = OrderMessage::getOrderMessages($langId);
++            if (!is_array($orderMessages)) {
++                continue;
++            }
++            foreach ($orderMessages as $orderMessage) {
++                if ((int) $orderMessage['id_order_message'] === $command->getOrderMessageId()->getValue()) {
++                    continue;
++                }
++                if ($orderMessage['name'] === $langName) {
++                    throw new OrderMessageNameAlreadyUsedException(
++                        $langName,
++                        $langId,
++                        'An order message already exists for this name'
++                    );
++                }
++            }
++        }
++    }
+ }
+diff --git a/src/Core/Domain/OrderMessage/Exception/OrderMessageNameAlreadyUsedException.php b/src/Core/Domain/OrderMessage/Exception/OrderMessageNameAlreadyUsedException.php
+new file mode 100644
+index 0000000000000..9d9cad209abd5
+--- /dev/null
++++ b/src/Core/Domain/OrderMessage/Exception/OrderMessageNameAlreadyUsedException.php
+@@ -0,0 +1,78 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception;
++
++use Exception;
++
++/**
++ * Thrown when order message's name is already used by another order message.
++ */
++class OrderMessageNameAlreadyUsedException extends OrderMessageException
++{
++    /**
++     * @var int
++     */
++    private $langId;
++
++    /**
++     * @var string
++     */
++    private $name;
++
++    /**
++     * @param string $name the email that's being used
++     * @param int $langId
++     * @param string $message
++     * @param int $code
++     * @param Exception|null $previous
++     */
++    public function __construct(string $name, int $langId, string $message = '', int $code = 0, Exception $previous = null)
++    {
++        parent::__construct($message, $code, $previous);
++
++        $this->name = $name;
++        $this->langId = $langId;
++    }
++
++    /**
++     * @return string
++     */
++    public function getName(): string
++    {
++        return $this->name;
++    }
++
++    /**
++     * @return int
++     */
++    public function getLangId(): int
++    {
++        return $this->langId;
++    }
++}
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/CustomerService/OrderMessageController.php b/src/PrestaShopBundle/Controller/Admin/Sell/CustomerService/OrderMessageController.php
+index 226d383ef3d1d..4fa5aa35901da 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/CustomerService/OrderMessageController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/CustomerService/OrderMessageController.php
+@@ -30,6 +30,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\BulkDeleteOrderMessageCommand;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\DeleteOrderMessageCommand;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageException;
++use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageNameAlreadyUsedException;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Query\GetOrderMessageForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\QueryResult\EditableOrderMessage;
+@@ -249,6 +250,10 @@ private function getErrorMessages(): array
+                 'The object cannot be loaded (or found)',
+                 'Admin.Notifications.Error'
+             ),
++            OrderMessageNameAlreadyUsedException::class => $this->trans(
++                'This name already exists.',
++                'Admin.Design.Notification'
++            ),
+         ];
+     }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index 5c0f6fbf79074..cf617cb16cf03 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -2013,4 +2013,78 @@ public function previewOrderCheckAddress(string $orderReference, string $address
+             );
+         }
+     }
++
++    /**
++     * @Then /^the order "(.+)" should have (\d+) document(s?)$/
++     *
++     * @param string $orderReference
++     * @param int $numDocuments
++     */
++    public function orderHasNumDocuments(string $orderReference, int $numDocuments): void
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        /** @var OrderForViewing $orderForViewing */
++        $orderForViewing = $this->getQueryBus()->handle(new GetOrderForViewing($orderId));
++
++        Assert::assertEquals(
++            $numDocuments,
++            count($orderForViewing->getDocuments()->getDocuments()),
++            sprintf(
++                'Invalid number of order documents, expected %s but got %s instead',
++                $numDocuments,
++                count($orderForViewing->getDocuments()->getDocuments())
++            )
++        );
++    }
++
++    /**
++     * @Then /^the order "(.+)" should have following documents:$/
++     *
++     * @param string $orderReference
++     * @param TableNode $table
++     */
++    public function orderHasFollowingDocuments(string $orderReference, TableNode $table): void
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        /** @var OrderForViewing $orderForViewing */
++        $orderForViewing = $this->getQueryBus()->handle(new GetOrderForViewing($orderId));
++
++        $expectedDetails = $table->getHash();
++        foreach ($expectedDetails as $expectedDetail) {
++            $hasDocument = $document = false;
++            foreach ($orderForViewing->getDocuments()->getDocuments() as $document) {
++                if ($expectedDetail['referenceNumber'] === $document->getReferenceNumber()) {
++                    $hasDocument = true;
++                    break;
++                }
++            }
++            if (!$hasDocument) {
++                throw new RuntimeException(sprintf(
++                    'Document not found : %s',
++                    $expectedDetail['referenceNumber']
++                ));
++            }
++
++            Assert::assertEquals(
++                $expectedDetail['type'],
++                $document->getType(),
++                sprintf(
++                    'Invalid document type for order %s, expected %s instead of %s',
++                    $orderReference,
++                    $expectedDetail['type'],
++                    $document->getType()
++                )
++            );
++            Assert::assertEquals(
++                $expectedDetail['amount'],
++                $document->getAmount(),
++                sprintf(
++                    'Invalid document type for order %s, expected %s instead of %s',
++                    $orderReference,
++                    $expectedDetail['amount'],
++                    $document->getAmount()
++                )
++            );
++        }
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderMessageContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderMessageContext.php
+index 3075d37596c83..6cc34a6c3c269 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderMessageContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderMessageContext.php
+@@ -24,12 +24,16 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
++declare(strict_types=1);
++
+ namespace Tests\Integration\Behaviour\Features\Context\Domain;
+ 
+ use OrderMessage;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Query\GetOrderForViewing;
+ use PrestaShop\PrestaShop\Core\Domain\Order\QueryResult\OrderForViewing;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\AddOrderMessageCommand;
++use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Command\EditOrderMessageCommand;
++use PrestaShop\PrestaShop\Core\Domain\OrderMessage\Exception\OrderMessageNameAlreadyUsedException;
+ use PrestaShop\PrestaShop\Core\Domain\OrderMessage\ValueObject\OrderMessageId;
+ use RuntimeException;
+ use Tests\Integration\Behaviour\Features\Context\SharedStorage;
+@@ -39,7 +43,7 @@ class OrderMessageContext extends AbstractDomainFeatureContext
+     /**
+      * @When I specify :propertyName :propertyValue in default language for order message :reference
+      */
+-    public function specifyPropertyInDefaultLanguage(string $propertyName, string $propertyValue, string $reference)
++    public function specifyPropertyInDefaultLanguage(string $propertyName, string $propertyValue, string $reference): void
+     {
+         $key = sprintf('order_message_%s_props', $reference);
+ 
+@@ -54,21 +58,52 @@ public function specifyPropertyInDefaultLanguage(string $propertyName, string $p
+     /**
+      * @When I add order message :reference with specified properties
+      */
+-    public function addWithSpecifiedProperties(string $reference)
++    public function addWithSpecifiedProperties(string $reference): void
+     {
+         $key = sprintf('order_message_%s_props', $reference);
+ 
+         $properties = $this->getSharedStorage()->get($key);
+ 
+-        /** @var OrderMessageId $orderMessageId */
+-        $orderMessageId = $this->getCommandBus()->handle(
+-            new AddOrderMessageCommand(
+-                $properties['name'],
+-                $properties['message']
+-            )
+-        );
++        /* @var OrderMessageId $orderMessageId */
++        try {
++            $this->cleanLastException();
++            $orderMessageId = $this->getCommandBus()->handle(
++                new AddOrderMessageCommand(
++                    $properties['name'],
++                    $properties['message']
++                )
++            );
++
++            $this->getSharedStorage()->set($reference, new OrderMessage($orderMessageId->getValue()));
++        } catch (OrderMessageNameAlreadyUsedException $exception) {
++            $this->setLastException($exception);
++        }
++    }
++
++    /**
++     * @When I edit order message :reference with specified properties
++     */
++    public function editWithSpecifiedProperties(string $reference): void
++    {
++        $key = sprintf('order_message_%s_props', $reference);
++
++        $properties = $this->getSharedStorage()->get($key);
+ 
+-        $this->getSharedStorage()->set($reference, new OrderMessage($orderMessageId->getValue()));
++        /** @var OrderMessage $orderMessage */
++        $orderMessage = $this->getSharedStorage()->get($reference);
++
++        try {
++            $this->cleanLastException();
++            $this->getCommandBus()->handle(
++                new EditOrderMessageCommand(
++                    (int) $orderMessage->id,
++                    $properties['name'],
++                    $properties['message'] ?? null
++                )
++            );
++        } catch (OrderMessageNameAlreadyUsedException $exception) {
++            $this->setLastException($exception);
++        }
+     }
+ 
+     /**
+@@ -78,7 +113,7 @@ public function addWithSpecifiedProperties(string $reference)
+      *
+      * @throws RuntimeException
+      */
+-    public function orderMustHaveNoCustomerMessage(string $orderReference)
++    public function orderMustHaveNoCustomerMessage(string $orderReference): void
+     {
+         $orderId = SharedStorage::getStorage()->get($orderReference);
+ 
+@@ -98,7 +133,7 @@ public function orderMustHaveNoCustomerMessage(string $orderReference)
+      *
+      * @throws RuntimeException
+      */
+-    public function orderMustHaveCustomerMessage(string $orderReference, string $messageContent)
++    public function orderMustHaveCustomerMessage(string $orderReference, string $messageContent): void
+     {
+         $orderId = SharedStorage::getStorage()->get($orderReference);
+ 
+@@ -115,4 +150,12 @@ public function orderMustHaveCustomerMessage(string $orderReference, string $mes
+             throw new RuntimeException(sprintf('Message "%s" not found in Order #%s messages', $messageContent, $orderId));
+         }
+     }
++
++    /**
++     * @Then I should get error that an order message with this name already exists
++     */
++    public function assertLastErrorIsOrderMessageNameAlreadyUsed(): void
++    {
++        $this->assertLastErrorIs(OrderMessageNameAlreadyUsedException::class);
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_address.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_address.feature
+index 436affe5a3267..4ef0e885da0b6 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_address.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_address.feature
+@@ -169,9 +169,13 @@ Feature: Order from Back Office (BO)
+     And the preview order "bo_order1" has following shipping details
+       | Tracking number  |                              |
+       | Tracking URL     |                              |
+-    Given the carrier "tracking-carrier" uses "http://tracking.url" as tracking url
+-    And I update order "bo_order1" Tracking number to "42424242" and Carrier to "tracking-carrier"
++    Given I update order "bo_order1" Tracking number to "42424242" and Carrier to "tracking-carrier"
++    And the carrier "tracking-carrier" uses "http://tracking.url" as tracking url
+     Then order "bo_order1" should have "tracking-carrier" as a carrier
+     And the preview order "bo_order1" has following shipping details
+       | Tracking number  | 42424242                     |
+       | Tracking URL     | http://tracking.url          |
++    Given the carrier "tracking-carrier" uses "http://tracking.url/@" as tracking url
++    Then the preview order "bo_order1" has following shipping details
++      | Tracking number  | 42424242                     |
++      | Tracking URL     | http://tracking.url/42424242 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_documents.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_documents.feature
+new file mode 100644
+index 0000000000000..b2c7e271ccf29
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_documents.feature
+@@ -0,0 +1,46 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s order --tags order-documents
++@reset-database-before-feature
++@reboot-kernel-before-feature
++@clear-cache-before-feature
++@order-documents
++Feature: Order from Back Office (BO)
++  In order to manage orders for FO customers
++  As a BO user
++  I need to be able to get documents from orders from the BO
++
++  Background:
++    Given email sending is disabled
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And the customer "testCustomer" has SIRET "49791663500061"
++    And the customer "testCustomer" has APE "5829C"
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++
++  Scenario: Default : no documents
++    Then the order "bo_order1" should have 0 document
++
++  Scenario: Status : Payment accepted
++    Given I update order "bo_order1" status to "Payment accepted"
++    Then the order "bo_order1" should have 1 document
++    Then the order "bo_order1" should have following documents:
++      | referenceNumber | type          | amount |
++      | #IN000001       | invoice       | $32.65 |
++
++  Scenario: Status : Delivered
++    Given I update order "bo_order1" status to "Delivered"
++    Then the order "bo_order1" should have 2 documents
++    Then the order "bo_order1" should have following documents:
++      | referenceNumber | type          | amount |
++      | #IN000002       | invoice       | $32.65 |
++      | #DE000001       | delivery_slip | $32.65 |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/OrderMessage/order_message_management.feature b/tests/Integration/Behaviour/Features/Scenario/OrderMessage/order_message_management.feature
+index e48222db0d389..cd62cfe337df8 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/OrderMessage/order_message_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/OrderMessage/order_message_management.feature
+@@ -11,3 +11,30 @@ Feature: Order message Management
+     When I add order message "OM1" with specified properties
+     Then order message "OM1" "name" in default language should be "Out of stock"
+     And order message "OM1" "message" in default language should be "Products are out of stock"
++
++  Scenario: Check duplicate order message
++    When I specify "name" "My Order Message Name" in default language for order message "OM2"
++    And I specify "message" "My Order Message Message" in default language for order message "OM2"
++    And I add order message "OM2" with specified properties
++    Then I should get no error
++    When I specify "name" "My Order Message Name" in default language for order message "OM3"
++    And I specify "message" "My Order Message Message" in default language for order message "OM3"
++    And I add order message "OM3" with specified properties
++    Then I should get error that an order message with this name already exists
++
++  Scenario: Check duplicate order message
++    When I specify "name" "My Order Message Name 1" in default language for order message "OM2"
++    And I specify "message" "My Order Message Message 1" in default language for order message "OM2"
++    And I add order message "OM2" with specified properties
++    Then I should get no error
++    When I specify "name" "My Order Message Name 2" in default language for order message "OM3"
++    And I specify "message" "My Order Message Message 2" in default language for order message "OM3"
++    And I add order message "OM3" with specified properties
++    Then I should get no error
++    When I specify "name" "My Order Message Name 3" in default language for order message "OM3"
++    And I edit order message "OM3" with specified properties
++    Then I should get no error
++    When I specify "name" "My Order Message Name 1" in default language for order message "OM3"
++    And I edit order message "OM3" with specified properties
++    Then I should get error that an order message with this name already exists
++
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 1b04a4602a0a9..a362a0ee58f3f 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -189,6 +189,7 @@ default:
+                 - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
+                 - Tests\Integration\Behaviour\Features\Context\OrderMessageContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\CommonDomainFeatureContext
+         misc:
+             paths:
+               - %paths.base%/Features/Scenario/Misc
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.js b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.js
+index b05057a04ad63..ac62fb6a0cf0a 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.js
++++ b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.js
+@@ -43,6 +43,7 @@ const createCarrierData = new CarrierFaker({
+   allZones: true,
+   handlingCosts: true,
+   allZonesValue: 5.00,
++  rangeSup: 50,
+ });
+ const priceDisplayMethod = ['Tax excluded', 'Tax included'];
+ const defaultHandlingChargesValue = 2.00;

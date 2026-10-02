@@ -1,0 +1,609 @@
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index c26eeac0ae2c0..76fbb5543bfdd 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -4,6 +4,7 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderResolver;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
+ use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsProvider;
+ use PrestaShop\PrestaShop\Core\Checkout\OnePageCheckoutAvailabilityCheckerInterface;
+@@ -379,6 +380,13 @@ protected function getDefaultTermsAndConditions(): string|bool
+      */
+     protected function buildCheckoutProcess(CheckoutSession $session, $translator)
+     {
++        /** @var CheckoutProcessProviderResolver $checkoutProcessProviderResolver */
++        $checkoutProcessProviderResolver = $this->get(CheckoutProcessProviderResolver::class);
++        $resolvedCheckoutProcess = $checkoutProcessProviderResolver->resolve($session, $translator);
++        if ($resolvedCheckoutProcess instanceof CheckoutProcess) {
++            return $resolvedCheckoutProcess;
++        }
++
+         $checkoutProcess = new CheckoutProcess(
+             $this->context,
+             $session
+diff --git a/install-dev/data/xml/configuration.xml b/install-dev/data/xml/configuration.xml
+index 10313f8b5da8b..3e81804cee51c 100644
+--- a/install-dev/data/xml/configuration.xml
++++ b/install-dev/data/xml/configuration.xml
+@@ -323,9 +323,6 @@
+   <configuration id="PS_GUEST_CHECKOUT_ENABLED" name="PS_GUEST_CHECKOUT_ENABLED">
+     <value>1</value>
+   </configuration>
+-  <configuration id="PS_ONE_PAGE_CHECKOUT_ENABLED" name="PS_ONE_PAGE_CHECKOUT_ENABLED">
+-    <value>0</value>
+-  </configuration>
+   <configuration id="PS_DISPLAY_SUPPLIERS" name="PS_DISPLAY_SUPPLIERS">
+     <value>0</value>
+   </configuration>
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index b6e526ad0eb03..db464e9e241e4 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -2873,6 +2873,11 @@
+       <title>Modify checkout process</title>
+       <description>This hook is called when constructing the checkout process</description>
+     </hook>
++    <hook id="actionCheckoutBuildProcess">
++      <name>actionCheckoutBuildProcess</name>
++      <title>Build checkout process</title>
++      <description>This hook is triggered before the checkout is rendered. Modules may return a checkout process provider. The provider is used only when exactly one enabled and valid provider is available.</description>
++    </hook>
+     <hook id="actionCheckoutStepRenderTemplate">
+       <name>actionCheckoutStepRenderTemplate</name>
+       <title>Modify the parameters of the checkout step template rendering</title>
+diff --git a/src/Adapter/Order/Checkout/CheckoutProcessProviderInterface.php b/src/Adapter/Order/Checkout/CheckoutProcessProviderInterface.php
+new file mode 100644
+index 0000000000000..8eb5bfeb77432
+--- /dev/null
++++ b/src/Adapter/Order/Checkout/CheckoutProcessProviderInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Order\Checkout;
++
++use CheckoutProcess;
++use CheckoutSession;
++use PrestaShopBundle\Translation\TranslatorComponent;
++
++/**
++ * Contract for modules that provide their own checkout process.
++ * If exactly one enabled provider is returned by hooked modules, its checkout
++ * process replaces the native one. Otherwise, we falls back to the
++ * native checkout.
++ */
++interface CheckoutProcessProviderInterface
++{
++    /**
++     * Indicates whether the module checkout can be used.
++     */
++    public function isEnabled(): bool;
++
++    /**
++     * Builds the checkout process for the current customer session.
++     */
++    public function buildCheckoutProcess(
++        CheckoutSession $session,
++        TranslatorComponent $translator
++    ): CheckoutProcess;
++}
+diff --git a/src/Adapter/Order/Checkout/CheckoutProcessProviderResolver.php b/src/Adapter/Order/Checkout/CheckoutProcessProviderResolver.php
+new file mode 100644
+index 0000000000000..28987bf5d267c
+--- /dev/null
++++ b/src/Adapter/Order/Checkout/CheckoutProcessProviderResolver.php
+@@ -0,0 +1,72 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Order\Checkout;
++
++use CheckoutProcess;
++use CheckoutSession;
++use Hook;
++use PrestaShopBundle\Translation\TranslatorComponent;
++
++/**
++ * Resolves the checkout process provided by modules through the checkout hook.
++ */
++class CheckoutProcessProviderResolver
++{
++    /**
++     * Returns the checkout process provided by modules when exactly one valid provider is available,
++     * or null to keep the native checkout.
++     *
++     * @param CheckoutSession $session
++     * @param TranslatorComponent $translator
++     *
++     * @return CheckoutProcess|null
++     */
++    public function resolve(CheckoutSession $session, TranslatorComponent $translator): ?CheckoutProcess
++    {
++        $providers = $this->getValidProviders();
++        $providersCount = count($providers);
++
++        if (0 === $providersCount) {
++            return null;
++        }
++
++        if ($providersCount > 1) {
++            return null;
++        }
++
++        /** @var CheckoutProcessProviderInterface $provider */
++        $provider = reset($providers);
++        $checkoutProcess = $provider->buildCheckoutProcess($session, $translator);
++
++        return $checkoutProcess instanceof CheckoutProcess ? $checkoutProcess : null;
++    }
++
++    /**
++     * @return array<string, CheckoutProcessProviderInterface>
++     */
++    protected function getValidProviders(): array
++    {
++        $providers = [];
++        $hookOutput = Hook::exec('actionCheckoutBuildProcess', [], null, true);
++
++        if (!is_array($hookOutput)) {
++            return $providers;
++        }
++
++        foreach ($hookOutput as $moduleName => $provider) {
++            if (!$provider instanceof CheckoutProcessProviderInterface || !$provider->isEnabled()) {
++                continue;
++            }
++
++            $providers[$moduleName] = $provider;
++        }
++
++        return $providers;
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/checkout.yml b/src/PrestaShopBundle/Resources/config/services/core/checkout.yml
+index bef06a18d0e2e..a8c932c85ce8a 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/checkout.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/checkout.yml
+@@ -2,6 +2,9 @@ services:
+   _defaults:
+     public: false
+ 
++  PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderResolver:
++    public: true
++
+   PrestaShop\PrestaShop\Adapter\Order\Checkout\OnePageCheckoutAvailabilityChecker:
+     arguments:
+       - '@PrestaShop\PrestaShop\Adapter\Configuration'
+diff --git a/tests/Integration/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php b/tests/Integration/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php
+new file mode 100644
+index 0000000000000..8b8fd9173a053
+--- /dev/null
++++ b/tests/Integration/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php
+@@ -0,0 +1,148 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Adapter\Order\Checkout;
++
++use Cache;
++use CheckoutProcess;
++use CheckoutSession;
++use Configuration;
++use Hook;
++use Module;
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderResolver;
++use PrestaShop\PrestaShop\Core\Addon\Module\ModuleManagerBuilder;
++use PrestaShopBundle\Translation\TranslatorComponent;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Tests\Integration\Utility\ContextMocker;
++use Tests\Resources\DatabaseDump;
++
++class CheckoutProcessProviderResolverTest extends KernelTestCase
++{
++    private const MODULE_NAME = 'ps_onepagecheckoutprovider';
++    private const CONFLICTING_MODULE_NAME = 'ps_conflictingcheckoutprovider';
++    private const OUTPUT_MODE_CONFIG_KEY = 'CHECKOUT_PROCESS_PROVIDER_TEST_OUTPUT';
++    private const TABLES_TO_RESTORE = [
++        'configuration',
++        'configuration_lang',
++        'module',
++        'module_shop',
++        'hook_module',
++        'module_group',
++        'authorization_role',
++        'module_access',
++        'log',
++    ];
++
++    private ?ContextMocker $contextMocker = null;
++    private CheckoutProcessProviderResolver $checkoutProcessProviderResolver;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++        self::bootKernel();
++
++        DatabaseDump::restoreTables(self::TABLES_TO_RESTORE);
++
++        $this->contextMocker = (new ContextMocker())->mockContext();
++        $this->checkoutProcessProviderResolver = self::getContainer()->get(CheckoutProcessProviderResolver::class);
++    }
++
++    protected function tearDown(): void
++    {
++        $moduleManager = ModuleManagerBuilder::getInstance()->build();
++
++        foreach ([self::MODULE_NAME, self::CONFLICTING_MODULE_NAME] as $moduleName) {
++            if ($moduleManager->isInstalled($moduleName)) {
++                $module = Module::getInstanceByName($moduleName);
++                if ($module instanceof Module) {
++                    $module->uninstall();
++                }
++            }
++        }
++
++        DatabaseDump::restoreTables(self::TABLES_TO_RESTORE);
++
++        if (null !== $this->contextMocker) {
++            $this->contextMocker->resetContext();
++        }
++
++        parent::tearDown();
++    }
++
++    public function testResolveReturnsNullWhenNoProviderIsInstalled(): void
++    {
++        $resolvedProcess = $this->checkoutProcessProviderResolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    public function testResolveReturnsCheckoutProcessWhenExactlyOneValidProviderIsInstalled(): void
++    {
++        $this->installModule(self::MODULE_NAME);
++
++        $session = $this->createMock(CheckoutSession::class);
++        $resolvedProcess = $this->checkoutProcessProviderResolver->resolve(
++            $session,
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertInstanceOf(CheckoutProcess::class, $resolvedProcess);
++        $this->assertSame($session, $resolvedProcess->getCheckoutSession());
++    }
++
++    public function testResolveReturnsNullWhenProviderReturnsInvalidHookOutput(): void
++    {
++        $this->installModule(self::MODULE_NAME);
++        Configuration::updateValue(self::OUTPUT_MODE_CONFIG_KEY, 'invalid');
++
++        $resolvedProcess = $this->checkoutProcessProviderResolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    public function testResolveReturnsNullWhenProviderIsDisabled(): void
++    {
++        $this->installModule(self::MODULE_NAME);
++        Configuration::updateValue(self::OUTPUT_MODE_CONFIG_KEY, 'disabled');
++
++        $resolvedProcess = $this->checkoutProcessProviderResolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    public function testResolveReturnsNullWhenSeveralValidProvidersAreInstalled(): void
++    {
++        $this->installModule(self::MODULE_NAME);
++        $this->installModule(self::CONFLICTING_MODULE_NAME);
++
++        $resolvedProcess = $this->checkoutProcessProviderResolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    private function installModule(string $moduleName): void
++    {
++        $moduleManager = ModuleManagerBuilder::getInstance()->build();
++
++        $this->assertTrue((bool) $moduleManager->install($moduleName));
++
++        Cache::clean(Hook::MODULE_LIST_BY_HOOK_KEY . '*');
++    }
++}
+diff --git a/tests/Resources/modules/ps_conflictingcheckoutprovider/ps_conflictingcheckoutprovider.php b/tests/Resources/modules/ps_conflictingcheckoutprovider/ps_conflictingcheckoutprovider.php
+new file mode 100644
+index 0000000000000..83f92cd58dc7d
+--- /dev/null
++++ b/tests/Resources/modules/ps_conflictingcheckoutprovider/ps_conflictingcheckoutprovider.php
+@@ -0,0 +1,53 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderInterface;
++use PrestaShopBundle\Translation\TranslatorComponent;
++
++class PsConflictingCheckoutTestProvider implements CheckoutProcessProviderInterface
++{
++    public function __construct(private readonly Context $context)
++    {
++    }
++
++    public function isEnabled(): bool
++    {
++        return true;
++    }
++
++    public function buildCheckoutProcess(
++        $session,
++        TranslatorComponent $translator
++    ): CheckoutProcess {
++        return new CheckoutProcess($this->context, $session);
++    }
++}
++
++class Ps_ConflictingCheckoutProvider extends Module
++{
++    public function __construct()
++    {
++        $this->name = 'ps_conflictingcheckoutprovider';
++        $this->version = '1.0.0';
++        $this->author = 'PrestaShop';
++        $this->need_instance = 0;
++
++        parent::__construct();
++
++        $this->displayName = 'Conflicting checkout process provider test module';
++        $this->description = 'Provides a second checkout process provider for integration tests.';
++    }
++
++    public function install()
++    {
++        return parent::install() && $this->registerHook('actionCheckoutBuildProcess');
++    }
++
++    public function hookActionCheckoutBuildProcess(array $params)
++    {
++        return new PsConflictingCheckoutTestProvider($this->context);
++    }
++}
+diff --git a/tests/Resources/modules/ps_onepagecheckoutprovider/ps_onepagecheckoutprovider.php b/tests/Resources/modules/ps_onepagecheckoutprovider/ps_onepagecheckoutprovider.php
+new file mode 100644
+index 0000000000000..8e2290afd5243
+--- /dev/null
++++ b/tests/Resources/modules/ps_onepagecheckoutprovider/ps_onepagecheckoutprovider.php
+@@ -0,0 +1,70 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderInterface;
++use PrestaShopBundle\Translation\TranslatorComponent;
++
++class PsOnePageCheckoutTestProvider implements CheckoutProcessProviderInterface
++{
++    public function __construct(
++        private readonly Context $context,
++        private readonly bool $enabled
++    ) {
++    }
++
++    public function isEnabled(): bool
++    {
++        return $this->enabled;
++    }
++
++    public function buildCheckoutProcess(
++        $session,
++        TranslatorComponent $translator
++    ): CheckoutProcess {
++        return new CheckoutProcess($this->context, $session);
++    }
++}
++
++class Ps_OnePageCheckoutProvider extends Module
++{
++    public const OUTPUT_MODE_CONFIG_KEY = 'CHECKOUT_PROCESS_PROVIDER_TEST_OUTPUT';
++
++    public function __construct()
++    {
++        $this->name = 'ps_onepagecheckoutprovider';
++        $this->version = '1.0.0';
++        $this->author = 'PrestaShop';
++        $this->need_instance = 0;
++
++        parent::__construct();
++
++        $this->displayName = 'Checkout process provider test module';
++        $this->description = 'Provides a checkout process for integration tests.';
++    }
++
++    public function install()
++    {
++        return parent::install() && $this->registerHook('actionCheckoutBuildProcess');
++    }
++
++    public function uninstall()
++    {
++        Configuration::deleteByName(static::OUTPUT_MODE_CONFIG_KEY);
++
++        return parent::uninstall();
++    }
++
++    public function hookActionCheckoutBuildProcess(array $params)
++    {
++        $mode = (string) Configuration::get(static::OUTPUT_MODE_CONFIG_KEY);
++
++        if ($mode === 'invalid') {
++            return 'invalid';
++        }
++
++        return new PsOnePageCheckoutTestProvider($this->context, $mode !== 'disabled');
++    }
++}
+diff --git a/tests/Unit/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php b/tests/Unit/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php
+new file mode 100644
+index 0000000000000..9210e0879c7bc
+--- /dev/null
++++ b/tests/Unit/Adapter/Order/Checkout/CheckoutProcessProviderResolverTest.php
+@@ -0,0 +1,103 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Adapter\Order\Checkout;
++
++use CheckoutProcess;
++use CheckoutSession;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderInterface;
++use PrestaShop\PrestaShop\Adapter\Order\Checkout\CheckoutProcessProviderResolver;
++use PrestaShopBundle\Translation\TranslatorComponent;
++
++class StubCheckoutProcessProvider implements CheckoutProcessProviderInterface
++{
++    public function __construct(
++        private readonly bool $enabled,
++        private readonly CheckoutProcess $checkoutProcess
++    ) {
++    }
++
++    public function isEnabled(): bool
++    {
++        return $this->enabled;
++    }
++
++    public function buildCheckoutProcess(
++        $session,
++        TranslatorComponent $translator
++    ): CheckoutProcess {
++        return $this->checkoutProcess;
++    }
++}
++
++class TestableCheckoutProcessProviderResolver extends CheckoutProcessProviderResolver
++{
++    public function __construct(
++        private readonly array $validProviders = []
++    ) {
++    }
++
++    protected function getValidProviders(): array
++    {
++        return $this->validProviders;
++    }
++}
++
++class CheckoutProcessProviderResolverTest extends TestCase
++{
++    public function testResolveReturnsNullWhenNoValidProviderExists(): void
++    {
++        $resolver = new TestableCheckoutProcessProviderResolver();
++
++        $resolvedProcess = $resolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    public function testResolveReturnsCheckoutProcessWhenExactlyOneValidProviderExists(): void
++    {
++        $checkoutProcess = $this->createMock(CheckoutProcess::class);
++        $resolver = new TestableCheckoutProcessProviderResolver([
++            'provider' => $this->createProvider(true, $checkoutProcess),
++        ]);
++
++        $resolvedProcess = $resolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertSame($checkoutProcess, $resolvedProcess);
++    }
++
++    public function testResolveReturnsNullWhenSeveralValidProvidersExist(): void
++    {
++        $resolver = new TestableCheckoutProcessProviderResolver([
++            'provider_b' => $this->createProvider(true),
++            'provider_a' => $this->createProvider(true),
++        ]);
++
++        $resolvedProcess = $resolver->resolve(
++            $this->createMock(CheckoutSession::class),
++            $this->createMock(TranslatorComponent::class)
++        );
++
++        $this->assertNull($resolvedProcess);
++    }
++
++    private function createProvider(bool $enabled, ?CheckoutProcess $checkoutProcess = null): CheckoutProcessProviderInterface
++    {
++        return new StubCheckoutProcessProvider(
++            $enabled,
++            $checkoutProcess ?? $this->createMock(CheckoutProcess::class)
++        );
++    }
++}
+diff --git a/tests/Unit/Core/Module/ModuleRepositoryTest.php b/tests/Unit/Core/Module/ModuleRepositoryTest.php
+index d51f10cd772f3..2869d9bdc132f 100644
+--- a/tests/Unit/Core/Module/ModuleRepositoryTest.php
++++ b/tests/Unit/Core/Module/ModuleRepositoryTest.php
+@@ -44,6 +44,8 @@ class ModuleRepositoryTest extends TestCase
+         'bankwire',
+     ];
+ 
++    private const MODULE_COUNT = 12;
++
+     /** @var ModuleRepository */
+     private $moduleRepository;
+ 
+@@ -69,7 +71,7 @@ public function setUp(): void
+ 
+     public function testGetList(): void
+     {
+-        $this->assertCount(10, $this->moduleRepository->getList());
++        $this->assertCount(self::MODULE_COUNT, $this->moduleRepository->getList());
+     }
+ 
+     public function testGetInstalledModules(): void

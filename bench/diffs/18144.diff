@@ -1,0 +1,107 @@
+diff --git a/src/Adapter/Presenter/Cart/CartPresenter.php b/src/Adapter/Presenter/Cart/CartPresenter.php
+index 05052498b66ff..52130994445f3 100644
+--- a/src/Adapter/Presenter/Cart/CartPresenter.php
++++ b/src/Adapter/Presenter/Cart/CartPresenter.php
+@@ -31,6 +31,7 @@
+ use Configuration;
+ use Context;
+ use Hook;
++use PrestaShop\PrestaShop\Adapter\CartRule\LegacyDiscountApplicationType;
+ use PrestaShop\PrestaShop\Adapter\Image\ImageRetriever;
+ use PrestaShop\PrestaShop\Adapter\Presenter\PresenterInterface;
+ use PrestaShop\PrestaShop\Adapter\Presenter\Product\ProductListingPresenter;
+@@ -557,7 +558,24 @@ private function getTemplateVarVouchers(Cart $cart)
+                 $freeShippingOnly = true;
+             }
+             if ($this->cartVoucherHasPercentReduction($cartVoucher)) {
+-                $productsTotalExcludingTax = $cart->getOrderTotal($this->includeTaxes(), Cart::ONLY_PRODUCTS);
++                $products = $cart->getProducts();
++                if ($this->cartVoucherHasPercentReductionOnSelectedProducts($cartVoucher)) {
++                    $selected_products = $cartVoucher['obj']->checkProductRestrictionsFromCart($cart, true);
++                    if (is_array($selected_products)) {
++                        foreach ($products as $key => $product) {
++                            // Check if product is in selected product for applying the voucher
++                            // Check if voucher applies on already discounted products (and if it applies)
++                            if ((in_array($product['id_product'] . '-' . $product['id_product_attribute'], $selected_products)
++                                    || in_array($product['id_product'] . '-0', $selected_products))
++                                && (($cartVoucher['reduction_exclude_special'] && !$product['reduction_applies'])
++                                    || !$cartVoucher['reduction_exclude_special'])) {
++                                continue;
++                            }
++                            unset($products[$key]);
++                        }
++                    }
++                }
++                $productsTotalExcludingTax = $cart->getOrderTotal($this->includeTaxes(), Cart::ONLY_PRODUCTS, $products);
+                 $percentageReduction = ($productsTotalExcludingTax / 100) * $cartVoucher['reduction_percent'];
+                 $freeShippingOnly = false;
+             } elseif ($this->cartVoucherHasAmountReduction($cartVoucher)) {
+@@ -630,6 +648,17 @@ private function cartVoucherHasPercentReduction($cartVoucher)
+             && $cartVoucher['reduction_amount'] == '0.00';
+     }
+ 
++    /**
++     * @param array $cartVoucher
++     *
++     * @return bool
++     */
++    private function cartVoucherHasPercentReductionOnSelectedProducts($cartVoucher)
++    {
++        return $this->cartVoucherHasPercentReduction($cartVoucher)
++            && (int) $cartVoucher['reduction_product'] == LegacyDiscountApplicationType::SELECTED_PRODUCTS;
++    }
++
+     /**
+      * @param array $cartVoucher
+      *
+diff --git a/src/Core/Cart/CartRuleCalculator.php b/src/Core/Cart/CartRuleCalculator.php
+index 091d4dcaf411c..c921afa9c3f43 100644
+--- a/src/Core/Cart/CartRuleCalculator.php
++++ b/src/Core/Cart/CartRuleCalculator.php
+@@ -176,8 +176,8 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+                 if (is_array($selected_products)) {
+                     foreach ($this->cartRows as $cartRow) {
+                         $product = $cartRow->getRowData();
+-                        if (in_array($product['id_product'] . '-' . $product['id_product_attribute'], $selected_products)
+-                            || in_array($product['id_product'] . '-0', $selected_products)
++                        if ((in_array($product['id_product'] . '-' . $product['id_product_attribute'], $selected_products)
++                                || in_array($product['id_product'] . '-0', $selected_products))
+                             && (($cartRule->reduction_exclude_special && !$product['reduction_applies'])
+                                 || !$cartRule->reduction_exclude_special)) {
+                             $amount = $cartRow->applyPercentageDiscount($cartRule->reduction_percent);
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/exclude_discounted_product.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/exclude_discounted_product.feature
+index 6d98c78d48309..45042b49bf047 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/exclude_discounted_product.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/exclude_discounted_product.feature
+@@ -3,7 +3,7 @@ Feature: Cart rule (percent) calculation with one cart rule restricted to not al
+   As a customer
+   I must be able to have correct cart total when adding cart rules
+ 
+-  Scenario: multiple products in cart, several quantities, one 50% cartRule on cheapest product excluding already discounted, cheapest product is already discounted
++  Scenario: multiple products in cart, several quantities, one 50% cartRule excluding already discounted
+     Given I have an empty default cart
+     Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
+     Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
+@@ -19,3 +19,22 @@ Feature: Cart rule (percent) calculation with one cart rule restricted to not al
+     When I use the discount "cartrule10"
+     Then my cart total should be 105.418 tax included
+     Then my cart total using previous calculation method should be 105.418 tax included
++
++  Scenario: multiple products in cart, several quantities, one 50% cartRule on selected product excluding already discounted
++    Given I have an empty default cart
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    Given there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    Given product "product1" has a specific price named "specificPrice1" with an amount discount of 3.0
++    Given there is a product in the catalog named "product2" with a price of 32.388 and 1000 items in stock
++    Given there is a product in the catalog named "product3" with a price of 31.188 and 1000 items in stock
++    Given there is a cart rule named "cartrule11" that applies a percent discount of 50.0% with priority 10, quantity of 1000 and quantity per user 1000
++    Given cart rule "cartrule11" is restricted to product "product1"
++    Given cart rule "cartrule11" is restricted to product "product2"
++    Given cart rule "cartrule11" does not apply to already discounted products
++    Given cart rule "cartrule11" has a discount code "foo10"
++    When I add 2 items of product "product2" in my cart
++    When I add 3 items of product "product1" in my cart
++    When I add 1 items of product "product3" in my cart
++    When I use the discount "cartrule11"
++    Then my cart total should be 121.000 tax included
++    Then my cart total using previous calculation method should be 121.000 tax included

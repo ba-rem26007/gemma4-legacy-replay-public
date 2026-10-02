@@ -1,0 +1,145 @@
+diff --git a/js/admin/tinymce_loader.js b/js/admin/tinymce_loader.js
+index 05f50217507cc..5d6eb261f6d47 100644
+--- a/js/admin/tinymce_loader.js
++++ b/js/admin/tinymce_loader.js
+@@ -40,6 +40,9 @@ $(document).ready(function() {
+ 						textarea.parent('div').find('span.counter').html(' ');
+ 				}
+ 			});
++			ed.on('blur', function(ed) {
++				tinyMCE.triggerSave();
++			});
+ 		}
+ 	});
+ });
+diff --git a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+index 54301cac3c1d8..6fe8435f6cdea 100644
+--- a/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
++++ b/src/PrestaShopBundle/Form/Admin/Product/ProductInformation.php
+@@ -37,6 +37,8 @@
+ use PrestaShopBundle\Form\Admin\Category\SimpleCategory as SimpleFormCategory;
+ use PrestaShopBundle\Form\Admin\Feature\ProductFeature;
+ use Symfony\Component\Form\FormError;
++use PrestaShop\PrestaShop\Adapter\Configuration;
++use Symfony\Component\Validator\Context\ExecutionContextInterface;
+ 
+ /**
+  * This form class is responsible to generate the basic product information form
+@@ -50,6 +52,7 @@ class ProductInformation extends CommonAbstractType
+     private $locales;
+     private $nested_categories;
+     private $productAdapter;
++    private $configuration;
+ 
+     /**
+      * Constructor
+@@ -71,6 +74,7 @@ public function __construct($translator, $legacyContext, $router, $categoryDataP
+         $this->productDataProvider = $productDataProvider;
+         $this->manufacturerDataProvider = $manufacturerDataProvider;
+         $this->featureDataProvider = $featureDataProvider;
++        $this->configuration = new Configuration();
+ 
+         $this->categories = $this->formatDataChoicesList($this->categoryDataProvider->getAllCategoriesName(), 'id_category');
+         $this->nested_categories = $this->categoryDataProvider->getNestedCategories();
+@@ -126,6 +130,19 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ))
+         ->add('description_short', new TranslateType('textarea', array(
+             'attr' => array('class' => 'autoload_rte'),
++            'constraints' => array(
++                new Assert\Callback(function ($str, ExecutionContextInterface $context) {
++                    $str = strip_tags($str);
++                    $limit = (int)$this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT') <=0 ? 800 : $this->configuration->get('PS_PRODUCT_SHORT_DESC_LIMIT');
++
++                    if (strlen($str) > $limit) {
++                        $context->addViolation(
++                            $this->translator->trans('This value is too long. It should have {{ limit }} characters or less.', [], 'AdminProducts'),
++                            array('{{ limit }}' => $limit)
++                        );
++                    }
++                }),
++            ),
+             'required' => false
+         ), $this->locales, true), array(
+             'label' =>  $this->translator->trans('Short description', [], 'AdminProducts'),
+diff --git a/src/PrestaShopBundle/Resources/public/admin/css/default.css b/src/PrestaShopBundle/Resources/public/admin/css/default.css
+index e5fd803448bc6..407c72f46ea2c 100644
+--- a/src/PrestaShopBundle/Resources/public/admin/css/default.css
++++ b/src/PrestaShopBundle/Resources/public/admin/css/default.css
+@@ -27,4 +27,12 @@
+ }
+ .product-combination-image img{
+   border: 1px solid #ccc
++}
++.tt-menu{
++  width: 100%;
++  border: 1px solid #ccc;
++  background: #fff;
++}
++.tt-suggestion{
++  cursor: pointer
+ }
+\ No newline at end of file
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
+index e22f14d2b1bb0..8c34e78a47403 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
+@@ -64,16 +64,16 @@
+                         </div>
+ 
+                         <ul class="nav nav-tabs">
+-                            <li><a href="#description_short" data-toggle="tab">{{ trans('Description', {}, 'AdminProducts') }}</a></li>
+-                            <li><a href="#description" data-toggle="tab">{{ trans('Short description', {}, 'AdminProducts') }}</a></li>
++                            <li><a href="#description" data-toggle="tab">{{ trans('Description', {}, 'AdminProducts') }}</a></li>
++                            <li><a href="#description_short" data-toggle="tab">{{ trans('Short description', {}, 'AdminProducts') }}</a></li>
+                         </ul>
+                         <div class="tab-content">
+-                            <div class="tab-pane panel panel-default active" id="description_short">
+-                                {{ form_widget(form.step1.description_short) }}
+-                            </div>
+                             <div class="tab-pane panel panel-default" id="description">
+                                 {{ form_widget(form.step1.description) }}
+                             </div>
++                            <div class="tab-pane panel panel-default active" id="description_short">
++                                {{ form_widget(form.step1.description_short) }}
++                            </div>
+                         </div>
+ 
+                         <div class="form-group">
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/typeahead.html.twig b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/typeahead.html.twig
+index b8dabfcf2879b..565451856a02f 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/typeahead.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/typeahead.html.twig
+@@ -13,7 +13,7 @@
+     </ul>
+     <script>
+         $( document ).ready(function() {
+-            var limit = {{ limit }}
++            var limit = {{ limit }};
+ 
+             //remove collection item
+             $(document).on( 'click', '#{{ form.vars.id }}-data a.delete', function() {
+@@ -113,10 +113,12 @@
+             $('#{{ form.vars.id }}').typeahead({
+                 limit: 20,
+                 minLength: 2,
+-                highlight: true
++                highlight: true,
++                cache: false
+             }, {
+                 display: '{{ mapping_name }}',
+-                source: this['{{ form.vars.id }}_source']
++                source: this['{{ form.vars.id }}_source'],
++                limit: 30
+             }).bind('typeahead:select', function(ev, suggestion) {
+ 
+                 //if collection length is up to limit, return
+@@ -225,7 +227,8 @@
+                 highlight: true
+             }, {
+                 display: '{{ mapping_name }}',
+-                source: this['{{ form.vars.id }}_source']
++                source: this['{{ form.vars.id }}_source'],
++                limit: 30
+             }).bind('typeahead:select', function(ev, suggestion) {
+                 $('#{{ form.vars.id }}-curPackItemAdd').data('currentItem', suggestion);
+             });

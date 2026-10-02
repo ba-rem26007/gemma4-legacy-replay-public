@@ -1,0 +1,108 @@
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/BulkCombinationFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/BulkCombinationFormDataHandler.php
+index 424038955cd69..77796ddcf07bf 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/BulkCombinationFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/BulkCombinationFormDataHandler.php
+@@ -29,7 +29,8 @@
+ 
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Combination\ValueObject\CombinationId;
+-use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationCommandsBuilderInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
++use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\MultiShopCombinationCommandsBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataFormatter\BulkCombinationFormDataFormatter;
+ 
+ class BulkCombinationFormDataHandler implements FormDataHandlerInterface
+@@ -40,7 +41,7 @@ class BulkCombinationFormDataHandler implements FormDataHandlerInterface
+     private $commandBus;
+ 
+     /**
+-     * @var CombinationCommandsBuilderInterface
++     * @var MultiShopCombinationCommandsBuilderInterface
+      */
+     private $commandsBuilder;
+ 
+@@ -50,18 +51,27 @@ class BulkCombinationFormDataHandler implements FormDataHandlerInterface
+     private $bulkCombinationFormDataFormatter;
+ 
+     /**
+-     * @param CommandBusInterface $commandBus
+-     * @param BulkCombinationFormDataFormatter $bulkCombinationFormDataFormatter
+-     * @param CombinationCommandsBuilderInterface $commandsBuilder
++     * @var int
+      */
++    private $contextShopId;
++
++    /**
++     * @var int
++     */
++    private $defaultShopId;
++
+     public function __construct(
+         CommandBusInterface $commandBus,
+         BulkCombinationFormDataFormatter $bulkCombinationFormDataFormatter,
+-        CombinationCommandsBuilderInterface $commandsBuilder
++        MultiShopCombinationCommandsBuilderInterface $commandsBuilder,
++        int $contextShopId,
++        int $defaultShopId
+     ) {
+         $this->commandBus = $commandBus;
+         $this->commandsBuilder = $commandsBuilder;
+         $this->bulkCombinationFormDataFormatter = $bulkCombinationFormDataFormatter;
++        $this->contextShopId = $contextShopId;
++        $this->defaultShopId = $defaultShopId;
+     }
+ 
+     /**
+@@ -79,8 +89,13 @@ public function create(array $data)
+     public function update($id, array $data): void
+     {
+         // @todo: a hook system should be integrated in this handler for extendability
++        $singleShopConstraint = $this->contextShopId ? ShopConstraint::shop($this->contextShopId) : ShopConstraint::shop($this->defaultShopId);
+         $formattedData = $this->bulkCombinationFormDataFormatter->format($data);
+-        $commands = $this->commandsBuilder->buildCommands(new CombinationId($id), $formattedData);
++        $commands = $this->commandsBuilder->buildCommands(
++            new CombinationId($id),
++            $formattedData,
++            $singleShopConstraint
++        );
+ 
+         foreach ($commands as $command) {
+             $this->commandBus->handle($command);
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml b/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
+index 17e1a8e506a5c..496a75894cc06 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/command_builder.yml
+@@ -66,7 +66,7 @@ services:
+     arguments:
+       - !tagged core.combination_command_builder
+ 
+-  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationCommandsBuilderInterface: '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationCommandsBuilder'
++  PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\MultiShopCombinationCommandsBuilderInterface: '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationCommandsBuilder'
+ 
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationSuppliersCommandsBuilder:
+     tags: [ 'core.combination_command_builder' ]
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+index 27244863696ec..357f559d61479 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/form_data_handler.yml
+@@ -200,14 +200,16 @@ services:
+       - '@prestashop.core.admin.shop.repository'
+ 
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\CombinationFormDataHandler:
++    autowire: true
+     arguments:
+-      - '@prestashop.core.command_bus'
+-      - '@PrestaShop\PrestaShop\Core\Form\IdentifiableObject\CommandBuilder\Product\Combination\CombinationCommandsBuilder'
+-      - '@=service("prestashop.adapter.legacy.configuration").getInt("PS_SHOP_DEFAULT")'
+-      - "@=service('prestashop.adapter.shop.context').getContextShopID()"
++      $contextShopId: '@=service("prestashop.adapter.legacy.configuration").getInt("PS_SHOP_DEFAULT")'
++      $defaultShopId: "@=service('prestashop.adapter.shop.context').getContextShopID()"
+ 
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\BulkCombinationFormDataHandler:
+     autowire: true
++    arguments:
++      $contextShopId: '@=service("prestashop.adapter.legacy.configuration").getInt("PS_SHOP_DEFAULT")'
++      $defaultShopId: "@=service('prestashop.adapter.shop.context').getContextShopID()"
+ 
+   PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataHandler\CombinationListFormDataHandler:
+     - '@prestashop.core.command_bus'

@@ -1,0 +1,71 @@
+diff --git a/classes/Language.php b/classes/Language.php
+index 4c71d81231b37..3eae176f97e07 100644
+--- a/classes/Language.php
++++ b/classes/Language.php
+@@ -1653,12 +1653,17 @@ public static function updateMultilangFromClass($table, $className, $lang)
+     private static function updateMultilangFromClassForShop(DataLangCore $classObject, self $lang, Shop $shop)
+     {
+         $shopDefaultLangId = (int) Configuration::get('PS_LANG_DEFAULT', null, $shop->id_shop_group, $shop->id);
+-        $shopDefaultLanguage = new Language($shopDefaultLangId);
++        // During install process the default language may not be available yet
++        if (!empty($shopDefaultLangId)) {
++            $shopDefaultLanguage = new Language($shopDefaultLangId);
++            self::loadAdminTranslatorLocale($shopDefaultLanguage->locale, false);
++        }
+ 
+-        self::loadAdminTranslatorLocale($shopDefaultLanguage->locale, false);
++        // The provided locale should always be loaded though
+         self::loadAdminTranslatorLocale($lang->locale, false);
+ 
+         $sfContainer = SymfonyContainer::getInstance();
++        /** @var TranslatorInterface $translator */
+         $translator = $sfContainer->get(TranslatorInterface::class);
+         (new EntityTranslatorFactory($translator))
+             ->build($classObject)
+diff --git a/src/PrestaShopBundle/Install/Install.php b/src/PrestaShopBundle/Install/Install.php
+index c89702a2d53ef..ae2349053aa9b 100644
+--- a/src/PrestaShopBundle/Install/Install.php
++++ b/src/PrestaShopBundle/Install/Install.php
+@@ -70,6 +70,7 @@
+ use PSRLoggerAdapter;
+ use Symfony\Component\Finder\Finder;
+ use Symfony\Component\Yaml\Yaml;
++use Throwable;
+ 
+ class Install extends AbstractInstall
+ {
+@@ -454,7 +455,7 @@ public function installDefaultData($shop_name, $iso_country = false, $all_langua
+             } else {
+                 $languages = $this->installLanguages();
+             }
+-        } catch (PrestashopInstallerException $e) {
++        } catch (Throwable $e) {
+             $this->setError($e->getMessage());
+ 
+             return false;
+@@ -535,7 +536,7 @@ public function populateDatabase($entity = null)
+                     return false;
+                 }
+             }
+-        } catch (PrestashopInstallerException $e) {
++        } catch (Throwable $e) {
+             $this->setError($e->getMessage());
+ 
+             return false;
+@@ -546,6 +547,8 @@ public function populateDatabase($entity = null)
+ 
+     public function createShop($shop_name)
+     {
++        $this->getLogger()->log('Creating shop');
++
+         // Create default group shop
+         $shop_group = new ShopGroup();
+         $shop_group->name = 'Default';
+@@ -602,6 +605,7 @@ public function installLanguages($languages_list = null)
+         if ($languages_list === null || (is_array($languages_list) && !count($languages_list))) {
+             $languages_list = $this->language->getIsoList();
+         }
++        $this->getLogger()->log('Installing languages: ' . implode(', ', $languages_list));
+ 
+         $languages_list = array_unique($languages_list);
+ 

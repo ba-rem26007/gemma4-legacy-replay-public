@@ -1,0 +1,309 @@
+diff --git a/.docker/Dockerfile b/.docker/Dockerfile
+index 1495569e08131..67353ec1c280e 100644
+--- a/.docker/Dockerfile
++++ b/.docker/Dockerfile
+@@ -13,15 +13,21 @@ ARG GROUP_ID
+ ARG USER_ID
+ ARG NODE_VERSION
+ ARG INSTALL_XDEBUG
++ARG TIMEZONE
+ 
++ENV TZ=$TIMEZONE
++ENV NODE_VERSION=$NODE_VERSION
+ 
+ RUN groupmod -g $GROUP_ID www-data \
+   && usermod -u $USER_ID -g $GROUP_ID www-data
+ 
+ # Install mailutils to make sendmail work
+-RUN apt update && apt install -y mailutils
++# Install tzdata to define the timezone
++RUN apt update && apt install -y mailutils tzdata
+ 
+-ENV NODE_VERSION       $NODE_VERSION
++## Define timezone
++RUN ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime \
++  && echo $TZ > /etc/timezone
+ 
+ RUN php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');" && php /tmp/composer-setup.php --no-ansi --install-dir=/usr/local/bin --filename=composer && rm -rf /tmp/composer-setup.php
+ 
+diff --git a/.github/actions/setup-env/action.yml b/.github/actions/setup-env/action.yml
+index 3891636451331..b41d35953ec21 100644
+--- a/.github/actions/setup-env/action.yml
++++ b/.github/actions/setup-env/action.yml
+@@ -89,6 +89,7 @@ runs:
+         DB_PASSWD: 'prestashop'
+         PS_LANGUAGE: 'en'
+         ADMIN_PASSWD: 'Correct Horse Battery Staple'
++        TIMEZONE: 'Europe/Paris'
+       run: |
+         cd ${{ inputs.PRESTASHOP_DIR }}
+         if [[ "${{ inputs.DOCKER_DAEMON }}" = "true" ]]; then
+diff --git a/docker-compose.mariadb.yml b/docker-compose.mariadb.yml
+index 21a1809c0414e..1adae75d22643 100644
+--- a/docker-compose.mariadb.yml
++++ b/docker-compose.mariadb.yml
+@@ -32,6 +32,7 @@ services:
+         - GROUP_ID=${GROUP_ID:-1000}
+         - NODE_VERSION=${NODE_VERSION:-16.20.1}
+         - INSTALL_XDEBUG=${INSTALL_XDEBUG:-false}
++        - TIMEZONE=${TIMEZONE:-UTC}
+     environment:
+       DISABLE_MAKE: ${DISABLE_MAKE:-0}
+       PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
+diff --git a/docker-compose.yml b/docker-compose.yml
+index b86fc2fba045e..06cbd923fa29e 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -26,6 +26,7 @@ services:
+         - GROUP_ID=${GROUP_ID:-1000}
+         - NODE_VERSION=${NODE_VERSION:-20.19.5}
+         - INSTALL_XDEBUG=${INSTALL_XDEBUG:-false}
++        - TIMEZONE=${TIMEZONE:-UTC}
+     environment:
+       DISABLE_MAKE: ${DISABLE_MAKE:-0}
+       PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
+diff --git a/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php b/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
+index ae50bd0bb18b9..03f0b10fd5a45 100644
+--- a/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
++++ b/src/Core/Form/ChoiceProvider/AttributeGroupChoiceProvider.php
+@@ -7,6 +7,8 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Form\ChoiceProvider;
+ 
++use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceAttributeProviderInterface;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
+ use PrestaShopBundle\Entity\Repository\AttributeGroupRepository;
+@@ -33,13 +35,13 @@ final class AttributeGroupChoiceProvider implements FormChoiceProviderInterface,
+ 
+     /**
+      * @param AttributeGroupRepository $attributeGroupRepository
+-     * @param int $langId
+-     * @param int $shopId
++     * @param LanguageContext $languageContext
++     * @param ShopContext $shopContext
+      */
+     public function __construct(
+         private readonly AttributeGroupRepository $attributeGroupRepository,
+-        private readonly int $langId,
+-        private readonly int $shopId,
++        private readonly LanguageContext $languageContext,
++        private ShopContext $shopContext,
+     ) {
+     }
+ 
+@@ -76,7 +78,10 @@ private function setAttributeGroups(): void
+     {
+         if (null === $this->attributeGroupsChoicesAttributes || null === $this->attributeGroupsChoices) {
+             if (null === $this->attributeGroups) {
+-                $this->attributeGroups = $this->attributeGroupRepository->findByLangAndShop($this->langId, $this->shopId);
++                $this->attributeGroups = $this->attributeGroupRepository->findByLangForShops(
++                    $this->languageContext->getId(),
++                    $this->shopContext->getAssociatedShopIds()
++                );
+             }
+ 
+             $this->attributeGroupsChoices = [];
+diff --git a/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php b/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
+index 5e5252fd6f8f4..0085ff4ee9987 100644
+--- a/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/AttributeGroupRepository.php
+@@ -37,4 +37,27 @@ public function findByLangAndShop(int $idLang, int $idShop): array
+                 'idLang' => $idLang,
+             ])->getQuery()->getResult();
+     }
++
++    /**
++     * Finds attribute groups by language and shops.
++     *
++     * @param int $idLang Language ID
++     * @param int[] $idShops Shop IDs
++     *
++     * @return \PrestaShopBundle\Entity\AttributeGroup[]
++     */
++    public function findByLangForShops(int $idLang, array $idShops): array
++    {
++        return $this->createQueryBuilder('ag')
++            ->addSelect('agl')
++            ->join('ag.shops', 'ags')
++            ->join('ag.attributeGroupLangs', 'agl')
++            ->andWhere('agl.lang = :idLang')
++            ->andWhere('ags.id IN (:idShops)')
++            ->orderBy('ag.position', 'ASC')
++            ->setParameters([
++                'idLang' => $idLang,
++                'idShops' => $idShops,
++            ])->getQuery()->getResult();
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+index 238ea5aee8d2a..8307a63913b1d 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/form/choice_provider.yml
+@@ -146,5 +146,3 @@ services:
+ 
+   PrestaShop\PrestaShop\Core\Form\ChoiceProvider\AttributeGroupChoiceProvider:
+     autowire: true
+-    arguments:
+-      $shopId: '@=service("prestashop.adapter.shop.context").getContextShopID()'
+diff --git a/tests/UI/campaigns/audit/BO/14_wallOfFame.ts b/tests/UI/campaigns/audit/BO/14_wallOfFame.ts
+new file mode 100644
+index 0000000000000..fdbf6c0a8db48
+--- /dev/null
++++ b/tests/UI/campaigns/audit/BO/14_wallOfFame.ts
+@@ -0,0 +1,63 @@
++import {expect} from 'chai';
++import testContext from '@utils/testContext';
++
++import {
++  boDashboardPage,
++  boLoginPage,
++  boWallOfFamePage,
++  type BrowserContext,
++  type Page,
++  utilsPlaywright,
++} from '@prestashop-core/ui-testing';
++
++const baseContext: string = 'audit_BO_wallOfFame';
++
++describe('BO - Wall of Fame', async () => {
++  let browserContext: BrowserContext;
++  let page: Page;
++
++  before(async function () {
++    utilsPlaywright.setErrorsCaptured(true);
++
++    browserContext = await utilsPlaywright.createBrowserContext(this.browser);
++    page = await utilsPlaywright.newTab(browserContext);
++  });
++
++  after(async () => {
++    await utilsPlaywright.closeBrowserContext(browserContext);
++  });
++
++  beforeEach(async () => {
++    utilsPlaywright.resetJsErrors();
++  });
++
++  it('should login in BO', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'loginBO', baseContext);
++
++    await boLoginPage.goTo(page, global.BO.URL);
++    await boLoginPage.successLogin(page, global.BO.EMAIL, global.BO.PASSWD);
++
++    const pageTitle = await boDashboardPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boDashboardPage.pageTitle);
++
++    const jsErrors = utilsPlaywright.getJsErrors();
++    expect(jsErrors.length).to.equals(0);
++  });
++
++  it('should go to \'Wall of Fame\' page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'goToWallOfFamePage', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      '',
++      boDashboardPage.wallOfFameLink,
++    );
++    await boWallOfFamePage.closeSfToolBar(page);
++
++    const pageTitle = await boWallOfFamePage.getPageTitle(page);
++    expect(pageTitle).to.contains(boWallOfFamePage.pageTitle);
++
++    const jsErrors = utilsPlaywright.getJsErrors();
++    expect(jsErrors.length).to.equals(0);
++  });
++});
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/03_statusTab.ts b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/03_statusTab.ts
+index 56d24787e837b..f21459cb96406 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/03_statusTab.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/03_statusTab.ts
+@@ -109,7 +109,6 @@ describe('BO - Orders - View and edit order : Check order status tab', async ()
+   // Pre-condition: Create order by default customer
+   createOrderByCustomerTest(orderByCustomerData, `${baseContext}_preTest_4`);
+ 
+-  // before and after functions
+   before(async function () {
+     browserContext = await utilsPlaywright.createBrowserContext(this.browser);
+     page = await utilsPlaywright.newTab(browserContext);
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
+index 1edf747ddf8cb..6f6d9076f3005 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
+@@ -185,9 +185,9 @@ describe('BO - Orders - Credit slips: Credit slip options', async () => {
+     it(`should check that the credit slip file name contain the prefix '${prefixToEdit}'`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkUpdatedPrefixOnFileName', baseContext);
+ 
+-      // Get file name
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
+-      expect(fileName).to.contains(prefixToEdit);
++      const document = await boOrdersViewBlockTabListPage.getDocument(page, 1, 'Credit slip');
++      expect(document.type).to.equals('Credit slip');
++      expect(document.number).to.contains(prefixToEdit);
+     });
+   });
+ 
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
+index 1921a444abca3..af23154f74a6e 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
+@@ -25,12 +25,10 @@ Back to the default delivery slip prefix value
+ describe('BO - Orders - Delivery slips : Update delivery slip prefix and check the generated file name', async () => {
+   let browserContext: BrowserContext;
+   let page: Page;
+-  let fileName: string;
+ 
+   const deliverySlipData: FakerOrderDeliverySlipOptions = new FakerOrderDeliverySlipOptions();
+   const defaultPrefix: string = '#DE';
+ 
+-  // before and after functions
+   before(async function () {
+     browserContext = await utilsPlaywright.createBrowserContext(this.browser);
+     page = await utilsPlaywright.newTab(browserContext);
+@@ -105,12 +103,19 @@ describe('BO - Orders - Delivery slips : Update delivery slip prefix and check t
+       expect(result).to.equal(dataOrderStatuses.shipped.name);
+     });
+ 
++    it('should click on \'Documents\' tab', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'displayDocumentsTab', baseContext);
++
++      const isTabOpened = await boOrdersViewBlockTabListPage.goToDocumentsTab(page);
++      expect(isTabOpened).to.eq(true);
++    });
++
+     it(`should check that the delivery slip file name contain '${deliverySlipData.prefix}'`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkDocumentNamePrefix', baseContext);
+ 
+-      // Get delivery slips filename
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+-      expect(fileName).to.contains(deliverySlipData.prefix.replace('#', '').trim());
++      const document = await boOrdersViewBlockTabListPage.getDocument(page, 1, 'Delivery slip');
++      expect(document.type).to.equals('Delivery slip');
++      expect(document.number).to.contains(deliverySlipData.prefix);
+     });
+   });
+ 
+diff --git a/tests/UI/package-lock.json b/tests/UI/package-lock.json
+index 59ca355e54828..5c90b095c2aeb 100644
+--- a/tests/UI/package-lock.json
++++ b/tests/UI/package-lock.json
+@@ -534,7 +534,7 @@
+     },
+     "node_modules/@prestashop-core/ui-testing": {
+       "version": "0.0.12",
+-      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#ac440421950d8dedfc22b38ba9003cfdf0b90344",
++      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#a012dc440fb006b7499666ee9750ebd8a3208377",
+       "license": "MIT",
+       "dependencies": {
+         "@faker-js/faker": "^10.1.0",
+@@ -8710,7 +8710,7 @@
+       }
+     },
+     "@prestashop-core/ui-testing": {
+-      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#ac440421950d8dedfc22b38ba9003cfdf0b90344",
++      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#a012dc440fb006b7499666ee9750ebd8a3208377",
+       "from": "@prestashop-core/ui-testing@https://github.com/PrestaShop/ui-testing-library#main",
+       "requires": {
+         "@faker-js/faker": "^10.1.0",

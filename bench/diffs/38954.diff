@@ -1,0 +1,588 @@
+diff --git a/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+new file mode 100644
+index 0000000000000..b4791ec75ed24
+--- /dev/null
++++ b/src/Adapter/Shipment/CommandHandler/MergeProductsToShipmentHandler.php
+@@ -0,0 +1,80 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler\MergeProductsToShipmentHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\CannotMergeProductToShipmentException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use PrestaShopBundle\Entity\ShipmentProduct;
++use Throwable;
++
++#[AsCommandHandler]
++class MergeProductsToShipmentHandler implements MergeProductsToShipmentHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $repository,
++    ) {
++    }
++
++    /**
++     * @param MergeProductsToShipment $command
++     */
++    public function handle(MergeProductsToShipment $command)
++    {
++        $sourceId = $command->getSourceShipmentId()->getValue();
++        $targetId = $command->getTargetShipmentId()->getValue();
++        $products = $command->getOrderDetailQuantity()->getValue();
++        $sourceShipment = $this->repository->findById($sourceId);
++        $targetShipment = $this->repository->findById($targetId);
++        $shipmentProducts = [];
++
++        if (!$sourceShipment) {
++            throw new ShipmentNotFoundException(sprintf('Shipment with id "%s" was not found', $sourceId));
++        }
++
++        if (!$targetShipment) {
++            throw new ShipmentNotFoundException(sprintf('Shipment with id "%s" was not found', $targetId));
++        }
++
++        $shipmentProducts = array_map(function ($product) {
++            $shipmentProduct = new ShipmentProduct();
++            $shipmentProduct->setOrderDetailId($product['id_order_detail']);
++            $shipmentProduct->setQuantity($product['quantity']);
++
++            return $shipmentProduct;
++        }, $products);
++
++        try {
++            $this->repository->mergeProductsToShipment($sourceShipment, $targetShipment, $shipmentProducts);
++        } catch (Throwable $e) {
++            throw new CannotMergeProductToShipmentException(sprintf('Cannot merge products to shipment with id "%s"', $targetId), 0, $e);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Command/MergeProductsToShipment.php b/src/Core/Domain/Shipment/Command/MergeProductsToShipment.php
+new file mode 100644
+index 0000000000000..49b78959be368
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Command/MergeProductsToShipment.php
+@@ -0,0 +1,69 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Command;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\OrderDetailQuantity;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\ShipmentId;
++
++class MergeProductsToShipment
++{
++    /**
++     * @var ShipmentId
++     */
++    private $sourceShipmentId;
++
++    /**
++     * @var ShipmentId
++     */
++    private $targetShipmentId;
++
++    /**
++     * @var OrderDetailQuantity
++     */
++    private $orderDetailQuantities;
++
++    public function __construct(int $sourceShipmentId, int $targetShipmentId, array $orderDetailQuantities)
++    {
++        $this->sourceShipmentId = new ShipmentId($sourceShipmentId);
++        $this->targetShipmentId = new ShipmentId($targetShipmentId);
++        $this->orderDetailQuantities = new OrderDetailQuantity(
++            $orderDetailQuantities,
++        );
++    }
++
++    public function getSourceShipmentId(): ShipmentId
++    {
++        return $this->sourceShipmentId;
++    }
++
++    public function getTargetShipmentId(): ShipmentId
++    {
++        return $this->targetShipmentId;
++    }
++
++    public function getOrderDetailQuantity(): OrderDetailQuantity
++    {
++        return $this->orderDetailQuantities;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/CommandHandler/MergeProductsToShipmentHandlerInterface.php b/src/Core/Domain/Shipment/CommandHandler/MergeProductsToShipmentHandlerInterface.php
+new file mode 100644
+index 0000000000000..10666549031b9
+--- /dev/null
++++ b/src/Core/Domain/Shipment/CommandHandler/MergeProductsToShipmentHandlerInterface.php
+@@ -0,0 +1,37 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
++
++interface MergeProductsToShipmentHandlerInterface
++{
++    /**
++     * @param MergeProductsToShipment $command
++     */
++    public function handle(MergeProductsToShipment $command);
++}
+diff --git a/src/Core/Domain/Shipment/Exception/CannotMergeProductToShipmentException.php b/src/Core/Domain/Shipment/Exception/CannotMergeProductToShipmentException.php
+new file mode 100644
+index 0000000000000..01f24c2882980
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Exception/CannotMergeProductToShipmentException.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Exception;
++
++class CannotMergeProductToShipmentException extends ShipmentException
++{
++}
+diff --git a/src/Core/Domain/Shipment/ValueObject/OrderDetailQuantity.php b/src/Core/Domain/Shipment/ValueObject/OrderDetailQuantity.php
+new file mode 100644
+index 0000000000000..96dff35674961
+--- /dev/null
++++ b/src/Core/Domain/Shipment/ValueObject/OrderDetailQuantity.php
+@@ -0,0 +1,63 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
++
++class OrderDetailQuantity
++{
++    /**
++     * @var array<int, array{id_order_detail: int, quantity: int}>
++     */
++    private array $items;
++
++    /**
++     * @param array<int, array{id_order_detail: int, quantity: int}> $items
++     *
++     * @throws ShipmentException
++     */
++    public function __construct(array $items)
++    {
++        foreach ($items as $item) {
++            if (!isset($item['id_order_detail']) || !isset($item['quantity'])) {
++                throw new ShipmentException(sprintf('Invalid order detail quantity item: %s', json_encode($item)));
++            }
++        }
++
++        $this->items = $items;
++    }
++
++    /**
++     * @return array<int, array{id_order_detail: int, quantity: int}>
++     */
++    public function getValue(): array
++    {
++        return $this->items;
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index 469e64cb91190..882535a855795 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -29,7 +29,9 @@
+ namespace PrestaShopBundle\Entity\Repository;
+ 
+ use Doctrine\ORM\EntityRepository;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
+ use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
+ 
+ class ShipmentRepository extends EntityRepository
+ {
+@@ -43,6 +45,11 @@ public function findByOrderId(int $orderId)
+         return $this->findBy(['orderId' => $orderId]);
+     }
+ 
++    public function findById(int $shipmentId): ?Shipment
++    {
++        return $this->findOneBy(['id' => $shipmentId]);
++    }
++
+     public function findByCarrierId(int $carrierId): array
+     {
+         return $this->findBy(['carrierId' => $carrierId]);
+@@ -55,4 +62,55 @@ public function save(Shipment $shipment): int
+ 
+         return $shipment->getId();
+     }
++
++    public function delete(Shipment $shipment): void
++    {
++        $this->getEntityManager()->remove($shipment);
++        $this->getEntityManager()->flush();
++    }
++
++    /**
++     * @param Shipment $source
++     * @param Shipment $target
++     * @param ShipmentProduct[] $shipmentProducts
++     */
++    public function mergeProductsToShipment(Shipment $source, Shipment $target, array $shipmentProducts): void
++    {
++        $sourceProductsByOrderDetailId = $this->getShipmentProductByOrderDetailId($source);
++        $targetProductsByOrderDetailId = $this->getShipmentProductByOrderDetailId($target);
++
++        foreach ($shipmentProducts as $shipmentProduct) {
++            if (empty($sourceProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()])) {
++                throw new ShipmentException(sprintf('Order detail with id %d does not exist in source shipment', $shipmentProduct->getOrderDetailId()));
++            }
++            if (empty($targetProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()])) {
++                $target->addShipmentProduct($shipmentProduct);
++            } else {
++                $targetProduct = $targetProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()];
++                $newQuantity = $targetProduct->getQuantity() + $shipmentProduct->getQuantity();
++                $targetProduct->setQuantity($newQuantity);
++            }
++            $sourceProduct = $sourceProductsByOrderDetailId[$shipmentProduct->getOrderDetailId()];
++            $newQuantity = $sourceProduct->getQuantity() - $shipmentProduct->getQuantity();
++            if ($newQuantity <= 0) {
++                $source->removeProduct($sourceProduct);
++            } else {
++                $sourceProduct->setQuantity($newQuantity);
++            }
++        }
++        $this->getEntityManager()->flush();
++
++        if ($source->getProducts()->isEmpty()) {
++            $this->delete($source);
++        }
++    }
++
++    private function getShipmentProductByOrderDetailId(Shipment $shipment): array
++    {
++        return array_reduce($shipment->getProducts()->toArray(), function ($carry, ShipmentProduct $product) {
++            $carry[$product->getOrderDetailId()] = $product;
++
++            return $carry;
++        }, []);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Entity/Shipment.php b/src/PrestaShopBundle/Entity/Shipment.php
+index 4899c9b02c34f..b29c1cfefc3f4 100644
+--- a/src/PrestaShopBundle/Entity/Shipment.php
++++ b/src/PrestaShopBundle/Entity/Shipment.php
+@@ -30,6 +30,7 @@
+ use Doctrine\Common\Collections\ArrayCollection;
+ use Doctrine\Common\Collections\Collection;
+ use Doctrine\ORM\Mapping as ORM;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
+ 
+ /**
+  * @ORM\Table()
+@@ -112,7 +113,7 @@ class Shipment
+     /**
+      * @var Collection<ShipmentProduct>
+      *
+-     * @ORM\OneToMany(targetEntity="PrestaShopBundle\Entity\ShipmentProduct", mappedBy="shipment", cascade={"persist"})
++     * @ORM\OneToMany(targetEntity="PrestaShopBundle\Entity\ShipmentProduct", mappedBy="shipment", cascade={"all"}, orphanRemoval=true)
+      */
+     private Collection $products;
+ 
+@@ -266,12 +267,24 @@ public function setCancelledAt(?DateTime $cancelledAt): self
+     public function addShipmentProduct(ShipmentProduct $shipmentProduct): self
+     {
+         $this->products[] = $shipmentProduct;
+-
+         $shipmentProduct->setShipment($this);
+ 
+         return $this;
+     }
+ 
++    public function removeProduct(ShipmentProduct $product): self
++    {
++        if ($product->getShipment() !== $this) {
++            throw new ShipmentException('Trying to remove a product that does not belong to the shipment');
++        }
++
++        if ($this->products->removeElement($product)) {
++            $product->setShipment(null);
++        }
++
++        return $this;
++    }
++
+     /**
+      * @ORM\PrePersist
+      *
+diff --git a/src/PrestaShopBundle/Entity/ShipmentProduct.php b/src/PrestaShopBundle/Entity/ShipmentProduct.php
+index 6277039b2d1a3..31f42236817f5 100644
+--- a/src/PrestaShopBundle/Entity/ShipmentProduct.php
++++ b/src/PrestaShopBundle/Entity/ShipmentProduct.php
+@@ -45,11 +45,11 @@ class ShipmentProduct
+     private int $id;
+ 
+     /**
+-     * @ORM\ManyToOne(targetEntity="PrestaShopBundle\Entity\Shipment", inversedBy="products", cascade={"persist"})
++     * @ORM\ManyToOne(targetEntity="PrestaShopBundle\Entity\Shipment", inversedBy="products", cascade={"all"})
+      *
+-     * @ORM\JoinColumn(name="id_shipment", referencedColumnName="id_shipment", nullable=false)
++     * @ORM\JoinColumn(name="id_shipment", referencedColumnName="id_shipment", nullable=false, onDelete="CASCADE")
+      */
+-    private Shipment $shipment;
++    private ?Shipment $shipment = null;
+ 
+     /**
+      * @ORM\Column(name="id_order_detail", type="integer")
+@@ -66,7 +66,7 @@ public function getId(): int
+         return $this->id;
+     }
+ 
+-    public function getShipment(): Shipment
++    public function getShipment(): ?Shipment
+     {
+         return $this->shipment;
+     }
+@@ -81,7 +81,7 @@ public function getQuantity(): int
+         return $this->quantity;
+     }
+ 
+-    public function setShipment(Shipment $shipment): self
++    public function setShipment(?Shipment $shipment): self
+     {
+         $this->shipment = $shipment;
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+index 9720fbb7118a8..d913b753ca738 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+@@ -9,3 +9,5 @@ services:
+   PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\GetShipmentProductsHandler:
+ 
+   PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\SwitchShipmentCarrierHandler:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\CommandHandler\MergeProductsToShipmentHandler:
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+index 378808784d28e..5a653f88510c9 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -31,7 +31,9 @@
+ 
+ use Behat\Gherkin\Node\TableNode;
+ use Exception;
++use OrderDetail;
+ use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\MergeProductsToShipment;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Command\SwitchShipmentCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
+ use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
+@@ -116,4 +118,55 @@ public function verifyShipmentProducts(string $shipmentReference, TableNode $tab
+             Assert::assertEquals($shipmentProducts[$i]->getProductName(), $data[$i]['product_name']);
+         }
+     }
++
++    /**
++     * @Then the shipment :shipmentReference should be deleted
++     *
++     * @param string $shipmentReference
++     */
++    public function verifyIfShipmentIsDeleted(string $shipmentReference)
++    {
++        $shipmentId = SharedStorage::getStorage()->get($shipmentReference);
++
++        $shipmentProducts = $this->getQueryBus()->handle(
++            new GetShipmentProducts($shipmentId)
++        );
++
++        Assert::assertEmpty($shipmentProducts);
++    }
++
++    /**
++     * @Given I merge product from :sourceShipment into :targetShipment with following information:
++     *
++     * @param string $sourceShipmentReference
++     * @param string $targetShipmentReference
++     * @param TableNode $table
++     */
++    public function mergeProductsToShipment(string $sourceShipmentReference, string $targetShipmentReference, TableNode $table): void
++    {
++        $data = $table->getColumnsHash();
++        $orderDetailQuantities = [];
++        $sourceShipmentId = SharedStorage::getStorage()->get($sourceShipmentReference);
++        $targetShipmentId = SharedStorage::getStorage()->get($targetShipmentReference);
++
++        $getSourceShipmentProducts = $this->getQueryBus()->handle(
++            new GetShipmentProducts($sourceShipmentId)
++        );
++
++        foreach ($getSourceShipmentProducts as $sourceShipmentProduct) {
++            $orderDetail = new OrderDetail($sourceShipmentProduct->getOrderDetailId());
++            foreach ($data as $value) {
++                if ($orderDetail->product_name === $value['product_name']) {
++                    $orderDetailQuantities[] = [
++                        'id_order_detail' => $orderDetail->id,
++                        'quantity' => $value['quantity'],
++                    ];
++                }
++            }
++        }
++
++        $this->getCommandBus()->handle(
++            new MergeProductsToShipment($sourceShipmentId, $targetShipmentId, $orderDetailQuantities)
++        );
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+index b8dab560f99d7..093783a2eae36 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/products_with_different_carriers.feature
+@@ -94,3 +94,25 @@ Feature: Product associated with different carriers
+     Then the shipment "shipment2" should have the following products:
+       | product_name | quantity |
+       | saucisson    | 2        |
++
++  Scenario: Merge product into a shipment with specified quantity
++    Given I merge product from "shipment2" into "shipment1" with following information:
++      | product_name | quantity |
++      | saucisson    | 1        |
++    Then the shipment "shipment1" should have the following products:
++      | product_name   | quantity |
++      | bottle of beer | 1        |
++      | saucisson      | 1        |
++    And the shipment "shipment2" should have the following products:
++      | product_name   | quantity |
++      | saucisson      | 1        |
++
++  Scenario: Merge product into a shipment with full quantity
++    Given I merge product from "shipment2" into "shipment1" with following information:
++      | product_name | quantity |
++      | saucisson    | 1        |
++    Then the shipment "shipment1" should have the following products:
++      | product_name   | quantity |
++      | bottle of beer | 1        |
++      | saucisson      | 2        |
++    And the shipment "shipment2" should be deleted

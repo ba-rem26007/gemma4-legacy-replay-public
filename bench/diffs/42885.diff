@@ -1,0 +1,414 @@
+diff --git a/classes/ImageManager.php b/classes/ImageManager.php
+index e9597b307d2ad..2e1192f191fd7 100644
+--- a/classes/ImageManager.php
++++ b/classes/ImageManager.php
+@@ -189,46 +189,12 @@ public static function resize(
+             return false;
+         }
+ 
+-        list($tmpWidth, $tmpHeight, $sourceFileType) = getimagesize($sourceFile);
+-        $rotate = 0;
+-        if (function_exists('exif_read_data')) {
+-            $exif = @exif_read_data($sourceFile);
+-
+-            if ($exif && isset($exif['Orientation'])) {
+-                switch ($exif['Orientation']) {
+-                    case 3:
+-                        $sourceWidth = $tmpWidth;
+-                        $sourceHeight = $tmpHeight;
+-                        $rotate = 180;
+-
+-                        break;
+-
+-                    case 6:
+-                        $sourceWidth = $tmpHeight;
+-                        $sourceHeight = $tmpWidth;
+-                        $rotate = -90;
+-
+-                        break;
+-
+-                    case 8:
+-                        $sourceWidth = $tmpHeight;
+-                        $sourceHeight = $tmpWidth;
+-                        $rotate = 90;
+-
+-                        break;
+-
+-                    default:
+-                        $sourceWidth = $tmpWidth;
+-                        $sourceHeight = $tmpHeight;
+-                }
+-            } else {
+-                $sourceWidth = $tmpWidth;
+-                $sourceHeight = $tmpHeight;
+-            }
+-        } else {
+-            $sourceWidth = $tmpWidth;
+-            $sourceHeight = $tmpHeight;
+-        }
++        // Read dimensions after the planned EXIF rotation and keep the angle to apply to the image pixels
++        $sourceInfo = self::getImageSizeWithOrientation($sourceFile);
++        $sourceWidth = $sourceInfo[0];
++        $sourceHeight = $sourceInfo[1];
++        $sourceFileType = $sourceInfo[2];
++        $rotationToApply = $sourceInfo['rotation_to_apply'] ?? 0;
+ 
+         /*
+          * If the filetype is not forced and we are requesting a JPG file, we will adjust the format inside
+@@ -258,39 +224,14 @@ public static function resize(
+             $destinationHeight = $sourceHeight;
+         }
+ 
+-        // Unknown fitments fall back to legacy behavior to keep old integrations working.
+-        if (!in_array($imageFitment, ImageFitment::AVAILABLE_VALUES, true)) {
+-            $imageFitment = ImageFitment::FIT;
+-        }
+-
+-        $widthDiff = $destinationWidth / $sourceWidth;
+-        $heightDiff = $destinationHeight / $sourceHeight;
+-
+-        $psImageGenerationMethod = Configuration::get('PS_IMAGE_GENERATION_METHOD');
+-
+-        // Calculate target dimensions according to the selected thumbnail fitment.
+-        if ($imageFitment === ImageFitment::BOUND) {
+-            $ratio = min(1, $widthDiff, $heightDiff);
+-            $nextWidth = (int) round($sourceWidth * $ratio);
+-            $nextHeight = (int) round($sourceHeight * $ratio);
+-            $destinationWidth = $nextWidth;
+-            $destinationHeight = $nextHeight;
+-        } elseif ($imageFitment === ImageFitment::CROP) {
+-            $ratio = max($widthDiff, $heightDiff);
+-            $nextWidth = (int) round($sourceWidth * $ratio);
+-            $nextHeight = (int) round($sourceHeight * $ratio);
+-        } elseif ($widthDiff > 1 && $heightDiff > 1) {
+-            $nextWidth = $sourceWidth;
+-            $nextHeight = $sourceHeight;
+-        } elseif ($psImageGenerationMethod == 2 || (!$psImageGenerationMethod && $widthDiff > $heightDiff)) {
+-            $nextHeight = $destinationHeight;
+-            $nextWidth = round(($sourceWidth * $nextHeight) / $sourceHeight);
+-            $destinationWidth = (int) (!$psImageGenerationMethod ? $destinationWidth : $nextWidth);
+-        } else {
+-            $nextWidth = $destinationWidth;
+-            $nextHeight = round($sourceHeight * $destinationWidth / $sourceWidth);
+-            $destinationHeight = (int) (!$psImageGenerationMethod ? $destinationHeight : $nextHeight);
+-        }
++        // Compute the thumbnail canvas and the image dimensions used for resampling.
++        [$destinationWidth, $destinationHeight, $nextWidth, $nextHeight] = self::computeThumbnailDimensions(
++            $sourceWidth,
++            $sourceHeight,
++            $destinationWidth,
++            $destinationHeight,
++            $imageFitment
++        );
+ 
+         if (!ImageManager::checkImageMemoryLimit($sourceFile)) {
+             $error = self::ERROR_MEMORY_LIMIT;
+@@ -320,9 +261,9 @@ public static function resize(
+         }
+ 
+         $srcImage = ImageManager::create($sourceFileType, $sourceFile);
+-        if ($rotate) {
++        if ($rotationToApply) {
+             /** @phpstan-ignore-next-line */
+-            $srcImage = imagerotate($srcImage, $rotate, 0);
++            $srcImage = imagerotate($srcImage, $rotationToApply, 0);
+         }
+ 
+         if ($destinationWidth >= $sourceWidth && $destinationHeight >= $sourceHeight) {
+@@ -337,6 +278,88 @@ public static function resize(
+         return $writeFile;
+     }
+ 
++    /**
++     * Reads image information with dimensions adjusted for the EXIF rotation applied during resizing.
++     *
++     * @return array|false Full image information with rotation_to_apply in degrees (positive counterclockwise), or false when reading fails
++     */
++    public static function getImageSizeWithOrientation(string $sourceFile): array|false
++    {
++        // Read the current image information without retaining it across file changes
++        $imageInfo = getimagesize($sourceFile);
++        if ($imageInfo === false) {
++            return false;
++        }
++
++        // Images without EXIF orientation retain their dimensions and require no rotation
++        $imageInfo['rotation_to_apply'] = 0;
++        $exif = function_exists('exif_read_data') ? @exif_read_data($sourceFile) : false;
++        $orientation = $exif['Orientation'] ?? 1;
++
++        // Adjust dimensions for the supported EXIF orientation and record the rotation still to apply to the pixels
++        if ($orientation == 3) {
++            $imageInfo['rotation_to_apply'] = 180;
++        }
++        if ($orientation == 6) {
++            [$imageInfo[0], $imageInfo[1]] = [$imageInfo[1], $imageInfo[0]];
++            $imageInfo['rotation_to_apply'] = -90;
++        }
++        if ($orientation == 8) {
++            [$imageInfo[0], $imageInfo[1]] = [$imageInfo[1], $imageInfo[0]];
++            $imageInfo['rotation_to_apply'] = 90;
++        }
++
++        return $imageInfo;
++    }
++
++    /**
++     * Computes the thumbnail canvas and resampled image dimensions for the selected fitment.
++     *
++     * @param value-of<ImageFitment::AVAILABLE_VALUES> $imageFitment
++     *
++     * @return array{0: int, 1: int, 2: int, 3: int} Canvas width/height followed by resampled width/height
++     */
++    public static function computeThumbnailDimensions(int $sourceWidth, int $sourceHeight, int $destinationWidth, int $destinationHeight, string $imageFitment): array
++    {
++        // Unknown fitments fall back to legacy behavior to keep old integrations working.
++        if (!in_array($imageFitment, ImageFitment::AVAILABLE_VALUES, true)) {
++            $imageFitment = ImageFitment::FIT;
++        }
++
++        // Compare the requested dimensions with the source and get the generation method.
++        $widthDiff = $destinationWidth / $sourceWidth;
++        $heightDiff = $destinationHeight / $sourceHeight;
++
++        $psImageGenerationMethod = Configuration::get('PS_IMAGE_GENERATION_METHOD');
++
++        // Calculate target dimensions according to the selected thumbnail fitment.
++        if ($imageFitment === ImageFitment::BOUND) {
++            $ratio = min(1, $widthDiff, $heightDiff);
++            $nextWidth = (int) round($sourceWidth * $ratio);
++            $nextHeight = (int) round($sourceHeight * $ratio);
++            $destinationWidth = $nextWidth;
++            $destinationHeight = $nextHeight;
++        } elseif ($imageFitment === ImageFitment::CROP) {
++            $ratio = max($widthDiff, $heightDiff);
++            $nextWidth = (int) round($sourceWidth * $ratio);
++            $nextHeight = (int) round($sourceHeight * $ratio);
++        } elseif ($widthDiff > 1 && $heightDiff > 1) {
++            $nextWidth = $sourceWidth;
++            $nextHeight = $sourceHeight;
++        } elseif ($psImageGenerationMethod == 2 || (!$psImageGenerationMethod && $widthDiff > $heightDiff)) {
++            $nextHeight = $destinationHeight;
++            $nextWidth = round(($sourceWidth * $nextHeight) / $sourceHeight);
++            $destinationWidth = (int) (!$psImageGenerationMethod ? $destinationWidth : $nextWidth);
++        } else {
++            $nextWidth = $destinationWidth;
++            $nextHeight = round($sourceHeight * $destinationWidth / $sourceWidth);
++            $destinationHeight = (int) (!$psImageGenerationMethod ? $destinationHeight : $nextHeight);
++        }
++
++        // Return both sizes so resizing can center or crop the image on the thumbnail canvas.
++        return [(int) $destinationWidth, (int) $destinationHeight, (int) $nextWidth, (int) $nextHeight];
++    }
++
+     /**
+      * @param resource|GdImage $dstImage
+      * @param resource|GdImage $srcImage
+@@ -421,7 +444,7 @@ public static function getMimeType(string $filename)
+             $mimeType = mime_content_type($filename);
+         }
+         // Try with exec command and file binary
+-        if (!$mimeType && function_exists('exec')) {
++        if (!$mimeType && function_exists('exec') && function_exists('escapeshellarg')) {
+             $mimeType = trim(exec('file -b --mime-type ' . escapeshellarg($filename)));
+             if (!$mimeType) {
+                 $mimeType = trim(exec('file --mime ' . escapeshellarg($filename)));
+diff --git a/classes/webservice/WebserviceSpecificManagementImages.php b/classes/webservice/WebserviceSpecificManagementImages.php
+index 85a7ba3efde67..a2bcea2254724 100644
+--- a/classes/webservice/WebserviceSpecificManagementImages.php
++++ b/classes/webservice/WebserviceSpecificManagementImages.php
+@@ -1054,7 +1054,7 @@ protected function writePostedImageOnDisk($reception_path, $dest_width = null, $
+                     finfo_close($finfo);
+                 } elseif (Tools::isCallable('mime_content_type')) {
+                     $mime_type = mime_content_type($file['tmp_name']);
+-                } elseif (Tools::isCallable('exec')) {
++                } elseif (Tools::isCallable('exec') && Tools::isCallable('escapeshellarg')) {
+                     $mime_type = trim(exec('file -b --mime-type ' . escapeshellarg($file['tmp_name'])));
+                 }
+                 if (empty($mime_type) || $mime_type == 'regular file') {
+diff --git a/controllers/front/GetFileController.php b/controllers/front/GetFileController.php
+index 9d0d01a56f79f..4c520881d0997 100644
+--- a/controllers/front/GetFileController.php
++++ b/controllers/front/GetFileController.php
+@@ -291,7 +291,7 @@ private function getMimeType(string $file, string $filename): string
+             @finfo_close($finfo);
+         } elseif (function_exists('mime_content_type')) {
+             $mimeType = @mime_content_type($file);
+-        } elseif (function_exists('exec')) {
++        } elseif (function_exists('exec') && function_exists('escapeshellarg')) {
+             $mimeType = trim(@exec('file -b --mime-type ' . escapeshellarg($file)));
+             if (!$mimeType) {
+                 $mimeType = trim(@exec('file --mime ' . escapeshellarg($file)));
+diff --git a/src/Adapter/Image/ImageRetriever.php b/src/Adapter/Image/ImageRetriever.php
+index 3396579f0bbe6..176aeac80c42f 100644
+--- a/src/Adapter/Image/ImageRetriever.php
++++ b/src/Adapter/Image/ImageRetriever.php
+@@ -15,6 +15,7 @@
+ use Link;
+ use Manufacturer;
+ use PrestaShop\PrestaShop\Adapter\ServiceLocator;
++use PrestaShop\PrestaShop\Core\Domain\ImageSettings\ValueObject\ImageFitment;
+ use PrestaShop\PrestaShop\Core\Image\ImageFormatConfiguration;
+ use PrestaShopDatabaseException;
+ use PrestaShopException;
+@@ -190,6 +191,9 @@ public function getImage($object, $id_image)
+             $rewrite = $id_image;
+         }
+ 
++        // Cache source information only for this retrieval, across thumbnail sizes and formats
++        $sourceImageSizes = [];
++
+         // Check and generate each thumbnail size
+         $image_types = ImageType::getImagesTypes($type, true);
+         foreach ($image_types as $image_type) {
+@@ -208,9 +212,10 @@ public function getImage($object, $id_image)
+                 $originalFileName,
+             ]);
+ 
++            // Generate each configured thumbnail format
+             foreach ($configuredImageFormats as $imageFormat) {
+-                // Generate the thumbnail
+-                $this->checkOrGenerateImageType($originalImagePath, $imageFolderPath, $id_image, $image_type, $imageFormat);
++                // Generate the thumbnail and return its path and dimensions
++                $thumbnail = $this->checkOrGenerateImageType($originalImagePath, $imageFolderPath, $id_image, $image_type, $imageFormat, $sourceImageSizes);
+ 
+                 // Get the URL of the thumb and add it to sources
+                 // Manufacturer and supplier use only IDs
+@@ -231,11 +236,13 @@ public function getImage($object, $id_image)
+                 $baseUrl = reset($sources);
+             }
+ 
+-            // And add this size to our list
++            // And add this size to our list; getGenerationFormats() always includes JPG, so the loop defines $thumbnail
+             $urls[$image_type['name']] = [
+                 'url' => $baseUrl,
+-                'width' => (int) $image_type['width'],
+-                'height' => (int) $image_type['height'],
++                // @phpstan-ignore-next-line
++                'width' => $thumbnail['width'],
++                // @phpstan-ignore-next-line
++                'height' => $thumbnail['height'],
+                 'sources' => $sources,
+             ];
+         }
+@@ -267,11 +274,13 @@ public function getImage($object, $id_image)
+      * @param int|string $idImage
+      * @param array $imageTypeData
+      * @param string $imageFormat
++     * @param array<string, array|false> $sourceImageSizes Source information cached for the current retrieval
+      *
+-     * @return void
++     * @return array{path: string, width: int, height: int}
+      */
+-    private function checkOrGenerateImageType(string $originalImagePath, string $imageFolderPath, int|string $idImage, array $imageTypeData, string $imageFormat)
++    private function checkOrGenerateImageType(string $originalImagePath, string $imageFolderPath, int|string $idImage, array $imageTypeData, string $imageFormat, array &$sourceImageSizes): array
+     {
++        // Get the path of the final thumbnail
+         $fileName = sprintf('%s-%s.%s', $idImage, $imageTypeData['name'], $imageFormat);
+         $resizedImagePath = implode(DIRECTORY_SEPARATOR, [
+             $imageFolderPath,
+@@ -302,6 +311,38 @@ private function checkOrGenerateImageType(string $originalImagePath, string $ima
+                 $imageTypeData['image_fitment']
+             );
+         }
++
++        // Start with the configured size and the thumbnail path
++        $thumbnail = [
++            'path' => $resizedImagePath,
++            'width' => (int) $imageTypeData['width'],
++            'height' => (int) $imageTypeData['height'],
++        ];
++
++        // Bound fitment can change the configured dimensions; other fitments need no file read here
++        if ($imageTypeData['image_fitment'] === ImageFitment::BOUND) {
++            // Read each source path once per retrieval, caching EXIF-adjusted image information and failed reads too
++            if (!array_key_exists($originalImagePath, $sourceImageSizes)) {
++                $sourceImageSizes[$originalImagePath] = is_file($originalImagePath) && is_readable($originalImagePath)
++                    ? ImageManager::getImageSizeWithOrientation($originalImagePath)
++                    : false;
++            }
++
++            // Reuse cached source dimensions, keeping the configured size if reading fails or dimensions are invalid
++            $sourceDimensions = $sourceImageSizes[$originalImagePath];
++            if ($sourceDimensions !== false && $sourceDimensions[0] > 0 && $sourceDimensions[1] > 0) {
++                // Compute the real thumbnail dimensions using the same calculation as resizing
++                [$thumbnail['width'], $thumbnail['height']] = ImageManager::computeThumbnailDimensions(
++                    $sourceDimensions[0],
++                    $sourceDimensions[1],
++                    $thumbnail['width'],
++                    $thumbnail['height'],
++                    $imageTypeData['image_fitment']
++                );
++            }
++        }
++
++        return $thumbnail;
+     }
+ 
+     /**
+@@ -349,6 +390,9 @@ public function getNoPictureImage(Language $language)
+     {
+         $urls = [];
+ 
++        // Share source information across fallback images only for this retrieval
++        $sourceImageSizes = [];
++
+         // Set images to regenerate with all theirs specific directories
+         $objectsToRegenerate = [
+             ['type' => 'categories', 'dir' => _PS_CAT_IMG_DIR_],
+@@ -386,36 +430,15 @@ public function getNoPictureImage(Language $language)
+ 
+             // Get all image sizes for product objects
+             foreach ($imageTypes as $imageType) {
+-                // Get path of the final thumbnail
+-                $resizedImagePath = implode(DIRECTORY_SEPARATOR, [
++                // Check or generate the thumbnail and get its path and dimensions
++                $thumbnail = $this->checkOrGenerateImageType(
++                    $originalImagePath,
+                     rtrim($object['dir'], DIRECTORY_SEPARATOR),
+-                    $language->getIsoCode() . '-default-' . $imageType['name'] . '.jpg',
+-                ]);
+-
+-                // Check if the thumbnail exists and generate it if needed
+-                if (!file_exists($resizedImagePath)) {
+-                    $error = 0;
+-                    $targetWidth = null;
+-                    $targetHeight = null;
+-                    $sourceWidth = null;
+-                    $sourceHeight = null;
+-
+-                    ImageManager::resize(
+-                        $originalImagePath,
+-                        $resizedImagePath,
+-                        (int) $imageType['width'],
+-                        (int) $imageType['height'],
+-                        'jpg',
+-                        false,
+-                        $error,
+-                        $targetWidth,
+-                        $targetHeight,
+-                        5,
+-                        $sourceWidth,
+-                        $sourceHeight,
+-                        $imageType['image_fitment']
+-                    );
+-                }
++                    $language->getIsoCode() . '-default',
++                    $imageType,
++                    'jpg',
++                    $sourceImageSizes
++                );
+ 
+                 // Build image URL for that thumbnail
+                 $imageUrl = $this->link->getImageLink(
+@@ -427,8 +450,8 @@ public function getNoPictureImage(Language $language)
+                 // And add it to the list
+                 $urls[$imageType['name']] = [
+                     'url' => $imageUrl,
+-                    'width' => (int) $imageType['width'],
+-                    'height' => (int) $imageType['height'],
++                    'width' => $thumbnail['width'],
++                    'height' => $thumbnail['height'],
+                 ];
+             }
+         }

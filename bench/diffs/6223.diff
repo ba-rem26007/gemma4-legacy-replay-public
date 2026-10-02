@@ -1,0 +1,181 @@
+diff --git a/admin-dev/themes/default/js/bundle/product/form.js b/admin-dev/themes/default/js/bundle/product/form.js
+index 19a1ca8a1cc6d..540763aeedec1 100644
+--- a/admin-dev/themes/default/js/bundle/product/form.js
++++ b/admin-dev/themes/default/js/bundle/product/form.js
+@@ -94,6 +94,8 @@ var displayFieldsManager = (function() {
+         $(this).select();
+       });
+ 
++      this.initVisibilityRule();
++
+       /** Tax rule dropdown shortcut */
+       $('a#tax_rule_shortcut_opener').on('click', function () {
+         // lazy instantiated
+@@ -114,6 +116,28 @@ var displayFieldsManager = (function() {
+         return false;
+       });
+     },
++    /**
++     * When a product is available for order, its price should be visible,
++     * whereas products unavailable for order can have their prices visible or hidden.
++     */
++    'initVisibilityRule': function () {
++      var showPriceSelector = '.js-show-price';
++      var availableForOrderSelector = '.js-available-for-order';
++
++      var applyVisibilityRule = () => {
++        var $availableForOrder = $(availableForOrderSelector + ' input');
++        var $showPrice = $(showPriceSelector + ' input');
++        var $showPriceColumn = $(showPriceSelector);
++        if ($availableForOrder.prop('checked')) {
++          $showPrice.prop('checked', true);
++          $showPriceColumn.addClass('hide');
++        } else {
++          $showPriceColumn.removeClass('hide');
++        }
++      };
++      $(availableForOrderSelector + ' .checkbox').on('click', applyVisibilityRule);
++      applyVisibilityRule();
++    },
+     'refresh': function () {
+       this.checkAccessVariations();
+       $('#virtual_product').hide();
+diff --git a/src/Core/Product/ProductPresenter.php b/src/Core/Product/ProductPresenter.php
+index 3c3017330c297..fdbbec698bd1e 100644
+--- a/src/Core/Product/ProductPresenter.php
++++ b/src/Core/Product/ProductPresenter.php
+@@ -33,11 +33,30 @@ public function __construct(
+         $this->translator = $translator;
+     }
+ 
++    /**
++     * Prices should be shown for products with active "Show price" option
++     * and customer groups with active "Show price" option.
++     *
++     * @param ProductPresentationSettings $settings
++     * @param array $product
++     * @return bool
++     */
+     private function shouldShowPrice(
+         ProductPresentationSettings $settings,
+         array $product
+     ) {
+-        return  $settings->showPrices && $product['available_for_order'];
++        return $settings->showPrices && (bool) $product['show_price'];
++    }
++
++    /**
++     * The "Add to cart" button should be shown for products available for order.
++     *
++     * @param $product
++     * @return mixed
++     */
++    private function shouldShowAddToCartButton($product)
++    {
++        return (bool) $product['available_for_order'];
+     }
+ 
+     private function fillImages(
+@@ -160,30 +179,30 @@ private function addQuantityDiscountInformation(
+         return $presentedProduct;
+     }
+ 
+-    private function shouldEnableAddToCartButton(
+-        ProductPresentationSettings $settings,
+-        array $product
+-    ) {
+-        $can_add_to_cart = $this->shouldShowPrice($settings, $product);
+-
++    private function shouldEnableAddToCartButton(array $product)
++    {
+         if (($product['customizable'] == 2 || !empty($product['customization_required']))) {
+-            $can_add_to_cart = false;
++            $shouldShowButton = false;
+ 
+             if (isset($product['customizations'])) {
+-                $can_add_to_cart = true;
++                $shouldShowButton = true;
+                 foreach ($product['customizations']['fields'] as $field) {
+                     if ($field['required'] && !$field['is_customized']) {
+-                        $can_add_to_cart = false;
++                        $shouldShowButton = false;
+                     }
+                 }
+             }
++        } else {
++            $shouldShowButton = true;
+         }
+ 
++        $shouldShowButton = $shouldShowButton && $this->shouldShowAddToCartButton($product);
++
+         if ($product['quantity'] <= 0 && !$product['allow_oosp']) {
+-            $can_add_to_cart = false;
++            $shouldShowButton = false;
+         }
+ 
+-        return $can_add_to_cart;
++        return $shouldShowButton;
+     }
+ 
+     private function getAddToCartURL(array $product)
+@@ -430,7 +449,7 @@ public function present(
+             $language
+         );
+ 
+-        if ($this->shouldEnableAddToCartButton($settings, $product)) {
++        if ($this->shouldEnableAddToCartButton($product)) {
+             $presentedProduct['add_to_cart_url'] = $this->getAddToCartURL($product);
+         } else {
+             $presentedProduct['add_to_cart_url'] = null;
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
+index 7d226ebe5f7e2..0f63e0b0f39fa 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Product/form.html.twig
+@@ -707,10 +707,10 @@
+                       <div class="col-md-7 form-group">
+                           {{ form_errors(form.step6.display_options) }}
+                           <div class="row">
+-                            <div class="col-md-4">
++                            <div class="col-md-4 js-available-for-order">
+                               {{ form_widget(form.step6.display_options.available_for_order) }}
+                             </div>
+-                            <div class="col-md-3">
++                            <div class="col-md-3 js-show-price">
+                               {{ form_widget(form.step6.display_options.show_price) }}
+                             </div>
+                             <div class="col-md-5">
+diff --git a/tests/Unit/Core/Business/Product/ProductPresenterTest.php b/tests/Unit/Core/Business/Product/ProductPresenterTest.php
+index 2f772e5db3c66..e3dff08efb60e 100644
+--- a/tests/Unit/Core/Business/Product/ProductPresenterTest.php
++++ b/tests/Unit/Core/Business/Product/ProductPresenterTest.php
+@@ -56,6 +56,7 @@ public function setup()
+         $this->product['on_sale'] = false;
+         $this->product['new'] = false;
+         $this->product['pack'] = false;
++        $this->product['show_price'] = true;
+         $this->language = new Language;
+     }
+ 
+@@ -119,7 +120,14 @@ public function test_price_should_shown_in_restricted_country_mode()
+     public function test_price_should_not_be_shown_if_product_not_available_for_order()
+     {
+         $this->product['available_for_order'] = false;
++        $this->product['show_price'] = false;
++
+         $this->assertFalse($this->getPresentedProduct('show_price'));
++
++        $this->product['available_for_order'] = false;
++        $this->product['show_price'] = true;
++
++        $this->assertTrue($this->getPresentedProduct('show_price'));
+     }
+ 
+     public function test_price_is_tax_excluded()
+@@ -281,6 +289,7 @@ public function test_product_has_no_flags_if_not_available_for_order()
+     {
+         $this->product['online_only'] = true;
+         $this->product['available_for_order'] = false;
++        $this->product['show_price'] = false;
+         $this->assertEquals(
+             [],
+             $this->getPresentedProduct('flags')

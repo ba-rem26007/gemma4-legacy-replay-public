@@ -1,0 +1,735 @@
+diff --git a/classes/controller/Controller.php b/classes/controller/Controller.php
+index bd5ef9ac16391..3640831715084 100644
+--- a/classes/controller/Controller.php
++++ b/classes/controller/Controller.php
+@@ -794,4 +794,9 @@ public function isMultistoreEnabled(): bool
+     {
+         return $this->get(static::SERVICE_MULTISTORE_FEATURE)->isUsed();
+     }
++
++    public function getControllerName(): string
++    {
++        return get_class($this);
++    }
+ }
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 6499767902f41..bb0395c726c8c 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -205,6 +205,7 @@ public function init()
+                 'controller' => $this,
+             ]
+         );
++        Hook::exec('action' . $this->getControllerName() . 'InitBefore', ['controller' => $this]);
+ 
+         /*
+          * Globals are DEPRECATED as of version 1.5.0.1
+@@ -496,6 +497,7 @@ public function init()
+                 'controller' => $this,
+             ]
+         );
++        Hook::exec('action' . $this->getControllerName() . 'InitAfter', ['controller' => $this]);
+     }
+ 
+     /**
+@@ -510,6 +512,8 @@ public function postProcess()
+ 
+     /**
+      * Initializes a set of commonly used variables, available for use in the template.
++     *
++     * @throws PrestaShopException
+      */
+     protected function assignGeneralPurposeVariables()
+     {
+@@ -523,6 +527,12 @@ protected function assignGeneralPurposeVariables()
+                 'cart' => $cart,
+             ]
+         );
++        Hook::exec('action' . $this->getControllerName() . 'SetVariablesBefore',
++            [
++                'templateVars' => &$templateVars,
++                'cart' => $cart,
++            ]
++        );
+ 
+         $templateVars = [
+             'cart' => $this->cart_presenter->present($cart, true),
+@@ -553,6 +563,16 @@ protected function assignGeneralPurposeVariables()
+             null,
+             true
+         );
++        $modulesVariables = array_merge(
++            $modulesVariables,
++            Hook::exec('action' . $this->getControllerName() . 'SetVariables',
++                [
++                    'templateVars' => &$templateVars,
++                ],
++                null,
++                true
++            )
++        );
+ 
+         if (is_array($modulesVariables)) {
+             foreach ($modulesVariables as $moduleName => $variables) {
+@@ -585,12 +605,17 @@ protected function buildFrontEndObject($object)
+         Hook::exec('actionBuildFrontEndObject', [
+             'obj' => &$object,
+         ]);
++        Hook::exec('actionBuild' . $this->getControllerName() . 'FrontEndObject', [
++            'obj' => &$object,
++        ]);
+ 
+         return $object;
+     }
+ 
+     /**
+      * Initializes common front page content: header, footer and side columns.
++     *
++     * @throws PrestaShopException
+      */
+     public function initContent()
+     {
+@@ -598,7 +623,8 @@ public function initContent()
+         $this->process();
+ 
+         $this->context->smarty->assign([
+-            'HOOK_HEADER' => Hook::exec('displayHeader'),
++            'HOOK_HEADER' => Hook::exec('displayHeader')
++                . Hook::exec('display' . $this->getControllerName() . 'Header'),
+         ]);
+     }
+ 
+@@ -738,6 +764,7 @@ protected function smartyOutputContent($content)
+         }
+ 
+         Hook::exec('actionOutputHTMLBefore', ['html' => &$html]);
++        Hook::exec('actionOutput' . $this->getControllerName() . 'HTMLBefore', ['html' => &$html]);
+         echo trim($html);
+     }
+ 
+@@ -787,7 +814,7 @@ protected function displayMaintenancePage()
+                 $this->context->smarty->assign([
+                     'urls' => $this->getTemplateVarUrls(),
+                     'shop' => $this->getTemplateVarShop(),
+-                    'HOOK_MAINTENANCE' => Hook::exec('displayMaintenance', []),
++                    'HOOK_MAINTENANCE' => Hook::exec('displayMaintenance'),
+                     'maintenance_text' => Configuration::get('PS_MAINTENANCE_TEXT', (int) $this->context->language->id),
+                     'stylesheets' => $this->getStylesheets(),
+                 ]);
+@@ -939,6 +966,8 @@ protected function geolocationManagement($defaultCountry)
+      * Sets controller CSS and JS files.
+      *
+      * @return bool
++     *
++     * @throws PrestaShopException
+      */
+     public function setMedia()
+     {
+@@ -966,7 +995,8 @@ public function setMedia()
+         }
+ 
+         // Execute Hook FrontController SetMedia
+-        Hook::exec('actionFrontControllerSetMedia', []);
++        Hook::exec('actionFrontControllerSetMedia');
++        Hook::exec('action' . $this->getControllerName() . 'SetMedia');
+ 
+         return true;
+     }
+diff --git a/controllers/admin/AdminImportController.php b/controllers/admin/AdminImportController.php
+index 7e79827b626e8..c2c4508d01849 100644
+--- a/controllers/admin/AdminImportController.php
++++ b/controllers/admin/AdminImportController.php
+@@ -1151,14 +1151,14 @@ protected function categoryImportOne($info, $default_language_id, $id_lang, $for
+         }
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Category::existsInDatabase((int) $info['id'], 'category')) {
+             $category = new Category((int) $info['id']);
+         } else {
+-            if (isset($info['id']) && (int) $info['id'] && Category::existsInDatabase((int) $info['id'], 'category')) {
+-                $category = new Category((int) $info['id']);
+-            } else {
+-                $category = new Category();
+-            }
++            $category = new Category();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $category);
+@@ -2641,14 +2641,14 @@ protected function customerImportOne($info, $default_language_id, $id_lang, $sho
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Customer::customerIdExistsStatic((int) $info['id'])) {
+             $customer = new Customer((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Customer::customerIdExistsStatic((int) $info['id'])) {
+-                $customer = new Customer((int) $info['id']);
+-            } else {
+-                $customer = new Customer();
+-            }
++            $customer = new Customer();
+         }
+ 
+         $customer_exist = false;
+@@ -2900,14 +2900,13 @@ protected function addressImportOne($info, $force_ids, $validateOnly = false)
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Address::addressExists((int) $info['id'])) {
+             $address = new Address((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Address::addressExists((int) $info['id'])) {
+-                $address = new Address((int) $info['id']);
+-            } else {
+-                $address = new Address();
+-            }
++            $address = new Address();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $address);
+@@ -3220,14 +3219,13 @@ protected function manufacturerImportOne($info, $shop_is_feature_active, $regene
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Manufacturer::existsInDatabase((int) $info['id'], 'manufacturer')) {
+             $manufacturer = new Manufacturer((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Manufacturer::existsInDatabase((int) $info['id'], 'manufacturer')) {
+-                $manufacturer = new Manufacturer((int) $info['id']);
+-            } else {
+-                $manufacturer = new Manufacturer();
+-            }
++            $manufacturer = new Manufacturer();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $manufacturer);
+@@ -3335,14 +3333,13 @@ protected function supplierImportOne($info, $shop_is_feature_active, $regenerate
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Supplier::existsInDatabase((int) $info['id'], 'supplier')) {
+             $supplier = new Supplier((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Supplier::existsInDatabase((int) $info['id'], 'supplier')) {
+-                $supplier = new Supplier((int) $info['id']);
+-            } else {
+-                $supplier = new Supplier();
+-            }
++            $supplier = new Supplier();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $supplier);
+@@ -3441,14 +3438,13 @@ protected function aliasImportOne($info, $force_ids, $validateOnly = false)
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Alias::existsInDatabase((int) $info['id'], 'alias')) {
+             $alias = new Alias((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Alias::existsInDatabase((int) $info['id'], 'alias')) {
+-                $alias = new Alias((int) $info['id']);
+-            } else {
+-                $alias = new Alias();
+-            }
++            $alias = new Alias();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $alias);
+@@ -3521,14 +3517,13 @@ public function storeContactImportOne($info, $shop_is_feature_active, $regenerat
+     {
+         AdminImportController::setDefaultValues($info);
+ 
+-        if ($force_ids && isset($info['id']) && (int) $info['id']) {
++        if (!$force_ids) {
++            unset($info['id']);
++        }
++        if ($force_ids && isset($info['id']) && (int) $info['id'] && Store::existsInDatabase((int) $info['id'], 'store')) {
+             $store = new Store((int) $info['id']);
+         } else {
+-            if (array_key_exists('id', $info) && (int) $info['id'] && Store::existsInDatabase((int) $info['id'], 'store')) {
+-                $store = new Store((int) $info['id']);
+-            } else {
+-                $store = new Store();
+-            }
++            $store = new Store();
+         }
+ 
+         AdminImportController::arrayWalk($info, ['AdminImportController', 'fillInfo'], $store);
+diff --git a/src/Core/Shop/LogoUploader.php b/src/Core/Shop/LogoUploader.php
+index 40b2b8d3a0f21..21e7e189366cc 100644
+--- a/src/Core/Shop/LogoUploader.php
++++ b/src/Core/Shop/LogoUploader.php
+@@ -127,7 +127,7 @@ public function update($fieldName, $logoPrefix, array $files = [])
+                 }
+             }
+ 
+-            $idShop = $this->shop->id;
++            $idShop = null;
+             $idShopGroup = null;
+ 
+             // on updating PS_LOGO if the new file is an svg, copy old logo for mail and invoice
+@@ -175,7 +175,7 @@ private function updateInMultiShopContext(&$idShop, &$idShopGroup, $fieldName)
+             $logoAll = Configuration::get($fieldName);
+             Shop::setContext(Shop::CONTEXT_GROUP);
+             $logoGroup = Configuration::get($fieldName);
+-            Shop::setContext(Shop::CONTEXT_SHOP);
++            Shop::setContext(Shop::CONTEXT_SHOP, $idShop);
+             $logoShop = Configuration::get($fieldName);
+             if ($logoAll != $logoShop && $logoGroup != $logoShop && $logoShop != false) {
+                 @unlink($this->imageDirection . Configuration::get($fieldName));
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/04_documentsTab.ts b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/04_documentsTab.ts
+index 9b4779138e715..40dfe29bd4f52 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/04_documentsTab.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/04_documentsTab.ts
+@@ -355,7 +355,7 @@ describe('BO - Orders - View and edit order : Check order documents tab', async
+     it('should check if \'Delivery slip\' document is created', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkDeliverySlipDocument', baseContext);
+ 
+-      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
++      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 2);
+       expect(documentType).to.be.equal('Delivery slip');
+     });
+ 
+@@ -382,7 +382,7 @@ describe('BO - Orders - View and edit order : Check order documents tab', async
+       await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocument', baseContext);
+ 
+       // Get document name
+-      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 4);
++      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
+       expect(documentType).to.be.equal('Credit slip');
+     });
+ 
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/12_checkMultiInvoice.ts b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/12_checkMultiInvoice.ts
+index d3bb817e35427..ccfa5e2167569 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/12_checkMultiInvoice.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/12_checkMultiInvoice.ts
+@@ -232,7 +232,7 @@ describe('BO - Orders - View and edit order: Check multi invoice', async () => {
+     it('should get the second invoice file name', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'getSecondInvoiceNumber', baseContext);
+ 
+-      secondFileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
++      secondFileName = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+       expect(filePath).is.not.equal('');
+     });
+   });
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/01_createFilterCreditSlips.ts b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/01_createFilterCreditSlips.ts
+index 6c8b44b6321cb..64339a43ecb86 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/01_createFilterCreditSlips.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/01_createFilterCreditSlips.ts
+@@ -137,12 +137,10 @@ describe('BO - Orders - Credit slips : Create, filter and check credit slips fil
+         .and.to.contain('Delivery slip');
+     });
+ 
+-    const tests = [
+-      {args: {productID: 1, quantity: 1, documentRow: 4}},
+-      {args: {productID: 1, quantity: 2, documentRow: 5}},
+-    ];
+-
+-    tests.forEach((test, index: number) => {
++    [
++      {productID: 1, quantity: 1, documentRow: 4},
++      {productID: 1, quantity: 2, documentRow: 5},
++    ].forEach((arg, index: number) => {
+       it(`should create the partial refund n°${index + 1}`, async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `addPartialRefund${index + 1}`, baseContext);
+ 
+@@ -150,8 +148,8 @@ describe('BO - Orders - Credit slips : Create, filter and check credit slips fil
+ 
+         const textMessage = await boOrdersViewBlockProductsPage.addPartialRefundProduct(
+           page,
+-          test.args.productID,
+-          test.args.quantity,
++          arg.productID,
++          arg.quantity,
+         );
+         expect(textMessage).to.contains(boOrdersViewBlockProductsPage.partialRefundValidationMessage);
+       });
+@@ -205,35 +203,27 @@ describe('BO - Orders - Credit slips : Create, filter and check credit slips fil
+       expect(numberOfCreditSlips).to.be.above(0);
+     });
+ 
+-    const tests = [
++    [
+       {
+-        args:
+-          {
+-            testIdentifier: 'filterIdCreditSlip',
+-            filterBy: 'id_credit_slip',
+-            filterValue: '1',
+-            columnName: 'id_order_slip',
+-          },
++        testIdentifier: 'filterIdCreditSlip',
++        filterBy: 'id_credit_slip',
++        filterValue: '1',
++        columnName: 'id_order_slip',
+       },
+       {
+-        args:
+-          {
+-            testIdentifier: 'filterIdOrder',
+-            filterBy: 'id_order',
+-            filterValue: '4',
+-            columnName: 'id_order',
+-          },
++        testIdentifier: 'filterIdOrder',
++        filterBy: 'id_order',
++        filterValue: '4',
++        columnName: 'id_order',
+       },
+-    ];
+-
+-    tests.forEach((test) => {
+-      it(`should filter by ${test.args.filterBy} '${test.args.filterValue}'`, async function () {
+-        await testContext.addContextItem(this, 'testIdentifier', test.args.testIdentifier, baseContext);
++    ].forEach((arg) => {
++      it(`should filter by ${arg.filterBy} '${arg.filterValue}'`, async function () {
++        await testContext.addContextItem(this, 'testIdentifier', arg.testIdentifier, baseContext);
+ 
+         await boCreditSlipsPage.filterCreditSlips(
+           page,
+-          test.args.filterBy,
+-          test.args.filterValue,
++          arg.filterBy,
++          arg.filterValue,
+         );
+ 
+         // Get number of credit slips
+@@ -244,14 +234,14 @@ describe('BO - Orders - Credit slips : Create, filter and check credit slips fil
+           const textColumn = await boCreditSlipsPage.getTextColumnFromTableCreditSlips(
+             page,
+             i,
+-            test.args.columnName,
++            arg.columnName,
+           );
+-          expect(textColumn).to.contains(test.args.filterValue);
++          expect(textColumn).to.contains(arg.filterValue);
+         }
+       });
+ 
+       it('should reset all filters', async function () {
+-        await testContext.addContextItem(this, 'testIdentifier', `${test.args.testIdentifier}Reset`, baseContext);
++        await testContext.addContextItem(this, 'testIdentifier', `${arg.testIdentifier}Reset`, baseContext);
+ 
+         const numberOfCreditSlipsAfterReset = await boCreditSlipsPage.resetAndGetNumberOfLines(page);
+         expect(numberOfCreditSlipsAfterReset).to.be.equal(numberOfCreditSlips);
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/02_sortAndPaginationCreditSlips.ts b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/02_sortAndPaginationCreditSlips.ts
+index a900ad3ef9af3..004c9db57724a 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/02_sortAndPaginationCreditSlips.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/02_sortAndPaginationCreditSlips.ts
+@@ -146,7 +146,7 @@ describe('BO - Orders - Credit slips : Sort (by ID, Date and OrderID) and Pagina
+           `${baseContext}_preTest_${i}`,
+         );
+ 
+-        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 4);
++        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
+         expect(documentType).to.be.equal(creditSlipDocumentName);
+       });
+     });
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/03_generateCreditSlipsByDate.ts b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/03_generateCreditSlipsByDate.ts
+index 6e861a2f1887f..7d031902d2c43 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/03_generateCreditSlipsByDate.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/03_generateCreditSlipsByDate.ts
+@@ -39,7 +39,6 @@ describe('BO - Orders - Credit slips : Generate Credit slip file by date', async
+   let page: Page;
+ 
+   const futureDate: string = utilsDate.getDateFormat('yyyy-mm-dd', 'future');
+-  const creditSlipDocumentName: string = 'Credit slip';
+   const orderByCustomerData: FakerOrder = new FakerOrder({
+     customer: dataCustomers.johnDoe,
+     products: [
+@@ -54,7 +53,6 @@ describe('BO - Orders - Credit slips : Generate Credit slip file by date', async
+   // Pre-condition: Create order in FO
+   createOrderByCustomerTest(orderByCustomerData, baseContext);
+ 
+-  // before and after functions
+   before(async function () {
+     browserContext = await utilsPlaywright.createBrowserContext(this.browser);
+     page = await utilsPlaywright.newTab(browserContext);
+@@ -97,6 +95,20 @@ describe('BO - Orders - Credit slips : Generate Credit slip file by date', async
+       expect(pageTitle).to.contains(boOrdersViewBlockTabListPage.pageTitle);
+     });
+ 
++    it('should check documents', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocumentNameBefore', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(0);
++
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 0,
++        deliverySlips: 0,
++        invoices: 0,
++      });
++    });
++
+     it(`should change the order status to '${dataOrderStatuses.shipped.name}' and check it`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'updateCreatedOrderStatus', baseContext);
+ 
+@@ -114,10 +126,17 @@ describe('BO - Orders - Credit slips : Generate Credit slip file by date', async
+     });
+ 
+     it('should check the existence of the Credit slip document', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocumentName', baseContext);
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocumentNameAfter', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(3);
+ 
+-      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 4);
+-      expect(documentType).to.be.equal(creditSlipDocumentName);
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 1,
++        deliverySlips: 1,
++        invoices: 1,
++      });
+     });
+   });
+ 
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
+index 2d10ee5fec2fd..1edf747ddf8cb 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/03_creditSlips/04_creditSlipOptions.ts
+@@ -138,6 +138,20 @@ describe('BO - Orders - Credit slips: Credit slip options', async () => {
+       expect(pageTitle).to.contains(boOrdersViewBlockTabListPage.pageTitle);
+     });
+ 
++    it('should check documents', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocumentNameBefore', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(0);
++
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 0,
++        deliverySlips: 0,
++        invoices: 0,
++      });
++    });
++
+     it(`should change the order status to '${dataOrderStatuses.shipped.name}' and check it`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'updateOrderStatus', baseContext);
+ 
+@@ -155,18 +169,24 @@ describe('BO - Orders - Credit slips: Credit slip options', async () => {
+     });
+ 
+     it('should check the existence of the Credit slip document', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocument', baseContext);
++      await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocumentNameAfter', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(3);
+ 
+-      // Get document name
+-      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 4);
+-      expect(documentType).to.be.equal('Credit slip');
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 1,
++        deliverySlips: 1,
++        invoices: 1,
++      });
+     });
+ 
+     it(`should check that the credit slip file name contain the prefix '${prefixToEdit}'`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkUpdatedPrefixOnFileName', baseContext);
+ 
+       // Get file name
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 4);
++      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
+       expect(fileName).to.contains(prefixToEdit);
+     });
+   });
+@@ -221,7 +241,7 @@ describe('BO - Orders - Credit slips: Credit slip options', async () => {
+     it('should check the credit slip file name', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkDeletedPrefix', baseContext);
+ 
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 4);
++      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
+       expect(fileName, 'Credit slip file name is not changed to default!').to.not.contains(prefixToEdit);
+     });
+   });
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/01_generateDeliverySlipByDate.ts b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/01_generateDeliverySlipByDate.ts
+index 2dc457ca53716..c230d22e4e43e 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/01_generateDeliverySlipByDate.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/01_generateDeliverySlipByDate.ts
+@@ -28,7 +28,6 @@ describe('BO - Orders - Delivery slips : Generate Delivery slip file by date', a
+ 
+   const futureDate: string = utilsDate.getDateFormat('yyyy-mm-dd', 'future');
+ 
+-  // before and after functions
+   before(async function () {
+     browserContext = await utilsPlaywright.createBrowserContext(this.browser);
+     page = await utilsPlaywright.newTab(browserContext);
+@@ -72,6 +71,20 @@ describe('BO - Orders - Delivery slips : Generate Delivery slip file by date', a
+       expect(pageTitle).to.contains(boOrdersViewBlockTabListPage.pageTitle);
+     });
+ 
++    it('should check documents', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'checkDocumentsBefore', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(3);
++
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 1,
++        deliverySlips: 1,
++        invoices: 1,
++      });
++    });
++
+     it(`should change the order status to '${dataOrderStatuses.shipped.name}' and check it`, async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'updateOrderStatus', baseContext);
+ 
+@@ -80,10 +93,17 @@ describe('BO - Orders - Delivery slips : Generate Delivery slip file by date', a
+     });
+ 
+     it('should check the delivery slip document name', async function () {
+-      await testContext.addContextItem(this, 'testIdentifier', 'checkDocumentName', baseContext);
++      await testContext.addContextItem(this, 'testIdentifier', 'checkDocumentsAfter', baseContext);
++
++      const numDocuments = await boOrdersViewBlockTabListPage.getNumberOfDocuments(page);
++      expect(numDocuments).to.be.equals(3);
+ 
+-      const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
+-      expect(documentType).to.be.equal('Delivery slip');
++      const countDocuments = await boOrdersViewBlockTabListPage.countDocumentsType(page);
++      expect(countDocuments).to.be.deep.equal({
++        creditSlips: 1,
++        deliverySlips: 1,
++        invoices: 1,
++      });
+     });
+   });
+ 
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
+index 8f914169d5fcb..1921a444abca3 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/01_deliverySlipPrefix.ts
+@@ -109,7 +109,7 @@ describe('BO - Orders - Delivery slips : Update delivery slip prefix and check t
+       await testContext.addContextItem(this, 'testIdentifier', 'checkDocumentNamePrefix', baseContext);
+ 
+       // Get delivery slips filename
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
++      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+       expect(fileName).to.contains(deliverySlipData.prefix.replace('#', '').trim());
+     });
+   });
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/02_deliverySlipNumber.ts b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/02_deliverySlipNumber.ts
+index 8a0e63b3c5e99..229d463926180 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/02_deliverySlipNumber.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/04_deliverySlips/02_deliverySlipOptions/02_deliverySlipNumber.ts
+@@ -133,7 +133,7 @@ describe('BO - Orders - Delivery slips : Update \'Delivery slip number\'', async
+       await testContext.addContextItem(this, 'testIdentifier', 'checkDeliverySlipsDocumentName', baseContext);
+ 
+       // Get delivery slips filename
+-      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 3);
++      fileName = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+       expect(fileName).to.contains(deliverySlipData.number);
+     });
+   });
+diff --git a/tests/UI/campaigns/functional/FO/classic/03_userAccount/01_creditSlips/01_consultCreditSlip.ts b/tests/UI/campaigns/functional/FO/classic/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
+index d53acbdbe9f8e..674f1136a8a66 100644
+--- a/tests/UI/campaigns/functional/FO/classic/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
++++ b/tests/UI/campaigns/functional/FO/classic/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
+@@ -235,7 +235,7 @@ describe('FO - Consult credit slip list & View PDF Credit slip & View order', as
+         await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocument', baseContext);
+ 
+         // Get document name
+-        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
++        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 2);
+         expect(documentType).to.be.equal('Credit slip');
+       });
+ 
+@@ -251,11 +251,11 @@ describe('FO - Consult credit slip list & View PDF Credit slip & View order', as
+         await testContext.addContextItem(this, 'testIdentifier', 'getIdentifierDateIssued', baseContext);
+ 
+         // Get Credit Slip ID
+-        creditSlipID = await boOrdersViewBlockTabListPage.getFileName(page, 3);
++        creditSlipID = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+         expect(creditSlipID).is.not.equal('');
+ 
+         // Get Date Issued
+-        dateIssued = await boOrdersViewBlockTabListPage.getDocumentDate(page, 3);
++        dateIssued = await boOrdersViewBlockTabListPage.getDocumentDate(page, 2);
+         expect(dateIssued).is.not.equal('');
+       });
+     });
+diff --git a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/01_creditSlips/01_consultCreditSlip.ts b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
+index 88dd9ca402072..c99880eb0c0b3 100644
+--- a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
++++ b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/01_creditSlips/01_consultCreditSlip.ts
+@@ -232,7 +232,7 @@ describe('FO - Consult credit slip list & View PDF Credit slip & View order', as
+         await testContext.addContextItem(this, 'testIdentifier', 'checkCreditSlipDocument', baseContext);
+ 
+         // Get document name
+-        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 3);
++        const documentType = await boOrdersViewBlockTabListPage.getDocumentType(page, 2);
+         expect(documentType).to.be.equal('Credit slip');
+       });
+ 
+@@ -248,11 +248,11 @@ describe('FO - Consult credit slip list & View PDF Credit slip & View order', as
+         await testContext.addContextItem(this, 'testIdentifier', 'getIdentifierDateIssued', baseContext);
+ 
+         // Get Credit Slip ID
+-        creditSlipID = await boOrdersViewBlockTabListPage.getFileName(page, 3);
++        creditSlipID = await boOrdersViewBlockTabListPage.getFileName(page, 2);
+         expect(creditSlipID).is.not.equal('');
+ 
+         // Get Date Issued
+-        dateIssued = await boOrdersViewBlockTabListPage.getDocumentDate(page, 3);
++        dateIssued = await boOrdersViewBlockTabListPage.getDocumentDate(page, 2);
+         expect(dateIssued).is.not.equal('');
+       });
+     });
+diff --git a/tests/UI/package-lock.json b/tests/UI/package-lock.json
+index 169dd285c135c..59ca355e54828 100644
+--- a/tests/UI/package-lock.json
++++ b/tests/UI/package-lock.json
+@@ -534,7 +534,7 @@
+     },
+     "node_modules/@prestashop-core/ui-testing": {
+       "version": "0.0.12",
+-      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#fdcd24f0c875e089691637e7a4ce935feed63842",
++      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#ac440421950d8dedfc22b38ba9003cfdf0b90344",
+       "license": "MIT",
+       "dependencies": {
+         "@faker-js/faker": "^10.1.0",
+@@ -8710,7 +8710,7 @@
+       }
+     },
+     "@prestashop-core/ui-testing": {
+-      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#fdcd24f0c875e089691637e7a4ce935feed63842",
++      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#ac440421950d8dedfc22b38ba9003cfdf0b90344",
+       "from": "@prestashop-core/ui-testing@https://github.com/PrestaShop/ui-testing-library#main",
+       "requires": {
+         "@faker-js/faker": "^10.1.0",

@@ -1,0 +1,258 @@
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index 0dc4ddcfcb8af..8f8b43c62a4fd 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -23,7 +23,7 @@
+     <feature_flag id="front_container_v2" name="front_container_v2" type="env,dotenv,db" label_wording="New front container" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the new front container." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="customer_group" name="customer_group" type="env,dotenv,db" label_wording="Customer group" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the customer group page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="store" name="store" type="env,dotenv,db" label_wording="Store" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the store page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+-    <feature_flag id="merchandise_return" name="merchandise_return" type="env,dotenv,db" label_wording="Merchandise return" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the merchandise return page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
++    <feature_flag id="merchandise_return" name="merchandise_return" type="env,dotenv,db" label_wording="Merchandise return" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the merchandise return page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+     <feature_flag id="improved_shipment" name="improved_shipment" type="env,dotenv,db" label_wording="Improved shipment" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the newly improved shipment system." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="discount" name="discount" type="env,dotenv,db" label_wording="Discount" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the new discount system." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="tag" name="tag" type="env,dotenv,db" label_wording="Tag" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the tag page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+diff --git a/src/Adapter/OrderReturn/CommandHandler/UpdateOrderReturnStateHandler.php b/src/Adapter/OrderReturn/CommandHandler/UpdateOrderReturnStateHandler.php
+index 319a09a8adcee..5d0946695a764 100644
+--- a/src/Adapter/OrderReturn/CommandHandler/UpdateOrderReturnStateHandler.php
++++ b/src/Adapter/OrderReturn/CommandHandler/UpdateOrderReturnStateHandler.php
+@@ -8,13 +8,21 @@
+ 
+ namespace PrestaShop\PrestaShop\Adapter\OrderReturn\CommandHandler;
+ 
++use Configuration;
++use Customer;
++use Language;
++use Mail;
++use Order;
+ use OrderReturn;
++use OrderReturnState;
+ use PrestaShop\PrestaShop\Adapter\OrderReturn\Repository\OrderReturnRepository;
+ use PrestaShop\PrestaShop\Adapter\OrderReturnState\Repository\OrderReturnStateRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\OrderReturn\Command\UpdateOrderReturnStateCommand;
+ use PrestaShop\PrestaShop\Core\Domain\OrderReturn\CommandHandler\UpdateOrderReturnStateHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\OrderReturn\Exception\OrderReturnException;
++use Symfony\Contracts\Translation\TranslatorInterface;
++use Validate;
+ 
+ #[AsCommandHandler]
+ class UpdateOrderReturnStateHandler implements UpdateOrderReturnStateHandlerInterface
+@@ -29,18 +37,26 @@ class UpdateOrderReturnStateHandler implements UpdateOrderReturnStateHandlerInte
+      */
+     private $orderReturnStateRepository;
+ 
++    /**
++     * @var TranslatorInterface
++     */
++    private $translator;
++
+     /**
+      * UpdateOrderReturnStateHandler constructor.
+      *
+      * @param OrderReturnRepository $orderReturnRepository
+      * @param OrderReturnStateRepository $orderReturnStateRepository
++     * @param TranslatorInterface $translator
+      */
+     public function __construct(
+         OrderReturnRepository $orderReturnRepository,
+-        OrderReturnStateRepository $orderReturnStateRepository
++        OrderReturnStateRepository $orderReturnStateRepository,
++        TranslatorInterface $translator
+     ) {
+         $this->orderReturnRepository = $orderReturnRepository;
+         $this->orderReturnStateRepository = $orderReturnStateRepository;
++        $this->translator = $translator;
+     }
+ 
+     /**
+@@ -49,9 +65,65 @@ public function __construct(
+     public function handle(UpdateOrderReturnStateCommand $command): void
+     {
+         $orderReturn = $this->orderReturnRepository->get($command->getOrderReturnId());
++        $previousState = (int) $orderReturn->state;
+         $orderReturn = $this->updateOrderReturnWithCommandData($orderReturn, $command);
+ 
+         $this->orderReturnRepository->update($orderReturn);
++
++        // Notify the customer when the return status actually changes, mirroring the legacy
++        // AdminReturnController behaviour (the migration had dropped this email).
++        if ((int) $orderReturn->state !== $previousState) {
++            $this->sendStateChangeEmail($orderReturn);
++        }
++    }
++
++    /**
++     * Sends the "order return status has changed" email to the customer, in the order's language
++     * and shop context.
++     *
++     * @param OrderReturn $orderReturn
++     */
++    private function sendStateChangeEmail(OrderReturn $orderReturn): void
++    {
++        $order = new Order((int) $orderReturn->id_order);
++        $customer = new Customer((int) $orderReturn->id_customer);
++
++        if (!Validate::isLoadedObject($order) || !Validate::isLoadedObject($customer)) {
++            return;
++        }
++
++        $orderReturnState = new OrderReturnState((int) $orderReturn->state);
++        $orderLanguage = new Language((int) $order->id_lang);
++
++        $stateName = $orderReturnState->name[(int) $order->id_lang]
++            ?? $orderReturnState->name[(int) Configuration::get('PS_LANG_DEFAULT')]
++            ?? '';
++
++        Mail::Send(
++            (int) $order->id_lang,
++            'order_return_state',
++            $this->translator->trans(
++                'Your order return status has changed',
++                [],
++                'Emails.Subject',
++                $orderLanguage->locale
++            ),
++            [
++                '{lastname}' => $customer->lastname,
++                '{firstname}' => $customer->firstname,
++                '{id_order_return}' => (int) $orderReturn->id,
++                '{state_order_return}' => $stateName,
++            ],
++            $customer->email,
++            $customer->firstname . ' ' . $customer->lastname,
++            null,
++            null,
++            null,
++            null,
++            _PS_MAIL_DIR_,
++            true,
++            (int) $order->id_shop
++        );
+     }
+ 
+     /**
+diff --git a/src/Core/Search/Filters/OrderReturnFilters.php b/src/Core/Search/Filters/OrderReturnFilters.php
+index b874f141326dd..9b799b0552fbc 100644
+--- a/src/Core/Search/Filters/OrderReturnFilters.php
++++ b/src/Core/Search/Filters/OrderReturnFilters.php
+@@ -25,7 +25,7 @@ public static function getDefaults()
+             'limit' => 50,
+             'offset' => 0,
+             'orderBy' => 'id_order_return',
+-            'sortOrder' => 'ASC',
++            'sortOrder' => 'DESC',
+             'filters' => [],
+         ];
+     }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order_return.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order_return.yml
+index 18e56fce619b7..7ef665bb15978 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order_return.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order_return.yml
+@@ -22,6 +22,7 @@ services:
+     arguments:
+       - '@prestashop.adapter.order_return.repository.order_return_repository'
+       - '@prestashop.adapter.order_return_state.repository.order_return_state_repository'
++      - '@translator'
+ 
+   prestashop.adapter.order_return.command_handler.delete_product_from_order_return_handler:
+     class: 'PrestaShop\PrestaShop\Adapter\OrderReturn\CommandHandler\DeleteProductFromOrderReturnHandler'
+diff --git a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/06_merchandiseReturnsTab.ts b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/06_merchandiseReturnsTab.ts
+index 7d6b56690dc1f..02f38075db801 100644
+--- a/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/06_merchandiseReturnsTab.ts
++++ b/tests/UI/campaigns/functional/BO/02_orders/01_orders/viewAndEditOrder/06_merchandiseReturnsTab.ts
+@@ -246,7 +246,7 @@ describe('BO - Orders - View and edit order : Check merchandise returns tab', as
+     it('should check the existence of the merchandise returns in the table', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'checkExistenceOfMerchandiseReturn', baseContext);
+ 
+-      await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++      await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+       const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+       expect(result).to.contains(orderID);
+@@ -343,7 +343,7 @@ describe('BO - Orders - View and edit order : Check merchandise returns tab', as
+       it('should check the existence of the merchandise returns in the table', async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `checkExistenceOfReturns${index}`, baseContext);
+ 
+-        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+         const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+         expect(result).to.contains(orderID);
+diff --git a/tests/UI/campaigns/functional/BO/05_customerService/03_merchandiseReturns/03_updateStatus.ts b/tests/UI/campaigns/functional/BO/05_customerService/03_merchandiseReturns/03_updateStatus.ts
+index c53bed68a2793..d8f9ca138d6f2 100644
+--- a/tests/UI/campaigns/functional/BO/05_customerService/03_merchandiseReturns/03_updateStatus.ts
++++ b/tests/UI/campaigns/functional/BO/05_customerService/03_merchandiseReturns/03_updateStatus.ts
+@@ -373,7 +373,7 @@ describe('BO - Customer Service - Merchandise Returns : Update status', async ()
+         it('should check the updated status in the merchandise returns table', async function () {
+           await testContext.addContextItem(this, 'testIdentifier', `checkStatus${index}`, baseContext);
+ 
+-          const status = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'name');
++          const status = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'status');
+           expect(status).to.eq(test.args.status);
+         });
+       });
+diff --git a/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts b/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
+index 38d3604bd5faa..317a7450a30f1 100644
+--- a/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
++++ b/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
+@@ -329,7 +329,7 @@ describe('FO - Account : Consult return details', async () => {
+         it('should check the existence of the merchandise returns in the table', async function () {
+           await testContext.addContextItem(this, 'testIdentifier', `checkExistenceOfReturns${index}`, baseContext);
+ 
+-          await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++          await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+           const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+           expect(result).to.contains(orderID);
+diff --git a/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts b/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
+index 838cd4fb66752..a6c3549b25ce4 100644
+--- a/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
++++ b/tests/UI/campaigns/functional/FO/classic/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
+@@ -326,7 +326,7 @@ describe('FO - Account : Check order return PDF', async () => {
+       it('should check the existence of the merchandise returns in the table', async function () {
+         await testContext.addContextItem(this, 'testIdentifier', 'checkExistenceOfReturns', baseContext);
+ 
+-        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+         const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+         expect(result).to.contains(orderID);
+diff --git a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
+index a870f99f90b0b..e3395ff1ecc34 100644
+--- a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
++++ b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/01_consultReturnDetails.ts
+@@ -324,7 +324,7 @@ describe('FO - User account - Merchandise Returns : Consult return details', asy
+         it('should check the existence of the merchandise returns in the table', async function () {
+           await testContext.addContextItem(this, 'testIdentifier', `checkExistenceOfReturns${index}`, baseContext);
+ 
+-          await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++          await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+           const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+           expect(result).to.contains(orderID);
+diff --git a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
+index 203f18b0e39a7..b83e16580399a 100644
+--- a/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
++++ b/tests/UI/campaigns/functional/FO/hummingbird/03_userAccount/03_merchandiseReturns/02_checkOrderReturnPDF.ts
+@@ -321,7 +321,7 @@ describe('FO - User account - Merchandise Returns : Check PDF order return', asy
+       it('should check the existence of the merchandise returns in the table', async function () {
+         await testContext.addContextItem(this, 'testIdentifier', 'checkExistenceOfReturns', baseContext);
+ 
+-        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'a!id_order', orderID.toString());
++        await boMerchandiseReturnsPage.filterMerchandiseReturnsTable(page, 'id_order', orderID.toString());
+ 
+         const result = await boMerchandiseReturnsPage.getTextColumnFromMerchandiseReturnsTable(page, 'id_order');
+         expect(result).to.contains(orderID);
+diff --git a/tests/UI/package-lock.json b/tests/UI/package-lock.json
+index 38b667dd8ed74..b98a43e830726 100644
+--- a/tests/UI/package-lock.json
++++ b/tests/UI/package-lock.json
+@@ -686,7 +686,7 @@
+     },
+     "node_modules/@prestashop-core/ui-testing": {
+       "version": "0.0.12",
+-      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#c0bd52981c7aabf06e9d9c92c882ef71ab7cc879",
++      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#39f0e20c5ca7d269480bb53ccca797f2fc88e05d",
+       "license": "MIT",
+       "dependencies": {
+         "@faker-js/faker": "^10.1.0",

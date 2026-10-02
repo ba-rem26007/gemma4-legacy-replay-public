@@ -1,0 +1,88 @@
+diff --git a/src/Adapter/CartRule/CartRuleBuilder.php b/src/Adapter/CartRule/CartRuleBuilder.php
+index d738a65ac19e0..5526d51f9d954 100644
+--- a/src/Adapter/CartRule/CartRuleBuilder.php
++++ b/src/Adapter/CartRule/CartRuleBuilder.php
+@@ -63,7 +63,7 @@ public function build(AddDiscountCommand $command): CartRule
+         $cartRule->id_cart_rule_type = $this->discountTypeRepository->getTypeIdByString($discountType);
+         $cartRule->free_shipping = $discountType === DiscountType::FREE_SHIPPING;
+ 
+-        if ($command->getDiscountType()->getValue() === DiscountType::CART_LEVEL || $command->getDiscountType()->getValue() === DiscountType::ORDER_LEVEL) {
++        if ($command->getDiscountType()->getValue() === DiscountType::CART_LEVEL || $command->getDiscountType()->getValue() === DiscountType::ORDER_LEVEL || $command->getDiscountType()->getValue() === DiscountType::PRODUCT_LEVEL) {
+             if ($command->getPercentDiscount()) {
+                 $cartRule->reduction_percent = (float) (string) $command->getPercentDiscount();
+                 $cartRule->reduction_amount = 0;
+diff --git a/src/Adapter/Discount/Validate/DiscountValidator.php b/src/Adapter/Discount/Validate/DiscountValidator.php
+index 0769b7e63042e..3d11c9f86e0e5 100644
+--- a/src/Adapter/Discount/Validate/DiscountValidator.php
++++ b/src/Adapter/Discount/Validate/DiscountValidator.php
+@@ -126,8 +126,12 @@ public function validateDiscountPropertiesForType(string $discountType, AddDisco
+                 }
+                 break;
+             case DiscountType::PRODUCT_LEVEL:
+-                if ($command->getReductionProduct() === 0 || $command->getPercentDiscount() === null) {
+-                    throw new DiscountConstraintException('Product discount must have his properties set.', DiscountConstraintException::INVALID_PRODUCT_DISCOUNT_PROPERTIES);
++                if ($command->getReductionProduct() === 0) {
++                    throw new DiscountConstraintException('Product discount must have reduction product set.', DiscountConstraintException::INVALID_PRODUCT_DISCOUNT_PROPERTIES);
++                }
++                // Must have either amount or percent discount
++                if ($command->getAmountDiscount() === null && $command->getPercentDiscount() === null) {
++                    throw new DiscountConstraintException('Product discount must have a discount value (amount or percent).', DiscountConstraintException::INVALID_PRODUCT_DISCOUNT_PROPERTIES);
+                 }
+                 break;
+             case DiscountType::FREE_GIFT:
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index fe2b9f7037c9d..0ef6414749be7 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -91,7 +91,24 @@ public function create(array $data)
+                 }
+                 break;
+             case DiscountType::PRODUCT_LEVEL:
+-                $command->setPercentDiscount(new DecimalNumber('50'));
++                if (!isset($data['value']['reduction']['type'])) {
++                    throw new DiscountConstraintException(
++                        'Discount value is required for catalog products discount.',
++                        DiscountConstraintException::INVALID_PRODUCT_DISCOUNT_PROPERTIES
++                    );
++                }
++
++                if ($data['value']['reduction']['type'] === DiscountSettings::AMOUNT) {
++                    $command->setAmountDiscount(
++                        new DecimalNumber((string) $data['value']['reduction']['value']),
++                        (int) $data['value']['reduction']['currency'],
++                        (bool) $data['value']['reduction']['include_tax']
++                    );
++                } elseif ($data['value']['reduction']['type'] === DiscountSettings::PERCENT) {
++                    $command->setPercentDiscount(new DecimalNumber((string) $data['value']['reduction']['value']));
++                } else {
++                    throw new RuntimeException('Unknown discount value type ' . $data['value']['reduction']['type']);
++                }
+                 $command->setReductionProduct(1);
+                 break;
+             case DiscountType::FREE_GIFT:
+@@ -146,6 +163,25 @@ public function update($id, array $data): void
+                 }
+                 break;
+             case DiscountType::PRODUCT_LEVEL:
++                if (!isset($data['value']['reduction']['type'])) {
++                    throw new DiscountConstraintException(
++                        'Discount value is required for catalog products discount.',
++                        DiscountConstraintException::INVALID_PRODUCT_DISCOUNT_PROPERTIES
++                    );
++                }
++
++                if ($data['value']['reduction']['type'] === DiscountSettings::AMOUNT) {
++                    $command->setAmountDiscount(
++                        new DecimalNumber((string) $data['value']['reduction']['value']),
++                        $data['value']['reduction']['currency'],
++                        (bool) $data['value']['reduction']['include_tax']
++                    );
++                } elseif ($data['value']['reduction']['type'] === DiscountSettings::PERCENT) {
++                    $command->setPercentDiscount(new DecimalNumber((string) $data['value']['reduction']['value']));
++                } else {
++                    throw new RuntimeException('Unknown discount value type ' . $data['value']['reduction']['type']);
++                }
++                $command->setReductionProduct(1);
+                 break;
+             case DiscountType::FREE_GIFT:
+                 $command->setProductId((int) ($data['free_gift'][0]['product_id'] ?? 0));

@@ -1,0 +1,44 @@
+--- a/src/Core/Stock/StockManager.php
++++ b/src/Core/Stock/StockManager.php
+@@ -133,7 +133,14 @@
+      */
+     public function updateQuantity($product, $id_product_attribute, $delta_quantity, $id_shop = null, $add_movement = false, $params = [])
+     {
+-        /** @TODO We should call the needed classes with the Symfony dependency injection instead of the Homemade Service Locator */
++        // Ensure that if $id_shop is null, we default it to the context shop ID if it's a single-shop environment,
++        // to prevent writing id_shop = 0 on single-shop installs.
++        if ($id_shop === null) {
++            $context = \Context::getContext();
++            if ($context && $context->shop && $context->shop->id > 0) {
++                $id_shop = (int) $context->shop->id;
++            }
++        }
+         $serviceLocator = new ServiceLocator();
+         $stockManager = $serviceLocator::get('\\PrestaShop\\PrestaShop\\Adapter\\StockManager');
+         $packItemsManager = $serviceLocator::get('\\PrestaShop\\PrestaShop\\Adapter\\Product\\PackItemsManager');
+--- a/classes/stock/StockAvailable.php
++++ b/classes/stock/StockAvailable.php
+@@ -105,6 +105,23 @@
+ 
+         if ($id_product_attribute !== null) {
+             $query->where('id_product_attribute = ' . (int) $id_product_attribute);
++        }
++
++        // If $id_shop is null, we must ensure we don't query for a non-existent shop context (like 0)
++        // in a single-shop environment, as this leads to the duplicate key error.
++        if ($id_shop === null) {
++            $context = \Context::getContext();
++            if ($context && $context->shop && $context->shop->id > 0) {
++                $id_shop = (int) $context->shop->id;
++            } else {
++                // If context shop is unavailable, we cannot reliably find the record,
++                // but we must prevent the SQL injection of 0 if the underlying system relies on it.
++                // For safety in this specific bug context, we rely on the caller ensuring context.
++                // However, to prevent the SQLSTATE[23000] error when id_shop is null,
++                // we rely on the caller (StockManager) to pass a valid ID if possible.
++                // If we must query without an ID, we must accept the risk or change the query structure.
++                // Given the context, we pass the ID if available, otherwise, we rely on the caller's fix.
++            }
+         }
+ 
+         $query = StockAvailable::addSqlShopRestriction($query, $id_shop);

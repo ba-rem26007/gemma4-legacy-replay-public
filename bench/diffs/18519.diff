@@ -1,0 +1,252 @@
+diff --git a/src/Adapter/HookManager.php b/src/Adapter/HookManager.php
+index b8aeb5da36bb1..491a776eb14f1 100644
+--- a/src/Adapter/HookManager.php
++++ b/src/Adapter/HookManager.php
+@@ -79,7 +79,7 @@ public function exec(
+                 return Hook::exec($hook_name, $hook_args, $id_module, $array_return, $check_exceptions, $use_push, $id_shop);
+             } catch (\Exception $e) {
+                 $logger = ServiceLocator::get('\\PrestaShop\\PrestaShop\\Adapter\\LegacyLogger');
+-                $logger->error(sprintf('Exception on hook %s for module %s. %s', $hook_name, $id_module, $e->getMessage()));
++                $logger->error(sprintf('Exception on hook %s for module %s. %s', $hook_name, $id_module, $e->getMessage()), ['object_type' => 'Module', 'object_id' => $id_module]);
+             }
+         }
+     }
+diff --git a/src/Adapter/Module/ModuleDataProvider.php b/src/Adapter/Module/ModuleDataProvider.php
+index c4004dbe4e819..cd6c214368980 100644
+--- a/src/Adapter/Module/ModuleDataProvider.php
++++ b/src/Adapter/Module/ModuleDataProvider.php
+@@ -219,6 +219,10 @@ public function isModuleMainClassValid($name)
+         }
+ 
+         $parser = (new PhpParser\ParserFactory())->create(PhpParser\ParserFactory::PREFER_PHP7);
++        $log_context_data = [
++            'object_type' => 'Module',
++            'object_id' => LegacyModule::getModuleIdByName($name),
++        ];
+ 
+         try {
+             $parser->parse(file_get_contents($file_path));
+@@ -231,7 +235,7 @@ public function isModuleMainClassValid($name)
+                         '%parse_error%' => $exception->getMessage(),
+                     ],
+                     'Admin.Modules.Notification'
+-                )
++                ), $log_context_data
+             );
+ 
+             return false;
+@@ -254,7 +258,7 @@ public function isModuleMainClassValid($name)
+                             '%module%' => $name,
+                             '%error_message%' => $e->getMessage(), ],
+                         'Admin.Modules.Notification'
+-                    )
++                    ), $log_context_data
+                 );
+ 
+                 return false;
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+index e7c8adfd7f039..25e8faa0551ff 100755
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/ModuleController.php
+@@ -375,6 +375,10 @@ public function moduleAction(Request $request)
+         $moduleManager->setActionParams($request->request->get('actionParams', []));
+         $moduleRepository = $this->container->get('prestashop.core.admin.module.repository');
+         $modulesProvider = $this->container->get('prestashop.core.admin.data_provider.module_interface');
++        // Get accessed module object
++        $moduleAccessed = $moduleRepository->getModule($module);
++        // Get accessed module DB Id
++        $moduleAccessedId = (int) $moduleAccessed->database->get('id');
+         $response = [$module => []];
+ 
+         if (!method_exists($moduleManager, $action)) {
+@@ -465,7 +469,7 @@ public function moduleAction(Request $request)
+             );
+ 
+             $logger = $this->container->get('logger');
+-            $logger->error($response[$module]['msg']);
++            $logger->error($response[$module]['msg'], ['object_type' => 'Module', 'object_id' => $moduleAccessedId]);
+         }
+ 
+         if ($response[$module]['status'] === true && $action != 'uninstall') {
+diff --git a/src/PrestaShopBundle/Controller/Admin/ProductController.php b/src/PrestaShopBundle/Controller/Admin/ProductController.php
+index de63d18a3a36b..b0c41de246668 100644
+--- a/src/PrestaShopBundle/Controller/Admin/ProductController.php
++++ b/src/PrestaShopBundle/Controller/Admin/ProductController.php
+@@ -768,7 +768,7 @@ public function bulkAction(Request $request, $action)
+                         );
+                     }
+ 
+-                    $logger->info('Products activated: (' . implode(',', $productIdList) . ').');
++                    $logger->info('Products activated: (' . implode(',', $productIdList) . ').', $this->getLogDataContext());
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminActivateAfter',
+                         $hookEventParameters
+@@ -797,7 +797,7 @@ public function bulkAction(Request $request, $action)
+                         );
+                     }
+ 
+-                    $logger->info('Products deactivated: (' . implode(',', $productIdList) . ').');
++                    $logger->info('Products deactivated: (' . implode(',', $productIdList) . ').', $this->getLogDataContext());
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDeactivateAfter',
+                         $hookEventParameters
+@@ -826,7 +826,7 @@ public function bulkAction(Request $request, $action)
+                         );
+                     }
+ 
+-                    $logger->info('Products deleted: (' . implode(',', $productIdList) . ').');
++                    $logger->info('Products deleted: (' . implode(',', $productIdList) . ').', $this->getLogDataContext());
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDeleteAfter',
+                         $hookEventParameters
+@@ -855,7 +855,7 @@ public function bulkAction(Request $request, $action)
+                         );
+                     }
+ 
+-                    $logger->info('Products duplicated: (' . implode(',', $productIdList) . ').');
++                    $logger->info('Products duplicated: (' . implode(',', $productIdList) . ').', $this->getLogDataContext());
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDuplicateAfter',
+                         $hookEventParameters
+@@ -871,7 +871,7 @@ public function bulkAction(Request $request, $action)
+                      * should never happens since the route parameters are
+                      * restricted to a set of action values in YML file.
+                      */
+-                    $logger->error('Bulk action from ProductController received a bad parameter.');
++                    $logger->error('Bulk action from ProductController received a bad parameter.', $this->getLogDataContext());
+ 
+                     throw new Exception('Bad action received from call to ProductController::bulkAction: "' . $action . '"', 2001);
+             }
+@@ -879,7 +879,7 @@ public function bulkAction(Request $request, $action)
+             //TODO : need to translate this with an domain name
+             $message = $due->getMessage();
+             $this->addFlash('failure', $message);
+-            $logger->warning($message);
++            $logger->warning($message, $this->getLogDataContext());
+         }
+ 
+         return new Response(json_encode(['result' => 'ok']));
+@@ -959,7 +959,7 @@ public function massEditAction(Request $request, $action)
+                     );
+                     $logger->info(
+                         'Products sorted: (' . implode(',', $productIdList) .
+-                        ') with positions (' . implode(',', $productPositionList) . ').'
++                        ') with positions (' . implode(',', $productPositionList) . ').', $this->getLogDataContext()
+                     );
+                     $hookEventParameters = [
+                         'product_list_id' => $productIdList,
+@@ -980,7 +980,7 @@ public function massEditAction(Request $request, $action)
+                      * should never happens since the route parameters are
+                      * restricted to a set of action values in YML file.
+                      */
+-                    $logger->error('Mass edit action from ProductController received a bad parameter.');
++                    $logger->error('Mass edit action from ProductController received a bad parameter.', $this->getLogDataContext());
+ 
+                     throw new Exception('Bad action received from call to ProductController::massEditAction: "' . $action . '"', 2001);
+             }
+@@ -988,7 +988,7 @@ public function massEditAction(Request $request, $action)
+             //TODO : need to translate with domain name
+             $message = $due->getMessage();
+             $this->addFlash('failure', $message);
+-            $logger->warning($message);
++            $logger->warning($message, $this->getLogDataContext());
+         }
+ 
+         $urlGenerator = $this->get('prestashop.core.admin.url_generator');
+@@ -1045,7 +1045,7 @@ public function unitAction($action, $id)
+                         'success',
+                         $this->trans('Product successfully deleted.', 'Admin.Catalog.Notification')
+                     );
+-                    $logger->info('Product deleted: (' . $id . ').');
++                    $logger->info('Product deleted: (' . $id . ').', $this->getLogDataContext($id));
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDeleteAfter',
+                         $hookEventParameters
+@@ -1071,7 +1071,7 @@ public function unitAction($action, $id)
+                         'success',
+                         $this->trans('Product successfully duplicated.', 'Admin.Catalog.Notification')
+                     );
+-                    $logger->info('Product duplicated: (from ' . $id . ' to ' . $duplicateProductId . ').');
++                    $logger->info('Product duplicated: (from ' . $id . ' to ' . $duplicateProductId . ').', $this->getLogDataContext($id));
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDuplicateAfter',
+                         $hookEventParameters
+@@ -1097,7 +1097,7 @@ public function unitAction($action, $id)
+                         'success',
+                         $this->trans('Product successfully activated.', 'Admin.Catalog.Notification')
+                     );
+-                    $logger->info('Product activated: ' . $id);
++                    $logger->info('Product activated: ' . $id, $this->getLogDataContext($id));
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminActivateAfter',
+                         $hookEventParameters
+@@ -1123,7 +1123,7 @@ public function unitAction($action, $id)
+                         'success',
+                         $this->trans('Product successfully deactivated.', 'Admin.Catalog.Notification')
+                     );
+-                    $logger->info('Product deactivated: ' . $id);
++                    $logger->info('Product deactivated: ' . $id, $this->getLogDataContext($id));
+                     $hookDispatcher->dispatchWithParameters(
+                         'actionAdminDeactivateAfter',
+                         $hookEventParameters
+@@ -1139,7 +1139,7 @@ public function unitAction($action, $id)
+                      * should never happens since the route parameters are
+                      * restricted to a set of action values in YML file.
+                      */
+-                    $logger->error('Unit action from ProductController received a bad parameter.');
++                    $logger->error('Unit action from ProductController received a bad parameter.', $this->getLogDataContext($id));
+ 
+                     throw new Exception('Bad action received from call to ProductController::unitAction: "' . $action . '"', 2002);
+             }
+@@ -1147,7 +1147,7 @@ public function unitAction($action, $id)
+             //TODO : need to translate with a domain name
+             $message = $due->getMessage();
+             $this->addFlash('failure', $message);
+-            $logger->warning($message);
++            $logger->warning($message, $this->getLogDataContext($id));
+         }
+ 
+         return $this->redirect($this->get('prestashop.core.admin.url_generator')->generate('admin_product_catalog'));
+@@ -1336,4 +1336,17 @@ private function getErrorMessages(): array
+             CannotUpdateProductException::class => $this->trans('An error occurred while updating the status for an object.', 'Admin.Notifications.Error'),
+         ];
+     }
++
++    /**
++     * @return array
++     */
++    private function getLogDataContext($id_product = null, $error_code = null, $allow_duplicate = null): array
++    {
++        return [
++            'object_type' => 'Product',
++            'object_id' => $id_product,
++            'error_code' => $error_code,
++            'allow_duplicate' => $allow_duplicate,
++        ];
++    }
+ }
+diff --git a/src/PrestaShopBundle/Service/TranslationService.php b/src/PrestaShopBundle/Service/TranslationService.php
+index af596af929740..cb860f0ce7606 100644
+--- a/src/PrestaShopBundle/Service/TranslationService.php
++++ b/src/PrestaShopBundle/Service/TranslationService.php
+@@ -288,9 +288,10 @@ public function saveTranslationMessage($lang, $domain, $key, $translationValue,
+ 
+         $validator = Validation::createValidator();
+         $violations = $validator->validate($translation, new PassVsprintf());
++        $log_context = ['object_type' => 'Translation'];
+         if (0 !== count($violations)) {
+             foreach ($violations as $violation) {
+-                $logger->error($violation->getMessage());
++                $logger->error($violation->getMessage(), $log_context);
+             }
+ 
+             return false;
+@@ -304,7 +305,7 @@ public function saveTranslationMessage($lang, $domain, $key, $translationValue,
+ 
+             $updatedTranslationSuccessfully = true;
+         } catch (Exception $exception) {
+-            $logger->error($exception->getMessage());
++            $logger->error($exception->getMessage(), $log_context);
+         }
+ 
+         return $updatedTranslationSuccessfully;

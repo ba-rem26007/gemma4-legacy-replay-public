@@ -1,0 +1,361 @@
+diff --git a/admin-dev/themes/new-theme/js/components/form/price-reduction-manager.ts b/admin-dev/themes/new-theme/js/components/form/price-reduction-manager.ts
+index 9a9b1969bbbc9..0c9ccd07c7df8 100644
+--- a/admin-dev/themes/new-theme/js/components/form/price-reduction-manager.ts
++++ b/admin-dev/themes/new-theme/js/components/form/price-reduction-manager.ts
+@@ -42,17 +42,21 @@ export default class PriceReductionManager {
+ 
+   private readonly currencySymbolUpdater: CurrencySymbolUpdater;
+ 
++  private readonly toggleCurrencySelector: string | null;
++
+   constructor(
+     reductionTypeSelector: string,
+     taxInclusionInputs: string,
+     currencySelect: string,
+     reductionValueSymbolSelector: string,
++    toggleCurrencySelector: string | null = null,
+   ) {
+     this.reductionTypeSelector = reductionTypeSelector;
+     this.$reductionTypeSelect = $(reductionTypeSelector);
+     this.$taxInclusionInputs = $(taxInclusionInputs);
+     this.currencySelect = currencySelect;
+     this.reductionValueSymbolSelector = reductionValueSymbolSelector;
++    this.toggleCurrencySelector = toggleCurrencySelector;
+     this.currencySymbolUpdater = new CurrencySymbolUpdater(
+       this.currencySelect,
+       ((symbol: string): void => {
+@@ -74,8 +78,14 @@ export default class PriceReductionManager {
+   private handle(): void {
+     if (this.$reductionTypeSelect.val() === 'percentage') {
+       this.$taxInclusionInputs.fadeOut();
++      if (this.toggleCurrencySelector) {
++        $(this.toggleCurrencySelector).fadeOut();
++      }
+     } else {
+       this.$taxInclusionInputs.fadeIn();
++      if (this.toggleCurrencySelector) {
++        $(this.toggleCurrencySelector).fadeIn();
++      }
+     }
+ 
+     this.updateSymbol(this.currencySymbolUpdater.getSymbol());
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+new file mode 100644
+index 0000000000000..4de59b7e487de
+--- /dev/null
++++ b/admin-dev/themes/new-theme/js/pages/discount/discount-map.ts
+@@ -0,0 +1,35 @@
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++const discountContainer = '.discount-container';
++
++export default {
++  currencySelect: '#discount_reduction_currency',
++  currencySelectContainer: '.price-reduction-currency-selector',
++  discountContainer,
++  includeTaxInput: '#discount_reduction_include_tax',
++  reductionTypeSelect: '#discount_reduction_type',
++  reductionValueSymbol: `${discountContainer} .price-reduction-value .input-group .input-group-append .input-group-text,
++   .price-reduction-value .input-group .input-group-prepend .input-group-text`,
++};
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index 14e9301edff81..54c7782acc86b 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -23,10 +23,31 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ 
++import PriceReductionManager from '@components/form/price-reduction-manager';
++import DiscountMap from '@pages/discount/discount-map';
++
+ $(() => {
+   window.prestashop.component.initComponents(
+     [
+       'TranslatableInput',
+     ],
+   );
++
++  new PriceReductionManager(
++    DiscountMap.reductionTypeSelect,
++    DiscountMap.includeTaxInput,
++    DiscountMap.currencySelect,
++    DiscountMap.reductionValueSymbol,
++    DiscountMap.currencySelectContainer,
++  );
++  toggleCurrency();
++  document.querySelector(DiscountMap.reductionTypeSelect)?.addEventListener('change', toggleCurrency);
++
++  function toggleCurrency(): void {
++    if ($(DiscountMap.reductionTypeSelect).val() === 'percentage') {
++      $(DiscountMap.currencySelect).fadeOut();
++    } else {
++      $(DiscountMap.currencySelect).fadeIn();
++    }
++  }
+ });
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index 739a35d3385a4..dee9d9b61eb42 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -65,8 +65,8 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+             $cartRule->highlight,
+             $cartRule->partial_use,
+             $cartRule->type,
+-            new DecimalNumber($cartRule->reduction_percent),
+-            new DecimalNumber($cartRule->reduction_amount),
++            (float) $cartRule->reduction_percent > 0.00 ? new DecimalNumber($cartRule->reduction_percent) : null,
++            (float) $cartRule->reduction_amount > 0.00 ? new DecimalNumber($cartRule->reduction_amount) : null,
+             $cartRule->reduction_currency,
+             $cartRule->reduction_tax,
+             $cartRule->reduction_product,
+diff --git a/src/Adapter/Discount/Update/Filler/DiscountFiller.php b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+index d041b6bee3fef..b6043dac9e4b4 100644
+--- a/src/Adapter/Discount/Update/Filler/DiscountFiller.php
++++ b/src/Adapter/Discount/Update/Filler/DiscountFiller.php
+@@ -82,6 +82,26 @@ public function fillUpdatableProperties(CartRule $cartRule, UpdateDiscountComman
+             $cartRule->quantity_per_user = $command->getQuantityPerUser();
+             $updatableProperties[] = 'quantity_per_user';
+         }
++        if (null !== $command->getAmountDiscount()) {
++            $cartRule->reduction_amount = (float) (string) $command->getAmountDiscount()->getAmount();
++            $cartRule->reduction_currency = $command->getAmountDiscount()->getCurrencyId()->getValue();
++            $cartRule->reduction_tax = $command->getAmountDiscount()->isTaxIncluded();
++            $cartRule->reduction_percent = null;
++            $updatableProperties[] = 'reduction_amount';
++            $updatableProperties[] = 'reduction_currency';
++            $updatableProperties[] = 'reduction_tax';
++            $updatableProperties[] = 'reduction_percent';
++        }
++        if (null !== $command->getPercentDiscount()) {
++            $cartRule->reduction_percent = (float) (string) $command->getPercentDiscount();
++            $cartRule->reduction_amount = null;
++            $cartRule->reduction_currency = 0;
++            $cartRule->reduction_tax = false;
++            $updatableProperties[] = 'reduction_percent';
++            $updatableProperties[] = 'reduction_amount';
++            $updatableProperties[] = 'reduction_currency';
++            $updatableProperties[] = 'reduction_tax';
++        }
+ 
+         return $updatableProperties;
+     }
+diff --git a/src/Core/Domain/Discount/DiscountSettings.php b/src/Core/Domain/Discount/DiscountSettings.php
+index a35cc5a6558d8..0f1b6ea208604 100644
+--- a/src/Core/Domain/Discount/DiscountSettings.php
++++ b/src/Core/Domain/Discount/DiscountSettings.php
+@@ -29,4 +29,6 @@
+ class DiscountSettings
+ {
+     public const MAX_NAME_LENGTH = 255;
++    public const AMOUNT = 'amount';
++    public const PERCENT = 'percentage';
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index d5bb9a80b958a..19c2523c0927b 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -29,11 +29,15 @@
+ use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
++use PrestaShop\PrestaShop\Core\Domain\Currency\Exception\CurrencyException;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\UpdateDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainConstraintException;
+ use RuntimeException;
+ use Symfony\Component\DependencyInjection\Attribute\Autowire;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+@@ -53,6 +57,8 @@ public function __construct(
+ 
+     /**
+      * @throws DiscountConstraintException
++     * @throws DomainConstraintException
++     * @throws CurrencyException
+      */
+     public function create(array $data)
+     {
+@@ -63,7 +69,17 @@ public function create(array $data)
+                 break;
+             case DiscountType::CART_LEVEL:
+             case DiscountType::ORDER_LEVEL:
+-                $command->setPercentDiscount(new DecimalNumber('50'));
++                if ($data['reduction']['type'] === DiscountSettings::AMOUNT) {
++                    $command->setAmountDiscount(
++                        new DecimalNumber((string) $data['reduction']['value']),
++                        new CurrencyId($data['reduction']['currency']),
++                        (bool) $data['reduction']['include_tax']
++                    );
++                } elseif ($data['reduction']['type'] === DiscountSettings::PERCENT) {
++                    $command->setPercentDiscount(new DecimalNumber((string) $data['reduction']['value']));
++                } else {
++                    throw new RuntimeException('Unknown discount value type ' . $data['reduction']['type']);
++                }
+                 break;
+             case DiscountType::PRODUCT_LEVEL:
+                 $command->setPercentDiscount(new DecimalNumber('50'));
+@@ -89,13 +105,30 @@ public function create(array $data)
+         return $discountId->getValue();
+     }
+ 
+-    public function update($id, array $data)
++    /**
++     * @throws DomainConstraintException
++     * @throws DiscountConstraintException
++     * @throws CurrencyException
++     */
++    public function update($id, array $data): void
+     {
+         $command = new UpdateDiscountCommand($id);
+         switch ($data['discount_type']) {
+             case DiscountType::FREE_SHIPPING:
+             case DiscountType::CART_LEVEL:
+             case DiscountType::ORDER_LEVEL:
++                if ($data['reduction']['type'] === DiscountSettings::AMOUNT) {
++                    $command->setAmountDiscount(
++                        new DecimalNumber((string) $data['reduction']['value']),
++                        $data['reduction']['currency'],
++                        (bool) $data['reduction']['include_tax']
++                    );
++                } elseif ($data['reduction']['type'] === DiscountSettings::PERCENT) {
++                    $command->setPercentDiscount(new DecimalNumber((string) $data['reduction']['value']));
++                } else {
++                    throw new RuntimeException('Unknown discount value type ' . $data['reduction']['type']);
++                }
++                break;
+             case DiscountType::PRODUCT_LEVEL:
+             case DiscountType::FREE_GIFT:
+                 break;
+@@ -106,8 +139,6 @@ public function update($id, array $data)
+             ->setLocalizedNames($data['names'])
+         ;
+ 
+-        $discountId = $this->commandBus->handle($command);
+-
+-        return $discountId->getValue();
++        $this->commandBus->handle($command);
+     }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 9cdf5c134bfcc..cf57c7fb8d479 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult\DiscountForEditing;
+ 
+@@ -46,11 +47,20 @@ public function getData($id)
+     {
+         /** @var DiscountForEditing $discountForEditing */
+         $discountForEditing = $this->queryBus->handle(new GetDiscountForEditing($id));
++        $isAmountDiscount = $discountForEditing->getAmountDiscount() !== null;
+ 
+         return [
+             'id' => $id,
+             'discount_type' => $discountForEditing->getType()->getValue(),
+             'names' => $discountForEditing->getLocalisedNames(),
++            'reduction' => [
++                'type' => $isAmountDiscount ? DiscountSettings::AMOUNT : DiscountSettings::PERCENT,
++                'value' => $isAmountDiscount
++                    ? (float) (string) $discountForEditing->getAmountDiscount()
++                    : (float) (string) $discountForEditing->getPercentDiscount(),
++                'currency' => $discountForEditing->getCurrencyId(),
++                'include_tax' => $discountForEditing->isTaxIncluded(),
++            ],
+         ];
+     }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
+index 7ba3217e44528..8b80f396b1f72 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountType.php
+@@ -29,6 +29,8 @@
+ use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DefaultLanguage;
+ use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType as DiscountTypeVo;
++use PrestaShopBundle\Form\Admin\Type\PriceReductionType;
+ use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+@@ -76,6 +78,20 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ],
+             ])
+         ;
++
++        if ($discountType === DiscountTypeVo::CART_LEVEL || $discountType === DiscountTypeVo::ORDER_LEVEL) {
++            $builder
++                ->add('reduction', PriceReductionType::class, [
++                    'currency_select' => true,
++                    'label' => $this->trans('Discount value', 'Admin.Catalog.Feature'),
++                    'label_help_box' => $this->trans('You can choose a minimum amount for the cart either with or without the taxes.', 'Admin.Catalog.Help'),
++                    'required' => false,
++                    'row_attr' => [
++                        'class' => 'discount-container',
++                    ],
++                ])
++            ;
++        }
+     }
+ 
+     public function configureOptions(OptionsResolver $resolver)
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/PriceReductionType.php b/src/PrestaShopBundle/Form/Admin/Type/PriceReductionType.php
+index cfb4314f67940..8b131a2d9c2d3 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/PriceReductionType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/PriceReductionType.php
+@@ -92,7 +92,11 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         ;
+ 
+         if ($options['currency_select']) {
+-            $builder->add('currency', CurrencyChoiceType::class);
++            $builder->add('currency', CurrencyChoiceType::class, [
++                'row_attr' => [
++                    'class' => 'price-reduction-currency-selector',
++                ],
++            ]);
+         }
+ 
+         $builder->add('include_tax', TaxInclusionChoiceType::class);
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/form.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/form.html.twig
+index 27d904a2eed34..0dc0cd0e6dd74 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/form.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Discount/form.html.twig
+@@ -35,7 +35,6 @@
+   </h3>
+   <div class="card-body">
+     <div class="form-wrapper">
+-
+       {% block discount_form_rest %}
+         {{ form_rest(discountForm) }}
+       {% endblock %}

@@ -1,0 +1,1403 @@
+diff --git a/classes/PaymentModule.php b/classes/PaymentModule.php
+index 8f35544ef864d..9cdf75cb7c83f 100644
+--- a/classes/PaymentModule.php
++++ b/classes/PaymentModule.php
+@@ -24,7 +24,10 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
+ use PrestaShop\PrestaShop\Adapter\MailTemplate\MailPartialTemplateRenderer;
++use PrestaShop\PrestaShop\Adapter\Shipment\OrderShipmentCreator;
+ use PrestaShop\PrestaShop\Adapter\StockManager;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ 
+ abstract class PaymentModuleCore extends Module
+ {
+@@ -572,6 +575,8 @@ public function validateOrder(
+                 'orderStatus' => $order_status,
+             ]);
+ 
++            $this->addShipmentToOrder($order);
++
+             if ($order_status->logable) {
+                 foreach ($this->context->cart->getProducts() as $product) {
+                     ProductSale::addProductSale((int) $product['id_product'], (int) $product['cart_quantity']);
+@@ -1268,4 +1273,19 @@ protected function createOrderCartRules(
+ 
+         return $cart_rules_list;
+     }
++
++    private function addShipmentToOrder(Order $order)
++    {
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $this->get(FeatureFlagStateCheckerInterface::class);
++
++        if (!$featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
++            return;
++        }
++
++        /** @var OrderShipmentCreator $orderShipmentCreator */
++        $orderShipmentCreator = $this->get('PrestaShop\PrestaShop\Adapter\Shipment\OrderShipmentCreator');
++
++        $orderShipmentCreator->addShipmentOrder($order);
++    }
+ }
+diff --git a/src/Adapter/Shipment/OrderShipmentCreator.php b/src/Adapter/Shipment/OrderShipmentCreator.php
+new file mode 100644
+index 0000000000000..885ffbed89f35
+--- /dev/null
++++ b/src/Adapter/Shipment/OrderShipmentCreator.php
+@@ -0,0 +1,72 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use Order;
++use OrderDetail;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use PrestaShopBundle\Entity\Shipment;
++use PrestaShopBundle\Entity\ShipmentProduct;
++
++class OrderShipmentCreator
++{
++    /**
++     * @var ShipmentRepository
++     */
++    private $shipmentRepository;
++
++    public function __construct(ShipmentRepository $shipmentRepository)
++    {
++        $this->shipmentRepository = $shipmentRepository;
++    }
++
++    public function addShipmentOrder(Order $order): void
++    {
++        $shipment = new Shipment();
++        $shipment->setOrderId((int) $order->id);
++        $shipment->setCarrierId((int) $order->id_carrier);
++        $shipment->setAddressId((int) $order->id_address_delivery);
++        $shipment->setTrackingNumber(null);
++        $shipment->setShippingCostTaxExcluded((float) $order->total_shipping_tax_excl);
++        $shipment->setShippingCostTaxIncluded((float) $order->total_shipping_tax_incl);
++        $shipment->setDeliveredAt(null);
++        $shipment->setShippedAt(null);
++        $shipment->setCancelledAt(null);
++
++        foreach (OrderDetail::getList($order->id) as $product) {
++            $shipmentProduct = new ShipmentProduct();
++            $shipmentProduct->setShipment($shipment);
++            $shipmentProduct->setOrderDetailId((int) $product['id_order_detail']);
++            $shipmentProduct->setQuantity($product['product_quantity']);
++            $shipment->addShipmentProduct($shipmentProduct);
++        }
++
++        $this->shipmentRepository->save($shipment);
++    }
++}
+diff --git a/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php b/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php
+new file mode 100644
+index 0000000000000..e1352937f29cd
+--- /dev/null
++++ b/src/Adapter/Shipment/QueryHandler/GetOrderShipmentsHandler.php
+@@ -0,0 +1,80 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\GetOrderShipmentsHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\OrderShipment;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Throwable;
++
++#[AsQueryHandler]
++class GetOrderShipmentsHandler implements GetOrderShipmentsHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $repository,
++    ) {
++    }
++
++    /**
++     * @param GetOrderShipments $query
++     *
++     * @return OrderShipment[]
++     */
++    public function handle(GetOrderShipments $query)
++    {
++        $shipments = [];
++        $orderId = $query->getOrderId()->getValue();
++
++        try {
++            $result = $this->repository->findByOrderId($orderId);
++        } catch (Throwable $e) {
++            throw new ShipmentNotFoundException(sprintf('Could not find shipment for order with id "%s"', $orderId), 0, $e);
++        }
++
++        foreach ($result as $shipment) {
++            $shipments[] = new OrderShipment(
++                $shipment->getId(),
++                $shipment->getOrderId(),
++                $shipment->getCarrierId(),
++                $shipment->getAddressId(),
++                new DecimalNumber((string) $shipment->getShippingCostTaxExcluded()),
++                new DecimalNumber((string) $shipment->getShippingCostTaxIncluded()),
++                $shipment->getProducts()->count(),
++                $shipment->getTrackingNumber(),
++                $shipment->getShippedAt(),
++                $shipment->getDeliveredAt(),
++                $shipment->getCancelledAt(),
++            );
++        }
++
++        return $shipments;
++    }
++}
+diff --git a/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php b/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php
+new file mode 100644
+index 0000000000000..5b919789c8bb3
+--- /dev/null
++++ b/src/Adapter/Shipment/QueryHandler/GetShipmentProductsHandler.php
+@@ -0,0 +1,74 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler;
++
++use OrderDetail;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler\GetShipmentProductsHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\OrderShipmentProduct;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++use Throwable;
++
++#[AsQueryHandler]
++class GetShipmentProductsHandler implements GetShipmentProductsHandlerInterface
++{
++    public function __construct(
++        private readonly ShipmentRepository $repository,
++    ) {
++    }
++
++    /**
++     * @param GetShipmentProducts $query
++     *
++     * @return OrderShipmentProduct[]
++     */
++    public function handle(GetShipmentProducts $query)
++    {
++        $shipmentProducts = [];
++        $shipmentId = $query->getShipmentId()->getValue();
++
++        try {
++            $result = $this->repository->findOneBy(['id' => $shipmentId]);
++        } catch (Throwable $e) {
++            throw new ShipmentNotFoundException(sprintf('Could not find shipment with id "%s"', $shipmentId), 0, $e);
++        }
++        if (!empty($result)) {
++            foreach ($result->getProducts() as $product) {
++                $orderDetail = new OrderDetail($product->getOrderDetailId());
++                $shipmentProducts[] = new OrderShipmentProduct(
++                    $product->getOrderDetailId(),
++                    $product->getQuantity(),
++                    $orderDetail->product_name,
++                );
++            }
++        }
++
++        return $shipmentProducts;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Exception/CannotAddShipmentException.php b/src/Core/Domain/Shipment/Exception/CannotAddShipmentException.php
+new file mode 100644
+index 0000000000000..61e20379a7525
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Exception/CannotAddShipmentException.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Exception;
++
++class CannotAddShipmentException extends ShipmentException
++{
++}
+diff --git a/src/Core/Domain/Shipment/Exception/ShipmentException.php b/src/Core/Domain/Shipment/Exception/ShipmentException.php
+new file mode 100644
+index 0000000000000..5a60a0b2928e7
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Exception/ShipmentException.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Exception;
++
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainException;
++
++class ShipmentException extends DomainException
++{
++}
+diff --git a/src/Core/Domain/Shipment/Exception/ShipmentNotFoundException.php b/src/Core/Domain/Shipment/Exception/ShipmentNotFoundException.php
+new file mode 100644
+index 0000000000000..e70cecce8ae3d
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Exception/ShipmentNotFoundException.php
+@@ -0,0 +1,33 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Exception;
++
++class ShipmentNotFoundException extends ShipmentException
++{
++}
+diff --git a/src/Core/Domain/Shipment/Query/GetOrderShipments.php b/src/Core/Domain/Shipment/Query/GetOrderShipments.php
+new file mode 100644
+index 0000000000000..159dcd1329a50
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Query/GetOrderShipments.php
+@@ -0,0 +1,47 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Order\ValueObject\OrderId;
++
++/**
++ * Get shipments for order.
++ */
++class GetOrderShipments
++{
++    /**
++     * @var OrderId
++     */
++    private $orderId;
++
++    public function __construct(int $orderId)
++    {
++        $this->orderId = new OrderId($orderId);
++    }
++
++    public function getOrderId(): OrderId
++    {
++        return $this->orderId;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/Query/GetShipmentProducts.php b/src/Core/Domain/Shipment/Query/GetShipmentProducts.php
+new file mode 100644
+index 0000000000000..82607cef5c487
+--- /dev/null
++++ b/src/Core/Domain/Shipment/Query/GetShipmentProducts.php
+@@ -0,0 +1,47 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Academic Free License version 3.0
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/AFL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License version 3.0
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\Query;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject\ShipmentId;
++
++/**
++ * Get shipment.
++ */
++class GetShipmentProducts
++{
++    /**
++     * @var ShipmentId
++     */
++    private $shipmentId;
++
++    public function __construct(int $shipmentId)
++    {
++        $this->shipmentId = new ShipmentId($shipmentId);
++    }
++
++    public function getShipmentId(): ShipmentId
++    {
++        return $this->shipmentId;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/QueryHandler/GetOrderShipmentsHandlerInterface.php b/src/Core/Domain/Shipment/QueryHandler/GetOrderShipmentsHandlerInterface.php
+new file mode 100644
+index 0000000000000..c4df3c112e77b
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryHandler/GetOrderShipmentsHandlerInterface.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\OrderShipment;
++
++/**
++ * Defines contract for GetOrderShipmentsHandler.
++ */
++interface GetOrderShipmentsHandlerInterface
++{
++    /**
++     * @param GetOrderShipments $query
++     *
++     * @return OrderShipment[]
++     */
++    public function handle(GetOrderShipments $query);
++}
+diff --git a/src/Core/Domain/Shipment/QueryHandler/GetShipmentProductsHandlerInterface.php b/src/Core/Domain/Shipment/QueryHandler/GetShipmentProductsHandlerInterface.php
+new file mode 100644
+index 0000000000000..8cc8d8829c83a
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryHandler/GetShipmentProductsHandlerInterface.php
+@@ -0,0 +1,43 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult\OrderShipmentProduct;
++
++/**
++ * Defines contract for GetShipmentProductsForViewingHandler.
++ */
++interface GetShipmentProductsHandlerInterface
++{
++    /**
++     * @param GetShipmentProducts $query
++     *
++     * @return OrderShipmentProduct[]
++     */
++    public function handle(GetShipmentProducts $query);
++}
+diff --git a/src/Core/Domain/Shipment/QueryResult/OrderShipment.php b/src/Core/Domain/Shipment/QueryResult/OrderShipment.php
+new file mode 100644
+index 0000000000000..75896bddc5db5
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryResult/OrderShipment.php
+@@ -0,0 +1,202 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult;
++
++use DateTime;
++use PrestaShop\Decimal\DecimalNumber;
++
++class OrderShipment
++{
++    /**
++     * @var int
++     */
++    private int $id;
++
++    /**
++     * @var int
++     */
++    private int $orderId;
++
++    /**
++     * @var int
++     */
++    private int $carrierId;
++
++    /**
++     * @var int
++     */
++    private int $addressId;
++
++    /**
++     * @var DecimalNumber
++     */
++    private DecimalNumber $shippingCostTaxExcluded;
++
++    /**
++     * @var DecimalNumber
++     */
++    private DecimalNumber $shippingCostTaxIncluded;
++
++    /**
++     * @var string
++     */
++    private ?string $trackingNumber;
++
++    /**
++     * @var DateTime
++     */
++    private ?DateTime $shippedAt;
++
++    /**
++     * @var DateTime
++     */
++    private ?DateTime $deliveredAt;
++
++    /**
++     * @var DateTime
++     */
++    private ?DateTime $cancelledAt;
++
++    /**
++     * @var int
++     */
++    private int $productsCount;
++
++    public function __construct(
++        int $id,
++        int $orderId,
++        int $carrierId,
++        int $addressId,
++        DecimalNumber $shippingCostTaxExcluded,
++        DecimalNumber $shippingCostTaxIncluded,
++        int $productsCount,
++        ?string $trackingNumber,
++        ?DateTime $shippedAt,
++        ?DateTime $deliveredAt,
++        ?DateTime $cancelledAt
++    ) {
++        $this->id = $id;
++        $this->orderId = $orderId;
++        $this->carrierId = $carrierId;
++        $this->addressId = $addressId;
++        $this->shippingCostTaxExcluded = $shippingCostTaxExcluded;
++        $this->shippingCostTaxIncluded = $shippingCostTaxIncluded;
++        $this->productsCount = $productsCount;
++        $this->trackingNumber = $trackingNumber;
++        $this->shippedAt = $shippedAt;
++        $this->deliveredAt = $deliveredAt;
++        $this->cancelledAt = $cancelledAt;
++    }
++
++    /**
++     * @return int
++     */
++    public function getId(): int
++    {
++        return $this->id;
++    }
++
++    /**
++     * @return int
++     */
++    public function getOrderId(): int
++    {
++        return $this->orderId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getCarrierId(): int
++    {
++        return $this->carrierId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getAddressId(): int
++    {
++        return $this->addressId;
++    }
++
++    /**
++     * @return DecimalNumber
++     */
++    public function getShippingCostTaxExcluded(): DecimalNumber
++    {
++        return $this->shippingCostTaxExcluded;
++    }
++
++    /**
++     * @return DecimalNumber
++     */
++    public function getShippingCostTaxIncluded(): DecimalNumber
++    {
++        return $this->shippingCostTaxIncluded;
++    }
++
++    /**
++     * @return string
++     */
++    public function getTrackingNumber(): ?string
++    {
++        return $this->trackingNumber;
++    }
++
++    /**
++     * @return DateTime
++     */
++    public function getShippedAt(): ?DateTime
++    {
++        return $this->shippedAt;
++    }
++
++    /**
++     * @return DateTime
++     */
++    public function getDeliveredAt(): ?DateTime
++    {
++        return $this->deliveredAt;
++    }
++
++    /**
++     * @return DateTime
++     */
++    public function getCancelledAt(): ?DateTime
++    {
++        return $this->cancelledAt;
++    }
++
++    /**
++     * @return int
++     */
++    public function getProductsCount(): int
++    {
++        return $this->productsCount;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/QueryResult/OrderShipmentProduct.php b/src/Core/Domain/Shipment/QueryResult/OrderShipmentProduct.php
+new file mode 100644
+index 0000000000000..c9784e9b93af8
+--- /dev/null
++++ b/src/Core/Domain/Shipment/QueryResult/OrderShipmentProduct.php
+@@ -0,0 +1,61 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\QueryResult;
++
++class OrderShipmentProduct
++{
++    public function __construct(
++        private int $orderDetailId,
++        private int $quantity,
++        private string $productName
++    ) {
++    }
++
++    /**
++     * @return int
++     */
++    public function getOrderDetailId(): int
++    {
++        return $this->orderDetailId;
++    }
++
++    /**
++     * @return string
++     */
++    public function getProductName(): string
++    {
++        return $this->productName;
++    }
++
++    /**
++     * @return int
++     */
++    public function getQuantity(): int
++    {
++        return $this->quantity;
++    }
++}
+diff --git a/src/Core/Domain/Shipment/ValueObject/ShipmentId.php b/src/Core/Domain/Shipment/ValueObject/ShipmentId.php
+new file mode 100644
+index 0000000000000..32f5038a9c982
+--- /dev/null
++++ b/src/Core/Domain/Shipment/ValueObject/ShipmentId.php
+@@ -0,0 +1,64 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Domain\Shipment\ValueObject;
++
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Exception\ShipmentException;
++
++/**
++ * Class ShipmentId
++ */
++class ShipmentId
++{
++    /**
++     * @var int
++     */
++    private $shipmentId;
++
++    /**
++     * @param int $shipmentId
++     *
++     * @throws ShipmentException
++     */
++    public function __construct(int $shipmentId)
++    {
++        if (0 >= $shipmentId) {
++            throw new ShipmentException('ShipmentException id must be greater than zero.');
++        }
++
++        $this->shipmentId = $shipmentId;
++    }
++
++    /**
++     * @return int
++     */
++    public function getValue(): int
++    {
++        return $this->shipmentId;
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+new file mode 100644
+index 0000000000000..469e64cb91190
+--- /dev/null
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -0,0 +1,58 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Entity\Repository;
++
++use Doctrine\ORM\EntityRepository;
++use PrestaShopBundle\Entity\Shipment;
++
++class ShipmentRepository extends EntityRepository
++{
++    /**
++     * @param int $orderId
++     *
++     * @return Shipment[]
++     */
++    public function findByOrderId(int $orderId)
++    {
++        return $this->findBy(['orderId' => $orderId]);
++    }
++
++    public function findByCarrierId(int $carrierId): array
++    {
++        return $this->findBy(['carrierId' => $carrierId]);
++    }
++
++    public function save(Shipment $shipment): int
++    {
++        $this->getEntityManager()->persist($shipment);
++        $this->getEntityManager()->flush();
++
++        return $shipment->getId();
++    }
++}
+diff --git a/src/PrestaShopBundle/Entity/Shipment.php b/src/PrestaShopBundle/Entity/Shipment.php
+index 5c15faba7e743..4899c9b02c34f 100644
+--- a/src/PrestaShopBundle/Entity/Shipment.php
++++ b/src/PrestaShopBundle/Entity/Shipment.php
+@@ -34,7 +34,7 @@
+ /**
+  * @ORM\Table()
+  *
+- * @ORM\Entity()
++ * @ORM\Entity(repositoryClass="PrestaShopBundle\Entity\Repository\ShipmentRepository"))
+  *
+  * @ORM\HasLifecycleCallbacks
+  */
+@@ -97,7 +97,7 @@ class Shipment
+     /**
+      * @ORM\Column(name="tracking_number", type="string", nullable=true)
+      */
+-    private ?string $trakingNumber;
++    private ?string $trackingNumber;
+ 
+     /**
+      * @ORM\Column(name="date_add", type="datetime", nullable=false)
+@@ -181,9 +181,9 @@ public function getCancelledAt(): ?DateTime
+         return $this->cancelledAt;
+     }
+ 
+-    public function getTrakingNumber(): ?string
++    public function getTrackingNumber(): ?string
+     {
+-        return $this->trakingNumber;
++        return $this->trackingNumber;
+     }
+ 
+     public function getProducts(): Collection
+@@ -249,9 +249,9 @@ public function setDeliveredAt(?DateTime $deliveredAt): self
+         return $this;
+     }
+ 
+-    public function setTrakingNumber(?string $trakingNumber): self
++    public function setTrackingNumber(?string $trackingNumber): self
+     {
+-        $this->trakingNumber = $trakingNumber;
++        $this->trackingNumber = $trackingNumber;
+ 
+         return $this;
+     }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+index 00a1602740c1f..5fbd876958f05 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/common.yml
+@@ -20,6 +20,10 @@ services:
+       - "%mail_themes_uri%"
+       - '@PrestaShop\PrestaShop\Adapter\Tools'
+ 
++  PrestaShop\PrestaShop\Adapter\Shipment\OrderShipmentCreator:
++    arguments:
++      - '@PrestaShopBundle\Entity\Repository\ShipmentRepository'
++
+   prestashop.adapter.legacy.context:
+     alias: PrestaShop\PrestaShop\Adapter\LegacyContext
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+new file mode 100644
+index 0000000000000..11fb163e09d41
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/shipment.yml
+@@ -0,0 +1,9 @@
++services:
++  _defaults:
++    public: false
++    autowire: true
++    autoconfigure: true
++
++  PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\GetOrderShipmentsHandler:
++
++  PrestaShop\PrestaShop\Adapter\Shipment\QueryHandler\GetShipmentProductsHandler:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+index 5b026c862089c..70f56bd85b1fe 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/common.yml
+@@ -9,6 +9,12 @@ services:
+       - PrestaShopBundle\Entity\FeatureFlag
+     lazy: true
+ 
++  PrestaShopBundle\Entity\Repository\ShipmentRepository:
++    factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
++    arguments:
++      - PrestaShopBundle\Entity\Shipment
++    lazy: true
++
+   PrestaShopBundle\Entity\Repository\TabRepository:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+index f118d85be7957..096a694f145d0 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/repository.yml
+@@ -154,6 +154,10 @@ services:
+     arguments:
+       - PrestaShopBundle\Entity\ApiClient
+ 
++  PrestaShopBundle\Entity\Repository\ShipmentRepository:
++    factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
++    arguments:
++      - PrestaShopBundle\Entity\Shipment
+ 
+   PrestaShopBundle\Entity\Repository\MutationRepository:
+     factory: [ '@doctrine.orm.default_entity_manager', getRepository ]
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+new file mode 100644
+index 0000000000000..d1faeed18b8a7
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Context/Domain/ShipmentFeatureContext.php
+@@ -0,0 +1,101 @@
++<?php
++
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Behaviour\Features\Context\Domain;
++
++use Behat\Gherkin\Node\TableNode;
++use PHPUnit\Framework\Assert;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetOrderShipments;
++use PrestaShop\PrestaShop\Core\Domain\Shipment\Query\GetShipmentProducts;
++use RuntimeException;
++use Tests\Integration\Behaviour\Features\Context\SharedStorage;
++
++class ShipmentFeatureContext extends AbstractDomainFeatureContext
++{
++    /**
++     * @Then the order :orderReference should have the following shipments:
++     *
++     * @param string $orderReference
++     * @param TableNode $table
++     *
++     * @throws RuntimeException
++     */
++    public function verifyOrderShipment(string $orderReference, TableNode $table)
++    {
++        $data = $table->getColumnsHash();
++        $orderId = $this->referenceToId($orderReference);
++        $shipments = $this->getQueryBus()->handle(
++            new GetOrderShipments($orderId)
++        );
++
++        if (count($shipments) === 0) {
++            $msg = 'Order [' . $orderId . '] has no shipments';
++            throw new RuntimeException($msg);
++        }
++
++        for ($i = 0; $i < count($data); ++$i) {
++            $shipmentData = $data[$i];
++            $shipment = $shipments[$i];
++            $carrierId = $this->referenceToId($data[$i]['carrier']);
++            $addressId = $this->referenceToId($data[$i]['address']);
++
++            if ($shipment->getOrderId() !== $orderId) {
++                throw new RuntimeException('Shipment [' . $shipment->getId() . '] does not belong to order [' . $orderId . ']');
++            }
++
++            Assert::assertEquals($shipment->getTrackingNumber(), $shipmentData['tracking_number']);
++            Assert::assertEquals($shipment->getCarrierId(), $carrierId);
++            Assert::assertEquals($shipment->getAddressId(), $addressId);
++            Assert::assertEquals($shipment->getShippingCostTaxExcluded(), $shipmentData['shipping_cost_tax_excl']);
++            Assert::assertEquals($shipment->getShippingCostTaxIncluded(), $shipmentData['shipping_cost_tax_incl']);
++            SharedStorage::getStorage()->set($shipmentData['shipment'], $shipment->getId());
++        }
++    }
++
++    /**
++     * @Then the shipment :shipmentReference should have the following products:
++     *
++     * @param string $shipmentReference
++     * @param TableNode $table
++     */
++    public function verifyShipmentProducts(string $shipmentReference, TableNode $table)
++    {
++        $data = $table->getColumnsHash();
++        $shipmentId = SharedStorage::getStorage()->get($shipmentReference);
++
++        $shipmentProducts = $this->getQueryBus()->handle(
++            new GetShipmentProducts($shipmentId)
++        );
++
++        for ($i = 0; $i < count($shipmentProducts); ++$i) {
++            Assert::assertEquals($shipmentProducts[$i]->getQuantity(), (int) $data[$i]['quantity']);
++            Assert::assertEquals($shipmentProducts[$i]->getProductName(), $data[$i]['product_name']);
++        }
++    }
++}
+diff --git a/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php b/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
+index 708adcec9e600..a7e87a419bc03 100644
+--- a/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/FeatureFlagFeatureContext.php
+@@ -72,7 +72,8 @@ public function modifyFeatureFlagState(string $state, string $name): void
+         /** @var FeatureFlag $featureFlag */
+         $featureFlag = $doctrineEntityManager->getRepository(FeatureFlag::class)->findOneBy(['name' => $name]);
+ 
+-        if ($state === 'enable') {
++        // We checking here because StringToBoolTransformContext transform enable/disable to boolean
++        if ($state === '1' || $state === 'enable') {
+             $featureFlag->enable();
+         } else {
+             $featureFlag->disable();
+diff --git a/tests/Integration/Behaviour/Features/Context/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/OrderFeatureContext.php
+index 516c3a2f0546f..024d3d6bc76ee 100644
+--- a/tests/Integration/Behaviour/Features/Context/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/OrderFeatureContext.php
+@@ -307,6 +307,20 @@ public function cleanOrderFixtures()
+         $this->orders = [];
+     }
+ 
++    /**
++     * @Then I reference order :orderReference delivery address as :addressReference
++     *
++     * @param string $orderReference
++     * @param string $addressReference
++     */
++    public function saveAddressIdFromOrder(string $orderReference, string $addressReference)
++    {
++        $orderId = SharedStorage::getStorage()->get($orderReference);
++        $order = new Order($orderId);
++
++        SharedStorage::getStorage()->set($addressReference, $order->id_address_delivery);
++    }
++
+     /**
+      * @Then order :reference should have :paymentModuleName payment method
+      *
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+new file mode 100644
+index 0000000000000..386ac31fab3f7
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/shipment.feature
+@@ -0,0 +1,35 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment
++@restore-all-tables-before-feature
++Feature: Retrieving shipment for orders
++  As a BO users
++  I want to retrieve the list of shipments associated with a specific order
++  In order to be able to track the shipment of this order
++
++  Background:
++    Given I enable feature flag "improved_shipment"
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And a carrier "default_carrier" with name "My carrier" exists
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add 2 products "Mug Today is a good day" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order1" delivery address as "US"
++
++  Scenario: Retrieve shipmets for existing order
++    Given the order "bo_order1" should have the following shipments:
++      | shipment  | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | default_carrier |                 | US      |                    7.0 |                   7.42 |
++    Then the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come |        1 |
++      | Mug Today is a good day     |        2 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index b686f7855880b..cbc2b35c782e1 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -672,3 +672,62 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
+         - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
++    shipment:
++      paths:
++        - "%paths.base%/Features/Scenario/Shipment"
++      contexts:
++        - Tests\Integration\Behaviour\Features\Context\Domain\ShipmentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\FeatureFlagFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierRangesFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ZoneFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\EmailConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\PriceDisplayMethodConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\CustomerManagerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\AddressFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ApiClientManagementFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Carrier\CarrierTaxRuleGroupFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\AddCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\CartRuleAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\EditCartRuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CartRule\SetCartRuleRestrictionsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CurrencyFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderCartFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderCustomerFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderMessageContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderPaymentFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderRefundFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\AddProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\CommonProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DeleteProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\DetailsAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\StockAssertionFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCustomizationFieldsFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateStockFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\ProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\TaxFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\EmployeeFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LanguageFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\LegacyProductFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ModuleFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\OrderFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\ShopFeatureContext
++        - Tests\Integration\Behaviour\Features\Transform\CurrencyTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\SharedStorageTransformContext
++        - Tests\Integration\Behaviour\Features\Transform\StringToBoolTransformContext
+diff --git a/tests/Unit/PrestaShopBundle/Entity/ShipmentTest.php b/tests/Unit/PrestaShopBundle/Entity/ShipmentTest.php
+index 138e11ebeae00..acdec5e509fe1 100644
+--- a/tests/Unit/PrestaShopBundle/Entity/ShipmentTest.php
++++ b/tests/Unit/PrestaShopBundle/Entity/ShipmentTest.php
+@@ -44,14 +44,14 @@ public function testShipmentCreation(): void
+         $shipment->setOrderId(1);
+         $shipment->setShippingCostTaxExcluded(10.5);
+         $shipment->setShippingCostTaxIncluded(12.6);
+-        $shipment->setTrakingNumber('FR123456789');
++        $shipment->setTrackingNumber('FR123456789');
+ 
+         $this->assertEquals(1, $shipment->getCarrierId());
+         $this->assertEquals(1, $shipment->getAddressId());
+         $this->assertEquals(1, $shipment->getOrderId());
+         $this->assertEquals(10.5, $shipment->getShippingCostTaxExcluded());
+         $this->assertEquals(12.6, $shipment->getShippingCostTaxIncluded());
+-        $this->assertEquals('FR123456789', $shipment->getTrakingNumber());
++        $this->assertEquals('FR123456789', $shipment->getTrackingNumber());
+     }
+ 
+     public function testShipmentLifecycle(): void

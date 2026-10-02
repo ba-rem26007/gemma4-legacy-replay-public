@@ -1,0 +1,143 @@
+diff --git a/src/Adapter/Category/QueryHandler/GetCategoryForEditingHandler.php b/src/Adapter/Category/QueryHandler/GetCategoryForEditingHandler.php
+index 86e17b4057923..7b0caed2c65ba 100644
+--- a/src/Adapter/Category/QueryHandler/GetCategoryForEditingHandler.php
++++ b/src/Adapter/Category/QueryHandler/GetCategoryForEditingHandler.php
+@@ -27,8 +27,10 @@
+ namespace PrestaShop\PrestaShop\Adapter\Category\QueryHandler;
+ 
+ use Category;
++use Db;
+ use ImageManager;
+ use ImageType;
++use PDO;
+ use PrestaShop\PrestaShop\Core\Domain\Category\QueryResult\EditableCategory;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Exception\CategoryNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Category\Query\GetCategoryForEditing;
+@@ -71,6 +73,20 @@ public function handle(GetCategoryForEditing $query)
+             );
+         }
+ 
++        /**
++         * Select recursivly the subcategories in one SQL request
++         */
++        $subcategories = Db::getInstance()->query(
++            'SELECT id_category ' .
++            'FROM ( ' .
++            '  SELECT * FROM `' . _DB_PREFIX_ . 'category`' .
++            '  ORDER BY id_parent, id_category' .
++            ') category_sorted, ' .
++            '(SELECT @pv := ' . (int) $category->id . ') initialisation ' .
++            'WHERE FIND_IN_SET(id_parent, @pv) ' .
++            'AND LENGTH(@pv := CONCAT(@pv, \',\', id_category))'
++        );
++
+         $editableCategory = new EditableCategory(
+             $query->getCategoryId(),
+             $category->name,
+@@ -86,7 +102,8 @@ public function handle(GetCategoryForEditing $query)
+             (bool) $category->is_root_category,
+             $this->getCoverImage($query->getCategoryId()),
+             $this->getThumbnailImage($query->getCategoryId()),
+-            $this->getMenuThumbnailImages($query->getCategoryId())
++            $this->getMenuThumbnailImages($query->getCategoryId()),
++            $subcategories->fetchAll(PDO::FETCH_COLUMN)
+         );
+ 
+         return $editableCategory;
+diff --git a/src/Core/Domain/Category/QueryResult/EditableCategory.php b/src/Core/Domain/Category/QueryResult/EditableCategory.php
+index 5f3ed56d42c4b..346aae93a759e 100644
+--- a/src/Core/Domain/Category/QueryResult/EditableCategory.php
++++ b/src/Core/Domain/Category/QueryResult/EditableCategory.php
+@@ -109,6 +109,11 @@ class EditableCategory
+      */
+     private $isRootCategory;
+ 
++    /**
++     * @var array
++     */
++    private $subCategories;
++
+     /**
+      * @param CategoryId $id
+      * @param string[] $name
+@@ -125,6 +130,7 @@ class EditableCategory
+      * @param mixed $coverImage
+      * @param mixed $thumbnailImage
+      * @param array $menuThumbnailImages
++     * @param array $subCategories
+      */
+     public function __construct(
+         CategoryId $id,
+@@ -141,7 +147,8 @@ public function __construct(
+         $isRootCategory,
+         $coverImage = null,
+         $thumbnailImage = null,
+-        array $menuThumbnailImages = []
++        array $menuThumbnailImages = [],
++        array $subCategories = []
+     ) {
+         $this->id = $id;
+         $this->name = $name;
+@@ -158,6 +165,7 @@ public function __construct(
+         $this->coverImage = $coverImage;
+         $this->menuThumbnailImages = $menuThumbnailImages;
+         $this->isRootCategory = $isRootCategory;
++        $this->subCategories = $subCategories;
+     }
+ 
+     /**
+@@ -287,4 +295,12 @@ public function canContainMoreMenuThumbnails()
+     {
+         return count($this->getMenuThumbnailImages()) < count(MenuThumbnailId::ALLOWED_ID_VALUES);
+     }
++
++    /**
++     * @return array
++     */
++    public function getSubCategories()
++    {
++        return $this->subCategories;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
+index ba2d3fb3bf757..95257d43c1b43 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/CategoryController.php
+@@ -237,6 +237,7 @@ public function editAction($categoryId, Request $request)
+ 
+             $categoryFormOptions = [
+                 'id_category' => (int) $categoryId,
++                'subcategories' => $editableCategory->getSubCategories(),
+             ];
+ 
+             $categoryForm = $categoryFormBuilder->getFormFor((int) $categoryId, [], $categoryFormOptions);
+diff --git a/src/PrestaShopBundle/Form/Admin/Catalog/Category/CategoryType.php b/src/PrestaShopBundle/Form/Admin/Catalog/Category/CategoryType.php
+index 45399d3c6fb34..767ea6112ddfa 100644
+--- a/src/PrestaShopBundle/Form/Admin/Catalog/Category/CategoryType.php
++++ b/src/PrestaShopBundle/Form/Admin/Catalog/Category/CategoryType.php
+@@ -43,9 +43,12 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         parent::buildForm($builder, $options);
+ 
+         // Root category is always disabled
+-        $disabledCategories = [
+-            $this->getConfiguration()->getInt('PS_ROOT_CATEGORY'),
+-        ];
++        $disabledCategories = array_merge(
++            [
++                $this->getConfiguration()->getInt('PS_ROOT_CATEGORY'),
++            ],
++            $options['subcategories']
++        );
+ 
+         if (null !== $options['id_category']) {
+             // when using CategoryType to edit category
+@@ -68,7 +71,9 @@ public function configureOptions(OptionsResolver $resolver)
+         $resolver
+             ->setDefaults([
+                 'id_category' => null,
++                'subcategories' => [],
+             ])
++            ->setAllowedTypes('subcategories', ['array'])
+             ->setAllowedTypes('id_category', ['int', 'null']);
+     }
+ }

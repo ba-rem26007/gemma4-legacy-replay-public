@@ -1,0 +1,549 @@
+diff --git a/src/PrestaShopBundle/Form/FormBuilderModifier.php b/src/PrestaShopBundle/Form/FormBuilderModifier.php
+new file mode 100644
+index 0000000000000..38fe282a770f9
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/FormBuilderModifier.php
+@@ -0,0 +1,112 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Form;
++
++use Symfony\Component\Form\Exception\InvalidArgumentException;
++use Symfony\Component\Form\FormBuilderInterface;
++
++class FormBuilderModifier
++{
++    /**
++     * @param FormBuilderInterface $formBuilder
++     * @param string $targetFieldName
++     * @param string|FormBuilderInterface $newChild
++     * @param string|null $type
++     * @param array $options
++     */
++    public function addAfter(FormBuilderInterface $formBuilder, string $targetFieldName, $newChild, ?string $type = null, array $options = []): void
++    {
++        $this->assertFieldExists($formBuilder, $targetFieldName);
++        $formChildren = $this->cleanAllChildren($formBuilder);
++
++        foreach ($formChildren as $childName => $formType) {
++            $formBuilder->add($formType);
++            if ($childName === $targetFieldName) {
++                $formBuilder->add($newChild, $type, $options);
++            }
++        }
++    }
++
++    /**
++     * @param FormBuilderInterface $formBuilder
++     * @param string $targetFieldName
++     * @param string|FormBuilderInterface $newChild
++     * @param string|null $type
++     * @param array $options
++     */
++    public function addBefore(FormBuilderInterface $formBuilder, string $targetFieldName, $newChild, ?string $type = null, array $options = []): void
++    {
++        $this->assertFieldExists($formBuilder, $targetFieldName);
++        $formChildren = $this->cleanAllChildren($formBuilder);
++
++        foreach ($formChildren as $childName => $formType) {
++            if ($childName === $targetFieldName) {
++                $formBuilder->add($newChild, $type, $options);
++            }
++            $formBuilder->add($formType);
++        }
++    }
++
++    /**
++     * @param FormBuilderInterface $formBuilder
++     *
++     * @return array
++     */
++    private function cleanAllChildren(FormBuilderInterface $formBuilder): array
++    {
++        $formTypes = [];
++        foreach ($formBuilder->all() as $formType) {
++            $typeName = $formType->getName();
++            // collect all the form child into local variable and remove them from
++            $formTypes[$typeName] = $formType;
++            $formBuilder->remove($typeName);
++        }
++
++        return $formTypes;
++    }
++
++    /**
++     * @param FormBuilderInterface $formBuilder
++     * @param string $name
++     */
++    private function assertFieldExists(FormBuilderInterface $formBuilder, string $name): void
++    {
++        if ($formBuilder->has($name)) {
++            return;
++        }
++
++        throw new InvalidArgumentException(
++            sprintf(
++                'Form field "%s" does not exist in "%s" form',
++                $name,
++                $formBuilder->getName()
++            )
++        );
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form.yml
+index 6b9cfafab01a0..542714df71e7b 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form.yml
+@@ -4,3 +4,6 @@ services:
+ 
+     form.form_cloner:
+         class: PrestaShopBundle\Form\FormCloner
++
++    form.form_builder_modifier:
++        class: PrestaShopBundle\Form\FormBuilderModifier
+diff --git a/tests/Integration/PrestaShopBundle/Form/AbstractFormTester.php b/tests/Integration/PrestaShopBundle/Form/AbstractFormTester.php
+new file mode 100644
+index 0000000000000..0a39300c174cc
+--- /dev/null
++++ b/tests/Integration/PrestaShopBundle/Form/AbstractFormTester.php
+@@ -0,0 +1,90 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\PrestaShopBundle\Form;
++
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\Form\FormFactoryInterface;
++use Symfony\Component\Form\FormInterface;
++
++/**
++ * Abstract class with helper function for form tests
++ */
++abstract class AbstractFormTester extends KernelTestCase
++{
++    protected function setUp()
++    {
++        self::bootKernel();
++    }
++
++    /**
++     * @param string $type
++     * @param array $options
++     * @param null $data
++     *
++     * @return FormInterface
++     */
++    protected function createForm(string $type, array $options = [], $data = null): FormInterface
++    {
++        return $this->getFormFactory()->create($type, $data, $options);
++    }
++
++    /**
++     * @param string $type
++     * @param array $options
++     * @param null $data
++     *
++     * @return FormBuilderInterface
++     */
++    protected function createFormBuilder(string $type, array $options = [], $data = null): FormBuilderInterface
++    {
++        return $this->getFormFactory()->createBuilder($type, $data, $options);
++    }
++
++    /**
++     * @param string $name
++     * @param string $type
++     * @param array $options
++     * @param null $data
++     *
++     * @return FormBuilderInterface
++     */
++    protected function createNamedBuilder(string $name, string $type, array $options = [], $data = null): FormBuilderInterface
++    {
++        return $this->getFormFactory()->createNamedBuilder($name, $type, $data, $options);
++    }
++
++    /**
++     * @return FormFactoryInterface
++     */
++    protected function getFormFactory(): FormFactoryInterface
++    {
++        return self::$kernel->getContainer()->get('form.factory');
++    }
++}
+diff --git a/tests/Integration/PrestaShopBundle/Form/AdvancedFormType.php b/tests/Integration/PrestaShopBundle/Form/AdvancedFormType.php
+index d0ab1633fa604..4b440ff17aae7 100644
+--- a/tests/Integration/PrestaShopBundle/Form/AdvancedFormType.php
++++ b/tests/Integration/PrestaShopBundle/Form/AdvancedFormType.php
+@@ -31,7 +31,6 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\RedirectType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use PrestaShopBundle\Form\Admin\Type\TypeaheadProductCollectionType;
+-use PrestaShopBundle\Form\FormCloner;
+ use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+ use Symfony\Component\Form\DataTransformerInterface;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+@@ -40,7 +39,10 @@
+ 
+ /**
+  * This form type is not used in the project but in the tests, it allows to build a complicated
+- * form type and check that it is correctly cloned by @see FormCloner
++ * form type and use it in test.
++ *
++ * @see FormClonerTest
++ * @see FormBuilderModifierTest
+  */
+ class AdvancedFormType extends TranslatorAwareType
+ {
+diff --git a/tests/Integration/PrestaShopBundle/Form/FormBuilderModifierTest.php b/tests/Integration/PrestaShopBundle/Form/FormBuilderModifierTest.php
+new file mode 100644
+index 0000000000000..97095d44106d4
+--- /dev/null
++++ b/tests/Integration/PrestaShopBundle/Form/FormBuilderModifierTest.php
+@@ -0,0 +1,250 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\PrestaShopBundle\Form;
++
++use Generator;
++use PrestaShopBundle\Form\FormBuilderModifier;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\ResolvedFormTypeInterface;
++
++/**
++ * We use an integration test instead of pure unit because manually creating advanced forms is a complicated and
++ * long process, and it would probably end up in mistakes in the test initialization process itself which would
++ * reduce the overall quality of the test.
++ */
++class FormBuilderModifierTest extends AbstractFormTester
++{
++    /**
++     * @dataProvider getAddAfterData
++     *
++     * @param string $targetFieldName
++     * @param array $childOptions
++     * @param array $expectedChildren
++     */
++    public function testAddAfter(string $targetFieldName, array $childOptions, array $expectedChildren)
++    {
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $modifier = new FormBuilderModifier();
++        $modifier->addAfter(
++            $formBuilder,
++            $targetFieldName,
++            $childOptions['child'],
++            $childOptions['type'] ?? null,
++            $childOptions['options'] ?? []
++        );
++
++        $builderChildren = $formBuilder->all();
++        $this->assertEquals(count($expectedChildren), count($builderChildren));
++
++        $builderIndex = 0;
++        foreach (array_keys($builderChildren) as $childName) {
++            $expectedChild = $expectedChildren[$builderIndex];
++            $this->assertEquals($expectedChild, $childName);
++            ++$builderIndex;
++        }
++    }
++
++    /**
++     * @dataProvider getAddAfterData
++     *
++     * @param string $targetFieldName
++     * @param array $childOptions
++     * @param array $expectedChildren
++     */
++    public function testAddAfterChildBuilder(string $targetFieldName, array $childOptions, array $expectedChildren)
++    {
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $child = $this->createNamedBuilder($childOptions['child'], $childOptions['type'], $childOptions['options'] ?? []);
++
++        $modifier = new FormBuilderModifier();
++        $modifier->addAfter(
++            $formBuilder,
++            $targetFieldName,
++            $child
++        );
++
++        $builderChildren = $formBuilder->all();
++        $this->assertEquals(count($expectedChildren), count($builderChildren));
++
++        $builderIndex = 0;
++        foreach (array_keys($builderChildren) as $childName) {
++            $expectedChild = $expectedChildren[$builderIndex];
++            $this->assertEquals($expectedChild, $childName);
++            ++$builderIndex;
++        }
++    }
++
++    public function getAddAfterData(): Generator
++    {
++        yield [
++            'type',
++            [
++                'child' => 'test1',
++                'type' => ChoiceType::class,
++            ],
++            ['type', 'test1', 'target'],
++        ];
++
++        yield [
++            'target',
++            [
++                'child' => 'test2',
++                'type' => ChoiceType::class,
++            ],
++            ['type', 'target', 'test2'],
++        ];
++    }
++
++    /**
++     * @dataProvider getAddBeforeData
++     *
++     * @param string $targetFieldName
++     * @param array $childOptions
++     * @param array $expectedChildren
++     */
++    public function testAddBefore(string $targetFieldName, array $childOptions, array $expectedChildren)
++    {
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $modifier = new FormBuilderModifier();
++        $modifier->addBefore(
++            $formBuilder,
++            $targetFieldName,
++            $childOptions['child'],
++            $childOptions['type'] ?? null,
++            $childOptions['options'] ?? []
++        );
++
++        $builderChildren = $formBuilder->all();
++        $this->assertEquals(count($expectedChildren), count($builderChildren));
++
++        $builderIndex = 0;
++        foreach (array_keys($builderChildren) as $childName) {
++            $expectedChild = $expectedChildren[$builderIndex];
++            $this->assertEquals($expectedChild, $childName);
++            ++$builderIndex;
++        }
++    }
++
++    /**
++     * @dataProvider getAddBeforeData
++     *
++     * @param string $targetFieldName
++     * @param array $childOptions
++     * @param array $expectedChildren
++     */
++    public function testAddBeforeChildBuilder(string $targetFieldName, array $childOptions, array $expectedChildren)
++    {
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $child = $this->createNamedBuilder($childOptions['child'], $childOptions['type'], $childOptions['options'] ?? []);
++
++        $modifier = new FormBuilderModifier();
++        $modifier->addBefore(
++            $formBuilder,
++            $targetFieldName,
++            $child
++        );
++
++        $builderChildren = $formBuilder->all();
++        $this->assertEquals(count($expectedChildren), count($builderChildren));
++
++        $builderIndex = 0;
++        foreach (array_keys($builderChildren) as $childName) {
++            $expectedChild = $expectedChildren[$builderIndex];
++            $this->assertEquals($expectedChild, $childName);
++            ++$builderIndex;
++        }
++    }
++
++    public function getAddBeforeData(): Generator
++    {
++        yield [
++            'type',
++            [
++                'child' => 'test1',
++                'type' => ChoiceType::class,
++            ],
++            ['test1', 'type', 'target'],
++        ];
++
++        yield [
++            'target',
++            [
++                'child' => 'test2',
++                'type' => ChoiceType::class,
++            ],
++            ['type', 'test2', 'target'],
++        ];
++    }
++
++    public function testAddBeforeOptions(): void
++    {
++        $expectedChoices = ['choice1', 'choice2'];
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $modifier = new FormBuilderModifier();
++        $modifier->addBefore(
++            $formBuilder,
++            'type',
++            'test',
++            ChoiceType::class,
++            [
++                'choices' => $expectedChoices,
++            ]
++        );
++
++        $childBuilder = $formBuilder->get('test');
++        /** @var ResolvedFormTypeInterface $resolvedType */
++        $resolvedType = $childBuilder->getType();
++        $this->assertInstanceOf(ChoiceType::class, $resolvedType->getInnerType());
++        $this->assertSame('test', $childBuilder->getName());
++        $this->assertSame($expectedChoices, $childBuilder->getOptions()['choices']);
++    }
++
++    public function testAddAfterOptions(): void
++    {
++        $expectedChoices = ['choice1', 'choice2'];
++        $formBuilder = $this->createFormBuilder(AdvancedFormType::class);
++        $modifier = new FormBuilderModifier();
++        $modifier->addAfter(
++            $formBuilder,
++            'type',
++            'test',
++            ChoiceType::class,
++            [
++                'choices' => $expectedChoices,
++            ]
++        );
++
++        $childBuilder = $formBuilder->get('test');
++        /** @var ResolvedFormTypeInterface $resolvedType */
++        $resolvedType = $childBuilder->getType();
++        $this->assertInstanceOf(ChoiceType::class, $resolvedType->getInnerType());
++        $this->assertSame('test', $childBuilder->getName());
++        $this->assertSame($expectedChoices, $childBuilder->getOptions()['choices']);
++    }
++}
+diff --git a/tests/Integration/PrestaShopBundle/Form/FormClonerTest.php b/tests/Integration/PrestaShopBundle/Form/FormClonerTest.php
+index e1310174e0941..9729921054700 100644
+--- a/tests/Integration/PrestaShopBundle/Form/FormClonerTest.php
++++ b/tests/Integration/PrestaShopBundle/Form/FormClonerTest.php
+@@ -30,7 +30,6 @@
+ 
+ use Closure;
+ use PrestaShopBundle\Form\FormCloner;
+-use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+ use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+ use Symfony\Component\Form\ChoiceList\ChoiceListInterface;
+ use Symfony\Component\Form\DataTransformerInterface;
+@@ -46,13 +45,8 @@
+  * long process, and it would probably end up in mistakes in the test initialization process itself which would
+  * reduce the overall quality of the test.
+  */
+-class FormClonerTest extends KernelTestCase
++class FormClonerTest extends AbstractFormTester
+ {
+-    protected function setUp()
+-    {
+-        self::bootKernel();
+-    }
+-
+     public function testClone(): void
+     {
+         $form = $this->createForm(AdvancedFormType::class);
+@@ -385,16 +379,4 @@ private function compareDataTransformers(array $originalTransformers, array $clo
+             $this->assertInstanceOf(get_class($originalTransformer), $clonedTransformer);
+         }
+     }
+-
+-    /**
+-     * @param string $type
+-     * @param array $options
+-     * @param null $data
+-     *
+-     * @return FormInterface
+-     */
+-    private function createForm(string $type, array $options = [], $data = null): FormInterface
+-    {
+-        return self::$kernel->getContainer()->get('form.factory')->create($type, $data, $options);
+-    }
+ }

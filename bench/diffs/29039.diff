@@ -1,0 +1,1238 @@
+diff --git a/admin-dev/themes/new-theme/js/components/grid/extension/column/common/async-toggle-column-extension.ts b/admin-dev/themes/new-theme/js/components/grid/extension/column/common/async-toggle-column-extension.ts
+index feb1937d0c953..47dca32f3831a 100644
+--- a/admin-dev/themes/new-theme/js/components/grid/extension/column/common/async-toggle-column-extension.ts
++++ b/admin-dev/themes/new-theme/js/components/grid/extension/column/common/async-toggle-column-extension.ts
+@@ -47,6 +47,9 @@ export default class AsyncToggleColumnExtension {
+           event.preventDefault();
+         }
+ 
++        const $newStateInput = $button.find('input:checked');
++        const newState = Boolean($newStateInput.val());
++
+         $.post({
+           url: $button.data('toggle-url'),
+         })
+@@ -59,16 +62,34 @@ export default class AsyncToggleColumnExtension {
+               return;
+             }
+ 
+-            window.showErrorMessage(response.message);
++            this.showErrorMessage(response.message, $newStateInput.prop('name'), !newState);
+           })
+           .catch((error: AjaxError) => {
+             const response = error.responseJSON;
+-
+-            window.showErrorMessage(response.message);
++            this.showErrorMessage(response.message, $newStateInput.prop('name'), !newState);
+           });
+       });
+   }
+ 
++  private showErrorMessage(message: string, switchName: string, initialState: boolean): void {
++    // We need to toggle back the switch state
++    this.toggleSwitch(switchName, initialState);
++
++    window.showErrorMessage(message);
++  }
++
++  private toggleSwitch(switchName: string, checked: boolean): void {
++    const $switchOn = $(`[name="${switchName}"][value="1"]`);
++    const $switchOff = $(`[name="${switchName}"][value="0"]`);
++
++    if ($switchOn.is(':checked') !== checked) {
++      $switchOn.prop('checked', checked);
++    }
++    if ($switchOff.is(':checked') === checked) {
++      $switchOff.prop('checked', !checked);
++    }
++  }
++
+   /**
+    * Toggle button display from enabled to disabled and other way around
+    *
+diff --git a/admin-dev/themes/new-theme/js/components/navbar-handler.ts b/admin-dev/themes/new-theme/js/components/navbar-handler.ts
+index 14af219d8b66f..551f3503bb23d 100644
+--- a/admin-dev/themes/new-theme/js/components/navbar-handler.ts
++++ b/admin-dev/themes/new-theme/js/components/navbar-handler.ts
+@@ -49,7 +49,13 @@ export default class NavbarHandler {
+     this.switchOnPageLoad();
+   }
+ 
+-  private switchToTarget(target: string): void {
++  public getHashTarget(): string {
++    const {hash} = document.location;
++
++    return hash.replace(`#${this.tabPrefix}`, '#');
++  }
++
++  public switchToTarget(target: string): void {
+     if (!target) {
+       return;
+     }
+diff --git a/admin-dev/themes/new-theme/js/pages/product/components/categories/category-tree-filter.ts b/admin-dev/themes/new-theme/js/pages/product/components/categories/category-tree-filter.ts
+index 37db6b8a10bd6..1514ac50ef3e7 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/components/categories/category-tree-filter.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/components/categories/category-tree-filter.ts
+@@ -35,12 +35,9 @@ export default class CategoryTreeFilter {
+ 
+   private $filterForm: JQuery;
+ 
+-  private $categoryInput: JQuery;
+-
+   constructor() {
+     this.$categoryTree = $(CategoryFilterMap.container);
+-    this.$filterForm = $(CategoryFilterMap.filterForm);
+-    this.$categoryInput = this.$filterForm.find(CategoryFilterMap.categoryInput);
++    this.$filterForm = this.$categoryTree.parent('form');
+ 
+     this.init();
+   }
+@@ -51,7 +48,7 @@ export default class CategoryTreeFilter {
+       // of the two actions, either expand/collapse or filter the selected category So We check which target has been
+       // clicked exactly
+       if (event.target instanceof HTMLInputElement) {
+-        this.filterCategory(event.target.value);
++        this.$filterForm.submit();
+       } else if (event.target.classList.contains(CategoryFilterMap.categoryLabelClass)) {
+         this.toggleCategory($(event.currentTarget).parent(CategoryFilterMap.categoryNode));
+       }
+@@ -63,7 +60,7 @@ export default class CategoryTreeFilter {
+     this.$categoryTree.on('click', CategoryFilterMap.collapseAll, () => {
+       this.collapseAll();
+     });
+-    this.$categoryTree.on('click', CategoryFilterMap.resetFilter, () => {
++    $(CategoryFilterMap.resetFilter).on('click', () => {
+       this.resetFilter();
+     });
+ 
+@@ -83,16 +80,12 @@ export default class CategoryTreeFilter {
+     $categoryNode.toggleClass(CategoryFilterMap.collapsedClass, isExpanded);
+   }
+ 
+-  private filterCategory(categoryId: string): void {
+-    this.$categoryInput.val(categoryId);
+-    this.$filterForm.submit();
+-  }
+-
+   private resetFilter(): void {
++    // Reset selected category
+     this.$categoryTree
+       .find(CategoryFilterMap.categoryRadio)
+       .prop('checked', false);
+-    this.$categoryInput.val('');
++
+     this.$filterForm.submit();
+   }
+ 
+diff --git a/admin-dev/themes/new-theme/js/pages/product/edit/index.ts b/admin-dev/themes/new-theme/js/pages/product/edit/index.ts
+index 8838c24daef35..5256428545f93 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/edit/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/edit/index.ts
+@@ -67,10 +67,6 @@ $(() => {
+   const $productForm = $(ProductMap.productForm);
+   const productId = parseInt($productForm.data('productId'), 10);
+   const productType = $productForm.data('productType');
+-
+-  // Responsive navigation tabs
+-  initTabs();
+-
+   const {eventEmitter} = window.prestashop.instance;
+ 
+   // Init product model along with input watching and syncing
+@@ -82,7 +78,15 @@ $(() => {
+     new CombinationsList(productId, productFormModel);
+   }
+ 
+-  new NavbarHandler($(ProductMap.navigationBar));
++  // Responsive navigation tabs
++  initTabs();
++  const navbar = new NavbarHandler($(ProductMap.navigationBar));
++
++  // When combination page is opened on quantity tab we automatically switch to the combination one which replaces it for product with combinations
++  if (productType === ProductConst.PRODUCT_TYPE.COMBINATIONS && navbar.getHashTarget() === ProductMap.stock.navigationTarget) {
++    navbar.switchToTarget(ProductMap.combinations.navigationTarget);
++  }
++
+   new ProductSEOManager(eventEmitter);
+   new ProductOptionsManager(productType, productFormModel);
+   new ProductShippingManager();
+diff --git a/admin-dev/themes/new-theme/js/pages/product/index.ts b/admin-dev/themes/new-theme/js/pages/product/index.ts
+index bab8c038b8b79..36af2d9e5c613 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/index.ts
+@@ -25,6 +25,7 @@
+ 
+ import CreateProductModal from '@pages/product/components/create-product-modal';
+ import CategoryTreeFilter from '@pages/product/components/categories/category-tree-filter';
++import LinkRowActionExtension from '@components/grid/extension/link-row-action-extension';
+ 
+ const {$} = window;
+ 
+@@ -41,6 +42,7 @@ $(() => {
+   grid.addExtension(new window.prestashop.component.GridExtensions.BulkActionCheckboxExtension());
+   grid.addExtension(new window.prestashop.component.GridExtensions.FiltersSubmitButtonEnablerExtension());
+   grid.addExtension(new window.prestashop.component.GridExtensions.AsyncToggleColumnExtension());
++  grid.addExtension(new LinkRowActionExtension());
+ 
+   new CreateProductModal();
+   grid.addExtension(new window.prestashop.component.GridExtensions.PositionExtension(grid));
+diff --git a/admin-dev/themes/new-theme/js/pages/product/product-map.ts b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+index 46c0fabc16816..a4a3ecf2fe53a 100644
+--- a/admin-dev/themes/new-theme/js/pages/product/product-map.ts
++++ b/admin-dev/themes/new-theme/js/pages/product/product-map.ts
+@@ -77,8 +77,12 @@ export default {
+     removeCustomizationBtn: '.remove-customization-btn',
+     customizationFieldRow: '.customization-field-row',
+   },
++  stock: {
++    navigationTarget: '#product_stock-tab',
++  },
+   combinations: {
+     navigationTab: '#product_combinations-tab-nav',
++    navigationTarget: '#product_combinations-tab',
+     combinationManager: '#product_combinations_combination_manager',
+     preloader: '#combinations-preloader',
+     emptyState: '#combinations-empty-state',
+@@ -280,7 +284,7 @@ export default {
+       container: '.product_list_category_filter',
+       categoryRadio: '.category-label input:radio',
+       filterForm: '#product_filter_form',
+-      categoryInput: 'input[name="product[id_category]"]',
++      positionInput: 'input[name="product[position]"]',
+       expandedClass: 'less',
+       collapsedClass: 'more',
+       categoryChildren: '.category-children',
+diff --git a/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php b/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
+index d5211202473ac..f8f11d9514ad5 100644
+--- a/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
++++ b/src/Adapter/Product/Grid/Data/Factory/ProductGridDataFactoryDecorator.php
+@@ -158,9 +158,14 @@ private function applyModification(array $products): array
+                 $products[$i]['name'] = $this->translator->trans('N/A', [], 'Admin.Global');
+             }
+ 
+-            $products[$i]['image'] = '';
+             if ($product['id_image']) {
+                 $products[$i]['image'] = $this->productImagePathFactory->getPathByType(new ImageId((int) $product['id_image']), ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT);
++            } else {
++                $products[$i]['image'] = $this->productImagePathFactory->getNoImagePath(ProductImagePathFactory::IMAGE_TYPE_SMALL_DEFAULT, $this->getLanguageIsoCode());
++            }
++            // If no legend is defined use the name as a fallback (used for alt property on image)
++            if (empty($product['legend'])) {
++                $products[$i]['legend'] = $products[$i]['name'];
+             }
+ 
+             $productTaxRulesGroupId = new TaxRulesGroupId((int) ($products[$i]['id_tax_rules_group'] ?? 0));
+@@ -204,4 +209,14 @@ private function applyModification(array $products): array
+ 
+         return $products;
+     }
++
++    /**
++     * Returns language iso code based on locale, en-US => en
++     *
++     * @return string
++     */
++    private function getLanguageIsoCode(): string
++    {
++        return explode('-', $this->locale->getCode())[0];
++    }
+ }
+diff --git a/src/Core/Grid/Action/Row/Type/LinkRowAction.php b/src/Core/Grid/Action/Row/Type/LinkRowAction.php
+index 7b15983c5865d..90a8564fd68f9 100644
+--- a/src/Core/Grid/Action/Row/Type/LinkRowAction.php
++++ b/src/Core/Grid/Action/Row/Type/LinkRowAction.php
+@@ -60,6 +60,7 @@ protected function configureOptions(OptionsResolver $resolver)
+                 //route_param_name and route_param_field becomes redundant, but it cannot be removed due to BC break
+                 'extra_route_params' => [],
+                 'clickable_row' => false,
++                'target' => '',
+             ])
+             ->setAllowedTypes('route', 'string')
+             ->setAllowedTypes('route_param_name', 'string')
+@@ -68,6 +69,7 @@ protected function configureOptions(OptionsResolver $resolver)
+             ->setAllowedTypes('confirm_message', 'string')
+             ->setAllowedTypes('accessibility_checker', [AccessibilityCheckerInterface::class, 'callable', 'null'])
+             ->setAllowedTypes('clickable_row', 'boolean')
++            ->setAllowedTypes('target', 'string')
+         ;
+     }
+ 
+diff --git a/src/Core/Grid/Column/Type/Common/ImageColumn.php b/src/Core/Grid/Column/Type/Common/ImageColumn.php
+index 4122f2b82c2c7..32959437fc082 100644
+--- a/src/Core/Grid/Column/Type/Common/ImageColumn.php
++++ b/src/Core/Grid/Column/Type/Common/ImageColumn.php
+@@ -53,8 +53,11 @@ public function configureOptions(OptionsResolver $resolver)
+             ])
+             ->setDefaults([
+                 'clickable' => true,
++                'alt_field' => '',
+             ])
+             ->setAllowedTypes('src_field', 'string')
+-            ->setAllowedTypes('clickable', 'bool');
++            ->setAllowedTypes('clickable', 'bool')
++            ->setAllowedTypes('alt_field', 'string')
++        ;
+     }
+ }
+diff --git a/src/Core/Grid/Definition/Factory/ProductGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/ProductGridDefinitionFactory.php
+index a7829c1445df1..feac5d61646aa 100644
+--- a/src/Core/Grid/Definition/Factory/ProductGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/ProductGridDefinitionFactory.php
+@@ -48,7 +48,6 @@
+ use PrestaShop\PrestaShop\Core\Grid\Column\Type\DataColumn;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\Filter;
+ use PrestaShop\PrestaShop\Core\Grid\Filter\FilterCollection;
+-use PrestaShop\PrestaShop\Core\Grid\Filter\HiddenFilter;
+ use PrestaShop\PrestaShop\Core\Hook\HookDispatcherInterface;
+ use PrestaShopBundle\Form\Admin\Type\IntegerMinMaxFilterType;
+ use PrestaShopBundle\Form\Admin\Type\NumberMinMaxFilterType;
+@@ -123,6 +122,7 @@ protected function getColumns()
+                     ->setName($this->trans('Image', [], 'Admin.Global'))
+                     ->setOptions([
+                         'src_field' => 'image',
++                        'alt_field' => 'legend',
+                     ])
+             )
+             ->add(
+@@ -136,10 +136,14 @@ protected function getColumns()
+                     ])
+             )
+             ->add(
+-                (new DataColumn('reference'))
+-                    ->setName($this->trans('Reference', [], 'Admin.Global'))
++                (new LinkColumn('reference'))
++                    ->setName($this->trans('Reference', [], 'Admin.Catalog.Feature'))
+                     ->setOptions([
+                         'field' => 'reference',
++                        'route' => 'admin_products_v2_edit',
++                        'route_param_name' => 'productId',
++                        'route_param_field' => 'id_product',
++                        'route_fragment' => 'tab-product_specifications-tab',
+                     ])
+             )
+             ->add(
+@@ -237,6 +241,17 @@ protected function getRowActions(): RowActionCollection
+                 'route' => 'admin_products_v2_edit',
+                 'route_param_name' => 'productId',
+                 'route_param_field' => 'id_product',
++                'clickable_row' => true,
++            ])
++            )
++            ->add((new LinkRowAction('preview'))
++            ->setName($this->trans('Preview', [], 'Admin.Actions'))
++            ->setIcon('remove_red_eye')
++            ->setOptions([
++                'route' => 'admin_products_v2_preview',
++                'route_param_name' => 'productId',
++                'route_param_field' => 'id_product',
++                'target' => '_blank',
+             ])
+             )
+             ->add((new SubmitRowAction('duplicate'))
+@@ -299,13 +314,6 @@ protected function getFilters()
+                     ])
+                     ->setAssociatedColumn('reference')
+             )
+-            ->add(
+-                (new HiddenFilter('id_category'))
+-                    ->setTypeOptions([
+-                        'required' => false,
+-                    ])
+-                    ->setAssociatedColumn('id_category')
+-            )
+             ->add(
+                 (new Filter('category', TextType::class))
+                     ->setTypeOptions([
+@@ -339,10 +347,7 @@ protected function getFilters()
+             ->add(
+                 (new Filter('actions', SearchAndResetType::class))
+                     ->setTypeOptions([
+-                        'reset_route' => 'admin_common_reset_search_by_filter_id',
+-                        'reset_route_params' => [
+-                            'filterId' => self::GRID_ID,
+-                        ],
++                        'reset_route' => 'admin_products_reset_grid_search',
+                         'redirect_route' => 'admin_products_v2_index',
+                     ])
+                     ->setAssociatedColumn('actions')
+@@ -354,6 +359,17 @@ protected function getFilters()
+                     (new Filter('quantity', IntegerMinMaxFilterType::class))
+                         ->setTypeOptions([
+                             'required' => false,
++                            // Ignore default zero value to use negative values
++                            'min_field_options' => [
++                                'attr' => [
++                                    'min' => false,
++                                ],
++                            ],
++                            'max_field_options' => [
++                                'attr' => [
++                                    'min' => false,
++                                ],
++                            ],
+                         ])
+                         ->setAssociatedColumn('quantity')
+                 )
+diff --git a/src/Core/Grid/Filter/GridFilterFormFactory.php b/src/Core/Grid/Filter/GridFilterFormFactory.php
+index 1d95216a3fa62..1877cb8b88772 100644
+--- a/src/Core/Grid/Filter/GridFilterFormFactory.php
++++ b/src/Core/Grid/Filter/GridFilterFormFactory.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Grid\Filter;
+ 
+ use PrestaShop\PrestaShop\Core\Grid\Definition\GridDefinitionInterface;
++use PrestaShop\PrestaShop\Core\Grid\Exception\ColumnNotFoundException;
+ use PrestaShop\PrestaShop\Core\Hook\HookDispatcherInterface;
+ use PrestaShopBundle\Event\Dispatcher\NullDispatcher;
+ use Symfony\Component\DependencyInjection\Container;
+@@ -71,15 +72,22 @@ public function create(GridDefinitionInterface $definition)
+     {
+         $formBuilder = $this->formFactory->createNamedBuilder(
+             $definition->getId(),
+-            FormType::class
++            FormType::class,
++            null,
++            [
++                'allow_extra_fields' => true,
++            ]
+         );
+ 
+         /** @var FilterInterface $filter */
+         foreach ($definition->getFilters()->all() as $filter) {
++            $filterOptions = array_merge([
++                'label' => $this->getFilterLabel($definition, $filter),
++            ], $filter->getTypeOptions());
+             $formBuilder->add(
+                 $filter->getName(),
+                 $filter->getType(),
+-                $filter->getTypeOptions()
++                $filterOptions
+             );
+         }
+ 
+@@ -89,4 +97,18 @@ public function create(GridDefinitionInterface $definition)
+ 
+         return $formBuilder->getForm();
+     }
++
++    private function getFilterLabel(GridDefinitionInterface $definition, FilterInterface $filter): string
++    {
++        $filterLabel = $filter->getName();
++        try {
++            if ($filter->getAssociatedColumn()) {
++                $column = $definition->getColumnById($filter->getAssociatedColumn());
++                $filterLabel = $column->getName();
++            }
++        } catch (ColumnNotFoundException $e) {
++        }
++
++        return $filterLabel;
++    }
+ }
+diff --git a/src/Core/Grid/Query/ProductQueryBuilder.php b/src/Core/Grid/Query/ProductQueryBuilder.php
+index 44dff846c885a..77d1bc0065cd6 100644
+--- a/src/Core/Grid/Query/ProductQueryBuilder.php
++++ b/src/Core/Grid/Query/ProductQueryBuilder.php
+@@ -103,13 +103,13 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+     {
+         $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+         $qb
+-            ->select('p.`id_product`, p.`reference`')
++            ->addSelect('p.`id_product`, p.`reference`')
+             ->addSelect('ps.`price` AS `price_tax_excluded`, ps.`ecotax` AS `ecotax_tax_excluded`, ps.`id_tax_rules_group`, ps.`active`')
+             ->addSelect('pl.`name`, pl.`link_rewrite`')
+             ->addSelect('cl.`name` AS `category`')
+             ->addSelect('img_shop.`id_image`')
++            ->addSelect('img_lang.legend')
+             ->addSelect('p.`id_tax_rules_group`')
+-            ->addSelect('pc.`position`, pc.`id_category`')
+         ;
+ 
+         // When ecotax is enabled the real final price is the sum of price and ecotax so we fetch an extra alias column that is used for sorting
+@@ -125,9 +125,16 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+ 
+         $this->searchCriteriaApplicator
+             ->applyPagination($searchCriteria, $qb)
+-            ->applySorting($searchCriteria, $qb)
+         ;
+ 
++        // Any sorting that is not based on position can be applied
++        if ($searchCriteria->getOrderBy() !== 'position') {
++            $this->searchCriteriaApplicator->applySorting($searchCriteria, $qb);
++        } elseif (array_key_exists('id_category', $searchCriteria->getFilters())) {
++            // Sort by position only works when we filter by category, so we need to be cautious and apply it only when the filter is present
++            $this->searchCriteriaApplicator->applySorting($searchCriteria, $qb);
++        }
++
+         return $qb;
+     }
+ 
+@@ -178,16 +185,29 @@ private function getQueryBuilder(array $filterValues): QueryBuilder
+                 'img_shop',
+                 'img_shop.`id_product` = ps.`id_product` AND img_shop.`cover` = 1 AND img_shop.`id_shop` = :id_shop'
+             )
+-            ->rightJoin(
+-                   'p',
+-                   $this->dbPrefix . 'category_product',
+-                   'pc',
+-                   'p.`id_product` = pc.`id_product` AND pc.id_category = :categoryId'
+-               )
+-            ->setParameter('categoryId', $this->getFilteredCategoryId($filterValues))
++            ->leftJoin(
++                'img_shop',
++                $this->dbPrefix . 'image_lang',
++                'img_lang',
++                'img_shop.`id_image` = img_lang.`id_image` AND img_lang.`id_lang` = :id_lang'
++            )
+             ->andWhere('p.`state`=1')
+         ;
+ 
++        $filteredCategoryId = $this->getFilteredCategoryId($filterValues);
++        if (null !== $filteredCategoryId) {
++            $qb
++                ->rightJoin(
++                    'p',
++                    $this->dbPrefix . 'category_product',
++                    'pc',
++                    'p.`id_product` = pc.`id_product` AND pc.id_category = :categoryId'
++                )
++                ->setParameter('categoryId', $filteredCategoryId)
++                ->addSelect('pc.`position`, pc.`id_category`')
++            ;
++        }
++
+         $isStockManagementEnabled = $this->configuration->getBoolean('PS_STOCK_MANAGEMENT');
+ 
+         if ($isStockManagementEnabled) {
+@@ -276,7 +296,8 @@ private function getQueryBuilder(array $filterValues): QueryBuilder
+                 $qb->setParameter('category', '%' . $filter . '%');
+             }
+ 
+-            if ('position' === $filterName) {
++            // Filter by position is only relevant when a category has been selected
++            if (array_key_exists('id_category', $filterValues) && 'position' === $filterName) {
+                 $qb->andWhere('pc.`position` = :position');
+                 $qb->setParameter('position', $filter);
+             }
+@@ -285,7 +306,7 @@ private function getQueryBuilder(array $filterValues): QueryBuilder
+         return $qb;
+     }
+ 
+-    private function getFilteredCategoryId(array $filterValues): int
++    private function getFilteredCategoryId(array $filterValues): ?int
+     {
+         foreach ($filterValues as $filterName => $filter) {
+             if ('id_category' === $filterName) {
+@@ -293,6 +314,6 @@ private function getFilteredCategoryId(array $filterValues): int
+             }
+         }
+ 
+-        return $this->configuration->getInt('PS_HOME_CATEGORY');
++        return null;
+     }
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
+index 259f30823d18f..f225ad34fe468 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Sell/Catalog/Product/ProductController.php
+@@ -29,6 +29,7 @@
+ namespace PrestaShopBundle\Controller\Admin\Sell\Catalog\Product;
+ 
+ use Exception;
++use PrestaShop\PrestaShop\Adapter\Shop\Url\ProductPreviewProvider;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\BulkDeleteProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\BulkDuplicateProductCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Command\BulkUpdateProductStatusCommand;
+@@ -42,6 +43,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\CannotUpdateProductPositionException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\InvalidProductTypeException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\DuplicateFeatureValueAssociationException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\FeatureValue\Exception\InvalidAssociatedFeatureException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Query\GetProductIsEnabled;
+@@ -50,17 +52,20 @@
+ use PrestaShop\PrestaShop\Core\Domain\Product\SpecificPrice\Exception\SpecificPriceConstraintException;
+ use PrestaShop\PrestaShop\Core\Domain\Product\ValueObject\ProductId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\Exception\ShopAssociationNotFound;
+-use PrestaShop\PrestaShop\Core\Exception\ProductException;
+ use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandlerInterface;
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\GridDefinitionFactoryInterface;
++use PrestaShop\PrestaShop\Core\Grid\Definition\Factory\ProductGridDefinitionFactory;
+ use PrestaShop\PrestaShop\Core\Search\Filters\ProductFilters;
+ use PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController;
++use PrestaShopBundle\Entity\AdminFilter;
+ use PrestaShopBundle\Entity\ProductDownload;
+ use PrestaShopBundle\Form\Admin\Sell\Product\Category\CategoryFilterType;
+ use PrestaShopBundle\Security\Annotation\AdminSecurity;
+ use PrestaShopBundle\Security\Annotation\DemoRestricted;
+ use PrestaShopBundle\Security\Voter\PageVoter;
++use PrestaShopBundle\Service\Grid\ResponseBuilder;
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\HttpFoundation\BinaryFileResponse;
+ use Symfony\Component\HttpFoundation\JsonResponse;
+@@ -114,7 +119,9 @@ public function indexAction(Request $request, ProductFilters $filters): Response
+         if (isset($filters->getFilters()['id_category'])) {
+             $filteredCategoryId = (int) $filters->getFilters()['id_category'];
+         }
+-        $categoriesForm = $this->createForm(CategoryFilterType::class, $filteredCategoryId);
++        $categoriesForm = $this->createForm(CategoryFilterType::class, $filteredCategoryId, [
++            'action' => $this->generateUrl('admin_products_grid_category_filter'),
++        ]);
+ 
+         return $this->render('@PrestaShop/Admin/Sell/Catalog/Product/index.html.twig', [
+             'categoryFilterForm' => $categoriesForm->createView(),
+@@ -125,6 +132,102 @@ public function indexAction(Request $request, ProductFilters $filters): Response
+         ]);
+     }
+ 
++    /**
++     * Process Grid search, but we need to add the category filter which is handled independently.
++     *
++     * @param Request $request
++     *
++     * @AdminSecurity("is_granted('create', request.get('_legacy_controller')) || is_granted('update', request.get('_legacy_controller')) || is_granted('read', request.get('_legacy_controller'))")
++     *
++     * @return RedirectResponse
++     */
++    public function searchGridAction(Request $request)
++    {
++        /** @var GridDefinitionFactoryInterface $definitionFactory */
++        $definitionFactory = $this->get('prestashop.core.grid.definition.factory.product');
++
++        $filterId = ProductGridDefinitionFactory::GRID_ID;
++
++        $adminFilter = $this->getGridAdminFilter();
++        if (isset($adminFilter)) {
++            $currentFilters = json_decode($adminFilter->getFilter(), true);
++            if (!empty($currentFilters['filters']['id_category'])) {
++                $request->query->add([
++                    'product[filters][id_category]' => $currentFilters['filters']['id_category'],
++                ]);
++            }
++        }
++
++        /** @var ResponseBuilder $responseBuilder */
++        $responseBuilder = $this->get('prestashop.bundle.grid.response_builder');
++
++        return $responseBuilder->buildSearchResponse(
++            $definitionFactory,
++            $request,
++            $filterId,
++            'admin_products_v2_index',
++            ['product[filters][id_category]']
++        );
++    }
++
++    /**
++     * Reset filters for the grid only (category is kept, it can be cleared via another dedicated action)
++     *
++     * @AdminSecurity("is_granted('create', request.get('_legacy_controller')) || is_granted('update', request.get('_legacy_controller')) || is_granted('read', request.get('_legacy_controller'))")
++     *
++     * @return JsonResponse
++     */
++    public function resetGridSearchAction(): JsonResponse
++    {
++        $adminFilter = $this->getGridAdminFilter();
++        if (isset($adminFilter)) {
++            $adminFiltersRepository = $this->get('prestashop.core.admin.admin_filter.repository');
++            $currentFilters = json_decode($adminFilter->getFilter(), true);
++
++            // This reset action only reset the filters from the Grid, we keep the filter by category if it was present (we still reset to page 1 though)
++            if (!empty($currentFilters['filters']['id_category'])) {
++                $adminFilter->setFilter(json_encode([
++                    'filters' => [
++                        'id_category' => $currentFilters['filters']['id_category'],
++                    ],
++                    'offset' => 0,
++                ]));
++                $adminFiltersRepository->updateFilter($adminFilter);
++            } else {
++                $adminFiltersRepository->unsetFilters($adminFilter);
++            }
++        }
++
++        return new JsonResponse();
++    }
++
++    /**
++     * Apply the category filter and redirect to list on first page.
++     *
++     * @AdminSecurity("is_granted('create', request.get('_legacy_controller')) || is_granted('update', request.get('_legacy_controller')) || is_granted('read', request.get('_legacy_controller'))")
++     *
++     * @return RedirectResponse
++     */
++    public function gridCategoryFilterAction(Request $request): RedirectResponse
++    {
++        $filteredCategoryId = $request->request->get('category_filter');
++        $adminFilter = $this->getGridAdminFilter();
++        if (isset($adminFilter)) {
++            $adminFiltersRepository = $this->get('prestashop.core.admin.admin_filter.repository');
++            $currentFilters = json_decode($adminFilter->getFilter(), true);
++            if (empty($filteredCategoryId)) {
++                unset($currentFilters['filters']['id_category']);
++            } else {
++                $currentFilters['filters']['id_category'] = $filteredCategoryId;
++            }
++            $currentFilters['offset'] = 0;
++            $adminFilter->setFilter(json_encode($currentFilters));
++            $adminFiltersRepository->updateFilter($adminFilter);
++        }
++
++        return $this->redirectToRoute('admin_products_v2_index');
++    }
++
+     /**
+      * @AdminSecurity("is_granted('read', 'AdminProducts')")
+      *
+@@ -141,6 +244,27 @@ public function lightListAction(ProductFilters $filters, Request $request): Resp
+         ]);
+     }
+ 
++    /**
++     * The redirection URL is generation thanks to the ProductPreviewProvider however it can't be used in the grid
++     * since the LinkRowAction expects a symfony route, so this action is merely used as a proxy for symfony routing
++     * and redirects to the appropriate product preview url.
++     *
++     * @AdminSecurity("is_granted('read', 'AdminProducts')")
++     *
++     * @return RedirectResponse
++     */
++    public function previewAction(int $productId): RedirectResponse
++    {
++        /** @var bool $isEnabled */
++        $isEnabled = $this->getQueryBus()->handle(new GetProductIsEnabled((int) $productId));
++
++        /** @var ProductPreviewProvider $previewUrlProvider */
++        $previewUrlProvider = $this->get('prestashop.adapter.shop.url.product_preview_provider');
++        $previewUrl = $previewUrlProvider->getUrl($productId, $isEnabled);
++
++        return $this->redirect($previewUrl);
++    }
++
+     /**
+      * @AdminSecurity("is_granted('create', request.get('_legacy_controller'))", message="You do not have permission to create this.")
+      *
+@@ -826,6 +950,19 @@ private function renderDisableMultistorePage(int $productId = null): Response
+         ]);
+     }
+ 
++    private function getGridAdminFilter(): ?AdminFilter
++    {
++        if (null === $this->getUser() || null === $this->getContext()->shop || empty($this->getContext()->shop->id)) {
++            return null;
++        }
++
++        $adminFiltersRepository = $this->get('prestashop.core.admin.admin_filter.repository');
++        $employeeId = $this->getUser()->getId();
++        $shopId = $this->getContext()->shop->id;
++
++        return $adminFiltersRepository->findByEmployeeAndFilterId($employeeId, $shopId, ProductGridDefinitionFactory::GRID_ID);
++    }
++
+     /**
+      * @return bool
+      */
+diff --git a/src/PrestaShopBundle/Entity/Repository/AdminFilterRepository.php b/src/PrestaShopBundle/Entity/Repository/AdminFilterRepository.php
+index 660662b3abb34..7f22b3cca6763 100644
+--- a/src/PrestaShopBundle/Entity/Repository/AdminFilterRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/AdminFilterRepository.php
+@@ -116,6 +116,17 @@ public function unsetFilters(AdminFilter $adminFilter)
+         $this->getEntityManager()->flush();
+     }
+ 
++    /**
++     * Updates and persists modification to a filter (that was previously modified).
++     *
++     * @param AdminFilter $adminFilter
++     */
++    public function updateFilter(AdminFilter $adminFilter): void
++    {
++        $this->getEntityManager()->persist($adminFilter);
++        $this->getEntityManager()->flush();
++    }
++
+     /**
+      * Persist (create or update) filters into database using employee and uuid
+      *
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/IntegerMinMaxFilterType.php b/src/PrestaShopBundle/Form/Admin/Type/IntegerMinMaxFilterType.php
+index 7c415e2010eec..2125a5c889789 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/IntegerMinMaxFilterType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/IntegerMinMaxFilterType.php
+@@ -31,6 +31,8 @@
+ use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\Callback;
++use Symfony\Component\Validator\Context\ExecutionContextInterface;
+ 
+ /**
+  * Defines the integer type two inputs of min and max value - designed to fit grid in grid filter.
+@@ -47,6 +49,22 @@ public function configureOptions(OptionsResolver $resolver)
+         $resolver->setDefaults([
+             'min_field_options' => [],
+             'max_field_options' => [],
++            'constraints' => [
++                new Callback([
++                    'callback' => function (?array $impactData, ExecutionContextInterface $context) {
++                        if (!isset($impactData['min_field']) || !isset($impactData['max_field'])) {
++                            return;
++                        }
++
++                        if ((int) $impactData['min_field'] > (int) $impactData['max_field']) {
++                            $context
++                                ->buildViolation($this->trans('Maximum value must be higher than minimum value.', [], 'Admin.Notifications.Warning'))
++                                ->addViolation()
++                            ;
++                        }
++                    },
++                ]),
++            ],
+         ]);
+ 
+         $resolver->setAllowedTypes('min_field_options', 'array');
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/NumberMinMaxFilterType.php b/src/PrestaShopBundle/Form/Admin/Type/NumberMinMaxFilterType.php
+index 77bdcee8d991a..13547c2574fd3 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/NumberMinMaxFilterType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/NumberMinMaxFilterType.php
+@@ -31,6 +31,8 @@
+ use Symfony\Component\Form\Extension\Core\Type\NumberType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\Callback;
++use Symfony\Component\Validator\Context\ExecutionContextInterface;
+ 
+ /**
+  * Defines the number type two inputs of min and max value - designed to fit grid in grid filter.
+@@ -47,6 +49,22 @@ public function configureOptions(OptionsResolver $resolver)
+         $resolver->setDefaults([
+             'min_field_options' => [],
+             'max_field_options' => [],
++            'constraints' => [
++                new Callback([
++                    'callback' => function (?array $impactData, ExecutionContextInterface $context) {
++                        if (!isset($impactData['min_field']) || !isset($impactData['max_field'])) {
++                            return;
++                        }
++
++                        if ($impactData['min_field'] > $impactData['max_field']) {
++                            $context
++                                ->buildViolation($this->trans('Maximum value must be higher than minimum value.', [], 'Admin.Notifications.Warning'))
++                                ->addViolation()
++                            ;
++                        }
++                    },
++                ]),
++            ],
+         ]);
+ 
+         $resolver->setAllowedTypes('min_field_options', 'array');
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/SearchAndResetType.php b/src/PrestaShopBundle/Form/Admin/Type/SearchAndResetType.php
+index aab02ec8358da..19e3bc38ac232 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/SearchAndResetType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/SearchAndResetType.php
+@@ -105,6 +105,7 @@ public function configureOptions(OptionsResolver $resolver)
+                 'reset_route_params' => [],
+                 'redirect_route' => null,
+                 'redirect_route_params' => [],
++                'allow_extra_fields' => true,
+             ])
+             ->setAllowedTypes('reset_route', ['string', 'null'])
+             ->setAllowedTypes('reset_route_params', 'array')
+diff --git a/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/product_v2/product.yml b/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/product_v2/product.yml
+index 94a64668f815d..5ec371b0b88c6 100644
+--- a/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/product_v2/product.yml
++++ b/src/PrestaShopBundle/Resources/config/routing/admin/sell/catalog/product_v2/product.yml
+@@ -21,13 +21,37 @@ admin_products_v2_light_list:
+     _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\Product\ProductController::lightListAction
+     _legacy_controller: AdminProducts
+ 
++admin_products_v2_preview:
++  path: /{productId}/preview
++  methods: [ GET ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\Product\ProductController::previewAction
++    _legacy_controller: AdminProducts
++    _legacy_link: AdminProducts:preview
++    _legacy_parameters:
++      id_product: productId
++  requirements:
++    productId: \d+
++
+ admin_products_search:
+   path: /
+   methods: [ POST ]
+   defaults:
+-    _controller: PrestaShopBundle\Controller\Admin\CommonController::searchGridAction
+-    gridDefinitionFactoryServiceId: prestashop.core.grid.definition.factory.product
+-    redirectRoute: admin_products_v2_index
++    _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\Product\ProductController::searchGridAction
++    _legacy_controller: AdminProducts
++
++admin_products_reset_grid_search:
++  path: /reset_grid_search
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\Product\ProductController::resetGridSearchAction
++    _legacy_controller: AdminProducts
++
++admin_products_grid_category_filter:
++  path: /grid_category_filter
++  methods: [ POST ]
++  defaults:
++    _controller: PrestaShopBundle\Controller\Admin\Sell\Catalog\Product\ProductController::gridCategoryFilterAction
+     _legacy_controller: AdminProducts
+ 
+ admin_products_v2_create:
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/grid.yml b/src/PrestaShopBundle/Resources/config/services/bundle/grid.yml
+index 7962fb8d19f51..34f9a2b164081 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/grid.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/grid.yml
+@@ -10,6 +10,7 @@ services:
+       - '@prestashop.core.admin.admin_filter.repository'
+       - '@=service("prestashop.adapter.legacy.context").getContext().employee.id'
+       - '@=service("prestashop.adapter.legacy.context").getContext().shop.id'
++      - '@session'
+ 
+   prestashop.bundle.grid.controller_response_builder:
+     class: PrestaShopBundle\Service\Grid\ControllerResponseBuilder
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Actions/Row/link.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Actions/Row/link.html.twig
+index 8749f2ae84490..0ac4f6df934d9 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Actions/Row/link.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Actions/Row/link.html.twig
+@@ -45,6 +45,7 @@
+     data-original-title="{{ action.name }}"
+   {% endif %}
+   data-clickable-row="{{ action.options.clickable_row|default(false) }}"
++  {% if action.options.target is not empty %}target="{{ action.options.target }}"{% endif %}
+ >
+   {% if action.icon is not empty %}
+     <i class="material-icons">{{ action.icon }}</i>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Blocks/EmptyState/product.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Blocks/EmptyState/product.html.twig
+new file mode 100644
+index 0000000000000..54a2c64428214
+--- /dev/null
++++ b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Blocks/EmptyState/product.html.twig
+@@ -0,0 +1,40 @@
++{#**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ *#}
++
++<div class="text-center showcase-list-card">
++  <img class="img-responsive mt-3 img-rtl" src="{{ asset('themes/new-theme/img/empty_state/catalog.png') }}">
++
++  <p class="mt-4 showcase-list-card__header">{{ 'Manage your products'|trans({}, 'Admin.Catalog.Feature') }}</p>
++
++  <div class="mt-4">
++    <a href="{{ path('admin_products_v2_create') }}" class="btn btn-primary ml-1 new-product-button">
++      {{ 'Create new product'|trans({}, 'Admin.Catalog.Feature') }}
++    </a>
++    {{ 'or'|trans({}, 'Admin.Global') }}
++    <a href="{{ path('admin_import') }}" target="_blank" class="btn btn-outline-secondary mr-1">
++      {{ 'Import a list of products.'|trans({}, 'Admin.Catalog.Feature') }}
++    </a>
++  </div>
++</div>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/image.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/image.html.twig
+index 83ca6e5cff56d..b46dba261df4a 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/image.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Common/Grid/Columns/Content/image.html.twig
+@@ -23,4 +23,7 @@
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  *#}
+ 
+-<img src="{{ record[column.options.src_field] }}">
++<img
++  src="{{ record[column.options.src_field] }}"
++  {% if record[column.options.alt_field] is defined %}alt="{{ record[column.options.alt_field] }}"{% endif %}
++/>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/categories.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/categories.html.twig
+index a83624443eb85..8a68187647bef 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/categories.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/FormTheme/categories.html.twig
+@@ -127,6 +127,11 @@
+       {{ form_widget(form) }}
+     </div>
+   </div>
++  {% if form.vars.data is not empty %}
++  <button class="btn btn-link category_tree_filter_reset" type="button">
++    <i class="material-icons">clear</i> Clear filter
++  </button>
++  {% endif %}
+ {% endblock %}
+ 
+ {% block category_filter_widget -%}
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Grid/grid.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Grid/grid.html.twig
+index df62d18a96bca..41783caec8660 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Grid/grid.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Catalog/Product/Grid/grid.html.twig
+@@ -28,6 +28,10 @@
+ {% form_theme categoryFilterForm '@PrestaShop/Admin/Sell/Catalog/Product/FormTheme/categories.html.twig' %}
+ 
+ {% block grid_bulk_actions_block %}
+-  {{ form_row(categoryFilterForm) }}
++  {% if not grid.attributes.is_empty_state %}
++  {{ form_start(categoryFilterForm, {attr: {class: 'd-inline-block'}}) }}
++    {{ form_row(categoryFilterForm) }}
++  {{ form_end(categoryFilterForm) }}
++  {% endif %}
+   {{ parent() }}
+ {% endblock %}
+diff --git a/src/PrestaShopBundle/Service/Grid/ResponseBuilder.php b/src/PrestaShopBundle/Service/Grid/ResponseBuilder.php
+index c4915e7a44bf5..133d11cc59577 100644
+--- a/src/PrestaShopBundle/Service/Grid/ResponseBuilder.php
++++ b/src/PrestaShopBundle/Service/Grid/ResponseBuilder.php
+@@ -33,6 +33,7 @@
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Session\Session;
+ use Symfony\Component\Routing\Router;
+ 
+ class ResponseBuilder
+@@ -52,6 +53,9 @@ class ResponseBuilder
+     /** @var int */
+     private $shopId;
+ 
++    /** @var Session */
++    private $session;
++
+     /**
+      * @param GridFilterFormFactoryInterface $filterFormFactory
+      * @param Router $router
+@@ -64,13 +68,15 @@ public function __construct(
+         Router $router,
+         AdminFilterRepository $adminFilterRepository,
+         ?int $employeeId,
+-        int $shopId
++        int $shopId,
++        Session $session
+     ) {
+         $this->filterFormFactory = $filterFormFactory;
+         $this->router = $router;
+         $this->adminFilterRepository = $adminFilterRepository;
+         $this->employeeId = $employeeId;
+         $this->shopId = $shopId;
++        $this->session = $session;
+     }
+ 
+     /**
+@@ -98,15 +104,22 @@ public function buildSearchResponse(
+ 
+         $redirectParams = [];
+         if ($filtersForm->isSubmitted()) {
+-            if ($this->checkIsFormDataEmpty($filtersForm->getData())) {
+-                $this->resetPersistedFilter($filterId);
++            if ($filtersForm->isValid()) {
++                if ($this->checkIsFormDataEmpty($filtersForm->getData())) {
++                    $this->resetPersistedFilter($filterId);
++                }
++
++                $redirectParams = [
++                    $filterId => [
++                        'filters' => $filtersForm->getData(),
++                    ],
++                ];
++            } else {
++                foreach ($filtersForm->getErrors(true) as $error) {
++                    $fieldLabel = $error->getOrigin()->getConfig()->getOption('label') ?: $error->getOrigin()->getName();
++                    $this->session->getFlashBag()->add('error', sprintf('%s: %s', $fieldLabel, $error->getMessage()));
++                }
+             }
+-
+-            $redirectParams = [
+-                $filterId => [
+-                    'filters' => $filtersForm->getData(),
+-                ],
+-            ];
+         }
+ 
+         foreach ($queryParamsToKeep as $paramName) {
+diff --git a/tests/Unit/PrestaShopBundle/Service/Grid/ResponseBuilderTest.php b/tests/Unit/PrestaShopBundle/Service/Grid/ResponseBuilderTest.php
+index 03742fe7f60ad..54871a4806413 100644
+--- a/tests/Unit/PrestaShopBundle/Service/Grid/ResponseBuilderTest.php
++++ b/tests/Unit/PrestaShopBundle/Service/Grid/ResponseBuilderTest.php
+@@ -34,14 +34,22 @@
+ use PrestaShop\PrestaShop\Core\Grid\Filter\GridFilterFormFactoryInterface;
+ use PrestaShopBundle\Entity\Repository\AdminFilterRepository;
+ use PrestaShopBundle\Service\Grid\ResponseBuilder;
++use Symfony\Component\Form\FormConfigInterface;
++use Symfony\Component\Form\FormError;
++use Symfony\Component\Form\FormErrorIterator;
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\HttpFoundation\ParameterBag;
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\HttpFoundation\Session\Flash\FlashBagInterface;
++use Symfony\Component\HttpFoundation\Session\Session;
+ use Symfony\Component\Routing\Router;
+ 
+ class ResponseBuilderTest extends TestCase
+ {
++    private const ERROR_MESSAGE = 'An error occurred.';
++    private const ERROR_LABEL = 'Field label';
++
+     /**
+      * @dataProvider dataProviderBuildSearchResponse
+      *
+@@ -50,43 +58,27 @@ class ResponseBuilderTest extends TestCase
+      */
+     public function testBuildSearchResponse(array $data, array $redirectParams): void
+     {
+-        $mockForm = $this->createMock(FormInterface::class);
+-        $mockForm->method('isSubmitted')->willReturn(true);
+-        $mockForm->method('getData')->willReturn($data);
+-
+-        $mockFilterFormFactory = $this->createMock(GridFilterFormFactoryInterface::class);
+-        $mockFilterFormFactory->method('create')->willReturn($mockForm);
+-
+-        $mockDefinitionFactory = $this->createMock(GridDefinitionFactoryInterface::class);
+-        $mockDefinitionFactory->method('getDefinition')->willReturn(
+-            $this->createMock(GridDefinitionInterface::class)
+-        );
+-
+-        $mockRouter = $this->createMock(Router::class);
+-        $mockRouter->method('generate')->willReturnCallback(function (string $name, array $parameters = []) {
+-            return $name . '?' . http_build_query($parameters);
+-        });
+-
+-        $mockRequest = $this->createMock(Request::class);
+-        $mockRequest->setMethod('POST');
+-        $mockRequest->request = $this->createMock(ParameterBag::class);
+-
+-        $responseBuilder = new ResponseBuilder(
+-            $mockFilterFormFactory,
+-            $mockRouter,
+-            $this->createMock(AdminFilterRepository::class),
+-            1,
+-            1
+-        );
++        $response = $this->buildResponse($data, true);
++        self::assertInstanceOf(RedirectResponse::class, $response);
+ 
+-        $response = $responseBuilder->buildSearchResponse(
+-            $mockDefinitionFactory,
+-            $mockRequest,
+-            'filterId',
+-            'index',
+-            []
+-        );
++        $parts = parse_url($response->getTargetUrl());
++        // Path
++        self::assertEquals('index', $parts['path']);
++        // Query
++        parse_str($parts['query'] ?? '', $query);
++        self::assertEquals($redirectParams, $query);
++    }
+ 
++    /**
++     * @dataProvider dataProviderBuildSearchResponse
++     *
++     * @param array $data
++     * @param array $redirectParams
++     */
++    public function testInvalidBuildSearchResponse(array $data, array $redirectParams): void
++    {
++        // The error message are tested via the mocks
++        $response = $this->buildResponse($data, false);
+         self::assertInstanceOf(RedirectResponse::class, $response);
+ 
+         $parts = parse_url($response->getTargetUrl());
+@@ -94,6 +86,8 @@ public function testBuildSearchResponse(array $data, array $redirectParams): voi
+         self::assertEquals('index', $parts['path']);
+         // Query
+         parse_str($parts['query'] ?? '', $query);
++        // The filters are ignored and not passed in redirect params when the form is invalid
++        unset($redirectParams['filterId']);
+         self::assertEquals($redirectParams, $query);
+     }
+ 
+@@ -174,4 +168,65 @@ public function dataProviderBuildSearchResponse(): array
+             ],
+         ];
+     }
++
++    private function buildResponse(array $data, bool $isValid): RedirectResponse
++    {
++        $mockForm = $this->createMock(FormInterface::class);
++        $mockForm->method('isSubmitted')->willReturn(true);
++        $mockForm->method('isValid')->willReturn($isValid);
++        $mockForm->method('getData')->willReturn($data);
++
++        if (!$isValid) {
++            $mockFieldConfig = $this->createMock(FormConfigInterface::class);
++            $mockFieldConfig->method('getOption')->with('label')->willReturn(self::ERROR_LABEL);
++            $mockFormField = $this->createMock(FormInterface::class);
++            $mockFormField->method('getConfig')->willReturn($mockFieldConfig);
++
++            $formError = new FormError(self::ERROR_MESSAGE);
++            $formError->setOrigin($mockFormField);
++
++            $mockForm->method('getErrors')->willReturn(new FormErrorIterator($mockForm, [$formError]));
++        }
++
++        $mockFilterFormFactory = $this->createMock(GridFilterFormFactoryInterface::class);
++        $mockFilterFormFactory->method('create')->willReturn($mockForm);
++
++        $mockDefinitionFactory = $this->createMock(GridDefinitionFactoryInterface::class);
++        $mockDefinitionFactory->method('getDefinition')->willReturn(
++            $this->createMock(GridDefinitionInterface::class)
++        );
++
++        $mockRouter = $this->createMock(Router::class);
++        $mockRouter->method('generate')->willReturnCallback(function (string $name, array $parameters = []) {
++            return $name . '?' . http_build_query($parameters);
++        });
++
++        $mockRequest = $this->createMock(Request::class);
++        $mockRequest->setMethod('POST');
++        $mockRequest->request = $this->createMock(ParameterBag::class);
++
++        $session = $this->createMock(Session::class);
++        if (!$isValid) {
++            $mockFlashBag = $this->createMock(FlashBagInterface::class);
++            $mockFlashBag->method('add')->with('error', sprintf('%s: %s', self::ERROR_LABEL, self::ERROR_MESSAGE));
++            $session->method('getFlashBag')->willReturn($mockFlashBag);
++        }
++
++        $responseBuilder = new ResponseBuilder(
++            $mockFilterFormFactory,
++            $mockRouter,
++            $this->createMock(AdminFilterRepository::class),
++            1,
++            1,
++            $session
++        );
++
++        return $responseBuilder->buildSearchResponse(
++            $mockDefinitionFactory,
++            $mockRequest,
++            'filterId',
++            'index',
++            []
++        );
++    }
+ }

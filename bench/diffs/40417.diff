@@ -1,0 +1,619 @@
+diff --git a/classes/Address.php b/classes/Address.php
+index 5e596c088c1c1..4ba1ee373c1c2 100644
+--- a/classes/Address.php
++++ b/classes/Address.php
+@@ -545,11 +545,14 @@ public static function initialize($id_address = null, $with_geoloc = false)
+     {
+         $context = Context::getContext();
+ 
++        /*
++         * To save performance, we cache the result, here we resolve a unique hash
++         * depending on the parameters used to initialize the address.
++         */
+         if ($id_address) {
+             $context_hash = (int) $id_address;
+         } elseif ($with_geoloc && isset($context->customer->geoloc_id_country)) {
+-            $context_hash = md5((int) $context->customer->geoloc_id_country . '-' . (int) $context->customer->id_state . '-' .
+-                                $context->customer->postcode);
++            $context_hash = md5((int) $context->customer->geoloc_id_country . '-' . (int) $context->customer->id_state . '-' . $context->customer->postcode);
+         } else {
+             $context_hash = md5((string) $context->country->id);
+         }
+@@ -557,29 +560,49 @@ public static function initialize($id_address = null, $with_geoloc = false)
+         $cache_id = 'Address::initialize_' . $context_hash;
+ 
+         if (!Cache::isStored($cache_id)) {
+-            // if an id_address has been specified retrieve the address
++            /*
++             * Case 1 - Specific address ID is provided. We just load it.
++             */
+             if ($id_address) {
+                 $address = new Address((int) $id_address);
+ 
+                 if (!Validate::isLoadedObject($address)) {
+                     throw new PrestaShopException('Invalid address #' . (int) $id_address);
+                 }
++            /*
++             * Case 2 - We try to use geolocation information if allowed. However, geoloc_id_country
++             * is not set to the customer anywhere in the current codebase. Most geolocation logic either
++             * native or from modules depend on setting the country directly in the context. So, this will
++             * probably never work.
++             */
+             } elseif ($with_geoloc && isset($context->customer->geoloc_id_country)) {
+                 $address = new Address();
+                 $address->id_country = (int) $context->customer->geoloc_id_country;
+                 $address->id_state = (int) $context->customer->id_state;
+                 $address->postcode = $context->customer->postcode;
++            /*
++             * Case 3 - There is already a country set in the context and it's not the shop country.
++             * This is pretty common if you either use geolocation modules or let the user select his country
++             * via a custom country selector on the front office.
++             */
+             } elseif ((int) $context->country->id && ((int) $context->country->id != Configuration::get('PS_SHOP_COUNTRY_ID'))) {
+                 $address = new Address();
+                 $address->id_country = (int) $context->country->id;
+                 $address->id_state = 0;
+                 $address->postcode = '0';
++            /*
++             * Case 4 - If there is no country in the context, or the country is the same, we use the shop country.
++             * We also assign the state and postcode if available.
++             */
+             } elseif ((int) Configuration::get('PS_SHOP_COUNTRY_ID')) {
+                 // set the default address
+                 $address = new Address();
+                 $address->id_country = (int) Configuration::get('PS_SHOP_COUNTRY_ID');
+                 $address->id_state = (int) Configuration::get('PS_SHOP_STATE_ID');
+                 $address->postcode = Configuration::get('PS_SHOP_CODE');
++            /*
++             * Case 5 - As a last resort, we just use the default country. It will most likely be the shop country anyway.
++             */
+             } else {
+                 // set the default address
+                 $address = new Address();
+@@ -587,6 +610,8 @@ public static function initialize($id_address = null, $with_geoloc = false)
+                 $address->id_state = 0;
+                 $address->postcode = '0';
+             }
++
++            // Store it in cache, so we don't have to re-initialize it again
+             Cache::store($cache_id, $address);
+ 
+             return $address;
+diff --git a/classes/Carrier.php b/classes/Carrier.php
+index 9790c7d9e7586..eef63c3419a3e 100644
+--- a/classes/Carrier.php
++++ b/classes/Carrier.php
+@@ -1359,6 +1359,11 @@ public function deleteTaxRulesGroup(?array $shops = null)
+      */
+     public function getTaxesRate(?Address $address = null)
+     {
++        /*
++         * If no address is provided, we let Address::initialize instantiate one blank
++         * for us with the all default/fallback data we can get. We get a blank Address
++         * object with a country, sometimes even state and postcode.
++         */
+         if (!$address || !$address->id_country) {
+             $address = Address::initialize();
+         }
+diff --git a/classes/Dispatcher.php b/classes/Dispatcher.php
+index 52b2006ba853c..474102c7d2206 100644
+--- a/classes/Dispatcher.php
++++ b/classes/Dispatcher.php
+@@ -537,7 +537,14 @@ private function buildRequestUri($requestUri, $isMultiLanguageActivated, ?Shop $
+         // If friendly URLs are activated and there are more than one languages on the shop, we handle the language
+         // Set $_GET['isolang'] and remove the language part from the request URI
+         if ($this->use_routes && $isMultiLanguageActivated) {
+-            // If we find a language in the URL, we assign it and remove it from the URL
++            /*
++             * If we find a language in the URL, we assign it and remove it from the URL
++             *
++             * @todo Please note that this does not validate the language code in any way.
++             * It would be better to check if the language actually exists in the shop directly.
++             * If not, the default language remains used and the url is redirected to the URL of
++             * the default language later, but only because of the canonical redirect.
++             */
+             if (preg_match('#^/([a-z]{2})(?:/.*)?$#', $requestUri, $matches)) {
+                 $_GET['isolang'] = $matches[1];
+                 $requestUri = substr($requestUri, 3);
+diff --git a/classes/Group.php b/classes/Group.php
+index 2f4ab1920d12a..a1a9e42333614 100644
+--- a/classes/Group.php
++++ b/classes/Group.php
+@@ -214,10 +214,20 @@ public function update($autodate = true, $null_values = false)
+ 
+     public function delete()
+     {
+-        if ($this->id == (int) Configuration::get('PS_CUSTOMER_GROUP')) {
++        // Prevent calling the logic in case of an invalid object
++        if (empty($this->id)) {
+             return false;
+         }
+ 
++        // Prevent deletion of groups currently used in configuration
++        if (in_array($this->id, [
++            (int) Configuration::get('PS_UNIDENTIFIED_GROUP'),
++            (int) Configuration::get('PS_GUEST_GROUP'),
++            (int) Configuration::get('PS_CUSTOMER_GROUP'),
++        ])) {
++            throw new PrestaShopException('You cannot delete a group that is used in the shop configuration.');
++        }
++
+         if (parent::delete()) {
+             Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . 'cart_rule_group` WHERE `id_group` = ' . (int) $this->id);
+             Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . 'customer_group` WHERE `id_group` = ' . (int) $this->id);
+diff --git a/classes/Product.php b/classes/Product.php
+index 23be4a37c2c9b..41087ba4d5748 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -3423,22 +3423,47 @@ public static function getPriceStatic(
+             }
+         }
+ 
++        /*
++         * Instantiate currency - either by using the one in the context or by getting the default currency
++         */
+         $id_currency = Validate::isLoadedObject($context->currency) ? (int) $context->currency->id : Currency::getDefaultCurrencyId();
+ 
++        /*
++         * Now, we need to retrieve address information. We need it to precisely calculate the price,
++         * without it, we cannot resolve proper tax, special prices to be used etc.
++         *
++         * First, if no address ID has been provided, we try to get it from the cart in the context.
++         */
+         if (!$id_address && Validate::isLoadedObject($cur_cart)) {
+             $id_address = $cur_cart->{Configuration::get('PS_TAX_ADDRESS_TYPE')};
+         }
+ 
+-        // retrieve address informations
++        /*
++         * Now, we either have the address ID or still null - which is not a problem.
++         *
++         * Address::initialize will take care of everything and just return an address with required data.
++         * We either get a filled Address object if we had an ID.
++         * Or, we get a blank Address object with a country, sometimes even state and postcode. Depends on
++         * geolocation enabled or if we already assigned some country to the context. See the method insides
++         * to see the logic.
++         */
+         $address = Address::initialize($id_address, true);
++
++        // Now, we extract other required data from the address
+         $id_country = (int) $address->id_country;
+         $id_state = (int) $address->id_state;
+         $zipcode = $address->postcode;
+ 
++        // Check if tax has been enabled in configuration, if not, it will be always false
+         if (!Configuration::get('PS_TAX')) {
+             $usetax = false;
+         }
+ 
++        /*
++         * If the customer has a valid VAT number, we calculate the price without tax.
++         * @TODO - This is historic and should be totally refactored for multiple reasons.
++         * No validation, only one address considered, dependence on configuration from legacy module.
++         */
+         if (
+             $usetax != false
+             && !empty($address->vat_number)
+@@ -3448,6 +3473,7 @@ public static function getPriceStatic(
+             $usetax = false;
+         }
+ 
++        // If no customer ID has been provided, we try to get it from the context, if set
+         if (null === $id_customer && Validate::isLoadedObject($context->customer)) {
+             $id_customer = $context->customer->id;
+         }
+@@ -6556,6 +6582,11 @@ public static function getIdTaxRulesGroupByIdProduct($id_product, ?Context $cont
+      */
+     public function getTaxesRate(?Address $address = null)
+     {
++        /*
++         * If no address is provided, we let Address::initialize instantiate one blank
++         * for us with the all default/fallback data we can get. We get a blank Address
++         * object with a country, sometimes even state and postcode.
++         */
+         if (!$address || !$address->id_country) {
+             $address = Address::initialize();
+         }
+diff --git a/classes/Tools.php b/classes/Tools.php
+index 5196964774766..347607ae700dc 100644
+--- a/classes/Tools.php
++++ b/classes/Tools.php
+@@ -536,7 +536,10 @@ public static function getIsset($key)
+     }
+ 
+     /**
+-     * Change language in cookie while clicking on a flag.
++     * This method was named "Change language in cookie while clicking on a flag.",
++     * but as of 25.12.2025, it does not really work at all. Language detection will
++     * never work because the language is exclusively determined by the URL, the isolang
++     * is always set and the HTTP_ACCEPT_LANGUAGE is not parsed properly anyway.
+      *
+      * @return string iso code
+      */
+@@ -592,7 +595,17 @@ public static function setCookieLanguage($cookie = null)
+     }
+ 
+     /**
+-     * If necessary change cookie language ID and context language.
++     * Detects proper id_language by the isolang parameter in the request and assigns
++     * it to the context and cookie. The method naming is a bit confusing as it does
++     * not switch anything. Language is exclusively determined by the URL.
++     *
++     * @todo - The behavior is a bit non stable, it should probably throw exceptions
++     * or somehow notify that nonsense is being present. If you for example pass a non
++     * existent language in the URL and you get "zz" in isolang, you will end up with:
++     * $_GET['isolang'] = zz
++     * $_GET['id_lang'] = null
++     * $context->cookie->id_lang = default language id from config.inc.php
++     * $context->language = default language from config.inc.php
+      *
+      * @param Context|null $context
+      *
+@@ -611,6 +624,11 @@ public static function switchLanguage(?Context $context = null)
+             return;
+         }
+ 
++        /*
++         * This takes the isolang parameter from $_GET, converts it to an id_lang
++         * and assigns it into the GET. The isolang in the request always set by the Dispatcher.
++         * Either to a language code from the URL or the default language.
++         */
+         if (
+             ($iso = Tools::getValue('isolang'))
+             && Validate::isLanguageIsoCode($iso)
+@@ -622,6 +640,16 @@ public static function switchLanguage(?Context $context = null)
+         // Only switch if new ID is different from old ID
+         $newLanguageId = (int) Tools::getValue('id_lang');
+ 
++        /*
++         * If we got a sensible language ID from the request, we will set it into the cookie
++         * and set it as the context language. There is already a default language set in the
++         * context from config.inc.php.
++         *
++         * @todo Please note that the cookie language ID has no effect as the language
++         * is exclusively determined by the URL. It may only by accessed by some really old
++         * codebase to read the language ID, but they should be updated to use the context
++         * language directly.
++         */
+         if (
+             Validate::isUnsignedId($newLanguageId)
+             && $newLanguageId !== 0
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index c85e8392afb46..3bbbcd6000679 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -284,6 +284,16 @@ public function init()
+             throw new PrestaShopException($this->trans('Current theme is unavailable. Please check your theme\'s directory name ("%s") and permissions.', [htmlspecialchars(basename(rtrim(_PS_THEME_DIR_, '/\\')))], 'Admin.Design.Notification'));
+         }
+ 
++        /*
++         * Here, we resolve the context->country, the default country that will be used to display
++         * prices, taxes, delivery options and other country specific data.
++         *
++         * The country may further change further down in this method, if we have a cart with an address assigned to it.
++         * If there is a cart already, the context country is set to the country of that cart.
++         *
++         * If you are looking to override the country selection logic, you can use actionFrontControllerInitBefore above
++         * and pre-set the things in beforehand.
++         */
+         if (Configuration::get('PS_GEOLOCATION_ENABLED')) {
+             if (($new_default = $this->geolocationManagement($this->context->country)) && Validate::isLoadedObject($new_default)) {
+                 $this->context->country = $new_default;
+@@ -459,10 +469,13 @@ public function init()
+ 
+         Product::initPricesComputation();
+ 
++        /*
++         * If there is an address assigned to the cart in context, the context->country MUST be set to the country of that address.
++         * We use delivery or invoice address, depending on PS_TAX_ADDRESS_TYPE configuration.
++         */
+         if (isset($cart->{Configuration::get('PS_TAX_ADDRESS_TYPE')}) && $cart->{Configuration::get('PS_TAX_ADDRESS_TYPE')}) {
+             $infos = Address::getCountryAndState((int) $cart->{Configuration::get('PS_TAX_ADDRESS_TYPE')});
+-            $country = new Country((int) $infos['id_country']);
+-            $this->context->country = $country;
++            $this->context->country = new Country((int) $infos['id_country']);
+         }
+ 
+         if (!Tools::isPHPCLI()) {
+diff --git a/composer.json b/composer.json
+index 80a75859d8e5a..5e5f9ea3d5adf 100644
+--- a/composer.json
++++ b/composer.json
+@@ -247,9 +247,6 @@
+             "phpunit/phpunit": true,
+             "symfony/phpunit-bridge": true
+         },
+-        "audit": {
+-            "block-insecure": false
+-        },
+         "platform": {
+             "php": "8.1.0"
+         },
+diff --git a/composer.lock b/composer.lock
+index 575af9f81783e..51f4f841b0e97 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -342,28 +342,28 @@
+         },
+         {
+             "name": "composer/ca-bundle",
+-            "version": "1.3.7",
++            "version": "1.5.9",
+             "source": {
+                 "type": "git",
+                 "url": "https://github.com/composer/ca-bundle.git",
+-                "reference": "76e46335014860eec1aa5a724799a00a2e47cc85"
++                "reference": "1905981ee626e6f852448b7aaa978f8666c5bc54"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/composer/ca-bundle/zipball/76e46335014860eec1aa5a724799a00a2e47cc85",
+-                "reference": "76e46335014860eec1aa5a724799a00a2e47cc85",
++                "url": "https://api.github.com/repos/composer/ca-bundle/zipball/1905981ee626e6f852448b7aaa978f8666c5bc54",
++                "reference": "1905981ee626e6f852448b7aaa978f8666c5bc54",
+                 "shasum": ""
+             },
+             "require": {
+                 "ext-openssl": "*",
+                 "ext-pcre": "*",
+-                "php": "^5.3.2 || ^7.0 || ^8.0"
++                "php": "^7.2 || ^8.0"
+             },
+             "require-dev": {
+-                "phpstan/phpstan": "^0.12.55",
+-                "psr/log": "^1.0",
+-                "symfony/phpunit-bridge": "^4.2 || ^5",
+-                "symfony/process": "^2.5 || ^3.0 || ^4.0 || ^5.0 || ^6.0"
++                "phpstan/phpstan": "^1.10",
++                "phpunit/phpunit": "^8 || ^9",
++                "psr/log": "^1.0 || ^2.0 || ^3.0",
++                "symfony/process": "^4.0 || ^5.0 || ^6.0 || ^7.0"
+             },
+             "type": "library",
+             "extra": {
+@@ -398,7 +398,7 @@
+             "support": {
+                 "irc": "irc://irc.freenode.org/composer",
+                 "issues": "https://github.com/composer/ca-bundle/issues",
+-                "source": "https://github.com/composer/ca-bundle/tree/1.3.7"
++                "source": "https://github.com/composer/ca-bundle/tree/1.5.9"
+             },
+             "funding": [
+                 {
+@@ -408,13 +408,9 @@
+                 {
+                     "url": "https://github.com/composer",
+                     "type": "github"
+-                },
+-                {
+-                    "url": "https://tidelift.com/funding/github/packagist/composer/composer",
+-                    "type": "tidelift"
+                 }
+             ],
+-            "time": "2023-08-30T09:31:38+00:00"
++            "time": "2025-11-06T11:46:17+00:00"
+         },
+         {
+             "name": "composer/installers",
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/CustomerPreferences/GeneralType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/CustomerPreferences/GeneralType.php
+index 33c20e6b42a11..671df16265d68 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/CustomerPreferences/GeneralType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/CustomerPreferences/GeneralType.php
+@@ -51,7 +51,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Feature'
+                 ),
+                 'help' => $this->trans(
+-                    'After a customer logs in, you can recall and display the content of his/her last shopping cart.',
++                    'If this option is enabled, the customer\'s last cart will be restored when they log back in. Otherwise, a new, empty cart will be created.',
+                     'Admin.Shopparameters.Help'
+                 ),
+                 'multistore_configuration_key' => 'PS_CART_FOLLOWING',
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+index bbb44a25025c8..ad2bbe46392b3 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/General/PreferencesType.php
+@@ -103,7 +103,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             $builder->add('enable_ssl', SwitchType::class, [
+                 'label' => $this->trans('Enable SSL', 'Admin.Shopparameters.Feature'),
+                 'help' => $this->trans(
+-                    'If you own an SSL certificate for your shop\'s domain name, you can activate SSL encryption (https://) for all the pages of your shop.',
++                    'Enables or disables SSL encryption (https://) for your shop. This is a security standard and you should always keep this option enabled, unless there is a specific technical issue.',
+                     'Admin.Shopparameters.Help'
+                 ),
+             ]);
+@@ -127,7 +127,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Feature'
+                 ),
+                 'help' => $this->trans(
+-                    'Allow iframes on text fields like product description. We recommend that you leave this option disabled.',
++                    'Allows the use of iframes in rich text fields such as product descriptions. It is recommended to keep this option disabled unless you specifically need iframes for video embeds or other external content.',
+                     'Admin.Shopparameters.Help'
+                 ),
+             ])
+@@ -137,7 +137,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Feature'
+                 ),
+                 'help' => $this->trans(
+-                    'Clean the HTML content on text fields. We recommend that you leave this option enabled.',
++                    'Cleans the HTML content in rich text fields before saving. It is recommended to keep this option enabled to ensure safe and valid content is saved into the database.',
+                     'Admin.Shopparameters.Help'
+                 ),
+             ])
+@@ -175,7 +175,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'display_suppliers', SwitchType::class, [
+                     'label' => $this->trans('Display suppliers', 'Admin.Shopparameters.Feature'),
+                     'help' => $this->trans(
+-                        'Enable suppliers page on your front office even when its module is disabled.',
++                        'Enables or disables the suppliers listing in your shop. When disabled, suppliers are also removed from the sitemap and other related sections.',
+                         'Admin.Shopparameters.Help'
+                     ),
+                 ])
+@@ -183,7 +183,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'display_manufacturers', SwitchType::class, [
+                     'label' => $this->trans('Display brands', 'Admin.Shopparameters.Feature'),
+                     'help' => $this->trans(
+-                        'Enable brands page on your front office even when its module is disabled.',
++                        'Enables or disables the brands listing in your shop. When disabled, brands are also removed from the sitemap and other related sections.',
+                         'Admin.Shopparameters.Help'
+                     ),
+                 ])
+@@ -191,7 +191,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'display_best_sellers', SwitchType::class, [
+                     'label' => $this->trans('Display best sellers', 'Admin.Shopparameters.Feature'),
+                     'help' => $this->trans(
+-                        'Enable best sellers page on your front office even when its respective module is disabled.',
++                        'Enables or disables the best sellers page in your shop. When disabled, the page and related links are also removed from the sitemap and other sections.',
+                         'Admin.Shopparameters.Help'
+                     ),
+                 ])
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderPreferences/GeneralType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderPreferences/GeneralType.php
+index 31996a17f25da..49e922331cf08 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderPreferences/GeneralType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/OrderPreferences/GeneralType.php
+@@ -101,8 +101,8 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('purchase_minimum_value', MoneyWithSuffixType::class, [
+                 'required' => false,
+-                'label' => $this->trans('Minimum purchase total required in order to validate the order', 'Admin.Shopparameters.Feature'),
+-                'help' => $this->trans('Set to 0 to disable this feature.', 'Admin.Shopparameters.Help'),
++                'label' => $this->trans('Minimum order value', 'Admin.Shopparameters.Feature'),
++                'help' => $this->trans('Set the minimum order value required to proceed to checkout. Customers won’t be able to continue if their cart total is below this amount. Set to 0 to disable this restriction.', 'Admin.Shopparameters.Help'),
+                 'currency' => $currencyIsoCode,
+                 'suffix' => $this->trans('(tax excl.)', 'Admin.Global'),
+                 'multistore_configuration_key' => 'PS_PURCHASE_MINIMUM',
+@@ -110,7 +110,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ->add('recalculate_shipping_cost', SwitchType::class, [
+                 'required' => false,
+                 'label' => $this->trans('Recalculate shipping costs after editing the order', 'Admin.Shopparameters.Feature'),
+-                'help' => $this->trans('Automatically updates the shipping costs when you edit an order.', 'Admin.Shopparameters.Help'),
++                'help' => $this->trans('Automatically updates the shipping costs when an order is edited in the back office. If you disable this option, make sure to review the shipping costs whenever you make changes to an order.', 'Admin.Shopparameters.Help'),
+                 'multistore_configuration_key' => 'PS_ORDER_RECALCULATE_SHIPPING',
+             ]);
+ 
+@@ -124,7 +124,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ->add('enable_tos', SwitchType::class, [
+                 'required' => false,
+                 'label' => $this->trans('Terms of service', 'Admin.Shopparameters.Feature'),
+-                'help' => $this->trans('Require customers to accept or decline terms of service before processing an order.', 'Admin.Shopparameters.Help'),
++                'help' => $this->trans('Require customers to accept terms of service before processing an order.', 'Admin.Shopparameters.Help'),
+                 'multistore_configuration_key' => 'PS_CONDITIONS',
+             ])
+             ->add('tos_cms_id', ChoiceType::class, [
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PaginationType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PaginationType.php
+index 83afa9317df4e..b8b78851ebade 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PaginationType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/PaginationType.php
+@@ -58,7 +58,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Feature'
+                 ),
+                 'help' => $this->trans(
+-                    'The order in which products are displayed in the product list.',
++                    'The default order in which products are displayed in listings. The available sorting methods differ based on the page type.',
+                     'Admin.Shopparameters.Help'
+                 ),
+                 'choices' => [
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/StockType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/StockType.php
+index 37972c942c4c4..bed3604db0c48 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/StockType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/ProductPreferences/StockType.php
+@@ -101,7 +101,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'Admin.Shopparameters.Feature'
+                 ),
+                 'help' => $this->trans(
+-                    'By default, the "%add_to_cart_label%" button is hidden when a product is unavailable. You can choose to have it displayed in all cases.',
++                    'Allow or deny customers to order products that are out of stock. Further customization is possible for each product.',
+                     'Admin.Shopparameters.Help',
+                     [
+                         '%add_to_cart_label%' => $this->trans(
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
+index 4a0860d045acb..26da02b2b086c 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/SetUpUrlType.php
+@@ -131,6 +131,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     'choices' => $this->canonicalUrlChoices,
+                     'translation_domain' => false,
+                     'label' => $this->trans('Redirect to the canonical URL', 'Admin.Shopparameters.Feature'),
++                    'help' => $this->trans(
++                        'If a visitor accesses a page using a non-canonical URL, this option defines how the shop should respond. For SEO reasons, we recommend choosing "301 Moved Permanently".',
++                        'Admin.Shopparameters.Help'
++                    ),
+                     'multistore_configuration_key' => 'PS_CANONICAL_REDIRECT',
+                 ]
+             );
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/TrafficSeo/Meta/Blocks/robots_file_generation.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/TrafficSeo/Meta/Blocks/robots_file_generation.html.twig
+index c487237bcb06c..ba5b453abf745 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/TrafficSeo/Meta/Blocks/robots_file_generation.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Configure/ShopParameters/TrafficSeo/Meta/Blocks/robots_file_generation.html.twig
+@@ -31,35 +31,37 @@
+     <i class="material-icons">settings</i>
+     {{ 'Robots file generation'|trans }}
+   </h3>
+-
+   <div class="card-body">
+     <div class="form-wrapper">
+       <div class="alert alert-info" role="alert">
+         <div class="alert-text">
+-          {% set defaultDescription = 'Your robots.txt file MUST be in your website\'s root directory and nowhere else (e.g. http://www.example.com/robots.txt).'|trans({}, 'Admin.Shopparameters.Notification') %}
+-            {% if isRobotsTextFileValid %}
+-              {{ defaultDescription }} <br>
+-              {{ 'Generate your "robots.txt" file by clicking on the following button (this will erase the old robots.txt file)'|trans({}, 'Admin.Shopparameters.Notification') }}
+-            {% else %}
+-              {{ defaultDescription }} <br>
+-              {{ 'Before you can use this tool, you need to:'|trans({}, 'Admin.Shopparameters.Notification') }} <br>
+-              {{ '1) Create a blank robots.txt file in your root directory.'|trans({}, 'Admin.Shopparameters.Notification') }} <br>
+-              {{ '2) Give it write permissions (CHMOD 666 on Unix system).'|trans({}, 'Admin.Shopparameters.Notification') }}
+-            {% endif %}
+-          </div>
++          {{ 'robots.txt defines the rules that bots and crawlers should follow. It is automatically generated and stored in your website\'s root directory (e.g. http://www.example.com/robots.txt).'|trans({}, 'Admin.Shopparameters.Notification') }}<br>
++          {{ 'It\'s regenerated automatically during certain actions in the back office, but you can manually regenerate it using the button below if needed.'|trans({}, 'Admin.Shopparameters.Notification') }}<br>
++          {{ 'Don\'t edit this file manually - use the appropriate hooks to modify its content.'|trans({}, 'Admin.Shopparameters.Notification') }}
+         </div>
+-
+-        {% block meta_robots_file_form_rest %}
+-          {{ form_rest(setUpUrlsForm) }}
+-        {% endblock %}
+       </div>
++
++      {% block meta_robots_file_form_rest %}
++        {{ form_rest(setUpUrlsForm) }}
++      {% endblock %}
++
++      {% if not isRobotsTextFileValid %}
++        <div class="alert alert-danger" role="alert">
++          <div class="alert-text">
++            {{ 'There seems to be a problem with your current robots.txt file. Before you can use this tool, you need to:'|trans({}, 'Admin.Shopparameters.Notification') }} <br>
++            {{ '1) Create a blank robots.txt file in your root directory.'|trans({}, 'Admin.Shopparameters.Notification') }} <br>
++            {{ '2) Give it write permissions (CHMOD 666 on Unix system).'|trans({}, 'Admin.Shopparameters.Notification') }}
++          </div>
++        </div>
++      {% endif %}
+     </div>
+-    <div class="card-footer">
+-      <div class="d-flex justify-content-end">
+-        {% if isRobotsTextFileValid %}
+-          <button class="btn btn-primary">{{ 'Generate robots.txt file'|trans }}</button>
+-        {% endif %}
+-      </div>
++  </div>
++  <div class="card-footer">
++    <div class="d-flex justify-content-end">
++      {% if isRobotsTextFileValid %}
++        <button class="btn btn-primary">{{ 'Generate robots.txt file'|trans }}</button>
++      {% endif %}
+     </div>
+   </div>
++</div>
+ {% endblock %}
+diff --git a/src/PrestaShopBundle/Service/TranslationService.php b/src/PrestaShopBundle/Service/TranslationService.php
+index b75cea7e217f1..4c8d0f331ed63 100644
+--- a/src/PrestaShopBundle/Service/TranslationService.php
++++ b/src/PrestaShopBundle/Service/TranslationService.php
+@@ -252,7 +252,7 @@ public function saveTranslationMessage($lang, $domain, $key, $translationValue,
+             } else {
+                 $queryBuilder->andWhere('t.theme IS NULL');
+             }
+-            $translation = $queryBuilder->getQuery()->getSingleResult();
++            $translation = $queryBuilder->getQuery()->getOneOrNullResult();
+         } catch (Exception $exception) {
+             $logger->error($exception->getMessage(), $log_context);
+         }

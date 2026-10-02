@@ -1,0 +1,133 @@
+diff --git a/admin-dev/themes/default/template/controllers/modules/modal_translation.tpl b/admin-dev/themes/default/template/controllers/modules/modal_translation.tpl
+index 5a131349c9091..daba87bfd7ffe 100644
+--- a/admin-dev/themes/default/template/controllers/modules/modal_translation.tpl
++++ b/admin-dev/themes/default/template/controllers/modules/modal_translation.tpl
+@@ -31,7 +31,9 @@
+ 		</button>
+ 		<ul class="dropdown-menu">
+ 			{foreach from=$module_languages item=language}
+-			<li><a href="{$trad_link|escape:'html':'UTF-8'}{$language['iso_code']|escape:'html':'UTF-8'}#{$module_name|escape:'html':'UTF-8'}">{$language.name|escape:'html':'UTF-8'}</a></li>
++				<li>
++					<a href="{$translateLinks[$language.iso_code]|escape:'html':'UTF-8'}">{$language.name|escape:'html':'UTF-8'}</a>
++				</li>
+ 			{/foreach}
+ 		</ul>
+ 	</div>
+diff --git a/classes/Link.php b/classes/Link.php
+index 23e97960a5c39..d71c26a4630a7 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -733,6 +733,11 @@ public function getAdminLink($controller, $withToken = true, $sfRouteParams = ar
+             case 'AdminStockManagement':
+                 $sfRoute = array_key_exists('route', $sfRouteParams) ? $sfRouteParams['route'] : 'admin_stock_overview';
+ 
++                return $sfRouter->generate($sfRoute, $sfRouteParams, UrlGeneratorInterface::ABSOLUTE_URL);
++
++            case 'AdminTranslationSf':
++                $sfRoute = array_key_exists('route', $sfRouteParams) ? $sfRouteParams['route'] : 'admin_international_translation_overview';
++
+                 return $sfRouter->generate($sfRoute, $sfRouteParams, UrlGeneratorInterface::ABSOLUTE_URL);
+         }
+ 
+diff --git a/classes/module/Module.php b/classes/module/Module.php
+index 7774d5b01e8b5..a343d94bfc179 100644
+--- a/classes/module/Module.php
++++ b/classes/module/Module.php
+@@ -3144,6 +3144,25 @@ protected function trans($id, array $parameters = array(), $domain = null, $loca
+         $parameters['legacy'] = 'htmlspecialchars';
+         return $this->getTranslator()->trans($id, $parameters, $domain, $locale);
+     }
++
++    /**
++     * Check if the module uses the new translation system
++     * @return bool
++     */
++    public function isUsingNewTranslationSystem()
++    {
++        $moduleName = $this->name;
++        $domains = array_keys($this->context->getTranslator()->getCatalogue()->all());
++        $moduleName = preg_replace('/^ps_(\w+)/', '$1', $moduleName);
++
++        foreach ($domains as $domain) {
++            if (false !== stripos($domain, $moduleName)) {
++                return true;
++            }
++        }
++
++        return false;
++    }
+ }
+ 
+ function ps_module_version_sort($a, $b)
+diff --git a/controllers/admin/AdminModulesController.php b/controllers/admin/AdminModulesController.php
+index f4b2a676e94e7..365522b231ca3 100644
+--- a/controllers/admin/AdminModulesController.php
++++ b/controllers/admin/AdminModulesController.php
+@@ -1395,10 +1395,33 @@ public function initModal()
+     {
+         parent::initModal();
+ 
++        $module = Module::getInstanceByName(Tools::getValue('configure'));
++        $languages = Language::getLanguages(false);
++        $isNewTranslateSystem = $module->isUsingNewTranslationSystem();
++        $link = Context::getContext()->link;
++        $translateLinks = array();
++        foreach ($languages as $lang) {
++            if ($isNewTranslateSystem) {
++                $translateLinks[$lang['iso_code']] = $link->getAdminLink('AdminTranslationSf', true, array(
++                    'lang' => $lang['iso_code'],
++                    'type' => 'modules',
++                    'selected' => $module->name,
++                    'locale' => $lang['locale'],
++                ));
++            } else {
++                $translateLinks[$lang['iso_code']] = $link->getAdminLink('AdminTranslations', true, array(), array(
++                    'type' => 'modules',
++                    'module' => $module->name,
++                    'lang' => $lang['iso_code'],
++                ));
++            }
++        }
++
+         $this->context->smarty->assign(array(
+             'trad_link' => 'index.php?tab=AdminTranslations&token='.Tools::getAdminTokenLite('AdminTranslations').'&type=modules&module='.Tools::getValue('configure').'&lang=',
+-            'module_languages' => Language::getLanguages(false),
+-            'module_name' => Tools::getValue('module_name'),
++            'module_languages' => $languages,
++            'module_name' => $module->name,
++            'translateLinks' => $translateLinks,
+         ));
+ 
+         $modal_content = $this->context->smarty->fetch('controllers/modules/modal_translation.tpl');
+diff --git a/controllers/admin/AdminTranslationsController.php b/controllers/admin/AdminTranslationsController.php
+index b138ae617ed2c..49bba05a5e3fd 100755
+--- a/controllers/admin/AdminTranslationsController.php
++++ b/controllers/admin/AdminTranslationsController.php
+@@ -221,7 +221,7 @@ public function initMain()
+             $modules[$module->name] = array(
+                 'name' => $module->name,
+                 'displayName' => $module->displayName,
+-                'urlToTranslate' => !$this->isUsingNewTranslationsSystem($module->name) ? $this->context->link->getAdminLink(
++                'urlToTranslate' => !$module->isUsingNewTranslationSystem() ? $this->context->link->getAdminLink(
+                     'AdminTranslations',
+                     true,
+                     array(),
+@@ -258,18 +258,6 @@ public function initMain()
+         return $this->content;
+     }
+ 
+-    private function isUsingNewTranslationsSystem($moduleName)
+-    {
+-        $domains = array_keys($this->context->getTranslator()->getCatalogue()->all());
+-        $moduleName = preg_replace('/^ps_(\w+)/', '$1', $moduleName);
+-
+-        if (count(preg_grep('/'.$moduleName.'/i', $domains))) {
+-            return true;
+-        }
+-
+-        return false;
+-    }
+-
+     /**
+      * This method merge each arrays of modules translation in the array of modules translations
+      */

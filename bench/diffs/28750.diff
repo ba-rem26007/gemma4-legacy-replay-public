@@ -1,0 +1,134 @@
+diff --git a/classes/Address.php b/classes/Address.php
+index dc2665b36fda5..9cfe4fa467ce9 100644
+--- a/classes/Address.php
++++ b/classes/Address.php
+@@ -104,9 +104,13 @@ class AddressCore extends ObjectModel
+ 
+     /** @var array Zone IDs cache */
+     protected static $_idZones = [];
++
+     /** @var array Country IDs cache */
+     protected static $_idCountries = [];
+ 
++    /** @var array<int, bool> Store if an adress ID exists */
++    protected static $addressExists = [];
++
+     /**
+      * @see ObjectModel::$definition
+      */
+@@ -178,6 +182,7 @@ public static function resetStaticCache()
+     {
+         static::$_idZones = [];
+         static::$_idCountries = [];
++        static::$addressExists = [];
+     }
+ 
+     /**
+@@ -193,6 +198,9 @@ public function add($autodate = true, $null_values = false)
+             Customer::resetAddressCache($this->id_customer, $this->id);
+         }
+ 
++        // Update the cache
++        static::$addressExists[$this->id] = true;
++
+         return true;
+     }
+ 
+@@ -209,6 +217,9 @@ public function update($null_values = false)
+             unset(self::$_idZones[$this->id]);
+         }
+ 
++        // Update the cache
++        static::$addressExists[$this->id] = true;
++
+         if (Validate::isUnsignedId($this->id_customer)) {
+             Customer::resetAddressCache($this->id_customer, $this->id);
+         }
+@@ -233,6 +244,11 @@ public function delete()
+         if (!$this->isUsed()) {
+             $this->deleteCartAddress();
+ 
++            // Update the cache
++            if (isset(static::$addressExists[$this->id])) {
++                static::$addressExists[$this->id] = false;
++            }
++
+             return parent::delete();
+         } else {
+             $this->deleted = true;
+@@ -438,21 +454,28 @@ public static function getCountryAndState($id_address)
+      * Specify if an address is already in base.
+      *
+      * @param int $id_address Address id
++     * @param bool $useCache Use Cache for optimizing queries
+      *
+      * @return bool The address exists
+      */
+-    public static function addressExists($id_address)
++    public static function addressExists($id_address, bool $useCache = false)
+     {
+-        if ($id_address <= 0) {
++        if ((int) $id_address <= 0) {
+             return false;
+         }
+ 
+-        return (bool) Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
++        if ($useCache && isset(static::$addressExists[$id_address])) {
++            return static::$addressExists[$id_address];
++        }
++
++        static::$addressExists[$id_address] = (bool) Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
+             'SELECT `id_address`
+             FROM ' . _DB_PREFIX_ . 'address a
+             WHERE a.`id_address` = ' . (int) $id_address,
+             false
+         );
++
++        return static::$addressExists[$id_address];
+     }
+ 
+     /**
+diff --git a/classes/Cart.php b/classes/Cart.php
+index d439d2c4e838c..610f412764154 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -881,7 +881,7 @@ protected function applyProductCalculations($row, $shopContext, $productQuantity
+         } else {
+             $address_id = (int) $row['id_address_delivery'];
+         }
+-        if (!Address::addressExists($address_id)) {
++        if (!Address::addressExists($address_id, true)) {
+             $address_id = null;
+         }
+ 
+@@ -3576,7 +3576,7 @@ public function getPackageShippingCost(
+         } else {
+             $address_id = null;
+         }
+-        if (!Address::addressExists($address_id)) {
++        if (!Address::addressExists($address_id, true)) {
+             $address_id = null;
+         }
+ 
+diff --git a/tests/UI/pages/BO/shopParameters/general/maintenance/index.js b/tests/UI/pages/BO/shopParameters/general/maintenance/index.js
+index 9f47d35bab1e7..a58f5157d03f2 100644
+--- a/tests/UI/pages/BO/shopParameters/general/maintenance/index.js
++++ b/tests/UI/pages/BO/shopParameters/general/maintenance/index.js
+@@ -54,7 +54,7 @@ class ShopParamsMaintenance extends BOBasePage {
+     await this.setValueOnTinymceInput(page, this.maintenanceTextInputEN, text);
+     await page.click(this.customMaintenanceFrTab);
+     await this.setValueOnTinymceInput(page, this.maintenanceTextInputFR, text);
+-    await page.click(this.saveFormButton);
++    await this.clickAndWaitForNavigation(page, this.saveFormButton);
+ 
+     return this.getAlertSuccessBlockParagraphContent(page);
+   }
+@@ -66,7 +66,7 @@ class ShopParamsMaintenance extends BOBasePage {
+    */
+   async addMyIpAddress(page) {
+     await page.click(this.addMyIPAddressButton);
+-    await page.click(this.saveFormButton);
++    await this.clickAndWaitForNavigation(page, this.saveFormButton);
+ 
+     return this.getAlertSuccessBlockParagraphContent(page);
+   }

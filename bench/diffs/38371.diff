@@ -1,0 +1,83 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index af4fed68f5a73..d914000bb4022 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -4482,10 +4482,8 @@ public function duplicate()
+             return false;
+         }
+ 
+-        $cart = new Cart($this->id);
+-        $cart->id = null;
+-        $cart->id_shop = $this->id_shop;
+-        $cart->id_shop_group = $this->id_shop_group;
++        /** @var Cart $cart */
++        $cart = $this->duplicateObject();
+ 
+         if (!Customer::customerHasAddress((int) $cart->id_customer, (int) $cart->id_address_delivery)) {
+             $cart->id_address_delivery = (int) Address::getFirstCustomerAddressId((int) $cart->id_customer);
+@@ -4499,7 +4497,13 @@ public function duplicate()
+             $cart->secure_key = Cart::$_customer->secure_key;
+         }
+ 
+-        $cart->add();
++        $cart->save();
++
++        // clear checkout session data so that the customer can start a new checkout
++        Db::getInstance()->execute(
++            'UPDATE ' . _DB_PREFIX_ . 'cart SET checkout_session_data = NULL
++                WHERE id_cart = ' . (int) $cart->id
++        );
+ 
+         if (!Validate::isLoadedObject($cart)) {
+             return false;
+@@ -4611,6 +4615,8 @@ public function duplicate()
+             );
+         }
+ 
++        Hook::exec('actionDuplicateCartData', ['oldCardId' => $this->id, 'newCartId' => $cart->id]);
++
+         return ['cart' => $cart, 'success' => $success];
+     }
+ 
+diff --git a/classes/ObjectModel.php b/classes/ObjectModel.php
+index 3c88d9e88ef7d..f9ba2a3172dc3 100644
+--- a/classes/ObjectModel.php
++++ b/classes/ObjectModel.php
+@@ -753,6 +753,9 @@ public function duplicateObject()
+         $object_duplicated = new $definition['classname']((int) $object_id);
+         $object_duplicated->duplicateShops((int) $this->id);
+ 
++        Hook::exec('actionObjectDuplicateAfter', ['oldObject' => $this, 'newObject' => $object_duplicated]);
++        Hook::exec('actionObject' . $this->getFullyQualifiedName() . 'DuplicateAfter', ['oldObject' => $this, 'newObject' => $object_duplicated]);
++
+         return $object_duplicated;
+     }
+ 
+diff --git a/install-dev/data/xml/hook.xml b/install-dev/data/xml/hook.xml
+index 6dd4b3eaa7c71..d947e9eefbca3 100644
+--- a/install-dev/data/xml/hook.xml
++++ b/install-dev/data/xml/hook.xml
+@@ -111,6 +111,11 @@
+       <title>Cart creation and update</title>
+       <description>This hook is displayed when a product is added to the cart or if the cart's content is modified</description>
+     </hook>
++    <hook id="actionDuplicateCartData">
++      <name>actionDuplicateCartData</name>
++      <title>Cart duplication</title>
++      <description>This hook is triggered after all the cart related data has been duplicated</description>
++    </hook>
+     <hook id="actionAuthentication">
+       <name>actionAuthentication</name>
+       <title>Successful customer authentication</title>
+@@ -166,6 +171,11 @@
+       <title>Product deletion</title>
+       <description>This hook is called when a product is deleted</description>
+     </hook>
++    <hook id="actionObjectDuplicateAfter">
++      <name>actionObjectDuplicateAfter</name>
++      <title>After duplicating an object</title>
++      <description>This hook is called after duplicating an object by the core.</description>
++    </hook>
+     <hook id="actionObjectProductInCartDeleteBefore">
+       <name>actionObjectProductInCartDeleteBefore</name>
+       <title>Cart product removal</title>

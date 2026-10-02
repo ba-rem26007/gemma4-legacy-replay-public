@@ -1,0 +1,199 @@
+diff --git a/src/Core/Domain/Product/ProductSettings.php b/src/Core/Domain/Product/ProductSettings.php
+index a76e6ef63b5d7..08cb604c6c5c9 100644
+--- a/src/Core/Domain/Product/ProductSettings.php
++++ b/src/Core/Domain/Product/ProductSettings.php
+@@ -48,8 +48,13 @@ private function __construct()
+     public const MAX_MPN_LENGTH = 40;
+     public const MAX_META_TITLE_LENGTH = 70;
+     public const MAX_META_DESCRIPTION_LENGTH = 160;
+-
+-    public const MAX_DESCRIPTION_SHORT_LENGTH = 800;
+     public const MAX_DESCRIPTION_LENGTH = 21844;
+     public const MAX_LINK_REWRITE_LENGTH = 128;
++
++    /**
++     * This is the default value for short description (a.k.a. summary) maximum length,
++     * but this value is configurable,
++     * it is saved in configuration named PS_PRODUCT_SHORT_DESC_LIMIT
++     */
++    public const MAX_DESCRIPTION_SHORT_LENGTH = 800;
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/DescriptionType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/DescriptionType.php
+index 799715ca65632..9d86fadcb2857 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/DescriptionType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Description/DescriptionType.php
+@@ -54,6 +54,11 @@ class DescriptionType extends TranslatorAwareType
+      */
+     private $employeeIsoCode;
+ 
++    /**
++     * @var int
++     */
++    private $shortDescriptionMaxLength;
++
+     /**
+      * @param TranslatorInterface $translator
+      * @param array $locales
+@@ -64,11 +69,13 @@ public function __construct(
+         TranslatorInterface $translator,
+         array $locales,
+         RouterInterface $router,
+-        string $employeeIsoCode
++        string $employeeIsoCode,
++        int $shortDescriptionMaxLength
+     ) {
+         parent::__construct($translator, $locales);
+         $this->router = $router;
+         $this->employeeIsoCode = $employeeIsoCode;
++        $this->shortDescriptionMaxLength = $shortDescriptionMaxLength;
+     }
+ 
+     /**
+@@ -77,6 +84,11 @@ public function __construct(
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         $productId = (int) $options['product_id'];
++        if ($this->shortDescriptionMaxLength > 0) {
++            $shortDescriptionLimit = $this->shortDescriptionMaxLength;
++        } else {
++            $shortDescriptionLimit = ProductSettings::MAX_DESCRIPTION_SHORT_LENGTH;
++        }
+ 
+         if ($productId) {
+             $builder
+@@ -93,22 +105,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Summary', 'Admin.Global'),
+                 'type' => FormattedTextareaType::class,
+                 'options' => [
+-                    'limit' => ProductSettings::MAX_DESCRIPTION_SHORT_LENGTH,
++                    'limit' => $shortDescriptionLimit,
+                     'attr' => [
+                         'class' => 'serp-default-description',
+                     ],
+-                    'constraints' => [
+-                        new Length([
+-                            'max' => ProductSettings::MAX_DESCRIPTION_SHORT_LENGTH,
+-                            'maxMessage' => $this->trans(
+-                                'This field cannot be longer than %limit% characters.',
+-                                'Admin.Notifications.Error',
+-                                [
+-                                    '%limit%' => ProductSettings::MAX_DESCRIPTION_SHORT_LENGTH,
+-                                ]
+-                            ),
+-                        ]),
+-                    ],
+                 ],
+                 'label_tag_name' => 'h3',
+                 'modify_all_shops' => true,
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/FormattedTextareaType.php b/src/PrestaShopBundle/Form/Admin/Type/FormattedTextareaType.php
+index 285e64d9e0552..782df42d42771 100644
+--- a/src/PrestaShopBundle/Form/Admin/Type/FormattedTextareaType.php
++++ b/src/PrestaShopBundle/Form/Admin/Type/FormattedTextareaType.php
+@@ -27,16 +27,16 @@
+ namespace PrestaShopBundle\Form\Admin\Type;
+ 
+ use PrestaShopBundle\Form\Validator\Constraints\TinyMceMaxLength;
+-use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\TextareaType;
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\Form\FormView;
++use Symfony\Component\OptionsResolver\Options;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ 
+ /**
+  * Class enabling TinyMCE on a Textarea field.
+  */
+-class FormattedTextareaType extends AbstractType
++class FormattedTextareaType extends TranslatorAwareType
+ {
+     /**
+      * Max size of UTF-8 content in MySQL text column
+@@ -48,12 +48,40 @@ class FormattedTextareaType extends AbstractType
+      */
+     public function configureOptions(OptionsResolver $resolver)
+     {
+-        $resolver->setDefaults([
+-            'autoload' => true, // Start automatically TinyMCE
+-            'limit' => self::LIMIT_TEXT_UTF8,
+-        ]);
+-        $resolver->setAllowedTypes('limit', 'int');
+-        $resolver->setAllowedTypes('autoload', 'bool');
++        $resolver
++            ->setDefined(['message'])
++            ->setDefaults([
++                'autoload' => true, // Start automatically TinyMCE
++                'limit' => self::LIMIT_TEXT_UTF8,
++            ])
++            ->setAllowedTypes('limit', 'int')
++            ->setAllowedTypes('autoload', 'bool')
++            ->setAllowedTypes('message', ['string', 'null'])
++            ->setNormalizer('constraints', function (Options $options, $constraints) {
++                $limit = $options->offsetGet('limit');
++                // provide message from options if exists, or default one
++                $message = $options->offsetExists('message') ? $options->offsetGet('message') : $this->trans(
++                    'This field cannot be longer than %limit% characters.',
++                    'Admin.Notifications.Error',
++                    [
++                        '%limit%' => $limit,
++                    ]
++                );
++                foreach ($constraints as $constraint) {
++                    if ($constraint instanceof TinyMceMaxLength) {
++                        // this means the TinyMceMaxLength constraint was overridden by child form, so we don't need to do anything
++                        return $constraints;
++                    }
++                }
++                // add length constraint
++                $constraints[] = new TinyMceMaxLength([
++                    'max' => $limit,
++                    'message' => $message,
++                ]);
++
++                return $constraints;
++            })
++        ;
+     }
+ 
+     /**
+@@ -61,6 +89,7 @@ public function configureOptions(OptionsResolver $resolver)
+      */
+     public function buildView(FormView $view, FormInterface $form, array $options)
+     {
++        parent::buildView($view, $form, $options);
+         if (!isset($view->vars['attr']['class'])) {
+             $view->vars['attr']['class'] = '';
+         }
+@@ -69,11 +98,6 @@ public function buildView(FormView $view, FormInterface $form, array $options)
+             $view->vars['attr']['class'] .= ' autoload_rte';
+         }
+         $view->vars['attr']['counter'] = $options['limit'];
+-        $view->vars['constraints'] = [
+-            new TinyMceMaxLength([
+-                'max' => $options['limit'],
+-            ]),
+-        ];
+     }
+ 
+     /**
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index 98b6dd0c326a4..c0a5d10d88fe6 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -1370,6 +1370,7 @@ services:
+     arguments:
+       - '@router'
+       - '@=service("prestashop.adapter.legacy.context").getEmployeeLanguageIso()'
++      - '@=service("prestashop.adapter.legacy.configuration").get("PS_PRODUCT_SHORT_DESC_LIMIT")'
+     tags:
+       - { name: form.type }
+ 
+@@ -2099,3 +2100,9 @@ services:
+     public: true
+     tags:
+       - { name: form.type }
++
++  PrestaShopBundle\Form\Admin\Type\FormattedTextareaType:
++    parent: 'form.type.translatable.aware'
++    public: true
++    tags:
++      - { name: form.type }

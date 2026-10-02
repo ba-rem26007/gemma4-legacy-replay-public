@@ -1,0 +1,971 @@
+diff --git a/.docker/Dockerfile b/.docker/Dockerfile
+index 5ca86992a61ea..53fe55206a7c4 100644
+--- a/.docker/Dockerfile
++++ b/.docker/Dockerfile
+@@ -18,8 +18,6 @@ ARG INSTALL_XDEBUG
+ RUN groupmod -g $GROUP_ID www-data \
+   && usermod -u $USER_ID -g $GROUP_ID www-data
+ 
+-COPY .docker/wait-for-it.sh /tmp/
+-
+ # Install mailutils to make sendmail work
+ RUN apt update && apt install -y mailutils
+ 
+@@ -28,12 +26,15 @@ ENV NODE_VERSION       $NODE_VERSION
+ RUN php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');" && php /tmp/composer-setup.php --no-ansi --install-dir=/usr/local/bin --filename=composer && rm -rf /tmp/composer-setup.php
+ 
+ RUN if [ "$INSTALL_XDEBUG" = "true" ]; then \
+-        pecl install xdebug-3.1.3 \
+-        && docker-php-ext-enable xdebug \
+-        && echo "xdebug.mode=debug" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+-        && echo "xdebug.start_with_request=yes" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+-        && echo "xdebug.client_host=host.docker.internal" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini; \
+-    fi
+-
+-COPY .docker/docker_run_git.sh /tmp/
++    pecl install xdebug-3.1.3 \
++    && docker-php-ext-enable xdebug \
++    && echo "xdebug.mode=debug" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
++    && echo "xdebug.start_with_request=yes" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
++    && echo "xdebug.client_host=host.docker.internal" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini; \
++fi
++
++COPY --link --chmod=755 .docker/docker_run_git.sh /tmp/
++COPY --link --chmod=755 .docker/wait-for-it.sh /tmp/
++COPY --link --chmod=755 .docker/install /var/www/html/.docker/install
++
+ CMD ["/tmp/docker_run_git.sh"]
+diff --git a/.docker/docker_run_git.sh b/.docker/docker_run_git.sh
+index 286235e3b163a..7398a9fddc364 100755
+--- a/.docker/docker_run_git.sh
++++ b/.docker/docker_run_git.sh
+@@ -41,7 +41,7 @@ if [ "${DISABLE_MAKE}" != "1" ]; then
+   echo "\n* Install node $NODE_VERSION...";
+   export NVM_DIR=/usr/local/nvm
+   mkdir -p $NVM_DIR \
+-      && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash \
++      && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
+       && . $NVM_DIR/nvm.sh \
+       && nvm install $NODE_VERSION \
+       && nvm alias default $NODE_VERSION \
+@@ -50,6 +50,15 @@ if [ "${DISABLE_MAKE}" != "1" ]; then
+   export NODE_PATH=$NVM_DIR/versions/node/v$NODE_VERSION/bin
+   export PATH=$PATH:$NODE_PATH
+ 
++  # Make nvm available by default for all users
++  echo 'export NVM_DIR="/usr/local/nvm"' >> /etc/bash.bashrc
++  echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> /etc/bash.bashrc
++  echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' >> /etc/bash.bashrc
++
++  # Also add Node.js binaries to system PATH for all users
++  echo "export PATH=\$PATH:$NODE_PATH" >> /etc/bash.bashrc
++  echo "export PATH=\$PATH:$NODE_PATH" >> /etc/profile
++
+   echo "\n* Install composer ...";
+   mkdir -p /var/www/.composer
+   chown -R www-data:www-data /var/www/.composer
+@@ -66,7 +75,7 @@ if [ "${DISABLE_MAKE}" != "1" ]; then
+   chown -R www-data:www-data vendor modules themes
+ 
+   echo "\n* Build assets ...";
+-  runuser -g www-data -u www-data -- /usr/bin/make assets
++  runuser -g www-data -u www-data -- /var/www/html/tools/assets/build.sh
+ 
+   echo "\n* Wait for assets built...";
+   /usr/bin/make wait-assets
+@@ -82,7 +91,7 @@ elif [ "$DB_SERVER" != "<to be defined>" -a $PS_INSTALL_AUTO = 1 ]; then
+     RET=1
+     while [ $RET -ne 0 ]; do
+         echo "\n* Checking if $DB_SERVER is available..."
+-        mysql -h $DB_SERVER -P $DB_PORT -u $DB_USER -p$DB_PASSWD --ssl=0 -e "status" > /dev/null 2>&1
++        mysql -h $DB_SERVER -P $DB_PORT -u $DB_USER -p$DB_PASSWD -e "status" > /dev/null 2>&1
+         RET=$?
+ 
+         if [ $RET -ne 0 ]; then
+diff --git a/.docker/install/database.sh b/.docker/install/database.sh
+new file mode 100755
+index 0000000000000..df4f035fd0cb5
+--- /dev/null
++++ b/.docker/install/database.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++set -e
++
++php $PS_FOLDER_INSTALL/index_cli.php \
++		--db_server=$DB_SERVER:$DB_PORT --db_user=$DB_USER --db_password=$DB_PASSWD --db_name="$DB_NAME" --prefix="$DB_PREFIX" \
++		--domain="$PS_DOMAIN" --ssl=$PS_ENABLE_SSL \
++		--firstname="$ADMIN_FIRSTNAME" --lastname="$ADMIN_LASTNAME" --email="$ADMIN_MAIL" --password="$ADMIN_PASSWD" \
++		--language=$PS_LANGUAGE --country=$PS_COUNTRY --all_languages=$PS_ALL_LANGUAGES \
++		--newsletter=0 --send_email=0 --fixtures=$PS_INSTALL_DEMO_PRODUCTS
+diff --git a/.docker/wait-for-it.sh b/.docker/wait-for-it.sh
+index 307be281cb5bb..36ee8af4a5ae7 100755
+--- a/.docker/wait-for-it.sh
++++ b/.docker/wait-for-it.sh
+@@ -35,7 +35,7 @@ wait_for()
+         # Special check for mysql
+         if [[ "$PORT" = "3306" ]]; then
+             echoerr "$CMD_NAME: Fetching status from docker mysql"
+-            mysql -h$HOST --ssl=0 -uroot -pprestashop -e "status"
++            mysql -h$HOST -uroot -pprestashop -e "status"
+             result=$?
+         elif [[ $ISBUSY -eq 1 ]]; then
+             nc -z $HOST $PORT
+diff --git a/Makefile b/Makefile
+index 7d8163affe65b..6d5d97e64659a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,54 +1,122 @@
+-help: ## Display this help menu
+-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
++# Executables (local)
++DOCKER_COMP = docker compose
+ 
+-install: composer assets  ## Install PHP dependencies and build the static assets
++# Determine if we are using docker
++DOCKER_RUNNING := $(shell docker compose ps -q)
++ifneq ($(strip $(DOCKER_RUNNING)),)
++	PHP_CONT = $(DOCKER_COMP) exec prestashop-git runuser -u www-data -g www-data --
++endif
+ 
+-composer: ## Install PHP dependencies
+-	COMPOSER_PROCESS_TIMEOUT=600 composer install --no-interaction
+-	./bin/console cache:clear --no-warmup
++# Executables (local or docker)
++PHP      = $(PHP_CONT) php
++COMPOSER = $(PHP_CONT) composer
++SYMFONY  = $(PHP_CONT) bin/console
++
++# Misc
++.DEFAULT_GOAL = install
++.PHONY        : help docker-build docker-up docker-start docker-restart docker-down docker-logs docker-sh composer cc test test-unit test-integration test-integration-behaviour test-api-module assets wait-assets admin front admin-default admin-new-theme front-core front-classic front-hummingbird install install-prestashop cs-fixer cs-fixer-dry phpstan scss-fixer es-linter
++
++## —— 🎵 🐳 PrestaShop Docker Makefile 🐳 🎵 ———————————————————————————————————
++help: ## Outputs this help screen
++	@grep -E '(^[a-zA-Z0-9\./_-]+:.*?##.*$$)|(^##)' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}{printf "\033[32m%-30s\033[0m %s\n", $$1, $$2}' | sed -e 's/\[32m##/[33m/'
++
++## —— Docker 🐳 ————————————————————————————————————————————————————————————————
++docker-build: ## Builds the Docker images
++	COMPOSE_BAKE=true $(DOCKER_COMP) build --pull --no-cache
++
++docker-up: ## Start the docker hub in detached mode (no logs)
++	$(DOCKER_COMP) up --detach --force-recreate --remove-orphans
++
++docker-start: docker-build docker-up ## Build and start the containers
++
++docker-restart: docker-down docker-start ## Restart the docker hub
++
++docker-down: ## Stop the docker hub
++	$(DOCKER_COMP) down --remove-orphans
++
++docker-logs: ## Show live logs
++	$(DOCKER_COMP) logs --follow
++
++docker-sh: ## Connect to the PHP container via bash so up and down arrows go to previous commands
++	@$(PHP_CONT) bash
++
++## —— PrestaShop 🛒 ———————————————————————————————————————————————————————————
++install: composer cc assets  ## Install PHP dependencies and build the static assets
++
++install-prestashop: ## Install fresh PrestaShop database (requires containers to be running)
++	$(PHP_CONT) .docker/install/database.sh
+ 
+-assets:  ## Rebuilds all the static assets, running npm install-clean as needed
+-	./tools/assets/build.sh
++## —— Assets 🎨 ———————————————————————————————————————————————————————————————
++assets: admin front ## Build all assets
++	$(PHP_CONT) ./tools/assets/build.sh all --force
+ 
+-wait-assets:
+-	./tools/assets/wait-build.sh
++wait-assets: ## Wait for assets to be built
++	$(PHP_CONT) ./tools/assets/wait-build.sh
+ 
+-front-core: ## Building core theme assets
+-	./tools/assets/build.sh front-core
++admin: ## Build admin assets
++	$(PHP_CONT) ./tools/assets/build.sh admin-default --force
++	$(PHP_CONT) ./tools/assets/build.sh admin-new-theme --force
+ 
+-front-classic: ## Building classic theme assets
+-	./tools/assets/build.sh front-classic
++front: ## Build front assets
++	$(PHP_CONT) ./tools/assets/build.sh front-core --force
++	$(PHP_CONT) ./tools/assets/build.sh front-classic --force
++	$(PHP_CONT) ./tools/assets/build.sh front-hummingbird --force
+ 
+-front-hummingbird: ## Building hummingbird theme assets
+-	./tools/assets/build.sh front-hummingbird
++admin-default: ## Build assets for default admin theme
++	$(PHP_CONT) ./tools/assets/build.sh admin-default --force
+ 
+-admin-default: ## Building admin default theme assets
+-	./tools/assets/build.sh admin-default
++admin-new-theme: ## Build assets for new admin theme
++	$(PHP_CONT) ./tools/assets/build.sh admin-new-theme --force
+ 
+-admin-new-theme: ## Building admin new theme assets
+-	./tools/assets/build.sh admin-new-theme
++front-core: ## Build assets for core theme
++	$(PHP_CONT) ./tools/assets/build.sh front-core --force
+ 
+-admin: admin-default admin-new-theme ## Building admin assets
++front-classic: ## Build assets for classic theme
++	$(PHP_CONT) ./tools/assets/build.sh front-classic --force
+ 
+-front: front-core front-classic ## Building front assets
++front-hummingbird: ## Build assets for hummingbird theme
++	$(PHP_CONT) ./tools/assets/build.sh front-hummingbird --force
+ 
++## —— Composer & Symfony 🧙 ————————————————————————————————————————————————————
++composer: ## Install PHP dependencies
++	$(COMPOSER) install --no-interaction
++
++cc: ## Clear Symfony cache
++	$(SYMFONY) cache:clear --no-warmup
++
++## —— Tests 🧪 —————————————————————————————————————————————————————————————————
++test: ## Run all tests
++	$(COMPOSER) run test-all
++
++test-unit: ## Run unit tests
++	$(COMPOSER) run unit-tests
++
++test-integration: ## Run integration tests
++	$(COMPOSER) run integration-tests
++
++test-integration-behaviour: ## Run integration behaviour tests
++	$(COMPOSER) run integration-behaviour-tests
++
++test-api-module: ## Run api module tests
++	$(COMPOSER) run api-module-tests
++
++## -- Code quality 🧹 ——————————————————————————————————————————————————————————
+ cs-fixer: ## Run php-cs-fixer
+-	./vendor/bin/php-cs-fixer fix
++	$(COMPOSER) run php-cs-fixer
++
++cs-fixer-dry: ## Run php-cs-fixer with dry-run
++	$(COMPOSER) run php-cs-fixer:dry
+ 
+ phpstan: ## Run phpstan analysis
+-	./vendor/bin/phpstan analyse -c phpstan.neon.dist
++	$(COMPOSER) run phpstan
+ 
+ scss-fixer: ## Run scss-fix
+-	cd admin-dev/themes/new-theme && npm run scss-fix
+-	cd admin-dev/themes/default && npm run scss-fix
+-	cd themes/classic/_dev && npm run scss-fix
++	$(PHP_CONT) bash -l -c "cd admin-dev/themes/new-theme && npm run scss-fix"
++	$(PHP_CONT) bash -l -c "cd admin-dev/themes/default && npm run scss-fix"
++	$(PHP_CONT) bash -l -c "cd themes/classic/_dev && npm run scss-fix"
+ 
+ es-linter: ## Run lint-fix
+-	cd admin-dev/themes/new-theme && npm run lint-fix
+-	cd admin-dev/themes/default && npm run lint-fix
+-	cd themes/classic/_dev && npm run lint-fix
+-	cd themes && npm run lint-fix
+-
+-.PHONY: help install composer assets front-core front-classic admin-default admin-new-theme admin front cs-fixer phpstan scss-fixer es-linter
+-
+-.DEFAULT_GOAL := install
++	$(PHP_CONT) bash -l -c "cd admin-dev/themes/new-theme && npm run lint-fix"
++	$(PHP_CONT) bash -l -c "cd admin-dev/themes/default && npm run lint-fix"
++	$(PHP_CONT) bash -l -c "cd themes/classic/_dev && npm run lint-fix"
++	$(PHP_CONT) bash -l -c "cd themes && npm run lint-fix"
+diff --git a/README.md b/README.md
+index 84f9d8ba75467..4d99a5b546235 100644
+--- a/README.md
++++ b/README.md
+@@ -43,18 +43,25 @@ Installation
+ 
+ If you downloaded the source code from GitHub, read our guide on [installing PrestaShop for development][install-guide-dev]. If you intend to install a production shop, make sure to download the latest version from [our releases page][download], then read the [install guide for users][install-guide].
+ 
+-Docker compose
+---------
++## 🐳 Docker Development Environment
+ 
+-PrestaShop can also be deployed with Docker and its tool [Docker compose][docker-compose].
++PrestaShop provides a complete Docker-based development environment.
+ 
+-To run the software, use:
++### Quick Start
+ 
+-```
+-docker compose up
++```bash
++# Start the development environment
++make docker-start
++
++# Access your PrestaShop installation
++# Frontend: http://localhost:8001
++# Backend: http://localhost:8001/admin-dev
++# Email testing: http://localhost:1080
+ ```
+ 
+-Then reach your shop on this URL: http://localhost:8001
++**Default Admin Credentials:**
++- Email: `demo@prestashop.com`
++- Password: `Correct Horse Battery Staple`
+ 
+ Docker will bind your port 8001 to the web server. If you want to use other port, open and modify the file `docker-compose.yml`.
+ MySQL credentials can also be found and modified in this file if needed.
+@@ -63,45 +70,11 @@ MySQL credentials can also be found and modified in this file if needed.
+ If you expect the container to (re)install your shop, remove this file if it exists. And make sure the container user `www-data`
+ has write access to the whole workspace.
+ 
+-To fully reset your repo and get a fresh start, run (be careful: this removes all your extra files):
+-
+-```
+-# clean everything that is not part of the original repository (node_modules, etc.)
+-git fetch origin
+-git reset --hard origin/develop
+-git clean -dfx
+-
+-# inform build scripts to reinstall shop
+-rm app/config/parameters.php
+-
+-# clear all docker caches and rebuild everything
+-docker compose down -v
+-docker compose build --no-cache
+-docker compose up --build --force-recreate
+-```
+-
+-### PHPMyAdmin
+-To add a PHPMyAdmin service to your Docker Compose setup, you can copy the existing `docker-compose.override.yml.dist` to `docker-compose.override.yml` and then start your Docker Compose setup (override file will be included as it is a convention)
+-
+-```
+-cp docker-compose.override.yml.dist docker-compose.override.yml
+-docker compose up
+-```
+-
+-### BLACKFIRE
+-By default, blackfire will not be installed. During the install process, the installation of blackfire is based on 3 environment variables:
+-
+-```
+-BLACKFIRE_ENABLE: 1
+-BLACKFIRE_SERVER_ID: "your_server_id"
+-BLACKFIRE_SERVER_TOKEN: "your_blackfire_server_token"
+-```
++### Documentation
+ 
+-Those env variables are self-explanatory, you can either set them yourself or override the docker-compose default values:
++For detailed information, see:
+ 
+-Open the file `docker-compose.override.yml` (copy it from `docker-compose.override.yml.dist`
+-if it's not already done, see command just above in the PHPMyadmin section).
+-Then uncomment the 3 docker lines and fill the BLACKFIRE_SERVER_ID and BLACKFIRE_SERVER_TOKEN with your account's server id and token.
++- **[🚀 Development Guide](./docs/DEVELOPMENT.md)** - Complete setup and development guide
+ 
+ Documentation
+ --------
+diff --git a/docker-compose.mariadb.yml b/docker-compose.mariadb.yml
+index 1bc9bf1278fd5..21a1809c0414e 100644
+--- a/docker-compose.mariadb.yml
++++ b/docker-compose.mariadb.yml
+@@ -1,5 +1,3 @@
+-version: '2.1'
+-
+ volumes:
+   db-data:
+ 
+diff --git a/docker-compose.override.yml.dist b/docker-compose.override.yml.dist
+index 2da7bc3f5f68d..d38eddb3e34fe 100644
+--- a/docker-compose.override.yml.dist
++++ b/docker-compose.override.yml.dist
+@@ -1,5 +1,3 @@
+-version: '2.1'
+-
+ services:
+   phpmyadmin:
+     image: phpmyadmin/phpmyadmin
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 6c584c0dceeeb..fb3c1d7ccd0fd 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,5 +1,3 @@
+-version: '2.1'
+-
+ volumes:
+   db-data:
+ 
+@@ -56,7 +54,7 @@ services:
+     depends_on:
+       - mysql
+     volumes:
+-      - ./:/var/www/html:delegated
++      - ./:/var/www/html
+     networks:
+       - prestashop-network
+ 
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+new file mode 100644
+index 0000000000000..e7e7613bc28a6
+--- /dev/null
++++ b/docs/DEVELOPMENT.md
+@@ -0,0 +1,423 @@
++# PrestaShop Development Guide
++
++Complete guide for setting up and working with PrestaShop development environment.
++
++## Table of Contents
++
++- [Prerequisites](#prerequisites)
++- [Quick Start](#quick-start)
++- [Architecture](#architecture)
++- [Makefile Commands](#makefile-commands)
++- [Environment Configuration](#environment-configuration)
++- [Development Workflow](#development-workflow)
++- [Troubleshooting](#troubleshooting)
++
++## Prerequisites
++
++- **Docker Desktop** (with Docker Compose)
++- **Git**
++- **Make** (usually pre-installed on macOS/Linux)
++
++## Quick Start
++
++### 1. Clone and Start
++
++```bash
++git clone https://github.com/PrestaShop/PrestaShop.git
++cd PrestaShop
++make docker-start
++```
++
++### 2. Access Your Installation
++
++- **Frontend**: http://localhost:8001
++- **Backend**: http://localhost:8001/admin-dev
++- **MailDev**: http://localhost:1080 (email testing)
++- **Database**: localhost:3306
++
++**Default Admin Credentials:**
++- Email: `demo@prestashop.com`
++- Password: `Correct Horse Battery Staple`
++
++## Architecture
++
++The setup includes three services:
++
++- **prestashop-git**: PHP 8.1 + Apache + Node.js 20
++- **mysql**: MySQL 8 database
++- **maildev**: Email testing service
++
++### File Structure
++
++```
++.docker/                         # Docker configuration
++├── Dockerfile                   # PHP container definition
++└── install/                     # Installation scripts
++
++docker-compose.yml               # Base configuration
++docker-compose.override.yml.dist # Development overrides
++Makefile                         # Development commands
++```
++
++## Makefile Commands
++
++### Quick Reference
++
++```bash
++make help # Show all available commands
++
++```
++
++### Docker Commands
++
++| Command | Description |
++|---------|-------------|
++| `make docker-build` | Build Docker images from scratch |
++| `make docker-up` | Start containers in detached mode |
++| `make docker-start` | Build and start containers |
++| `make docker-restart` | Restart the docker hub |
++| `make docker-down` | Stop and remove containers |
++| `make docker-logs` | Show live container logs |
++| `make docker-bash` | Connect to PHP container via bash |
++
++### Asset Management
++
++| Command | Description |
++|---------|-------------|
++| `make assets` | Build all assets (admin + front) |
++| `make assets-dev` | Start development servers for all themes |
++| `make wait-assets` | Wait for assets to finish building |
++| `make admin` | Build admin assets (default + new theme) |
++| `make front` | Build front assets (core + classic) |
++| `make admin-default` | Build default admin theme assets |
++| `make admin-new-theme` | Build new admin theme assets |
++| `make front-core` | Build core front theme assets |
++| `make front-classic` | Build classic front theme assets |
++| `make front-hummingbird` | Build hummingbird theme assets |
++
++### PrestaShop Installation
++
++| Command | Description |
++|---------|-------------|
++| `make install` | Install PHP dependencies and build assets |
++| `make install-prestashop` | Install fresh PrestaShop database |
++
++### Composer & Symfony
++
++| Command | Description |
++|---------|-------------|
++| `make composer` | Install PHP dependencies |
++| `make cc` | Clear Symfony cache |
++
++### Testing
++
++| Command | Description |
++|---------|-------------|
++| `make test` | Run all tests (unit + integration) |
++| `make test-unit` | Run unit tests |
++| `make test-integration` | Run integration tests |
++| `make test-integration-behaviour` | Run integration behaviour tests |
++| `make test-api-module` | Run API module tests |
++
++### Code Quality
++
++| Command | Description |
++|---------|-------------|
++| `make cs-fixer` | Run PHP CS Fixer |
++| `make cs-fixer-dry` | Run PHP CS Fixer (dry run) |
++| `make phpstan` | Run PHPStan analysis |
++| `make scss-fixer` | Fix SCSS files |
++| `make es-linter` | Fix ESLint issues |
++
++## Environment Configuration
++
++| Category | Variable | Default | Description |
++|----------|----------|---------|-------------|
++| **Database** | `DB_PASSWD` | `prestashop` | Database password |
++| | `DB_NAME` | `prestashop` | Database name |
++| | `DB_SERVER` | `mysql` | Database host |
++| | `DB_PREFIX` | `ps_` | Database table prefix |
++| **PrestaShop** | `PS_INSTALL_AUTO` | `1` | Auto-install PrestaShop |
++| | `PS_DOMAIN` | `localhost:8001` | Shop domain |
++| | `PS_FOLDER_INSTALL` | `install-dev` | Install folder |
++| | `PS_FOLDER_ADMIN` | `admin-dev` | Admin folder |
++| | `PS_COUNTRY` | `fr` | Shop country |
++| | `PS_LANGUAGE` | `en` | Installation language |
++| | `PS_DEV_MODE` | `1` | Development mode |
++| | `PS_ENABLE_SSL` | `0` | Enable SSL |
++| | `PS_ERASE_DB` | `0` | Erase database on install |
++| | `PS_USE_DOCKER_MAILDEV` | `1` | Use MailDev for emails |
++| **Admin** | `ADMIN_MAIL` | `demo@prestashop.com` | Admin email |
++| | `ADMIN_PASSWD` | `Correct Horse Battery Staple` | Admin password |
++| **Development** | `VERSION` | `8.1-apache` | PHP version |
++| | `NODE_VERSION` | `20.17.0` | Node.js version |
++| | `INSTALL_XDEBUG` | `false` | Install Xdebug |
++| | `BLACKFIRE_ENABLE` | `0` | Enable Blackfire profiling |
++| | `BLACKFIRE_SERVER_ID` | `0` | Blackfire server ID |
++| | `BLACKFIRE_SERVER_TOKEN` | `0` | Blackfire server token |
++| | `USER_ID` | `1000` | User ID for container |
++| | `GROUP_ID` | `1000` | Group ID for container |
++| | `DISABLE_MAKE` | `0` | Disable make commands |
++| | `PS_HOSTNAME` | `localhost` | Container hostname |
++
++## Development Workflow
++
++### Initial Setup
++
++```bash
++make docker-start       # Build, start containers and install assets and database fixtures
++```
++
++### Daily Development
++
++```bash
++make docker-up          # Start containers
++make cc                 # Clear Symfony's cache
++make test               # Run tests
++make cs-fixer           # Fix code style
++```
++
++### Asset Building
++
++The asset build system provides a simple and reliable way to build all assets:
++
++- **Always Fresh**: Assets are always rebuilt to ensure consistency
++- **Parallel Execution**: Multiple assets build in parallel for faster builds
++- **Clean Builds**: Node modules are cleaned and reinstalled for each build
++
++**Examples:**
++```bash
++# Build all assets
++make assets
++# Build Admin default theme
++make admin-default
++
++# Direct script usage (dry-run by default. Use --force to force rebuild)
++
++# All assets
++./tools/assets/build.sh # dry-run
++./tools/assets/build/sh --force
++
++# Specific asset
++./tools/assets/build.sh admin-default # dry-run
++./tools/assets/build.sh admin-default --force
++```
++
++### Performance Tips
++
++- Use `make test-unit` for faster test runs during development
++- Use `make cs-fixer-dry` to check code style without modifying files
++
++## Troubleshooting
++
++### Docker Issues
++
++#### Container Won't Start
++
++**Solutions:**
++
++1. **Clean Docker cache:**
++   ```bash
++   docker system prune -f
++   docker volume prune -f
++   ```
++
++2. **Rebuild from scratch:**
++   ```bash
++   make docker-down
++   docker system prune -af
++   make docker-start
++   ```
++
++#### Port Already in Use
++
++**Solutions:**
++
++1. **Check what's using the port:**
++   ```bash
++   lsof -i :8001
++   ```
++
++2. **Stop conflicting services:**
++   ```bash
++   docker ps
++   docker stop <container-id>
++   ```
++
++#### Image Build Fails
++
++**Solutions:**
++
++1. **Increase Docker resources:**
++   - Open Docker Desktop settings
++   - Increase memory to at least 4GB
++
++2. **Check network connectivity:**
++   ```bash
++   curl -I https://deb.nodesource.com
++   ```
++
++### Database Issues
++
++#### Database Connection Failed
++
++**Solutions:**
++
++1. **Check database container:**
++   ```bash
++   docker ps | grep mysql
++   docker logs prestashop-mysql-1
++   ```
++
++2. **Reset database:**
++   ```bash
++   make docker-down
++   docker volume rm prestashop_db-data
++   make docker-up
++   ```
++
++3. **Check database credentials:**
++   ```bash
++   docker compose exec prestashop-git env | grep DB_
++   ```
++
++#### Database Data Lost
++
++If your database is corrupted / data is lost, you can reset your data by running the following command:
++   ```bash
++   make install-prestashop
++   ```
++
++### Asset Build Issues
++
++#### Node.js Dependencies Missing
++
++**Solutions:**
++
++1. **Install Node.js dependencies:**
++   ```bash
++   make assets
++   ```
++
++2. **Restart Docker containers:**
++   ```bash
++   make docker-restart
++   ```
++
++#### Asset Build Fails
++
++**Solutions:**
++
++1. **Check for syntax errors:**
++   ```bash
++   make assets
++   ```
++
++2. **Rebuild specific assets:**
++   ```bash
++   make admin-default
++   make front-classic
++   ```
++
++3. **Restart Docker containers:**
++   ```bash
++   make docker-restart
++   ```
++
++### Permission Issues
++
++#### File Permission Errors
++
++**Solutions:**
++
++1. **Fix ownership:**
++   ```bash
++   sudo chown -R $USER:$USER .
++   ```
++
++2. **Fix permissions:**
++   ```bash
++   find . -type d -exec chmod 755 {} \;
++   find . -type f -exec chmod 644 {} \;
++   chmod +x .docker/docker_run_git.sh
++   ```
++
++#### Cache Directory Issues
++
++**Solutions:**
++
++1. **Clear cache:**
++   ```bash
++   make cc
++   ```
++
++2. **Fix cache permissions:**
++   ```bash
++   make sh
++   chmod -R 777 var/cache
++   chmod -R 777 var/logs
++   ```
++
++### Development Tools Issues
++
++#### Xdebug Not Working
++
++**Solutions:**
++
++1. **Enable Xdebug:**
++   ```bash
++   export INSTALL_XDEBUG=true
++   make docker-start
++   ```
++
++2. **Check Xdebug configuration:**
++   ```bash
++   make docker-sh
++   php -i | grep xdebug
++   ```
++
++#### PHPUnit Test Issues
++
++**Solutions:**
++
++1. **Run specific test groups:**
++   ```bash
++   make test-unit
++   make test-integration
++   ```
++
++2. **Check test database:**
++   ```bash
++   make docker-sh
++   php bin/console doctrine:database:create --env=test
++   ```
++
++3. **Run tests with custom options:**
++   ```bash
++   # Run specific test files or classes
++   composer run unit-tests -- --filter=ClassName
++   composer run integration-tests -- --filter=ClassName
++   
++   # Run with specific options
++   composer run unit-tests -- --stop-on-failure
++   composer run integration-tests -- --stop-on-failure
++   ```
++
++### Getting Help
++
++If you're still experiencing issues:
++
++1. **Check logs:**
++   ```bash
++   make docker-logs
++   docker logs prestashop-prestashop-git-1
++   docker logs prestashop-mysql-1
++   ```
++
++2. **Search existing issues:**
++   - [GitHub Issues](https://github.com/PrestaShop/PrestaShop/issues)
++   - [PrestaShop Forums](https://www.prestashop.com/forums/)
++
++3. **Ask for help:**
++   - [PrestaShop Slack](https://www.prestashop-project.org/slack/)
++   - [GitHub Discussions](https://github.com/PrestaShop/PrestaShop/discussions)
+diff --git a/tools/assets/build.sh b/tools/assets/build.sh
+index 5a258efe828e7..bcb9792b5e2ad 100755
+--- a/tools/assets/build.sh
++++ b/tools/assets/build.sh
+@@ -2,6 +2,9 @@
+ 
+ ###
+ # This script rebuilds all the static assets, running npm install-clean as needed
++# Usage: ./tools/assets/build.sh [asset-name] [--force]
++#   asset-name: admin-default, admin-new-theme, front-core, front-classic, front-hummingbird, or all
++#   --force: Force rebuild even if assets already exist
+ #
+ 
+ #http://redsymbol.net/articles/unofficial-bash-strict-mode/
+@@ -9,6 +12,23 @@ set -euo pipefail
+ PROJECT_PATH=$(cd "$( dirname "$0" )/../../" && pwd)
+ ADMIN_DIR="${PROJECT_PATH}/${ADMIN_DIR:-admin-dev}"
+ 
++# Parse command line arguments
++FORCE_BUILD=false
++ASSET_NAME=""
++
++for arg in "$@"; do
++  case $arg in
++    --force)
++      FORCE_BUILD=true
++      ;;
++    *)
++      if [[ -z "$ASSET_NAME" ]]; then
++        ASSET_NAME="$arg"
++      fi
++      ;;
++  esac
++done
++
+ if [[ ! -d $ADMIN_DIR ]]; then
+   echo "Could not find directory '$ADMIN_DIR'. Make sure to launch this script from the root directory of PrestaShop"
+   return 1
+@@ -37,39 +57,91 @@ function build {
+   popd
+ }
+ 
++# Check if asset needs to be built
++should_build_asset() {
++  local asset_type=$1
++  
++  if [[ "$FORCE_BUILD" == "true" ]]; then
++    return 0
++  fi
++  
++  case $asset_type in
++    admin-default)
++      [[ ! -f "$ADMIN_DIR/themes/default/public/theme.css" ]]
++      ;;
++    admin-new-theme)
++      [[ ! -f "$ADMIN_DIR/themes/new-theme/public/theme.css" ]]
++      ;;
++    front-core)
++      [[ ! -f "$PROJECT_PATH/themes/core.js" ]]
++      ;;
++    front-classic)
++      [[ ! -f "$PROJECT_PATH/themes/classic/assets/css/theme.css" ]]
++      ;;
++    front-hummingbird)
++      [[ ! -f "$PROJECT_PATH/themes/hummingbird/assets/css/theme.css" ]]
++      ;;
++    *)
++      return 0
++      ;;
++  esac
++}
++
+ build_asset() {
+   case $1 in
+     admin-default)
+-      echo ">>> Building admin default theme..."
+-      build "$ADMIN_DIR/themes/default"
++      if should_build_asset "admin-default"; then
++        echo ">>> Building admin default theme..."
++        build "$ADMIN_DIR/themes/default"
++      else
++        echo "> Admin default theme already exists (use --force to rebuild)"
++      fi
+     ;;
+     admin-new-theme)
+-      echo ">>> Building admin new theme..."
+-      build "$ADMIN_DIR/themes/new-theme"
++      if should_build_asset "admin-new-theme"; then
++        echo ">>> Building admin new theme..."
++        build "$ADMIN_DIR/themes/new-theme"
++      else
++        echo "> Admin new theme already exists (use --force to rebuild)"
++      fi
+     ;;
+     front-core)
+-      echo ">>> Building core theme assets..."
+-      build "$PROJECT_PATH/themes"
++      if should_build_asset "front-core"; then
++        echo ">>> Building core theme assets..."
++        build "$PROJECT_PATH/themes"
++      else
++        echo "> Front core already exists (use --force to rebuild)"
++      fi
+     ;;
+     front-classic)
+-      echo ">>> Building classic theme assets..."
+-      build "$PROJECT_PATH/themes/classic/_dev"
++      if should_build_asset "front-classic"; then
++        echo ">>> Building classic theme assets..."
++        build "$PROJECT_PATH/themes/classic/_dev"
++      else
++        echo "> Front classic already exists (use --force to rebuild)"
++      fi
+     ;;
+     front-hummingbird)
+-      echo ">>> Building hummingbird theme assets..."
+-      build "$PROJECT_PATH/themes/hummingbird"
++      if should_build_asset "front-hummingbird"; then
++        echo ">>> Building hummingbird theme assets..."
++        build "$PROJECT_PATH/themes/hummingbird"
++      else
++        echo "> Front hummingbird already exists (use --force to rebuild)"
++      fi
+     ;;
+     all)
+       build_asset admin-default & build_asset admin-new-theme & build_asset front-core & build_asset front-classic & build_asset front-hummingbird
+     ;;
+     *)
+       echo "Unknown asset to build $1"
+-    ;;
++      echo "Available assets: admin-default, admin-new-theme, front-core, front-classic, front-hummingbird, all"
++      echo "Use --force to rebuild even if assets already exist"
++      ;;
+   esac
+ }
+ 
+-if test $# -gt 0; then
+-  build_asset $1
++if [[ -n "$ASSET_NAME" ]]; then
++  build_asset "$ASSET_NAME"
+ else
+   build_asset all
+ fi

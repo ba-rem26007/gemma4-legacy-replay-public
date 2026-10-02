@@ -1,0 +1,1085 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/carrier/form/carrier-form-manager.ts b/admin-dev/themes/new-theme/js/pages/carrier/form/carrier-form-manager.ts
+index a6b0e603ea980..c42582506ce7a 100644
+--- a/admin-dev/themes/new-theme/js/pages/carrier/form/carrier-form-manager.ts
++++ b/admin-dev/themes/new-theme/js/pages/carrier/form/carrier-form-manager.ts
+@@ -152,6 +152,7 @@ export default class CarrierFormManager {
+ 
+         // We need to update the zone id and the zone name
+         const $prototype = $(prototype);
++        $prototype.attr('data-zone-id', zoneId);
+         $prototype.find(CarrierFormMap.zoneIdInput).val(zoneId);
+         $prototype.find(CarrierFormMap.zoneNamePreview).text(this.$zonesInput.find(CarrierFormMap.zoneIdOption(zoneId)).text());
+ 
+@@ -245,7 +246,10 @@ export default class CarrierFormManager {
+ 
+         // We set the previous value for this range if it exists
+         // @ts-ignore
+-        $rPrototype.find(CarrierFormMap.rangePriceInput).val(price);
++        $rPrototype.find(CarrierFormMap.rangePriceInput)
++          .attr('data-from', range.from || '0')
++          .attr('data-to', range.to || '0')
++          .val(price);
+         // Then, we append the new range row into the range container
+         $zoneRangesContainerBody.append($rPrototype);
+       });
+diff --git a/install-dev/data/xml/feature_flag.xml b/install-dev/data/xml/feature_flag.xml
+index d4e014d279522..d298144065e06 100644
+--- a/install-dev/data/xml/feature_flag.xml
++++ b/install-dev/data/xml/feature_flag.xml
+@@ -17,7 +17,7 @@
+     <feature_flag id="catalog_price_rule" name="catalog_price_rule" type="env,dotenv,db" label_wording="Catalog price rules" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated catalog price rules page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="country" name="country" type="env,dotenv,db" label_wording="Countries" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated countries page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="state" name="state" type="env,dotenv,db" label_wording="States" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated states page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+-    <feature_flag id="carrier" name="carrier" type="env,dotenv,db" label_wording="Carriers" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated carriers page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
++    <feature_flag id="carrier" name="carrier" type="env,dotenv,db" label_wording="Carriers" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated carriers page." description_domain="Admin.Advparameters.Help" state="1" stability="stable" />
+     <feature_flag id="permission" name="permission" type="env,dotenv,db" label_wording="Permissions" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated permissions page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="tax_rules_group" name="tax_rules_group" type="env,dotenv,db" label_wording="Tax rule groups" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated tax rules page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+     <feature_flag id="customer_threads" name="customer_threads" type="env,dotenv,db" label_wording="Customer threads" label_domain="Admin.Advparameters.Feature" description_wording="Enable / Disable the migrated customer threads page." description_domain="Admin.Advparameters.Help" state="0" stability="beta" />
+diff --git a/src/Adapter/Carrier/CommandHandler/SetCarrierTaxRuleGroupHandler.php b/src/Adapter/Carrier/CommandHandler/SetCarrierTaxRuleGroupHandler.php
+index 6d7a21273ff11..0d6c4942d711b 100644
+--- a/src/Adapter/Carrier/CommandHandler/SetCarrierTaxRuleGroupHandler.php
++++ b/src/Adapter/Carrier/CommandHandler/SetCarrierTaxRuleGroupHandler.php
+@@ -44,7 +44,9 @@ public function __construct(
+ 
+     public function handle(SetCarrierTaxRuleGroupCommand $command): CarrierId
+     {
+-        $this->taxRulesGroupRepository->assertTaxRulesGroupExists($command->getCarrierTaxRuleGroupId());
++        if ($command->getCarrierTaxRuleGroupId()->getValue() !== 0) {
++            $this->taxRulesGroupRepository->assertTaxRulesGroupExists($command->getCarrierTaxRuleGroupId());
++        }
+ 
+         $newCarrier = $this->carrierRepository->getEditableOrNewVersion($command->getCarrierId());
+         $newCarrierId = new CarrierId($newCarrier->id);
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/CarrierFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/CarrierFormDataHandler.php
+index 6b6f84502657e..9a753ee7612e3 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/CarrierFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/CarrierFormDataHandler.php
+@@ -30,6 +30,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\AddCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\EditCarrierCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\SetCarrierRangesCommand;
++use PrestaShop\PrestaShop\Core\Domain\Carrier\Command\SetCarrierTaxRuleGroupCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Carrier\ValueObject\CarrierId;
+ use PrestaShop\PrestaShop\Core\Domain\Shop\ValueObject\ShopConstraint;
+ use Symfony\Component\HttpFoundation\File\UploadedFile;
+@@ -75,6 +76,9 @@ public function create(array $data)
+         // Then, we need to add ranges for this carrier
+         $carrierId = $this->setCarrierRange($carrierId, $data);
+ 
++        // Finally we save the tax rules group
++        $carrierId = $this->setCarrierTaxRuleGroup($carrierId, $data);
++
+         return $carrierId->getValue();
+     }
+ 
+@@ -118,11 +122,14 @@ public function update($id, array $data)
+             $carrierId = $this->setCarrierRange($carrierId, $data);
+         }
+ 
++        // Finally we save the tax rules group
++        $carrierId = $this->setCarrierTaxRuleGroup($carrierId, $data);
++
+         return $carrierId->getValue();
+     }
+ 
+     /**
+-     * Function aim to format ranges data from the form, to be used in the command of Seting carrier ranges.
++     * Function aim to format ranges data from the form, to be used in the command of Setting carrier ranges.
+      */
+     private function formatFormRangesData(array $data): array
+     {
+@@ -161,4 +168,18 @@ private function setCarrierRange(CarrierId $carrierId, array $data): CarrierId
+ 
+         return $newCarrierId;
+     }
++
++    private function setCarrierTaxRuleGroup(CarrierId $carrierId, array $data): CarrierId
++    {
++        $taxRuleCommand = new SetCarrierTaxRuleGroupCommand(
++            $carrierId->getValue(),
++            $data['shipping_settings']['id_tax_rule_group'],
++            ShopConstraint::allShops()
++        );
++
++        /** @var CarrierId $newCarrierId */
++        $newCarrierId = $this->commandBus->handle($taxRuleCommand);
++
++        return $newCarrierId;
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProvider.php
+index 7e2facfb9ff97..26c254ec2c0d8 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProvider.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
+ use PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\ZoneByIdChoiceProvider;
++use PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+@@ -45,7 +46,8 @@ public function __construct(
+         private readonly ShopContext $shopContext,
+         private readonly CurrencyDataProviderInterface $currencyDataProvider,
+         private readonly ConfigurationInterface $configuration,
+-        private readonly ZoneByIdChoiceProvider $zonesChoiceProvider
++        private readonly ZoneByIdChoiceProvider $zonesChoiceProvider,
++        private readonly GroupDataProvider $groupDataProvider,
+     ) {
+     }
+ 
+@@ -91,6 +93,7 @@ public function getDefaultData()
+             'general_settings' => [
+                 'grade' => 0,
+                 'associated_shops' => $this->shopContext->getAssociatedShopIds(),
++                'group_access' => $this->groupDataProvider->getAllGroupIds(),
+             ],
+         ];
+     }
+diff --git a/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php b/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
+index c1521a5f4336e..dc9ce780a65f7 100644
+--- a/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Improve/Shipping/Carrier/ShippingLocationsAndCostsType.php
+@@ -91,6 +91,7 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                         'target' => '_blank',
+                     ],
+                 ],
++                'placeholder' => false,
+             ])
+             ->add('has_additional_handling_fee', SwitchType::class, [
+                 'label' => $this->trans('Handling costs', 'Admin.Shipping.Feature'),
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/data_provider.yml b/src/PrestaShopBundle/Resources/config/services/adapter/data_provider.yml
+index dadd6a0777c07..ebb84bd859519 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/data_provider.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/data_provider.yml
+@@ -27,7 +27,10 @@ services:
+     arguments: [ "@=service('prestashop.adapter.legacy.context')" ]
+ 
+   prestashop.adapter.data_provider.group:
+-    class: PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider
++    alias: PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider
++    deprecated:
++      package: PrestaShop\PrestaShop
++      version: 9.0
+ 
+   prestashop.adapter.data_provider.manufacturer:
+     class: PrestaShop\PrestaShop\Adapter\Manufacturer\ManufacturerDataProvider
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/group.yml b/src/PrestaShopBundle/Resources/config/services/adapter/group.yml
+index 265193a3a4bff..ef3e4503468d9 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/group.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/group.yml
+@@ -10,8 +10,13 @@ services:
+ 
+   PrestaShop\PrestaShop\Adapter\Customer\Group\Repository\GroupRepository: ~
+ 
++  PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider: ~
++
+   prestashop.adapter.group.group_data_provider:
+-    class: 'PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider'
++    alias: 'PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider'
++    deprecated:
++      package: PrestaShop\PrestaShop
++      version: 9.0
+ 
+   prestashop.adapter.feature.group_feature:
+     class: 'PrestaShop\PrestaShop\Adapter\Feature\GroupFeature'
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierTaxRuleGroupFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierTaxRuleGroupFeatureContext.php
+index 2bfbfd80e7071..74d31cb2a5b2a 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierTaxRuleGroupFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Carrier/CarrierTaxRuleGroupFeatureContext.php
+@@ -48,6 +48,18 @@ public function editTaxRuleWithoutIdUpdate(string $reference, string $taxRulesGr
+         }
+     }
+ 
++    /**
++     * @When I set no tax rule for carrier :reference
++     */
++    public function removeTaxRule(string $reference): void
++    {
++        $initialCarrierId = $this->getSharedStorage()->get($reference);
++        $carrierId = $this->editCarrierTaxRule($reference, null, null);
++        if ($carrierId) {
++            Assert::assertEquals($initialCarrierId, $carrierId->getValue(), 'Carrier ID was expected the remain the same');
++        }
++    }
++
+     /**
+      * @When I set tax rule :taxRulesGroupReference for carrier :reference I get a new carrier referenced as :newReference
+      */
+@@ -60,14 +72,19 @@ public function editTaxRuleWithIdUpdate(string $reference, string $newReference,
+         }
+     }
+ 
+-    protected function editCarrierTaxRule(string $reference, ?string $newReference, string $taxRulesGroupReference): ?CarrierId
++    protected function editCarrierTaxRule(string $reference, ?string $newReference, ?string $taxRulesGroupReference): ?CarrierId
+     {
+         $carrierId = $this->referenceToId($reference);
+ 
+         try {
++            if (null === $taxRulesGroupReference) {
++                $taxRulesGroupId = 0;
++            } else {
++                $taxRulesGroupId = 'wrong-tax-rules' === $taxRulesGroupReference ? 4242 : $this->referenceToId($taxRulesGroupReference);
++            }
+             $command = new SetCarrierTaxRuleGroupCommand(
+                 $carrierId,
+-                'wrong-tax-rules' === $taxRulesGroupReference ? 4242 : $this->referenceToId($taxRulesGroupReference),
++                $taxRulesGroupId,
+                 ShopConstraint::allShops()
+             );
+ 
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_tax_rule_group_management.feature b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_tax_rule_group_management.feature
+index b78c81219c5b6..aebd5448d8665 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_tax_rule_group_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Carrier/carrier_tax_rule_group_management.feature
+@@ -34,6 +34,11 @@ Feature: Carrier Tax Rule Group management
+     Then carrier "carrier1" should have the following properties:
+       | name         | Carrier 1         |
+       | taxRuleGroup | US-AZ Rate (6.6%) |
++    # Remove associated taw rule
++    When I set no tax rule for carrier "carrier1"
++    Then carrier "carrier1" should have the following properties:
++      | name         | Carrier 1 |
++      | taxRuleGroup |           |
+ 
+   Scenario: Partially editing carrier with wrong tax rule group
+     When I create carrier "carrier1" with specified properties:
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/01_CRUDCarrier.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/01_CRUDCarrier.ts
+index af61778af2c83..99daccebf2c34 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/01_CRUDCarrier.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/01_CRUDCarrier.ts
+@@ -224,6 +224,19 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+ 
+       const textResult = await boCarriersCreatePage.createEditCarrier(page, createCarrierData);
+       expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++    });
++
++    it('should return to carriers page', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++      await boDashboardPage.goToSubMenu(
++        page,
++        boDashboardPage.shippingLink,
++        boDashboardPage.carriersLink,
++      );
++
++      const pageTitle = await boCarriersPage.getPageTitle(page);
++      expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+       const numberCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+       expect(numberCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
+@@ -315,10 +328,7 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+       const isCustomerConnected = await foClassicCheckoutPage.isCustomerConnected(page);
+       expect(isCustomerConnected, 'Customer is connected').to.eq(false);
+     });
+-  });
+ 
+-  // 3 - Update carrier
+-  describe('Update carrier created', async () => {
+     it('should go back to BO', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'firstGoBackToBO', baseContext);
+ 
+@@ -327,7 +337,10 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+       const pageTitle = await boCarriersPage.getPageTitle(page);
+       expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+     });
++  });
+ 
++  // 3 - Update carrier
++  describe('Update carrier created', async () => {
+     it('should filter list by name', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'filterForUpdate', baseContext);
+ 
+@@ -357,6 +370,19 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+ 
+       const textResult = await boCarriersCreatePage.createEditCarrier(page, editCarrierData);
+       expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++    });
++
++    it('should return to carriers page', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdate', baseContext);
++
++      await boDashboardPage.goToSubMenu(
++        page,
++        boDashboardPage.shippingLink,
++        boDashboardPage.carriersLink,
++      );
++
++      const pageTitle = await boCarriersPage.getPageTitle(page);
++      expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+       const numberOfCarriersAfterUpdate = await boCarriersPage.resetAndGetNumberOfLines(page);
+       expect(numberOfCarriersAfterUpdate).to.be.equal(numberOfCarriers + 1);
+@@ -448,10 +474,7 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+       const isCustomerConnected = await foClassicCheckoutPage.isCustomerConnected(page);
+       expect(isCustomerConnected, 'Customer is connected').to.eq(false);
+     });
+-  });
+ 
+-  // 5 - Delete carrier
+-  describe('Delete carrier', async () => {
+     it('should go back to BO', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'secondGoBackToBO', baseContext);
+ 
+@@ -460,7 +483,10 @@ describe('BO - Shipping - Carriers : CRUD carrier in BO', async () => {
+       const pageTitle = await boCarriersPage.getPageTitle(page);
+       expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+     });
++  });
+ 
++  // 5 - Delete carrier
++  describe('Delete carrier', async () => {
+     it('should filter list by name', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'filterForDelete', baseContext);
+ 
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/02_filterSortAndPagination.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/02_filterSortAndPagination.ts
+index 44ee1dcc36dc7..c383c5a95e18d 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/02_filterSortAndPagination.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/02_filterSortAndPagination.ts
+@@ -1,4 +1,4 @@
+-// Import utils
++import {expect} from 'chai';
+ import testContext from '@utils/testContext';
+ 
+ import {
+@@ -13,14 +13,11 @@ import {
+   utilsCore,
+   utilsFile,
+   utilsPlaywright,
++  dataZones,
+ } from '@prestashop-core/ui-testing';
+ 
+-import {expect} from 'chai';
+-
+ const baseContext: string = 'functional_BO_shipping_carriers_filterSortAndPagination';
+ 
+-// Browser and tab
+-
+ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', async () => {
+   let browserContext: BrowserContext;
+   let page: Page;
+@@ -68,7 +65,7 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+ 
+   // 1 - Filter carriers
+   describe('Filter carriers table', async () => {
+-    const tests = [
++    [
+       {
+         args:
+           {
+@@ -116,18 +113,7 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+           },
+         expected: 'Disabled',
+       },
+-      {
+-        args:
+-          {
+-            testIdentifier: 'filterByPosition',
+-            filterType: 'input',
+-            filterBy: 'a!position',
+-            filterValue: dataCarriers.myLightCarrier.position.toString(),
+-          },
+-      },
+-    ];
+-
+-    tests.forEach((test) => {
++    ].forEach((test) => {
+       it(`should filter by ${test.args.filterBy} '${test.args.filterValue}'`, async function () {
+         await testContext.addContextItem(this, 'testIdentifier', test.args.testIdentifier, baseContext);
+ 
+@@ -163,56 +149,47 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+ 
+   // 2 - Sort carriers table
+   describe('Sort carriers table', async () => {
+-    const sortTests = [
++    [
+       {
+-        args: {
+-          testIdentifier: 'sortByIdDesc', sortBy: 'id_carrier', sortDirection: 'down', isFloat: true,
+-        },
++        testIdentifier: 'sortByIdDesc', sortBy: 'id_carrier', sortDirection: 'desc', isFloat: true,
+       },
+       {
+-        args: {
+-          testIdentifier: 'sortByNameDesc', sortBy: 'name', sortDirection: 'down',
+-        },
++        testIdentifier: 'sortByNameDesc', sortBy: 'name', sortDirection: 'desc',
+       },
+       {
+-        args: {
+-          testIdentifier: 'sortByNameAsc', sortBy: 'name', sortDirection: 'up',
+-        },
++        testIdentifier: 'sortByNameAsc', sortBy: 'name', sortDirection: 'asc',
+       },
+       {
+-        args: {
+-          testIdentifier: 'sortByPositionAsc', sortBy: 'a!position', sortDirection: 'up', isFloat: true,
+-        },
++        testIdentifier: 'sortByPositionAsc', sortBy: 'a!position', sortDirection: 'asc', isFloat: true,
+       },
+       {
+-        args: {
+-          testIdentifier: 'sortByPositionDesc', sortBy: 'a!position', sortDirection: 'down', isFloat: true,
+-        },
++        testIdentifier: 'sortByPositionDesc', sortBy: 'a!position', sortDirection: 'desc', isFloat: true,
+       },
+       {
+-        args: {
+-          testIdentifier: 'sortByIdAsc', sortBy: 'id_carrier', sortDirection: 'up', isFloat: true,
+-        },
++        testIdentifier: 'sortByIdAsc', sortBy: 'id_carrier', sortDirection: 'asc', isFloat: true,
+       },
+-    ];
++    ].forEach((test: {
++      testIdentifier: string
++      sortBy: string
++      sortDirection: string
++      isFloat?: boolean
++    }) => {
++      it(`should sort by '${test.sortBy}' '${test.sortDirection}' and check result`, async function () {
++        await testContext.addContextItem(this, 'testIdentifier', test.testIdentifier, baseContext);
+ 
+-    sortTests.forEach((test) => {
+-      it(`should sort by '${test.args.sortBy}' '${test.args.sortDirection}' and check result`, async function () {
+-        await testContext.addContextItem(this, 'testIdentifier', test.args.testIdentifier, baseContext);
++        const nonSortedTable = await boCarriersPage.getAllRowsColumnContent(page, test.sortBy);
+ 
+-        const nonSortedTable = await boCarriersPage.getAllRowsColumnContent(page, test.args.sortBy);
++        await boCarriersPage.sortTable(page, test.sortBy, test.sortDirection);
+ 
+-        await boCarriersPage.sortTable(page, test.args.sortBy, test.args.sortDirection);
++        const sortedTable = await boCarriersPage.getAllRowsColumnContent(page, test.sortBy);
+ 
+-        const sortedTable = await boCarriersPage.getAllRowsColumnContent(page, test.args.sortBy);
+-
+-        if (test.args.isFloat) {
++        if (test.isFloat) {
+           const nonSortedTableFloat = nonSortedTable.map((text: string): number => parseFloat(text));
+           const sortedTableFloat = sortedTable.map((text: string): number => parseFloat(text));
+ 
+           const expectedResult = await utilsCore.sortArrayNumber(nonSortedTableFloat);
+ 
+-          if (test.args.sortDirection === 'up') {
++          if (test.sortDirection === 'asc') {
+             expect(sortedTableFloat).to.deep.equal(expectedResult);
+           } else {
+             expect(sortedTableFloat).to.deep.equal(expectedResult.reverse());
+@@ -220,7 +197,7 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+         } else {
+           const expectedResult = await utilsCore.sortArray(nonSortedTable);
+ 
+-          if (test.args.sortDirection === 'up') {
++          if (test.sortDirection === 'asc') {
+             expect(sortedTable).to.deep.equal(expectedResult);
+           } else {
+             expect(sortedTable).to.deep.equal(expectedResult.reverse());
+@@ -236,12 +213,27 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+     creationTests.forEach((test: number, index: number) => {
+       before(() => utilsFile.generateImage(`todelete${index}.jpg`));
+ 
+-      const carrierData: FakerCarrier = new FakerCarrier({name: `todelete${index}`});
++      const carrierData: FakerCarrier = new FakerCarrier({
++        name: `todelete${index}`,
++        ranges: [
++          {
++            weightMin: 0,
++            weightMax: 5,
++            zones: [
++              {
++                zone: dataZones.europe,
++                price: 5,
++              },
++            ],
++          },
++        ],
++      });
+ 
+       it('should go to add new carrier page', async function () {
+         await testContext.addContextItem(this, 'testIdentifier', `goToAddCarrierPage${index}`, baseContext);
+ 
+         await boCarriersPage.goToAddNewCarrierPage(page);
++
+         const pageTitle = await boCarriersCreatePage.getPageTitle(page);
+         expect(pageTitle).to.contains(boCarriersCreatePage.pageTitleCreate);
+       });
+@@ -251,6 +243,19 @@ describe('BO - Shipping - Carriers : Filter, sort and pagination carriers', asyn
+ 
+         const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierData);
+         expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++      });
++
++      it('should return to carriers page', async function () {
++        await testContext.addContextItem(this, 'testIdentifier', `returnToCarriers${index}`, baseContext);
++
++        await boDashboardPage.goToSubMenu(
++          page,
++          boDashboardPage.shippingLink,
++          boDashboardPage.carriersLink,
++        );
++
++        const pageTitle = await boCarriersPage.getPageTitle(page);
++        expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+         const numberOfCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+         expect(numberOfCarriersAfterCreation).to.be.equal(numberOfCarriers + 1 + index);
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/03_quickEditAndBulkActions.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/03_quickEditAndBulkActions.ts
+index 92e51858f9ff9..a6a3a35e959fb 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/03_quickEditAndBulkActions.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/03_quickEditAndBulkActions.ts
+@@ -1,7 +1,6 @@
+-// Import utils
++import {expect} from 'chai';
+ import testContext from '@utils/testContext';
+ 
+-import {expect} from 'chai';
+ import {
+   boCarriersPage,
+   boCarriersCreatePage,
+@@ -50,7 +49,6 @@ describe('BO - Shipping - Carriers : Bulk actions', async () => {
+     maxWeight: 500,
+   });
+ 
+-  // before and after functions
+   before(async function () {
+     browserContext = await utilsPlaywright.createBrowserContext(this.browser);
+     page = await utilsPlaywright.newTab(browserContext);
+@@ -219,9 +217,22 @@ describe('BO - Shipping - Carriers : Bulk actions', async () => {
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierData);
+     expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+-    const numberOfCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+-    expect(numberOfCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
++    const numberCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
+   });
+ 
+   it('should check there are carriers (after creation)', async function () {
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/04_quickEditStatusAndFreeShipping.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/04_quickEditStatusAndFreeShipping.ts
+index 7f7fbadf8e6d6..babaa2c19b008 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/04_quickEditStatusAndFreeShipping.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/04_quickEditStatusAndFreeShipping.ts
+@@ -67,7 +67,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setStatus(page, 1, false);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+@@ -140,7 +140,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setStatus(page, 3, true);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+@@ -174,7 +174,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setFreeShippingStatus(page, 2, true);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+@@ -226,7 +226,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setFreeShippingStatus(page, 2, false);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+@@ -240,7 +240,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setStatus(page, 3, false);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+@@ -254,7 +254,7 @@ describe('BO - Shipping - Carriers : Quick edit status and free shipping', async
+       const isActionPerformed = await boCarriersPage.setStatus(page, 1, true);
+ 
+       if (isActionPerformed) {
+-        const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++        const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+         expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+       }
+ 
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/05_changePosition.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/05_changePosition.ts
+index 29fc337a947da..3a1a159940607 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/05_changePosition.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/05_changePosition.ts
+@@ -19,6 +19,7 @@ import {
+   foClassicHomePage,
+   foClassicProductPage,
+   type Page,
++  utilsCore,
+   utilsPlaywright,
+ } from '@prestashop-core/ui-testing';
+ 
+@@ -134,6 +135,22 @@ describe('BO - Shipping - Carriers : Change carrier position', async () => {
+       expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+     });
+ 
++    it('should sort by \'position\' \'asc\' and check result', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'sortByPosition', baseContext);
++
++      const nonSortedTable = await boCarriersPage.getAllRowsColumnContent(page, 'a!position');
++
++      await boCarriersPage.sortTable(page, 'a!position', 'asc');
++
++      const sortedTable = await boCarriersPage.getAllRowsColumnContent(page, 'a!position');
++
++      const nonSortedTableFloat = nonSortedTable.map((text: string): number => parseFloat(text));
++      const sortedTableFloat = sortedTable.map((text: string): number => parseFloat(text));
++
++      const expectedResult = await utilsCore.sortArrayNumber(nonSortedTableFloat);
++      expect(sortedTableFloat).to.deep.equal(expectedResult);
++    });
++
+     it('should change first carrier position to 2', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'changeCarrierPosition', baseContext);
+ 
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/06_generalSettings.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/06_generalSettings.ts
+index 01342160b9fc0..5b06e6ebf52bc 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/06_generalSettings.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/06_generalSettings.ts
+@@ -207,6 +207,19 @@ describe('BO - Shipping - Carriers : General Settings', async () => {
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierData);
+     expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+     const numberCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+     expect(numberCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
+@@ -329,6 +342,22 @@ describe('BO - Shipping - Carriers : General Settings', async () => {
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataEnabled);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierStatus', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -362,6 +391,22 @@ describe('BO - Shipping - Carriers : General Settings', async () => {
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataName);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierName', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -401,6 +446,22 @@ describe('BO - Shipping - Carriers : General Settings', async () => {
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataGuest);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierGroupAccess', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/07_shippingLocationsAndCosts.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/07_shippingLocationsAndCosts.ts
+index 7438279348d9d..321c9611e4ef8 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/07_shippingLocationsAndCosts.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/07_shippingLocationsAndCosts.ts
+@@ -107,6 +107,18 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+     // Shipping locations and cost
+     handlingCosts: false,
+     freeShipping: true,
++    ranges: [
++      {
++        zones: [
++          {
++            zone: dataZones.europe,
++          },
++          {
++            zone: dataZones.northAmerica,
++          },
++        ],
++      },
++    ],
+     billing: 'According to total weight',
+     taxRule: 'No tax',
+     outOfRangeBehavior: 'Apply the cost of the highest defined range',
+@@ -467,6 +479,19 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierData);
+     expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+     const numberCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+     expect(numberCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
+@@ -599,6 +624,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataFreeShipping);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierFreeShipping', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -639,6 +680,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataHandlingCosts);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierHandlingCosts', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -680,6 +737,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataTax);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierTax', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -821,6 +894,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataRanges);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierRanges', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -950,6 +1039,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataBilling);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierBilling', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+@@ -988,6 +1093,22 @@ describe('BO - Shipping - Carriers : Shipping locations and costs', async () =>
+ 
+     const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierDataRemoveRanges);
+     expect(textResult).to.contains(boCarriersPage.successfulUpdateMessage);
++  });
++
++  it('should return to carriers page', async function () {
++    await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriersAfterUpdateCarrierWORanges', baseContext);
++
++    await boDashboardPage.goToSubMenu(
++      page,
++      boDashboardPage.shippingLink,
++      boDashboardPage.carriersLink,
++    );
++
++    const pageTitle = await boCarriersPage.getPageTitle(page);
++    expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++
++    const numberCarriersAfterUpdate = await boCarriersPage.getNumberOfElementInGrid(page);
++    expect(numberCarriersAfterUpdate).to.be.equal(1);
+ 
+     idCarrier = parseInt(await boCarriersPage.getTextColumn(page, 1, 'id_carrier'), 10);
+   });
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/08_sizeAndWeight.ts b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/08_sizeAndWeight.ts
+index beba0d753bc40..e52c6bdb44982 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/08_sizeAndWeight.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/01_carriers/08_sizeAndWeight.ts
+@@ -181,6 +181,19 @@ describe('BO - Shipping - Carriers : Size and weight', async () => {
+ 
+       const textResult = await boCarriersCreatePage.createEditCarrier(page, carrierData);
+       expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
++    });
++
++    it('should return to carriers page', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++      await boDashboardPage.goToSubMenu(
++        page,
++        boDashboardPage.shippingLink,
++        boDashboardPage.carriersLink,
++      );
++
++      const pageTitle = await boCarriersPage.getPageTitle(page);
++      expect(pageTitle).to.contains(boCarriersPage.pageTitle);
+ 
+       const numberCarriersAfterCreation = await boCarriersPage.getNumberOfElementInGrid(page);
+       expect(numberCarriersAfterCreation).to.be.equal(numberOfCarriers + 1);
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.ts b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.ts
+index 7fd06d913c826..1777c8cf1f32c 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/01_handling/01_handlingCharges.ts
+@@ -180,6 +180,19 @@ describe('BO - Shipping - Preferences : Test handling charges for carriers in FO
+       expect(textResult).to.contains(boCarriersPage.successfulCreationMessage);
+     });
+ 
++    it('should return to carriers page', async function () {
++      await testContext.addContextItem(this, 'testIdentifier', 'returnToCarriers', baseContext);
++
++      await boDashboardPage.goToSubMenu(
++        page,
++        boDashboardPage.shippingLink,
++        boDashboardPage.carriersLink,
++      );
++
++      const pageTitle = await boCarriersPage.getPageTitle(page);
++      expect(pageTitle).to.contains(boCarriersPage.pageTitle);
++    });
++
+     it('should filter list by name and get the new carrier ID', async function () {
+       await testContext.addContextItem(this, 'testIdentifier', 'filterToCheckNewCarrier', baseContext);
+ 
+diff --git a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/02_carrierOptions/02_updateCarriersSortOption.ts b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/02_carrierOptions/02_updateCarriersSortOption.ts
+index b860e58cee725..315257e2c9569 100644
+--- a/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/02_carrierOptions/02_updateCarriersSortOption.ts
++++ b/tests/UI/campaigns/functional/BO/09_shipping/02_preferences/02_carrierOptions/02_updateCarriersSortOption.ts
+@@ -103,7 +103,7 @@ describe('BO - Shipping - Preferences : Update \'sort carriers by\' and \'Order
+         const isActionPerformed = await boCarriersPage.setStatus(page, 1, true);
+ 
+         if (isActionPerformed) {
+-          const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++          const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+           expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+         }
+ 
+@@ -251,7 +251,7 @@ describe('BO - Shipping - Preferences : Update \'sort carriers by\' and \'Order
+         const isActionPerformed = await boCarriersPage.setStatus(page, 1, false);
+ 
+         if (isActionPerformed) {
+-          const resultMessage = await boCarriersPage.getAlertSuccessBlockContent(page);
++          const resultMessage = await boCarriersPage.getAlertSuccessBlockParagraphContent(page);
+           expect(resultMessage).to.contains(boCarriersPage.successfulUpdateStatusMessage);
+         }
+ 
+diff --git a/tests/UI/package-lock.json b/tests/UI/package-lock.json
+index 9ed0cd973a60a..4a6345d7b97af 100644
+--- a/tests/UI/package-lock.json
++++ b/tests/UI/package-lock.json
+@@ -419,7 +419,7 @@
+     },
+     "node_modules/@prestashop-core/ui-testing": {
+       "version": "0.0.12",
+-      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#fed47c18cfe0c4b3eae4efe28cd513035edf2a06",
++      "resolved": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#97d123dcd04f9541b63103d80e50f263ad6de914",
+       "license": "MIT",
+       "dependencies": {
+         "@faker-js/faker": "^9.0.3",
+@@ -7746,7 +7746,7 @@
+       }
+     },
+     "@prestashop-core/ui-testing": {
+-      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#fed47c18cfe0c4b3eae4efe28cd513035edf2a06",
++      "version": "git+ssh://git@github.com/PrestaShop/ui-testing-library.git#97d123dcd04f9541b63103d80e50f263ad6de914",
+       "from": "@prestashop-core/ui-testing@https://github.com/PrestaShop/ui-testing-library#main",
+       "requires": {
+         "@faker-js/faker": "^9.0.3",
+diff --git a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProviderTest.php b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProviderTest.php
+index e4111274b6fe2..6af8828fa316b 100644
+--- a/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProviderTest.php
++++ b/tests/Unit/Core/Form/IdentifiableObject/DataProvider/CarrierFormDataProviderTest.php
+@@ -28,6 +28,7 @@
+ 
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Adapter\Form\ChoiceProvider\ZoneByIdChoiceProvider;
++use PrestaShop\PrestaShop\Adapter\Group\GroupDataProvider;
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
+@@ -118,12 +119,15 @@ public function testGetData(): void
+                 'Zone C' => 3,
+             ]);
+ 
++        $groupDataProvider = $this->createMock(GroupDataProvider::class);
++
+         $formDataProvider = new CarrierFormDataProvider(
+             $queryBus,
+             $this->createMock(ShopContext::class),
+             $currencyDataProvider,
+             $configuration,
+-            $zonesChoiceProvider
++            $zonesChoiceProvider,
++            $groupDataProvider
+         );
+         $formData = $formDataProvider->getData(42);
+         $this->assertEquals([
+@@ -180,17 +184,24 @@ public function testGetDefaultData(): void
+     {
+         $shopContext = $this->createMock(ShopContext::class);
+         $shopContext->method('getAssociatedShopIds')->willReturn([2, 4]);
++        $groupDataProvider = $this->createMock(GroupDataProvider::class);
++        $groupDataProvider
++            ->method('getAllGroupIds')
++            ->willReturn([1, 2, 3]);
++
+         $formDataProvider = new CarrierFormDataProvider(
+             $this->createMock(CommandBusInterface::class),
+             $shopContext,
+             $this->createMock(CurrencyDataProviderInterface::class),
+             $this->createMock(ConfigurationInterface::class),
+-            $this->createMock(ZoneByIdChoiceProvider::class)
++            $this->createMock(ZoneByIdChoiceProvider::class),
++            $groupDataProvider
+         );
+         $this->assertEquals([
+             'general_settings' => [
+                 'grade' => 0,
+                 'associated_shops' => [2, 4],
++                'group_access' => [1, 2, 3],
+             ],
+         ], $formDataProvider->getDefaultData());
+     }

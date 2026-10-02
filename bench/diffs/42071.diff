@@ -1,0 +1,276 @@
+diff --git a/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandler.php b/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandler.php
+index 9d7e08c091836..4c0855665a0e7 100644
+--- a/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandler.php
++++ b/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandler.php
+@@ -18,8 +18,8 @@ public function __construct(
+     ) {
+     }
+ 
+-    public function handle(SendEmployeePasswordResetEmailCommand $command): string
++    public function handle(SendEmployeePasswordResetEmailCommand $command): void
+     {
+-        return $this->employeePasswordResetter->sendResetEmail($command->getEmail()->getValue());
++        $this->employeePasswordResetter->sendResetEmail($command->getEmail()->getValue());
+     }
+ }
+diff --git a/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandlerInterface.php b/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandlerInterface.php
+index 6adf56598b9f0..6431b805a01f2 100644
+--- a/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandlerInterface.php
++++ b/src/Core/Domain/Employee/CommandHandler/SendEmployeePasswordResetEmailHandlerInterface.php
+@@ -12,8 +12,6 @@ interface SendEmployeePasswordResetEmailHandlerInterface
+ {
+     /**
+      * @param SendEmployeePasswordResetEmailCommand $command
+-     *
+-     * @return string The url to reset the password
+      */
+-    public function handle(SendEmployeePasswordResetEmailCommand $command): string;
++    public function handle(SendEmployeePasswordResetEmailCommand $command): void;
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/security.yml b/src/PrestaShopBundle/Resources/config/services/bundle/security.yml
+index db55ab876d631..ea410ded19719 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/security.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/security.yml
+@@ -14,6 +14,11 @@ services:
+   PrestaShopBundle\Security\Admin\SessionEmployeeProvider:
+     autowire: true
+ 
++  PrestaShopBundle\Routing\AdminUrlGenerator:
++    autowire: true
++    arguments:
++      $adminFolderName: '%prestashop.admin_folder_name%'
++
+   PrestaShopBundle\Security\Admin\EmployeePasswordResetter:
+     autowire: true
+     lazy: true
+diff --git a/src/PrestaShopBundle/Routing/AdminUrlGenerator.php b/src/PrestaShopBundle/Routing/AdminUrlGenerator.php
+new file mode 100644
+index 0000000000000..32af926235bb2
+--- /dev/null
++++ b/src/PrestaShopBundle/Routing/AdminUrlGenerator.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++namespace PrestaShopBundle\Routing;
++
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++
++/**
++ * Builds absolute back-office URLs without depending on the admin Router.
++ *
++ * The admin routing collection is only registered in the admin kernel, so
++ * services triggered from other kernels (admin-api, CLI) cannot use
++ * $router->generate() to build admin URLs. This generator relies on the
++ * shop base URL and the "prestashop.admin_folder_name" container parameter
++ * (defined by AppKernel and therefore available everywhere) so the same URLs
++ * can be produced from any kernel.
++ */
++class AdminUrlGenerator
++{
++    public function __construct(
++        private readonly ShopContext $shopContext,
++        private readonly string $adminFolderName,
++    ) {
++    }
++
++    public function generateAdminUrl(string $urlPath): string
++    {
++        return sprintf(
++            '%s/%s/index.php%s',
++            rtrim($this->shopContext->getBaseURL(), '/'),
++            trim($this->adminFolderName, '/'),
++            $urlPath,
++        );
++    }
++}
+diff --git a/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php b/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
+index 70fce3105edc6..80aa507d35679 100644
+--- a/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
++++ b/src/PrestaShopBundle/Security/Admin/EmployeePasswordResetter.php
+@@ -12,14 +12,12 @@
+ use Doctrine\ORM\UnexpectedResultException;
+ use Mail;
+ use PrestaShop\PrestaShop\Core\ConfigurationInterface;
+-use PrestaShop\PrestaShop\Core\Context\ShopContext;
+ use PrestaShop\PrestaShop\Core\Crypto\Hashing;
+-use PrestaShop\PrestaShop\Core\Util\Url\UrlCleaner;
+ use PrestaShopBundle\Entity\Employee\Employee;
+ use PrestaShopBundle\Entity\Repository\EmployeeRepository;
++use PrestaShopBundle\Routing\AdminUrlGenerator;
+ use PrestaShopBundle\Security\Admin\Exception\PasswordResetTemporarilyBlockedException;
+ use RuntimeException;
+-use Symfony\Component\Routing\RouterInterface;
+ use Symfony\Component\Security\Core\Exception\UserNotFoundException;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+@@ -29,24 +27,19 @@ public function __construct(
+         private readonly EmployeeRepository $employeeRepository,
+         private readonly ConfigurationInterface $configuration,
+         private readonly EntityManagerInterface $entityManager,
+-        private readonly RouterInterface $router,
+         private readonly TranslatorInterface $translator,
+-        private readonly ShopContext $shopContext,
++        private readonly AdminUrlGenerator $adminUrlGenerator,
+         private readonly Hashing $hashing,
+         private readonly string $cookieKey,
+     ) {
+     }
+ 
+     /**
+-     * @param string $email
+-     *
+-     * @return string
+-     *
+      * @throws PasswordResetTemporarilyBlockedException
+      * @throws UserNotFoundException
+      * @throws RuntimeException
+      */
+-    public function sendResetEmail(string $email): string
++    public function sendResetEmail(string $email): void
+     {
+         try {
+             /** @var Employee|null $employee */
+@@ -62,7 +55,7 @@ public function sendResetEmail(string $email): string
+         $this->checkLastPasswordGeneration($employee);
+         $this->updateEmployeeResetData($employee);
+ 
+-        return $this->doSendResetEmail($employee);
++        $this->doSendResetEmail($employee);
+     }
+ 
+     public function getEmployeeByValidResetPasswordToken(string $resetPasswordToken): ?Employee
+@@ -122,11 +115,9 @@ private function checkLastPasswordGeneration(Employee $employee): void
+         }
+     }
+ 
+-    private function doSendResetEmail(Employee $employee): string
++    private function doSendResetEmail(Employee $employee): void
+     {
+-        $resetUrl = $this->router->generate('admin_reset_password', ['resetToken' => $employee->getResetPasswordToken()]);
+-        // We remove thr CSRF token that is automatically added by the router and is useless for this url, and we need an absolute url
+-        $resetUrl = rtrim($this->shopContext->getBaseURL(), '/') . '/' . trim(UrlCleaner::cleanUrl($resetUrl, ['_token', 'token']), '/');
++        $resetUrl = $this->adminUrlGenerator->generateAdminUrl('/reset-password/' . $employee->getResetPasswordToken());
+ 
+         $params = [
+             '{email}' => $employee->getEmail(),
+@@ -151,8 +142,6 @@ private function doSendResetEmail(Employee $employee): string
+         if (!$mailSent) {
+             throw new RuntimeException('Unable to send reset email.');
+         }
+-
+-        return $resetUrl;
+     }
+ 
+     private function updateEmployeeResetData(Employee $employee): void
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/EmployeeFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/EmployeeFeatureContext.php
+index 3239f425daa25..97628b867cf2e 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/EmployeeFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/EmployeeFeatureContext.php
+@@ -234,23 +234,27 @@ public function sendPasswordReset(string $employeeEmail, string $tokenReference)
+         $mailDevClient = $this->getMailDevClient();
+         $mailDevClient->deleteAllEmails();
+ 
+-        $resetUrl = $this->getCommandBus()->handle(new SendEmployeePasswordResetEmailCommand($employeeEmail));
+-        $resetUrl = str_replace('http://localhost', '', $resetUrl);
+-        /** @var UrlMatcherInterface $router */
+-        $router = CommonFeatureContext::getContainer()->get('router');
+-        $matchedRoute = $router->match($resetUrl);
+-        Assert::assertEquals('admin_reset_password', $matchedRoute['_route']);
+-        Assert::assertNotEmpty($matchedRoute['resetToken']);
++        $this->getCommandBus()->handle(new SendEmployeePasswordResetEmailCommand($employeeEmail));
+ 
+         $emails = $mailDevClient->getAllEmails();
+         Assert::assertCount(1, $emails);
+         $resetEmail = $emails[0];
+         Assert::assertStringContainsString('Your new password', $resetEmail['subject']);
+-        Assert::assertStringContainsString($resetUrl, $resetEmail['text']);
+-        Assert::assertStringContainsString($resetUrl, $resetEmail['html']);
+         Assert::assertEquals($employeeEmail, $resetEmail['to'][0]['address']);
+ 
+-        $this->getSharedStorage()->set($tokenReference, $matchedRoute['resetToken']);
++        if (!preg_match('#/reset-password/([^\s"\'<]+)#', $resetEmail['text'], $matches)) {
++            throw new RuntimeException('Reset URL not found in email body');
++        }
++        $resetToken = $matches[1];
++        Assert::assertNotEmpty($resetToken);
++        Assert::assertStringContainsString('/reset-password/' . $resetToken, $resetEmail['html']);
++
++        /** @var UrlMatcherInterface $router */
++        $router = CommonFeatureContext::getContainer()->get('router');
++        $matchedRoute = $router->match('/reset-password/' . $resetToken);
++        Assert::assertEquals('admin_reset_password', $matchedRoute['_route']);
++
++        $this->getSharedStorage()->set($tokenReference, $resetToken);
+     }
+ 
+     /**
+diff --git a/tests/Unit/PrestaShopBundle/Routing/AdminUrlGeneratorTest.php b/tests/Unit/PrestaShopBundle/Routing/AdminUrlGeneratorTest.php
+new file mode 100644
+index 0000000000000..bb6157db9eeae
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Routing/AdminUrlGeneratorTest.php
+@@ -0,0 +1,60 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Routing;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShopBundle\Routing\AdminUrlGenerator;
++
++class AdminUrlGeneratorTest extends TestCase
++{
++    /**
++     * @dataProvider provideAdminUrlCases
++     */
++    public function testGenerateAdminUrl(string $baseUrl, string $adminFolder, string $urlPath, string $expected): void
++    {
++        $shopContext = $this->createMock(ShopContext::class);
++        $shopContext->method('getBaseURL')->willReturn($baseUrl);
++
++        $generator = new AdminUrlGenerator($shopContext, $adminFolder);
++
++        self::assertSame($expected, $generator->generateAdminUrl($urlPath));
++    }
++
++    public static function provideAdminUrlCases(): iterable
++    {
++        yield 'reset password route' => [
++            'https://example.com/',
++            'admin123',
++            '/reset-password/some-token',
++            'https://example.com/admin123/index.php/reset-password/some-token',
++        ];
++
++        yield 'legacy controller query string' => [
++            'https://example.com',
++            'admin123',
++            '?controller=LegacyAdminController',
++            'https://example.com/admin123/index.php?controller=LegacyAdminController',
++        ];
++
++        yield 'trims trailing slash on base URL and slashes on admin folder' => [
++            'https://example.com/shop/',
++            '/admin123/',
++            '/reset-password/token',
++            'https://example.com/shop/admin123/index.php/reset-password/token',
++        ];
++
++        yield 'empty url path' => [
++            'https://example.com',
++            'admin123',
++            '',
++            'https://example.com/admin123/index.php',
++        ];
++    }
++}

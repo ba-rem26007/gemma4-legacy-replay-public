@@ -1,0 +1,542 @@
+diff --git a/admin-dev/themes/new-theme/scss/components/_badges.scss b/admin-dev/themes/new-theme/scss/components/_badges.scss
+index 6902870bdac37..808c5863721a7 100644
+--- a/admin-dev/themes/new-theme/scss/components/_badges.scss
++++ b/admin-dev/themes/new-theme/scss/components/_badges.scss
+@@ -7,3 +7,17 @@
+     background-color: var(--#{$cdk}blue-300);
+   }
+ }
++
++/**
++ * Soft badge variants — light background + dark text, following PUIK badge spec.
++ * @see https://uikit.prestashop.com/?path=/story/components-badge--info
++ */
++.badge-soft-info {
++  padding: 0.25rem 0.75rem;
++  font-size: var(--cdk-size-14);
++  font-weight: 500;
++  line-height: 1.25rem;
++  color: var(--cdk-primary-800);
++  background-color: var(--cdk-blue-100);
++  border-radius: 1rem;
++}
+diff --git a/app/config/admin/services.yml b/app/config/admin/services.yml
+index 8110164920d8e..11990420e5f67 100644
+--- a/app/config/admin/services.yml
++++ b/app/config/admin/services.yml
+@@ -58,7 +58,13 @@ services:
+   # Context listeners, these are event subscribers, so they define their priority themselves
+   PrestaShopBundle\EventListener\Admin\Context\EmployeeContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\LanguageContextSubscriber: ~
+-  PrestaShopBundle\EventListener\Admin\Context\ShopContextSubscriber: ~
++
++  PrestaShopBundle\EventListener\Admin\Context\ShopContextSubscriber:
++    autowire: true
++    autoconfigure: true
++    arguments:
++      $router: '@router'
++
+   PrestaShopBundle\EventListener\Admin\Context\CurrencyContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\CountryContextSubscriber: ~
+   PrestaShopBundle\EventListener\Admin\Context\LegacyControllerContextSubscriber: ~
+diff --git a/classes/Pack.php b/classes/Pack.php
+index 4a11dcf270a79..4c7a9fb1280cf 100644
+--- a/classes/Pack.php
++++ b/classes/Pack.php
+@@ -184,7 +184,7 @@ public static function getItems($id_product, $id_lang)
+ 					LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl ON (ag.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) Context::getContext()->language->id . ')
+ 					WHERE pa.`id_product_attribute` = ' . $row['id_product_attribute_item'] . '
+ 					GROUP BY pa.`id_product_attribute`, ag.`id_attribute_group`
+-					ORDER BY pa.`id_product_attribute`';
++					ORDER BY ag.`position`, a.`position`';
+ 
+                 $combinations = Db::getInstance()->executeS($sql);
+                 foreach ($combinations as $k => $combination) {
+@@ -382,7 +382,7 @@ public static function getItemTable($id_product, $id_lang, $full = false)
+ 				LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_image` pai ON (' . $line['id_product_attribute_item'] . ' = pai.`id_product_attribute`)
+ 				WHERE pa.`id_product` = ' . (int) $line['id_product'] . ' AND pa.`id_product_attribute` = ' . $line['id_product_attribute_item'] . '
+ 				GROUP BY pa.`id_product_attribute`, ag.`id_attribute_group`
+-				ORDER BY pa.`id_product_attribute`';
++				ORDER BY ag.`position`, a.`position`';
+ 
+                 $attr_name = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($sql);
+ 
+diff --git a/classes/Product.php b/classes/Product.php
+index 07c8bea492b09..4cb883717997f 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -2512,7 +2512,7 @@ public function getAttributesResume($id_lang, $attribute_value_separator = ' - '
+ 
+         $combinationIds = array_keys($combinations);
+ 
+-        $lang = Db::getInstance()->executeS('SELECT pac.id_product_attribute, GROUP_CONCAT(agl.`name`, \'' . pSQL($attribute_value_separator) . '\',al.`name` ORDER BY agl.`id_attribute_group` SEPARATOR \'' . pSQL($attribute_separator) . '\') as attribute_designation
++        $lang = Db::getInstance()->executeS('SELECT pac.id_product_attribute, GROUP_CONCAT(agl.`name`, \'' . pSQL($attribute_value_separator) . '\',al.`name` ORDER BY ag.`position`, a.`position` SEPARATOR \'' . pSQL($attribute_separator) . '\') as attribute_designation
+                 FROM `' . _DB_PREFIX_ . 'product_attribute_combination` pac
+                 LEFT JOIN `' . _DB_PREFIX_ . 'attribute` a ON a.`id_attribute` = pac.`id_attribute`
+                 LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag ON ag.`id_attribute_group` = a.`id_attribute_group`
+@@ -2568,7 +2568,7 @@ public function getAttributeCombinations($id_lang = null, $groupByIdAttributeGro
+         }
+ 
+         $sql = 'SELECT pa.*, product_attribute_shop.*, ag.`id_attribute_group`, ag.`is_color_group`, agl.`name` AS group_name, al.`name` AS attribute_name, ' .
+-            'a.`id_attribute`, stock.location ' .
++            'a.`id_attribute`, a.`position` AS attribute_position, stock.location ' .
+             'FROM `' . _DB_PREFIX_ . 'product_attribute` pa ' .
+             Shop::addSqlAssociation('product_attribute', 'pa') . ' ' .
+             'LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac ON pac.`id_product_attribute` = pa.`id_product_attribute` ' .
+@@ -2579,7 +2579,7 @@ public function getAttributeCombinations($id_lang = null, $groupByIdAttributeGro
+             'LEFT JOIN `' . _DB_PREFIX_ . 'stock_available` stock ON (stock.id_product = pa.id_product AND stock.id_product_attribute = IFNULL(pa.`id_product_attribute`, 0)) ' .
+             'WHERE pa.`id_product` = ' . (int) $this->id . ' ' .
+             'GROUP BY pa.`id_product_attribute`' . ($groupByIdAttributeGroup ? ', ag.`id_attribute_group` ' : '') .
+-            'ORDER BY pa.`id_product_attribute`';
++            'ORDER BY pa.`id_product_attribute`, ag.`position`, a.`position`';
+ 
+         $res = Db::getInstance()->executeS($sql);
+ 
+@@ -2626,7 +2626,7 @@ public function getAttributeCombinationsById($id_product_attribute, $id_lang, $g
+                 WHERE pa.`id_product` = ' . (int) $this->id . '
+                 AND pa.`id_product_attribute` = ' . (int) $id_product_attribute . '
+                 GROUP BY pa.`id_product_attribute`' . ($groupByIdAttributeGroup ? ',ag.`id_attribute_group`' : '') . '
+-                ORDER BY pa.`id_product_attribute`';
++                ORDER BY pa.`id_product_attribute`, ag.`position`, a.`position`';
+ 
+         $res = Db::getInstance()->executeS($sql);
+ 
+@@ -7287,11 +7287,14 @@ public static function getAttributesParams($id_product, $id_product_attribute)
+             ' . Shop::addSqlAssociation('product_attribute', 'pa') . '
+             LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_lang` pal
+                 ON (pal.`id_product_attribute` = pac.`id_product_attribute` AND pal.`id_lang` = ' . (int) $id_lang . ')
++            LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag
++                ON (a.`id_attribute_group` = ag.`id_attribute_group`)
+             LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl
+                 ON (a.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) $id_lang . ')
+             WHERE pa.`id_product` = ' . (int) $id_product . '
+                 AND pac.`id_product_attribute` = ' . (int) $id_product_attribute . '
+-                AND agl.`id_lang` = ' . (int) $id_lang);
++                AND agl.`id_lang` = ' . (int) $id_lang . '
++            ORDER BY ag.`position` ASC, a.`position` ASC');
+             Cache::store($cache_id, $result);
+         } else {
+             $result = Cache::retrieve($cache_id);
+@@ -7312,6 +7315,8 @@ public static function getAttributesInformationsByProduct($id_product)
+         FROM `' . _DB_PREFIX_ . 'attribute` a
+         LEFT JOIN `' . _DB_PREFIX_ . 'attribute_lang` al
+             ON (a.`id_attribute` = al.`id_attribute` AND al.`id_lang` = ' . (int) Context::getContext()->language->id . ')
++        LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group` ag
++            ON (a.`id_attribute_group` = ag.`id_attribute_group`)
+         LEFT JOIN `' . _DB_PREFIX_ . 'attribute_group_lang` agl
+             ON (a.`id_attribute_group` = agl.`id_attribute_group` AND agl.`id_lang` = ' . (int) Context::getContext()->language->id . ')
+         LEFT JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac
+@@ -7320,7 +7325,8 @@ public static function getAttributesInformationsByProduct($id_product)
+             ON (pac.`id_product_attribute` = pa.`id_product_attribute`)
+         ' . Shop::addSqlAssociation('product_attribute', 'pa') . '
+         ' . Shop::addSqlAssociation('attribute', 'pac') . '
+-        WHERE pa.`id_product` = ' . (int) $id_product);
++        WHERE pa.`id_product` = ' . (int) $id_product . '
++        ORDER BY ag.`position` ASC, a.`position` ASC');
+ 
+         return $result;
+     }
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 5c62a80ffba8d..f67c1a18ea5c7 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -1104,8 +1104,13 @@ public function registerStylesheet($id, $relativePath, $params = [])
+         $params = array_merge($default_params, $params);
+ 
+         if (Tools::hasMediaServer() && !Configuration::get('PS_CSS_THEME_CACHE')) {
+-            $relativePath = Tools::getCurrentUrlProtocolPrefix() . Tools::getMediaServer($relativePath)
+-                . ($this->stylesheetManager->getFullPath($relativePath) ?? $relativePath);
++            $fullPath = $this->stylesheetManager->getFullPath($relativePath);
++
++            if (!$fullPath) {
++                return;
++            }
++
++            $relativePath = Tools::getCurrentUrlProtocolPrefix() . Tools::getMediaServer($relativePath) . $fullPath;
+             $params['server'] = 'remote';
+         }
+ 
+@@ -1134,8 +1139,13 @@ public function registerJavascript($id, $relativePath, $params = [])
+         $params = array_merge($default_params, $params);
+ 
+         if (Tools::hasMediaServer() && !Configuration::get('PS_JS_THEME_CACHE')) {
+-            $relativePath = Tools::getCurrentUrlProtocolPrefix() . Tools::getMediaServer($relativePath)
+-                . ($this->javascriptManager->getFullPath($relativePath) ?? $relativePath);
++            $fullPath = $this->javascriptManager->getFullPath($relativePath);
++
++            if (!$fullPath) {
++                return;
++            }
++
++            $relativePath = Tools::getCurrentUrlProtocolPrefix() . Tools::getMediaServer($relativePath) . $fullPath;
+             $params['server'] = 'remote';
+         }
+         $this->javascriptManager->register($id, $relativePath, $params['position'], $params['priority'], $params['inline'], $params['attributes'], $params['server'], $params['version']);
+diff --git a/classes/pdf/HTMLTemplateInvoice.php b/classes/pdf/HTMLTemplateInvoice.php
+index 2ccaca6f85ad6..d32cbcc1b4f09 100644
+--- a/classes/pdf/HTMLTemplateInvoice.php
++++ b/classes/pdf/HTMLTemplateInvoice.php
+@@ -487,10 +487,10 @@ public function getFilename()
+         $id_lang = Context::getContext()->language->id;
+         $id_shop = (int) $this->order->id_shop;
+ 
+-        return sprintf(
+-            '%s.pdf',
+-            $this->order_invoice->getInvoiceNumberFormatted($id_lang, $id_shop)
+-        );
++        $invoiceNumber = $this->order_invoice->getInvoiceNumberFormatted($id_lang, $id_shop);
++        $safeNumber = str_replace(['/', '\\'], '-', $invoiceNumber);
++
++        return sprintf('%s.pdf', $safeNumber);
+     }
+ 
+     /**
+diff --git a/composer.lock b/composer.lock
+index 80b74c13fb9fb..19e475402a5c9 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4744,16 +4744,16 @@
+         },
+         {
+             "name": "prestashop/dashactivity",
+-            "version": "v2.1.1",
++            "version": "v2.1.2",
+             "source": {
+                 "type": "git",
+                 "url": "https://github.com/PrestaShop/dashactivity.git",
+-                "reference": "e604732a897a26d751afac09936bdcb7eb7b9044"
++                "reference": "c428ae5b4030dd3b551919cb328111ded80c3ef8"
+             },
+             "dist": {
+                 "type": "zip",
+-                "url": "https://api.github.com/repos/PrestaShop/dashactivity/zipball/e604732a897a26d751afac09936bdcb7eb7b9044",
+-                "reference": "e604732a897a26d751afac09936bdcb7eb7b9044",
++                "url": "https://api.github.com/repos/PrestaShop/dashactivity/zipball/c428ae5b4030dd3b551919cb328111ded80c3ef8",
++                "reference": "c428ae5b4030dd3b551919cb328111ded80c3ef8",
+                 "shasum": ""
+             },
+             "require": {
+@@ -4776,9 +4776,10 @@
+             "description": "PrestaShop module dashactivity",
+             "homepage": "https://github.com/PrestaShop/dashactivity",
+             "support": {
+-                "source": "https://github.com/PrestaShop/dashactivity/tree/v2.1.1"
++                "issues": "https://github.com/PrestaShop/dashactivity/issues",
++                "source": "https://github.com/PrestaShop/dashactivity/tree/v2.1.2"
+             },
+-            "time": "2024-04-08T11:12:02+00:00"
++            "time": "2026-05-25T13:31:15+00:00"
+         },
+         {
+             "name": "prestashop/dashgoals",
+diff --git a/controllers/front/ProductController.php b/controllers/front/ProductController.php
+index 6e78467784dfb..e08ecf3b2ad36 100644
+--- a/controllers/front/ProductController.php
++++ b/controllers/front/ProductController.php
+@@ -28,7 +28,7 @@ class ProductControllerCore extends ProductPresentingFrontControllerCore
+     /** @var int|null */
+     protected $id_product_attribute;
+ 
+-    /** @var Product */
++    /** @var Product|null */
+     protected $product;
+ 
+     /** @var Category|null */
+@@ -135,6 +135,7 @@ public function init(): void
+ 
+         // Otherwise immediately show 404
+         if (!Validate::isLoadedObject($this->product)) {
++            $this->product = null;
+             header('HTTP/1.1 404 Not Found');
+             header('Status: 404 Not Found');
+             $this->errors[] = $this->trans('This product is no longer available.', [], 'Shop.Notifications.Error');
+@@ -300,6 +301,12 @@ public function initializeCategory(): void
+      */
+     public function initContent(): void
+     {
++        if ($this->product === null) {
++            parent::initContent();
++
++            return;
++        }
++
+         // Assign template vars related to the category + execute hooks related to the category
+         $this->assignCategory();
+ 
+@@ -1398,6 +1405,10 @@ public function getBreadcrumbLinks(): array
+     {
+         $breadcrumb = parent::getBreadcrumbLinks();
+ 
++        if ($this->product === null) {
++            return $breadcrumb;
++        }
++
+         // $productBreadcrumbCategory can have two possible values
+         // - current : Category the product was accessed from
+         // - default : Product default category
+diff --git a/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php b/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
+index e3bc2962483ae..a751d971aeb21 100644
+--- a/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
++++ b/src/Adapter/Cart/QueryHandler/GetCartForViewingHandler.php
+@@ -32,24 +32,10 @@
+ #[AsQueryHandler]
+ final class GetCartForViewingHandler implements GetCartForViewingHandlerInterface
+ {
+-    /**
+-     * @var ImageManager
+-     */
+-    private $imageManager;
+-
+-    /**
+-     * @var Locale
+-     */
+-    private $locale;
+-
+-    /**
+-     * @param ImageManager $imageManager
+-     * @param Locale $locale
+-     */
+-    public function __construct(ImageManager $imageManager, Locale $locale)
+-    {
+-        $this->imageManager = $imageManager;
+-        $this->locale = $locale;
++    public function __construct(
++        private ImageManager $imageManager,
++        private Locale $locale
++    ) {
+     }
+ 
+     /**
+@@ -204,11 +190,10 @@ private function prepareProductForView(array $products, Currency $currency, int
+         $formattedProducts = [];
+ 
+         foreach ($products as $product) {
+-            if ($product['id_product_attribute']) {
+-                $image = Product::getCombinationImageById($product['id_product_attribute'], $languageId);
+-            } else {
+-                $image = Product::getCover($product['id_product']);
+-            }
++            $image = $product['id_product_attribute']
++                ? Product::getCombinationImageById($product['id_product_attribute'], $languageId)
++                : false;
++            $image = $image ?: Product::getCover($product['id_product']);
+ 
+             $formattedProduct = [
+                 'id' => $product['id_product'],
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index 50dcdb5ded92b..4bcd1d1343577 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -74,6 +74,7 @@ public function update($id, array $data): void
+         $command = new UpdateDiscountCommand($id);
+ 
+         $command->setLocalizedNames($data['information']['names']);
++        $command->setActive((bool) $data['information']['active']);
+ 
+         $this->fillCommandFromData($command, $data);
+ 
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 49e44dfd6cd68..3e66169546480 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -161,6 +161,7 @@ public function getData($id)
+         return [
+             'id' => $id,
+             'information' => [
++                'active' => $discountForEditing->isActive(),
+                 'discount_type' => $discountForEditing->getType()->getValue(),
+                 'names' => $discountForEditing->getLocalizedNames(),
+                 'description' => $discountForEditing->getDescription(),
+diff --git a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+index 7a2b8a91bef4a..d0bdc8b2dbe2e 100644
+--- a/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
++++ b/src/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriber.php
+@@ -29,7 +29,7 @@
+ use Symfony\Component\HttpKernel\Event\RequestEvent;
+ use Symfony\Component\HttpKernel\KernelEvents;
+ use Symfony\Component\Routing\Exception\NoConfigurationException;
+-use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Routing\Matcher\RequestMatcherInterface;
+ use Symfony\Component\Security\Core\Event\AuthenticationSuccessEvent;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+@@ -53,7 +53,7 @@ public function __construct(
+         private readonly EmployeeContext $employeeContext,
+         private readonly ShopConfigurationInterface $configuration,
+         private readonly MultistoreFeature $multistoreFeature,
+-        private readonly RouterInterface $router,
++        private readonly RequestMatcherInterface $router,
+         private readonly Security $security,
+         private readonly LegacyContext $legacyContext,
+         private readonly TranslatorInterface $translator,
+@@ -351,8 +351,12 @@ private function getShopConstraintFromParameter(string $parameter): ShopConstrai
+     private function getShopConstraintFromRouteAttribute(Request $request): ?ShopConstraint
+     {
+         try {
+-            $routeInfo = $this->router->match($request->getPathInfo());
+-            $controller = $routeInfo['_controller'];
++            $controller = $request->attributes->get('_controller');
++            if (empty($controller)) {
++                // If the attribute is not present yet we handle the matching ourselves and get the controller via routing info
++                $routeInfo = $this->router->matchRequest($request);
++                $controller = $routeInfo['_controller'];
++            }
+             [$className, $methodName] = explode('::', $controller);
+ 
+             $reflectionClass = new ReflectionClass($className);
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
+index 3a4b01b819855..876f802f49655 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
+@@ -87,6 +87,11 @@ private function validateData(array $data)
+         $patternErrors = [];
+         $fieldErrors = [];
+         foreach ($data as $routeId => $rule) {
++            // Skip multistore checkbox helper fields added to the form, they are not route patterns.
++            if (str_starts_with($routeId, 'multistore_') && is_bool($rule)) {
++                continue;
++            }
++
+             if (!$this->routeValidator->isRoutePattern($rule)) {
+                 $patternErrors[] = $this->translator->trans(
+                     'The route %routeRule% is not valid',
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountInformationType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountInformationType.php
+index 17e334a26c316..3a1b78accb1fe 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountInformationType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountInformationType.php
+@@ -12,6 +12,7 @@
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
+ use PrestaShopBundle\Form\Admin\Type\CardType;
++use PrestaShopBundle\Form\Admin\Type\SwitchType;
+ use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+@@ -40,13 +41,23 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         $builder
+             ->add('discount_type', TextPreviewType::class, [
+                 'data' => $discountType,
+-                'label' => $this->trans('Discount type', 'Admin.Catalog.Feature'),
+-                'preview_class' => 'badge rounded discount-type-badge badge-light-info',
++                'label' => $this->trans('Discount Type', 'Admin.Catalog.Feature'),
++                'label_attr' => [
++                    'class' => 'font-weight-bold',
++                ],
++                'label_subtitle' => $this->trans(
++                    'You have selected a discount type to apply. Please remember this choice is final and can not be changed.',
++                    'Admin.Catalog.Feature'
++                ),
++                'preview_class' => 'badge badge-soft-info',
+                 'prefix' => $discountTypeName,
+                 'required' => false,
+             ])
+             ->add('names', TranslatableType::class, [
+-                'label' => $this->trans('Discount name', 'Admin.Catalog.Feature'),
++                'label' => $this->trans('Discount Name', 'Admin.Catalog.Feature'),
++                'label_attr' => [
++                    'class' => 'font-weight-bold',
++                ],
+                 'label_help_box' => $this->trans('This will be displayed in the cart summary, as well as on the invoice.', 'Admin.Catalog.Help'),
+                 'required' => true,
+                 'type' => TextType::class,
+@@ -71,6 +82,9 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add('description', TextareaType::class, [
+                 'label' => $this->trans('Discount description', 'Admin.Global'),
++                'label_attr' => [
++                    'class' => 'font-weight-bold',
++                ],
+                 'required' => false,
+                 'label_help_box' => $this->trans(
+                     'For your eyes only. This will never be displayed to the customer.',
+@@ -90,6 +104,13 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                     ]),
+                 ],
+             ])
++            ->add('active', SwitchType::class, [
++                'label' => $this->trans('Enable discount', 'Admin.Catalog.Feature'),
++                'label_attr' => [
++                    'class' => 'font-weight-bold',
++                ],
++                'required' => false,
++            ])
+         ;
+     }
+ 
+diff --git a/tests/UI/campaigns/functional/BO/01_dashboard/02_activityOverview.ts b/tests/UI/campaigns/functional/BO/01_dashboard/02_activityOverview.ts
+index aad35c0d24036..230c48393b826 100644
+--- a/tests/UI/campaigns/functional/BO/01_dashboard/02_activityOverview.ts
++++ b/tests/UI/campaigns/functional/BO/01_dashboard/02_activityOverview.ts
+@@ -738,19 +738,17 @@ describe('BO - Dashboard : Activity overview', async () => {
+       const isConfigureFormVisible = await boDashboardPage.clickOnConfigureActivityOverviewLink(page);
+       expect(isConfigureFormVisible).to.eq(true);
+ 
+-      this.skip();
+-
+       const numActiveCarts = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'active_cart'), 10);
+-      expect(numActiveCarts).to.equals(45);
++      expect(numActiveCarts).to.equals(30);
+ 
+       const numOnlineVisitor = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'online_visitor'), 10);
+-      expect(numOnlineVisitor).to.equals(45);
++      expect(numOnlineVisitor).to.equals(30);
+ 
+       const numAbandonedCartMin = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'abandoned_cart_min'), 10);
+-      expect(numAbandonedCartMin).to.equals(12);
++      expect(numAbandonedCartMin).to.equals(24);
+ 
+       const numAbandonedCartMax = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'abandoned_cart_max'), 10);
+-      expect(numAbandonedCartMax).to.equals(96);
++      expect(numAbandonedCartMax).to.equals(48);
+     });
+ 
+     it('should reset the form', async function () {
+@@ -770,16 +768,16 @@ describe('BO - Dashboard : Activity overview', async () => {
+       expect(isConfigureFormVisible).to.eq(true);
+ 
+       const numActiveCarts = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'active_cart'), 10);
+-      expect(numActiveCarts).to.equals(30);
++      expect(numActiveCarts).to.equals(45);
+ 
+       const numOnlineVisitor = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'online_visitor'), 10);
+-      expect(numOnlineVisitor).to.equals(30);
++      expect(numOnlineVisitor).to.equals(45);
+ 
+       const numAbandonedCartMin = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'abandoned_cart_min'), 10);
+-      expect(numAbandonedCartMin).to.equals(24);
++      expect(numAbandonedCartMin).to.equals(12);
+ 
+       const numAbandonedCartMax = parseInt(await boDashboardPage.getFormActivityOverviewValue(page, 'abandoned_cart_max'), 10);
+-      expect(numAbandonedCartMax).to.equals(48);
++      expect(numAbandonedCartMax).to.equals(96);
+     });
+   });
+ 
+diff --git a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+index 4f127ee660607..7e58bc6470b0c 100644
+--- a/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
++++ b/tests/Unit/PrestaShopBundle/EventListener/Admin/Context/ShopContextSubscriberTest.php
+@@ -21,7 +21,7 @@
+ use Symfony\Component\HttpFoundation\RedirectResponse;
+ use Symfony\Component\HttpFoundation\Request;
+ use Symfony\Component\Routing\Exception\NoConfigurationException;
+-use Symfony\Component\Routing\RouterInterface;
++use Symfony\Component\Routing\Matcher\RequestMatcherInterface;
+ use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+ use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
+ use Symfony\Component\Security\Core\Event\AuthenticationSuccessEvent;
+@@ -524,11 +524,11 @@ public static function provideLoginShopContext(): iterable
+         ];
+     }
+ 
+-    private function mockRouter(): RouterInterface|MockObject
++    private function mockRouter(): RequestMatcherInterface|MockObject
+     {
+-        $router = $this->createMock(RouterInterface::class);
++        $router = $this->createMock(RequestMatcherInterface::class);
+         $router
+-            ->method('match')
++            ->method('matchRequest')
+             ->willThrowException(new NoConfigurationException())
+         ;
+ 

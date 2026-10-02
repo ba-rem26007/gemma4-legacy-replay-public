@@ -1,0 +1,113 @@
+diff --git a/controllers/front/DiscountController.php b/controllers/front/DiscountController.php
+index 6c9c52098713e..6d3bc6501416a 100644
+--- a/controllers/front/DiscountController.php
++++ b/controllers/front/DiscountController.php
+@@ -1,4 +1,5 @@
+ <?php
++
+ /**
+  * 2007-2019 PrestaShop SA and Contributors
+  *
+@@ -58,27 +59,26 @@ public function initContent()
+     public function getTemplateVarCartRules()
+     {
+         $cart_rules = [];
++        $customerId = $this->context->customer->id;
++        $languageId = $this->context->language->id;
+ 
+         $vouchers = CartRule::getCustomerCartRules(
+-            $this->context->language->id,
+-            $this->context->customer->id,
++            $languageId,
++            $customerId,
+             true,
+             false
+         );
+ 
+         foreach ($vouchers as $key => $voucher) {
+-            $cart_rules[$key] = $voucher;
+-            $cart_rules[$key]['voucher_date'] = Tools::displayDate($voucher['date_to'], null, false);
+-            $cart_rules[$key]['voucher_minimal'] = ($voucher['minimum_amount'] > 0) ? Tools::displayPrice($voucher['minimum_amount'], (int) $voucher['minimum_amount_currency']) : $this->trans('None', array(), 'Shop.Theme.Global');
+-            $cart_rules[$key]['voucher_cumulable'] = $this->getCombinableVoucherTranslation($voucher);
+-
+-            $cartRuleValue = $this->accumulateCartRuleValue($voucher);
++            $voucherCustomerId = (int) $voucher['id_customer'];
++            $voucherIsRestrictedToASingleCustomer = ($voucherCustomerId !== 0);
+ 
+-            if (0 === count($cartRuleValue)) {
+-                $cart_rules[$key]['value'] = '-';
+-            } else {
+-                $cart_rules[$key]['value'] = implode(' + ', $cartRuleValue);
++            if ($voucherIsRestrictedToASingleCustomer && $customerId !== $voucherCustomerId) {
++                continue;
+             }
++
++            $cart_rule = $this->buildCartRuleFromVoucher($voucher);
++            $cart_rules[$key] = $cart_rule;
+         }
+ 
+         return $cart_rules;
+@@ -141,7 +141,7 @@ protected function formatReductionInPercentage($percentage)
+     }
+ 
+     /**
+-     * @param $voucher
++     * @param array $voucher
+      *
+      * @return array
+      */
+@@ -174,4 +174,35 @@ protected function accumulateCartRuleValue($voucher)
+ 
+         return $cartRuleValue;
+     }
++
++    /**
++     * @param array $voucher
++     *
++     * @return array
++     */
++    protected function buildCartRuleFromVoucher(array $voucher): array
++    {
++        $voucher['voucher_date'] = Tools::displayDate($voucher['date_to'], null, false);
++
++        if ((int) $voucher['minimum_amount'] === 0) {
++            $voucher['voucher_minimal'] = $this->trans('None', array(), 'Shop.Theme.Global');
++        } else {
++            $voucher['voucher_minimal'] = Tools::displayPrice(
++                $voucher['minimum_amount'],
++                (int) $voucher['minimum_amount_currency']
++            );
++        }
++
++        $voucher['voucher_cumulable'] = $this->getCombinableVoucherTranslation($voucher);
++
++        $cartRuleValues = $this->accumulateCartRuleValue($voucher);
++
++        if (0 === count($cartRuleValues)) {
++            $voucher['value'] = '-';
++        } else {
++            $voucher['value'] = implode(' + ', $cartRuleValues);
++        }
++
++        return $voucher;
++    }
+ }
+diff --git a/src/Adapter/Presenter/Cart/CartPresenter.php b/src/Adapter/Presenter/Cart/CartPresenter.php
+index 152e362accd7a..486a941d09036 100644
+--- a/src/Adapter/Presenter/Cart/CartPresenter.php
++++ b/src/Adapter/Presenter/Cart/CartPresenter.php
+@@ -444,7 +444,13 @@ function ($voucher) {
+             $vouchers['added']
+         ));
+ 
+-        $discounts = array_filter($discounts, function ($discount) use ($cartRulesIds) {
++        $discounts = array_filter($discounts, function ($discount) use ($cartRulesIds, $cart) {
++            $voucherCustomerId = (int) $discount['id_customer'];
++            $voucherIsRestrictedToASingleCustomer = ($voucherCustomerId !== 0);
++            if ($voucherIsRestrictedToASingleCustomer && $cart->id_customer !== $voucherCustomerId) {
++                return false;
++            }
++
+             return !array_key_exists($discount['id_cart_rule'], $cartRulesIds);
+         });
+ 

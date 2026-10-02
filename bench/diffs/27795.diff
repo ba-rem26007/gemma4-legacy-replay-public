@@ -1,0 +1,186 @@
+diff --git a/classes/order/Order.php b/classes/order/Order.php
+index 81bbe6ec8bf21..73ed57bf9f7f0 100644
+--- a/classes/order/Order.php
++++ b/classes/order/Order.php
+@@ -655,6 +655,7 @@ public function getProducts($products = false, $selected_products = false, $sele
+ 
+             $this->setProductImageInformations($row);
+             $this->setProductCurrentStock($row);
++            $row = $this->setProductReduction($row);
+ 
+             // Backward compatibility 1.4 -> 1.5
+             $this->setProductPrices($row);
+@@ -662,7 +663,7 @@ public function getProducts($products = false, $selected_products = false, $sele
+             $this->setProductCustomizedDatas($row, $customized_datas);
+ 
+             // Add information for virtual product
+-            if ($row['download_hash'] && !empty($row['download_hash'])) {
++            if (!empty($row['download_hash'])) {
+                 $row['filename'] = ProductDownload::getFilenameFromIdProduct((int) $row['product_id']);
+                 // Get the display filename
+                 $row['display_filename'] = ProductDownload::getFilenameFromFilename($row['filename']);
+@@ -681,6 +682,35 @@ public function getProducts($products = false, $selected_products = false, $sele
+         return $result_array;
+     }
+ 
++    /**
++     * @param array $product
++     *
++     * @return array
++     */
++    protected function setProductReduction(array $product): array
++    {
++        $address = Address::initialize($this->id_address_delivery, true);
++        $id_country = (int) $address->id_country;
++
++        $specific_price = SpecificPrice::getSpecificPrice(
++            $product['product_id'],
++            $product['id_shop'],
++            $this->id_currency,
++            $id_country,
++            $this->id_shop_group,
++            $product['product_quantity'],
++            $product['product_attribute_id']
++        );
++        $product['reduction_type'] = 0;
++        $product['reduction_applies'] = false;
++        if ($specific_price) {
++            $product['reduction_type'] = $specific_price['reduction_type'];
++            $product['reduction_applies'] = (float) $specific_price['reduction'];
++        }
++
++        return $product;
++    }
++
+     public static function getIdOrderProduct($id_customer, $id_product)
+     {
+         return (int) Db::getInstance()->getValue('
+diff --git a/src/Core/Cart/CartRuleCalculator.php b/src/Core/Cart/CartRuleCalculator.php
+index 2fbf153817637..74b78e76116bd 100644
+--- a/src/Core/Cart/CartRuleCalculator.php
++++ b/src/Core/Cart/CartRuleCalculator.php
+@@ -153,10 +153,14 @@ protected function applyCartRule(CartRuleData $cartRuleData, $withFreeShipping =
+                 $cartRowCheapest = null;
+                 foreach ($this->cartRows as $cartRow) {
+                     $product = $cartRow->getRowData();
+-                    if (((($cartRule->reduction_exclude_special && !$product['reduction_applies'])
+-                            || !$cartRule->reduction_exclude_special)) && ($cartRowCheapest === null
+-                            || $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded() > $cartRow->getInitialUnitPrice()
+-                                ->getTaxIncluded())
++                    if (
++                        (
++                            ($cartRule->reduction_exclude_special && !$product['reduction_applies'])
++                            || !$cartRule->reduction_exclude_special
++                        ) && (
++                            $cartRowCheapest === null
++                            || $cartRowCheapest->getInitialUnitPrice()->getTaxIncluded() > $cartRow->getInitialUnitPrice()->getTaxIncluded()
++                        )
+                     ) {
+                         $cartRowCheapest = $cartRow;
+                     }
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/CartRuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/CartRuleFeatureContext.php
+index 950619c3fd5d3..f6ec4a093d9b3 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/CartRuleFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/CartRuleFeatureContext.php
+@@ -102,8 +102,8 @@ public function createCartRuleWithName(array $properties, string $nameInDefaultL
+     }
+ 
+     /**
+-     * @Given /^I specify (cart rule|its) "([^"]+)" as "([^"]+)"$/
+-     * @Given /^I specify that (its) "([^"]+)" is "([^"]+)"$/
++     * @Given /^I specify (cart rule|its) "([^"]+)" as "([^"]*)"$/
++     * @Given /^I specify that (its) "([^"]+)" is "([^"]*)"$/
+      */
+     public function specifyCartRuleProperty(array $properties, string $property, string $value)
+     {
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_cart_rules.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_cart_rules.feature
+index 2f1bbfeabfb03..3fcfb4f1b356a 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_cart_rules.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_cart_rules.feature
+@@ -728,7 +728,6 @@ Feature: Order from Back Office (BO)
+       | total_shipping_tax_excl  | 7.000  |
+       | total_shipping_tax_incl  | 7.420  |
+ 
+-  @order-cart-rules1
+   Scenario: Add a cart rule with free shipping to an order with a total of 0 and existing order
+     Given there is a product in the catalog named "product1" with a price of 0.00 and 100 items in stock
+     When I create an empty cart "dummy_cart_free_shipping" for customer "testCustomer"
+@@ -770,3 +769,66 @@ Feature: Order from Back Office (BO)
+       | total_paid_real          | 7.420  |
+       | total_shipping_tax_excl  | 7.000  |
+       | total_shipping_tax_incl  | 7.420  |
++
++  Scenario: Add a cart rule with free shipping to an order with a total of 0 and existing order
++    Given there is a product in the catalog named "product_expensive" with a price of 123.00 and 100 items in stock
++    And there is a product in the catalog named "product_cheap" with a price of 10.00 and 100 items in stock
++    When I create an empty cart "dummy_cart_cart_rule_cheapest" for customer "testCustomer"
++    And I add 1 products "product_expensive" to the cart "dummy_cart_cart_rule_cheapest"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart_cart_rule_cheapest"
++    Then cart "dummy_cart_cart_rule_cheapest" should contain 1 products
++    ## Create an order with the expensive product
++    When I add order "bo_order1" with the following details:
++      | cart                | dummy_cart_cart_rule_cheapest |
++      | message             |                               |
++      | payment module name | dummy_payment                 |
++      | status              | Payment accepted              |
++    Then order "bo_order1" should have 1 products in total
++    And order "bo_order1" should have 0 cart rule
++    And order "bo_order1" should have following details:
++      | total_products           | 123.000 |
++      | total_products_wt        | 130.380 |
++      | total_discounts_tax_excl | 0.000   |
++      | total_discounts_tax_incl | 0.000   |
++      | total_paid_tax_excl      | 130.000 |
++      | total_paid_tax_incl      | 137.80  |
++      | total_paid               | 137.80  |
++      | total_paid_real          | 137.80  |
++      | total_shipping_tax_excl  | 7.000   |
++      | total_shipping_tax_incl  | 7.42    |
++    And order "bo_order1" should have invoice
++    ## Create a new cart rule
++    When I want to create a new cart rule
++    And I specify its name in default language as "Cart Rule 50% which excludes discounted products and applies to cheapest product"
++    And I specify its "description" as "None"
++    And I specify its "code" as ""
++    And I specify that its active from "2019-01-01 11:00:00"
++    And I specify that its active until "2040-01-01 12:00:00"
++    And I specify that its "quantity" is "100"
++    And I specify that its "quantity per user" is "100"
++    And I specify that its "priority" is "1"
++    And its minimum purchase amount in currency "USD" is "0.0"
++    And its minimum purchase amount is tax included
++    And its minimum purchase amount is shipping included
++    And I specify its status as enabled
++    And it gives a percentage reduction of "50" which excludes discounted products and applies to cheapest product
++    Then I save it
++    ## Add the product to the order
++    When I add products to order "bo_order1" without invoice and the following products details:
++      | name          | product_cheap     |
++      | amount        | 1                 |
++      | price         | 10                |
++    Then order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 1 cart rule
++    And order "bo_order1" should have a cart rule with name "Cart Rule 50% which excludes discounted products and applies to cheapest product"
++    And order "bo_order1" should have following details:
++      | total_products           | 133.000  |
++      | total_products_wt        | 140.980  |
++      | total_discounts_tax_excl | 5.000    |
++      | total_discounts_tax_incl | 5.300    |
++      | total_paid_tax_excl      | 135.000  |
++      | total_paid_tax_incl      | 143.100  |
++      | total_paid               | 143.100  |
++      | total_paid_real          | 137.800  |
++      | total_shipping_tax_excl  | 7.000    |
++      | total_shipping_tax_incl  | 7.420    |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index 195933ce5ee37..c28eea9cb6821 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -109,6 +109,7 @@ default:
+                 - Tests\Integration\Behaviour\Features\Context\CountryFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Configuration\RoundingTypeConfigurationFeatureContext
++                - Tests\Integration\Behaviour\Features\Context\Domain\CartRuleFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\OrderPaymentFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\OrderShippingFeatureContext
+                 - Tests\Integration\Behaviour\Features\Context\Domain\OrderCartFeatureContext

@@ -1,0 +1,74 @@
+diff --git a/classes/Pack.php b/classes/Pack.php
+index a71cd3148a9c7..a5cd60f92d8ce 100644
+--- a/classes/Pack.php
++++ b/classes/Pack.php
+@@ -225,7 +225,7 @@ public static function isInStock($idProduct, $wantedQuantity = 1, Cart $cart = n
+     }
+ 
+     /**
+-     * Returns the available quantity of a given pack.
++     * Returns the available quantity of a given pack (this method already have decreased products in cart).
+      *
+      * @param int $id_product Product id
+      * @param int $id_product_attribute Product attribute id (optional)
+diff --git a/classes/Product.php b/classes/Product.php
+index 97fedee6873b6..53bbe51eabf30 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -3712,6 +3712,7 @@ public static function getQuantity(
+         Cart $cart = null,
+         $idCustomization = null
+     ) {
++        // pack usecase: Pack::getQuantity() returns the pack quantity after cart quantities have been removed from stock
+         if (Pack::isPack((int) $idProduct)) {
+             return Pack::getQuantity($idProduct, $idProductAttribute, $cacheIsPack, $cart, $idCustomization);
+         }
+diff --git a/controllers/front/CartController.php b/controllers/front/CartController.php
+index 2ed771e7bb374..8d4afeca62569 100644
+--- a/controllers/front/CartController.php
++++ b/controllers/front/CartController.php
+@@ -562,7 +562,13 @@ public function getTemplateVarPage()
+     }
+ 
+     /**
+-     * Check product quantity availability.
++     * Check product quantity availability to acknowledge whether
++     * an availability error should be raised.
++     *
++     * If shop has been configured to oversell, answer is no.
++     * If there is no items available (no stock), answer is yes.
++     * If there is items available, but the Cart already contains more than the quantity,
++     * answer is yes.
+      *
+      * @param Product $product
+      * @param int $qtyToCheck
+@@ -578,8 +584,18 @@ protected function shouldAvailabilityErrorBeRaised($product, $qtyToCheck)
+             return false;
+         }
+ 
+-        // product quantity is the available quantity after decreasing products in cart
+-        $productQuantity = Product::getQuantity(
++        // Check if this product is out-of-stock
++        $availableProductQuantity = StockAvailable::getQuantityAvailableByProduct(
++            $this->id_product,
++            $this->id_product_attribute
++        );
++        if ($availableProductQuantity <= 0) {
++            return true;
++        }
++
++        // Check if this product is out-of-stock after cart quantities have been removed from stock
++        // Be aware that Product::getQuantity() returns the available quantity after decreasing products in cart
++        $productQuantityAvailableAfterCartItemsHaveBeenRemovedFromStock = Product::getQuantity(
+             $this->id_product,
+             $this->id_product_attribute,
+             null,
+@@ -587,7 +603,7 @@ protected function shouldAvailabilityErrorBeRaised($product, $qtyToCheck)
+             $this->customization_id
+         );
+ 
+-        return $productQuantity < 0;
++        return $productQuantityAvailableAfterCartItemsHaveBeenRemovedFromStock < 0;
+     }
+ 
+     /**

@@ -1,0 +1,202 @@
+diff --git a/src/Adapter/Order/Refund/OrderProductRemover.php b/src/Adapter/Order/Refund/OrderProductRemover.php
+index 25d7f2184f896..a91d4ce9a65c6 100644
+--- a/src/Adapter/Order/Refund/OrderProductRemover.php
++++ b/src/Adapter/Order/Refund/OrderProductRemover.php
+@@ -187,7 +187,10 @@ private function deleteOrderCartRule(
+         $removedOrderCartRules = [];
+         foreach ($orderCartRules as $orderCartRule) {
+             $cartRule = new CartRule($orderCartRule['id_cart_rule']);
+-            $discountedProducts = $cartRule->checkProductRestrictionsFromCart($cart, true, true, true);
++            $discountedProducts = $cartRule->checkProductRestrictionsFromCart($cart, true, false, true);
++            if (!is_array($discountedProducts)) {
++                continue;
++            }
+             foreach ($discountedProducts as $discountedProduct) {
+                 // The return value is the concatenation of productId and attributeId, but the attributeId is always replaced by 0
+                 if ($discountedProduct === $orderDetail->product_id . '-0') {
+diff --git a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+index 15531105f9108..3ab84ff05e18f 100644
+--- a/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CartRuleFeatureContext.php
+@@ -145,7 +145,7 @@ protected function createCartRule(
+     /**
+      * @Given /^cart rule "(.+?)" is restricted to the category "(.+?)" with a quantity of (\d+)$/
+      */
+-    public function cartRuleWithProductRuleRestriction($cartRuleName, $categoryName)
++    public function cartRuleWithProductRuleRestriction(string $cartRuleName, string $categoryName, int $quantity)
+     {
+         $this->checkCartRuleWithNameExists($cartRuleName);
+         $this->categoryFeatureContext->checkCategoryWithNameExists($categoryName);
+@@ -153,7 +153,7 @@ public function cartRuleWithProductRuleRestriction($cartRuleName, $categoryName)
+ 
+         Db::getInstance()->execute(
+             'INSERT INTO `' . _DB_PREFIX_ . 'cart_rule_product_rule_group` (`id_cart_rule`, `quantity`) ' .
+-            'VALUES (' . (int) $this->cartRules[$cartRuleName]->id . ', 1)'
++            'VALUES (' . (int) $this->cartRules[$cartRuleName]->id . ', ' . $quantity . ')'
+         );
+         $idProductRuleGroup = Db::getInstance()->Insert_ID();
+ 
+@@ -191,9 +191,13 @@ public function cartRuleNamedHasNoCode($cartRuleName)
+ 
+     /**
+      * @Given /^cart rule "(.+)" is restricted to product "(.+)"$/
++     * @Given /^cart rule "(.+)" is restricted to product "(.+)" with a quantity of (\d+)$/
+      */
+-    public function cartRuleNamedIsRestrictedToProductNamed($cartRuleName, $productName)
+-    {
++    public function cartRuleNamedIsRestrictedToProductNamed(
++        string $cartRuleName,
++        string $productName,
++        int $quantity = 1
++    ): void {
+         $this->checkCartRuleWithNameExists($cartRuleName);
+         $this->productFeatureContext->checkProductWithNameExists($productName);
+ 
+@@ -203,11 +207,20 @@ public function cartRuleNamedIsRestrictedToProductNamed($cartRuleName, $productN
+         $this->cartRules[$cartRuleName]->save();
+ 
+         // The reduction_product is not enough, we need to define product rules for condition (this is done by the controller usually)
+-        Db::getInstance()->insert('cart_rule_product_rule_group', ['id_cart_rule' => $this->cartRules[$cartRuleName]->id, 'quantity' => 1]);
++        Db::getInstance()->insert(
++            'cart_rule_product_rule_group',
++            ['id_cart_rule' => $this->cartRules[$cartRuleName]->id, 'quantity' => $quantity]
++        );
+         $productRuleGroupId = Db::getInstance()->Insert_ID();
+-        Db::getInstance()->insert('cart_rule_product_rule', ['id_product_rule_group' => $productRuleGroupId, 'type' => 'products']);
++        Db::getInstance()->insert(
++            'cart_rule_product_rule',
++            ['id_product_rule_group' => $productRuleGroupId, 'type' => 'products']
++        );
+         $productRuleId = Db::getInstance()->Insert_ID();
+-        Db::getInstance()->insert('cart_rule_product_rule_value', ['id_product_rule' => $productRuleId, 'id_item' => $restrictedProduct->id]);
++        Db::getInstance()->insert(
++            'cart_rule_product_rule_value',
++            ['id_product_rule' => $productRuleId, 'id_item' => $restrictedProduct->id]
++        );
+     }
+ 
+     /**
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index da4210b5a4816..6400a908ca685 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -1763,4 +1763,12 @@ public function checkOrderForViewingWithReference(string $productReference, stri
+             }
+         }
+     }
++
++    /**
++     * @Then I should get no order error
++     */
++    public function assertNoOrderError()
++    {
++        $this->assertLastErrorIsNull();
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
+index d7b825f56686e..51fe2f6763107 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_gift_cart_rule.feature
+@@ -1070,3 +1070,102 @@ Feature: Order from Back Office (BO)
+       | total_shipping_tax_excl  | 7.0    |
+       | total_shipping_tax_incl  | 7.42   |
+ 
++  Scenario: I have a cart rule that is associated to a product which adds a discount,
++      and an another cart rule which adds a free gift which is the same product,
++      I add this product,
++      I order,
++      I remove all cart rules,
++      I remove the product
++    Given there is a product in the catalog named "Product 12345" with a price of 12.0 and 100 items in stock
++    # Create a cart rule : No cade + Product restriction with min quanity + Discount 50%
++    And there is a cart rule named "cartRulePercentDiscountOnSpecificProduct" that applies a percent discount of 50.0% with priority 1, quantity of 100 and quantity per user 100
++    And cart rule "cartRulePercentDiscountOnSpecificProduct" has no discount code
++    And cart rule "cartRulePercentDiscountOnSpecificProduct" is restricted to product "Product 12345" with a quantity of 2
++    # Create a cart rule : No cade + no conditions + free gift = demo_6
++    And there is a cart rule named "cartRuleFreeGift" that applies no discount with priority 1, quantity of 100 and quantity per user 100
++    And cart rule "cartRuleFreeGift" has no discount code
++    And cart rule "cartRuleFreeGift" offers a gift product "Product 12345"
++    # Make an order
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "Product 12345" to the cart "dummy_cart"
++    And I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    Then order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 2 cart rules
++    And order "bo_order1" should have following details:
++      | total_products           | 24.00 |
++      | total_products_wt        | 25.44 |
++      | total_discounts_tax_excl | 18.00 |
++      | total_discounts_tax_incl | 19.08 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 13.00 |
++      | total_paid_tax_incl      | 13.78 |
++      | total_paid               | 13.78 |
++      | total_paid_real          | 0.0   |
++    # total_products : 12 +12 = 24 (+ 6% (1.44) = 25.44)
++    # total_discounts : 12 (cartRuleFreeGift) + 6 (cartRulePercentDiscountOnSpecificProduct) = 18 (+ 6% (1.08) = 19.08)
++    # total_paid_tax_excl : 24 - 18 + 7 = 19
++
++    # Remove cart rule "cartRulePercentDiscountOnSpecificProduct"
++    Then I remove cart rule "cartRulePercentDiscountOnSpecificProduct" from order "bo_order1"
++    And order "bo_order1" should have 2 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 1 cart rules
++    And order "bo_order1" should have following details:
++      | total_products           | 24.00 |
++      | total_products_wt        | 25.44 |
++      | total_discounts_tax_excl | 12.00 |
++      | total_discounts_tax_incl | 12.72 |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    # total_products : 12 +12 = 24 (+ 6% (1.44) = 25.44)
++    # total_discounts : 12 (cartRuleFreeGift) = 12 (+ 6% (0.72) = 12.72)
++    # total_paid_tax_excl : 24 - 12 + 7 = 19
++
++    # Remove cart rule "cartRuleFreeGift"
++    Then I remove cart rule "cartRuleFreeGift" from order "bo_order1"
++    And order "bo_order1" should have 1 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 0 cart rules
++    And order "bo_order1" should have following details:
++      | total_products           | 12.00 |
++      | total_products_wt        | 12.72 |
++      | total_discounts_tax_excl | 0.00  |
++      | total_discounts_tax_incl | 0.00  |
++      | total_shipping_tax_excl  | 7.0   |
++      | total_shipping_tax_incl  | 7.42  |
++      | total_paid_tax_excl      | 19.00 |
++      | total_paid_tax_incl      | 20.14 |
++      | total_paid               | 20.14 |
++      | total_paid_real          | 0.0   |
++    # total_products : 12 = 12 (+ 6% (0.72) = 12.72)
++    # total_discounts : 0
++    # total_paid_tax_excl : 12 - 0 + 7 = 19
++
++    # Delete the product
++    Then I remove product "Product 12345" from order "bo_order1"
++    And I should get no order error
++    And order "bo_order1" should have 0 products in total
++    And order "bo_order1" should have 0 invoice
++    And order "bo_order1" should have 0 cart rules
++    And order "bo_order1" should have following details:
++      | total_products           | 0.00  |
++      | total_products_wt        | 0.00  |
++      | total_discounts_tax_excl | 0.00  |
++      | total_discounts_tax_incl | 0.00  |
++      | total_shipping_tax_excl  | 0.00  |
++      | total_shipping_tax_incl  | 0.00  |
++      | total_paid_tax_excl      | 0.00  |
++      | total_paid_tax_incl      | 0.00  |
++      | total_paid               | 0.00  |
++      | total_paid_real          | 0.00  |

@@ -1,0 +1,108 @@
+diff --git a/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl b/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
+index abe07882e04d1..b5d255e6e02e7 100644
+--- a/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
++++ b/admin-dev/themes/default/template/controllers/cart_rules/conditions.tpl
+@@ -294,10 +294,10 @@
+ 				</a>
+ 			</div>
+ 
+-		{if ($shops.unselected|@count) + ($shops.selected|@count) > 1}
++		{if ($all_shops|@count) > 1}
+ 			<p class="checkbox">
+ 				<label>
+-					<input type="checkbox" id="shop_restriction" name="shop_restriction" value="1" {if $shops.unselected|@count}checked="checked"{/if} />
++					<input type="checkbox" id="shop_restriction" name="shop_restriction" value="1" {if $shops.selected|@count || ($shops.selected|@count + $shops.unselected|@count < $all_shops|@count)}checked="checked"{/if} />
+ 					{l s='Shop selection' d='Admin.Catalog.Feature'}
+ 				</label>
+ 			</p>
+diff --git a/admin-dev/themes/default/template/controllers/cart_rules/form.js b/admin-dev/themes/default/template/controllers/cart_rules/form.js
+index 8907dfb223b62..fb37a0a4d822d 100644
+--- a/admin-dev/themes/default/template/controllers/cart_rules/form.js
++++ b/admin-dev/themes/default/template/controllers/cart_rules/form.js
+@@ -255,12 +255,9 @@ $('#cart_rule_form').submit(() => {
+   if ($('#customerFilter').val() == '') $('#id_customer').val('0');
+ 
+   for (i in restrictions) {
+-    if ($(`#${restrictions[i]}_select_1 option`).length == 0) $(`#${restrictions[i]}_restriction`).prop('checked', false);
+-    else {
+-      $(`#${restrictions[i]}_select_2 option`).each(function (i) {
+-        $(this).prop('selected', true);
+-      });
+-    }
++    $(`#${restrictions[i]}_select_2 option`).each(function (i) {
++      $(this).prop('selected', true);
++    });
+   }
+ 
+   $('.product_rule_toselect option').each(function (i) {
+diff --git a/controllers/admin/AdminCartRulesController.php b/controllers/admin/AdminCartRulesController.php
+index ce72c64cd615a..23e67bb8a0b47 100644
+--- a/controllers/admin/AdminCartRulesController.php
++++ b/controllers/admin/AdminCartRulesController.php
+@@ -200,13 +200,35 @@ public function postProcess()
+                 }
+             }
+ 
+-            // These are checkboxes (which aren't sent through POST when they are not check), so they are forced to 0
++            // These are checkboxes (which aren't sent through POST when they are not checked), so they are forced to 0
+             foreach (['country', 'carrier', 'group', 'cart_rule', 'product', 'shop'] as $type) {
+                 if (!Tools::getValue($type . '_restriction')) {
+                     $_POST[$type . '_restriction'] = 0;
+                 }
+             }
+ 
++            // If the restriction is checked, but no item is selected, raise an error
++            foreach (['country', 'carrier', 'group', 'shop'] as $type) {
++                if (Tools::getValue($type . '_restriction') && empty(Tools::getValue($type . '_select'))) {
++                    switch ($type) {
++                        case 'country':
++                            $restriction_name = $this->trans('Country selection', [], 'Admin.Catalog.Feature');
++                            break;
++                        case 'carrier':
++                            $restriction_name = $this->trans('Carrier selection', [], 'Admin.Catalog.Feature');
++                            break;
++                        case 'group':
++                            $restriction_name = $this->trans('Customer group selection', [], 'Admin.Catalog.Feature');
++                            break;
++                        case 'shop':
++                        default:
++                            $restriction_name = $this->trans('Shop selection', [], 'Admin.Catalog.Feature');
++                            break;
++                    }
++                    $this->errors[] = $this->trans('The "%s" restriction is checked, but no item is selected.', [$restriction_name], 'Admin.Catalog.Notification');
++                }
++            }
++
+             // Remove the gift if the radio button is set to "no"
+             if (!(int) Tools::getValue('free_gift')) {
+                 $_POST['gift_product'] = 0;
+@@ -297,6 +319,21 @@ public function processAdd()
+      */
+     protected function afterAdd($currentObject)
+     {
++        // Add shop restrictions if employee has not access to all shops
++        $context = Context::getContext();
++        $all_shops = Shop::getCompleteListOfShopsID();
++        if ($context->employee->isSuperAdmin()) {
++            $employee_shops = $all_shops;
++        } else {
++            $employee_shops = $context->employee->getAssociatedShops();
++        }
++        if (count($all_shops) > count($employee_shops) && Tools::getValue('shop_restriction') == '0') {
++            $values = [];
++            foreach ($employee_shops as $id) {
++                $values[] = '(' . (int) $currentObject->id . ',' . (int) $id . ')';
++            }
++            Db::getInstance()->execute('INSERT INTO `' . _DB_PREFIX_ . 'cart_rule_shop` (`id_cart_rule`, `id_shop`) VALUES ' . implode(',', $values));
++        }
+         // Add restrictions for generic entities like country, carrier and group
+         foreach (['country', 'carrier', 'group', 'shop'] as $type) {
+             if (Tools::getValue($type . '_restriction') && is_array($array = Tools::getValue($type . '_select')) && count($array)) {
+@@ -755,6 +792,7 @@ public function renderForm()
+                 'carriers' => $carriers,
+                 'groups' => $groups,
+                 'shops' => $shops,
++                'all_shops' => Shop::getCompleteListOfShopsID(),
+                 'cart_rules' => $cart_rules,
+                 'product_rule_groups' => $product_rule_groups,
+                 'product_rule_groups_counter' => count($product_rule_groups),

@@ -1,0 +1,791 @@
+diff --git a/src/Adapter/Employee/EmployeeContextInitializer.php b/src/Adapter/Employee/EmployeeContextInitializer.php
+new file mode 100644
+index 0000000000000..c4dceb170b138
+--- /dev/null
++++ b/src/Adapter/Employee/EmployeeContextInitializer.php
+@@ -0,0 +1,47 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Employee;
++
++use Context;
++use Employee;
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++
++/**
++ * Loads an existing super-administrator into the legacy context.
++ *
++ * Used by CLI entry points that need to satisfy the ProfileAccessChecker
++ * before dispatching CQRS employee commands (the checker requires the
++ * context employee to be a super-admin in order to act on super-admin
++ * profiles).
++ */
++class EmployeeContextInitializer
++{
++    public function __construct(
++        private readonly ConfigurationInterface $configuration,
++    ) {
++    }
++
++    /**
++     * @return int|null The impersonated employee ID, or null if no super-admin exists
++     */
++    public function initializeWithFirstSuperAdmin(): ?int
++    {
++        $superAdminProfileId = (int) $this->configuration->get('_PS_ADMIN_PROFILE_');
++        $superAdmins = Employee::getEmployeesByProfile($superAdminProfileId, true);
++
++        if (empty($superAdmins)) {
++            return null;
++        }
++
++        $employeeId = (int) $superAdmins[0]['id_employee'];
++        Context::getContext()->employee = new Employee($employeeId);
++
++        return $employeeId;
++    }
++}
+diff --git a/src/PrestaShopBundle/Command/EmployeeChangePasswordCommand.php b/src/PrestaShopBundle/Command/EmployeeChangePasswordCommand.php
+new file mode 100644
+index 0000000000000..0a049a7ffc700
+--- /dev/null
++++ b/src/PrestaShopBundle/Command/EmployeeChangePasswordCommand.php
+@@ -0,0 +1,111 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Command;
++
++use PrestaShopBundle\Entity\Employee\Employee;
++use PrestaShopBundle\Entity\Repository\EmployeeRepository;
++use PrestaShopBundle\Security\Admin\EmployeePasswordResetter;
++use RuntimeException;
++use Symfony\Component\Console\Attribute\AsCommand;
++use Symfony\Component\Console\Command\Command;
++use Symfony\Component\Console\Input\InputArgument;
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use Throwable;
++
++#[AsCommand(
++    name: 'prestashop:employee:change-password',
++    description: 'Change an employee password from the CLI.',
++)]
++final class EmployeeChangePasswordCommand extends Command
++{
++    use PasswordPromptTrait;
++
++    public function __construct(
++        private readonly EmployeeRepository $employeeRepository,
++        private readonly EmployeePasswordResetter $passwordResetter,
++    ) {
++        parent::__construct();
++    }
++
++    protected function configure(): void
++    {
++        $this
++            ->setHelp(<<<'HELP'
++                Reset an employee password from the command line.
++                If <info>email</info> is not provided, it is asked interactively.
++                The new password is asked interactively (hidden) unless <info>--password</info> is provided.
++                The employee will receive the standard "Your new password" notification email.
++                HELP)
++            ->addArgument('email', InputArgument::OPTIONAL, 'Employee email')
++            ->addOption('password', null, InputOption::VALUE_REQUIRED, 'New password (prefer the interactive prompt to avoid leaking it in shell history)')
++        ;
++    }
++
++    protected function execute(InputInterface $input, OutputInterface $output): int
++    {
++        $io = new SymfonyStyle($input, $output);
++
++        $email = $input->getArgument('email');
++        if (empty($email)) {
++            $email = $io->ask('Employee email', null, function (?string $value): string {
++                $value = trim((string) $value);
++                if ($value === '') {
++                    throw new RuntimeException('Email cannot be empty.');
++                }
++
++                return $value;
++            });
++        }
++
++        $employee = $this->loadEmployee((string) $email);
++        if ($employee === null) {
++            $io->error(sprintf('No employee found with email "%s".', $email));
++
++            return Command::FAILURE;
++        }
++
++        $password = $input->getOption('password');
++        if (empty($password)) {
++            try {
++                $password = $this->askPasswordTwice($io, 'New password');
++            } catch (RuntimeException $e) {
++                $io->error($e->getMessage());
++
++                return Command::FAILURE;
++            }
++        }
++
++        try {
++            $this->passwordResetter->resetPassword($employee, (string) $password);
++        } catch (Throwable $e) {
++            $io->error(sprintf('Failed to change password: %s', $e->getMessage()));
++
++            return Command::FAILURE;
++        }
++
++        $io->success(sprintf('Password updated for %s (notification email sent).', $email));
++
++        return Command::SUCCESS;
++    }
++
++    private function loadEmployee(string $email): ?Employee
++    {
++        try {
++            /** @var Employee|null $employee */
++            $employee = $this->employeeRepository->loadEmployeeByIdentifier($email);
++        } catch (Throwable) {
++            return null;
++        }
++
++        return $employee ?: null;
++    }
++}
+diff --git a/src/PrestaShopBundle/Command/EmployeeCreateCommand.php b/src/PrestaShopBundle/Command/EmployeeCreateCommand.php
+new file mode 100644
+index 0000000000000..5d4e16dc9a875
+--- /dev/null
++++ b/src/PrestaShopBundle/Command/EmployeeCreateCommand.php
+@@ -0,0 +1,146 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Command;
++
++use PrestaShop\PrestaShop\Adapter\Employee\EmployeeContextInitializer;
++use PrestaShop\PrestaShop\Adapter\Shop\Context as ShopContextAdapter;
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Domain\Employee\Command\AddEmployeeCommand;
++use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\EmployeeId;
++use PrestaShop\PrestaShop\Core\Security\PasswordPolicyConfiguration;
++use RuntimeException;
++use Symfony\Component\Console\Attribute\AsCommand;
++use Symfony\Component\Console\Command\Command;
++use Symfony\Component\Console\Input\InputArgument;
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use Throwable;
++
++#[AsCommand(
++    name: 'prestashop:employee:create-admin',
++    description: 'Create a new SuperAdmin back-office employee.',
++)]
++final class EmployeeCreateCommand extends Command
++{
++    use PasswordPromptTrait;
++
++    private const DEFAULT_PAGE_ID = 1;
++
++    public function __construct(
++        private readonly CommandBusInterface $commandBus,
++        private readonly ConfigurationInterface $configuration,
++        private readonly ShopContextAdapter $shopContext,
++        private readonly EmployeeContextInitializer $employeeContextInitializer,
++    ) {
++        parent::__construct();
++    }
++
++    protected function configure(): void
++    {
++        $this
++            ->setHelp(<<<'HELP'
++                Create a new back-office <comment>SuperAdmin</comment> employee from the CLI.
++
++                The CLI intentionally only exposes the bare minimum (email, first/last
++                name, password). The new employee is always created as a SuperAdmin
++                with full back-office access, active, on the default shop language,
++                associated to every shop, no Gravatar.
++
++                For more granular employee management, use the back-office Team page.
++
++                Missing values for <info>email</info>, <info>--first-name</info>, <info>--last-name</info> and <info>--password</info>
++                are prompted interactively. The password prompt is hidden and asked twice for confirmation.
++                HELP)
++            ->addArgument('email', InputArgument::OPTIONAL, 'Employee email')
++            ->addOption('first-name', null, InputOption::VALUE_REQUIRED, 'First name')
++            ->addOption('last-name', null, InputOption::VALUE_REQUIRED, 'Last name')
++            ->addOption('password', null, InputOption::VALUE_REQUIRED, 'New password (prefer the interactive prompt to avoid leaking it in shell history)')
++        ;
++    }
++
++    protected function execute(InputInterface $input, OutputInterface $output): int
++    {
++        $io = new SymfonyStyle($input, $output);
++
++        $email = (string) ($input->getArgument('email') ?: $this->askNonEmpty($io, 'Employee email'));
++        $firstName = (string) ($input->getOption('first-name') ?: $this->askNonEmpty($io, 'First name'));
++        $lastName = (string) ($input->getOption('last-name') ?: $this->askNonEmpty($io, 'Last name'));
++
++        $password = $input->getOption('password');
++        if (empty($password)) {
++            try {
++                $password = $this->askPasswordTwice($io);
++            } catch (RuntimeException $e) {
++                $io->error($e->getMessage());
++
++                return Command::FAILURE;
++            }
++        }
++
++        $profileId = (int) $this->configuration->get('_PS_ADMIN_PROFILE_');
++        $languageId = (int) $this->configuration->get('PS_LANG_DEFAULT');
++        /** @var array<int, int> $shopAssociation */
++        $shopAssociation = array_map('intval', $this->shopContext->getShops(true, true));
++
++        if ($this->employeeContextInitializer->initializeWithFirstSuperAdmin() === null) {
++            $io->error('No active super-administrator exists yet. Create one through the installer first.');
++
++            return Command::FAILURE;
++        }
++
++        $command = new AddEmployeeCommand(
++            $firstName,
++            $lastName,
++            $email,
++            (string) $password,
++            self::DEFAULT_PAGE_ID,
++            $languageId,
++            true,
++            $profileId,
++            $shopAssociation,
++            false,
++            (int) $this->configuration->get(PasswordPolicyConfiguration::CONFIGURATION_MINIMUM_LENGTH),
++            (int) $this->configuration->get(PasswordPolicyConfiguration::CONFIGURATION_MAXIMUM_LENGTH),
++            (int) $this->configuration->get(PasswordPolicyConfiguration::CONFIGURATION_MINIMUM_SCORE),
++        );
++
++        try {
++            /** @var EmployeeId $employeeId */
++            $employeeId = $this->commandBus->handle($command);
++        } catch (Throwable $e) {
++            $io->error(sprintf('Failed to create employee: %s', $e->getMessage()));
++
++            return Command::FAILURE;
++        }
++
++        $io->success(sprintf(
++            'SuperAdmin employee #%d (%s) created with full back-office access.',
++            $employeeId->getValue(),
++            $email,
++        ));
++        $io->warning('This account has SuperAdmin privileges. Share the credentials carefully.');
++
++        return Command::SUCCESS;
++    }
++
++    private function askNonEmpty(SymfonyStyle $io, string $label): string
++    {
++        return (string) $io->ask($label, null, static function (?string $value) use ($label): string {
++            $value = trim((string) $value);
++            if ($value === '') {
++                throw new RuntimeException(sprintf('%s cannot be empty.', $label));
++            }
++
++            return $value;
++        });
++    }
++}
+diff --git a/src/PrestaShopBundle/Command/PasswordPromptTrait.php b/src/PrestaShopBundle/Command/PasswordPromptTrait.php
+new file mode 100644
+index 0000000000000..c7e08f3186c86
+--- /dev/null
++++ b/src/PrestaShopBundle/Command/PasswordPromptTrait.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Command;
++
++use RuntimeException;
++use Symfony\Component\Console\Question\Question;
++use Symfony\Component\Console\Style\SymfonyStyle;
++
++/**
++ * Shared interactive password prompt for the prestashop:employee:* CLI commands.
++ *
++ * Asks for a password twice (hidden), validates both inputs and either returns
++ * the confirmed value or throws a RuntimeException describing precisely why
++ * the input was rejected. Throwing — rather than returning null — keeps the
++ * "why" distinguishable when more validation rules are added later (length,
++ * policy, …).
++ */
++trait PasswordPromptTrait
++{
++    /**
++     * @throws RuntimeException when the password is empty or the two prompts do not match
++     */
++    private function askPasswordTwice(SymfonyStyle $io, string $label = 'Password'): string
++    {
++        $first = $this->askHidden($io, $label);
++        if ($first === '') {
++            throw new RuntimeException('Password cannot be empty.');
++        }
++
++        $second = $this->askHidden($io, sprintf('Confirm %s', lcfirst($label)));
++        if ($first !== $second) {
++            throw new RuntimeException('Passwords do not match.');
++        }
++
++        return $first;
++    }
++
++    private function askHidden(SymfonyStyle $io, string $label): string
++    {
++        $question = new Question($label);
++        $question->setHidden(true);
++        $question->setHiddenFallback(false);
++
++        return (string) $io->askQuestion($question);
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/employee.yml b/src/PrestaShopBundle/Resources/config/services/adapter/employee.yml
+index 04af67c6b99b9..3b3a1185c0f8f 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/employee.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/employee.yml
+@@ -82,3 +82,7 @@ services:
+   PrestaShop\PrestaShop\Core\Domain\Employee\CommandHandler\ResetEmployeePasswordHandler:
+     autoconfigure: true
+     autowire: true
++
++  PrestaShop\PrestaShop\Adapter\Employee\EmployeeContextInitializer:
++    arguments:
++      - '@prestashop.adapter.legacy.configuration'
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/command.yml b/src/PrestaShopBundle/Resources/config/services/bundle/command.yml
+index 106e7f06e27ab..1fa91a1ec19fa 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/command.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/command.yml
+@@ -103,3 +103,13 @@ services:
+       - '@prestashop.core.command_bus'
+     tags:
+       - 'console.command'
++
++  PrestaShopBundle\Command\EmployeeChangePasswordCommand:
++    autowire: true
++    tags:
++      - 'console.command'
++
++  PrestaShopBundle\Command\EmployeeCreateCommand:
++    autowire: true
++    tags:
++      - 'console.command'
+diff --git a/tests/Unit/PrestaShopBundle/Command/EmployeeChangePasswordCommandTest.php b/tests/Unit/PrestaShopBundle/Command/EmployeeChangePasswordCommandTest.php
+new file mode 100644
+index 0000000000000..596ceb004fb9d
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Command/EmployeeChangePasswordCommandTest.php
+@@ -0,0 +1,185 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Command;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShopBundle\Command\EmployeeChangePasswordCommand;
++use PrestaShopBundle\Entity\Employee\Employee;
++use PrestaShopBundle\Entity\Repository\EmployeeRepository;
++use PrestaShopBundle\Security\Admin\EmployeePasswordResetter;
++use RuntimeException;
++use Symfony\Component\Console\Command\Command;
++use Symfony\Component\Console\Tester\CommandTester;
++
++class EmployeeChangePasswordCommandTest extends TestCase
++{
++    public function testChangesPasswordWithEmailArgumentAndPasswordOption(): void
++    {
++        $employee = $this->createMock(Employee::class);
++
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository
++            ->expects($this->once())
++            ->method('loadEmployeeByIdentifier')
++            ->with('admin@example.com')
++            ->willReturn($employee);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter
++            ->expects($this->once())
++            ->method('resetPassword')
++            ->with($employee, 'NewP@ssw0rd!');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++
++        $exitCode = $tester->execute([
++            'email' => 'admin@example.com',
++            '--password' => 'NewP@ssw0rd!',
++        ]);
++
++        $this->assertSame(Command::SUCCESS, $exitCode);
++        $this->assertStringContainsString('Password updated for admin@example.com', $tester->getDisplay());
++    }
++
++    public function testFailsWhenEmployeeNotFound(): void
++    {
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository
++            ->method('loadEmployeeByIdentifier')
++            ->with('ghost@example.com')
++            ->willReturn(null);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter->expects($this->never())->method('resetPassword');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++
++        $exitCode = $tester->execute([
++            'email' => 'ghost@example.com',
++            '--password' => 'whatever',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('No employee found with email "ghost@example.com"', $tester->getDisplay());
++    }
++
++    public function testFailsWhenRepositoryThrows(): void
++    {
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository
++            ->method('loadEmployeeByIdentifier')
++            ->willThrowException(new RuntimeException('boom'));
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter->expects($this->never())->method('resetPassword');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++
++        $exitCode = $tester->execute([
++            'email' => 'broken@example.com',
++            '--password' => 'whatever',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('No employee found', $tester->getDisplay());
++    }
++
++    public function testFailsWhenPasswordsDoNotMatch(): void
++    {
++        $employee = $this->createMock(Employee::class);
++
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository->method('loadEmployeeByIdentifier')->willReturn($employee);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter->expects($this->never())->method('resetPassword');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++        $tester->setInputs(['first-password', 'different-password']);
++
++        $exitCode = $tester->execute(['email' => 'admin@example.com']);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('Passwords do not match', $tester->getDisplay());
++    }
++
++    public function testFailsWhenInteractivePasswordIsEmpty(): void
++    {
++        $employee = $this->createMock(Employee::class);
++
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository->method('loadEmployeeByIdentifier')->willReturn($employee);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter->expects($this->never())->method('resetPassword');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++        $tester->setInputs(['', '']);
++
++        $exitCode = $tester->execute(['email' => 'admin@example.com']);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('Password cannot be empty', $tester->getDisplay());
++    }
++
++    public function testPromptsForEmailAndPasswordWhenNotProvided(): void
++    {
++        $employee = $this->createMock(Employee::class);
++
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository
++            ->expects($this->once())
++            ->method('loadEmployeeByIdentifier')
++            ->with('admin@example.com')
++            ->willReturn($employee);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter
++            ->expects($this->once())
++            ->method('resetPassword')
++            ->with($employee, 'NewP@ssw0rd!');
++
++        $tester = $this->getCommandTester($repository, $resetter);
++        $tester->setInputs(['admin@example.com', 'NewP@ssw0rd!', 'NewP@ssw0rd!']);
++
++        $exitCode = $tester->execute([]);
++
++        $this->assertSame(Command::SUCCESS, $exitCode);
++    }
++
++    public function testFailsWhenResetterThrows(): void
++    {
++        $employee = $this->createMock(Employee::class);
++
++        $repository = $this->createMock(EmployeeRepository::class);
++        $repository->method('loadEmployeeByIdentifier')->willReturn($employee);
++
++        $resetter = $this->createMock(EmployeePasswordResetter::class);
++        $resetter
++            ->method('resetPassword')
++            ->willThrowException(new RuntimeException('Unable to send reset email.'));
++
++        $tester = $this->getCommandTester($repository, $resetter);
++
++        $exitCode = $tester->execute([
++            'email' => 'admin@example.com',
++            '--password' => 'NewP@ssw0rd!',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('Failed to change password: Unable to send reset email.', $tester->getDisplay());
++    }
++
++    private function getCommandTester(
++        EmployeeRepository $repository,
++        EmployeePasswordResetter $resetter,
++    ): CommandTester {
++        return new CommandTester(new EmployeeChangePasswordCommand($repository, $resetter));
++    }
++}
+diff --git a/tests/Unit/PrestaShopBundle/Command/EmployeeCreateCommandTest.php b/tests/Unit/PrestaShopBundle/Command/EmployeeCreateCommandTest.php
+new file mode 100644
+index 0000000000000..ff4f8c59a74ab
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Command/EmployeeCreateCommandTest.php
+@@ -0,0 +1,184 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Command;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Employee\EmployeeContextInitializer;
++use PrestaShop\PrestaShop\Adapter\Shop\Context as ShopContextAdapter;
++use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
++use PrestaShop\PrestaShop\Core\ConfigurationInterface;
++use PrestaShop\PrestaShop\Core\Domain\Employee\Command\AddEmployeeCommand;
++use PrestaShop\PrestaShop\Core\Domain\Employee\Exception\EmailAlreadyUsedException;
++use PrestaShop\PrestaShop\Core\Domain\Employee\ValueObject\EmployeeId;
++use PrestaShop\PrestaShop\Core\Security\PasswordPolicyConfiguration;
++use PrestaShopBundle\Command\EmployeeCreateCommand;
++use Symfony\Component\Console\Command\Command;
++use Symfony\Component\Console\Tester\CommandTester;
++
++class EmployeeCreateCommandTest extends TestCase
++{
++    public function testCreatesSuperAdminEmployeeWithExplicitOptions(): void
++    {
++        $configuration = $this->mockConfiguration();
++
++        $commandBus = $this->createMock(CommandBusInterface::class);
++        $commandBus
++            ->expects($this->once())
++            ->method('handle')
++            ->with($this->callback(function (AddEmployeeCommand $cmd): bool {
++                $this->assertSame('John', $cmd->getFirstName()->getValue());
++                $this->assertSame('Doe', $cmd->getLastName()->getValue());
++                $this->assertSame('john@example.com', $cmd->getEmail()->getValue());
++                // Always SuperAdmin (_PS_ADMIN_PROFILE_ = 1 in the mock), always default lang (1),
++                // always all shops returned by ShopContextAdapter, always active, never gravatar.
++                $this->assertSame(1, $cmd->getProfileId());
++                $this->assertSame(1, $cmd->getLanguageId());
++                $this->assertTrue($cmd->isActive());
++                $this->assertSame([1, 2], $cmd->getShopAssociation());
++                $this->assertFalse($cmd->hasEnabledGravatar());
++
++                return true;
++            }))
++            ->willReturn(new EmployeeId(42));
++
++        $tester = $this->getCommandTester($commandBus, $configuration);
++
++        $exitCode = $tester->execute([
++            'email' => 'john@example.com',
++            '--first-name' => 'John',
++            '--last-name' => 'Doe',
++            '--password' => 'Str0ng!Pass',
++        ]);
++
++        $this->assertSame(Command::SUCCESS, $exitCode);
++        $this->assertStringContainsString('SuperAdmin employee #42 (john@example.com) created', $tester->getDisplay());
++        $this->assertStringContainsString('SuperAdmin privileges', $tester->getDisplay());
++    }
++
++    public function testFailsWhenPasswordsDoNotMatch(): void
++    {
++        $configuration = $this->mockConfiguration();
++
++        $commandBus = $this->createMock(CommandBusInterface::class);
++        $commandBus->expects($this->never())->method('handle');
++
++        $tester = $this->getCommandTester($commandBus, $configuration);
++        $tester->setInputs(['first', 'different']);
++
++        $exitCode = $tester->execute([
++            'email' => 'admin@example.com',
++            '--first-name' => 'Admin',
++            '--last-name' => 'User',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('Passwords do not match', $tester->getDisplay());
++    }
++
++    public function testFailsWhenCommandBusThrows(): void
++    {
++        $configuration = $this->mockConfiguration();
++
++        $commandBus = $this->createMock(CommandBusInterface::class);
++        $commandBus
++            ->method('handle')
++            ->willThrowException(new EmailAlreadyUsedException('admin@example.com'));
++
++        $tester = $this->getCommandTester($commandBus, $configuration);
++
++        $exitCode = $tester->execute([
++            'email' => 'admin@example.com',
++            '--first-name' => 'Admin',
++            '--last-name' => 'User',
++            '--password' => 'Str0ng!Pass',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('Failed to create employee', $tester->getDisplay());
++    }
++
++    public function testFailsWhenNoSuperAdminExistsYet(): void
++    {
++        $configuration = $this->mockConfiguration();
++
++        $commandBus = $this->createMock(CommandBusInterface::class);
++        $commandBus->expects($this->never())->method('handle');
++
++        $shopContext = $this->createMock(ShopContextAdapter::class);
++        $shopContext->method('getShops')->willReturn([1, 2]);
++
++        $contextInitializer = $this->createMock(EmployeeContextInitializer::class);
++        $contextInitializer->method('initializeWithFirstSuperAdmin')->willReturn(null);
++
++        $tester = new CommandTester(new EmployeeCreateCommand($commandBus, $configuration, $shopContext, $contextInitializer));
++
++        $exitCode = $tester->execute([
++            'email' => 'admin@example.com',
++            '--first-name' => 'Admin',
++            '--last-name' => 'User',
++            '--password' => 'Str0ng!Pass',
++        ]);
++
++        $this->assertSame(Command::FAILURE, $exitCode);
++        $this->assertStringContainsString('No active super-administrator', $tester->getDisplay());
++    }
++
++    public function testPromptsForMissingMandatoryValues(): void
++    {
++        $configuration = $this->mockConfiguration();
++
++        $commandBus = $this->createMock(CommandBusInterface::class);
++        $commandBus
++            ->expects($this->once())
++            ->method('handle')
++            ->with($this->callback(function (AddEmployeeCommand $cmd): bool {
++                $this->assertSame('Jane', $cmd->getFirstName()->getValue());
++                $this->assertSame('Roe', $cmd->getLastName()->getValue());
++                $this->assertSame('jane@example.com', $cmd->getEmail()->getValue());
++
++                return true;
++            }))
++            ->willReturn(new EmployeeId(2));
++
++        $tester = $this->getCommandTester($commandBus, $configuration);
++        // Order: email, first name, last name, password, password confirm.
++        $tester->setInputs(['jane@example.com', 'Jane', 'Roe', 'Str0ng!Pass', 'Str0ng!Pass']);
++
++        $exitCode = $tester->execute([]);
++
++        $this->assertSame(Command::SUCCESS, $exitCode);
++    }
++
++    private function getCommandTester(
++        CommandBusInterface $commandBus,
++        ConfigurationInterface $configuration,
++    ): CommandTester {
++        $shopContext = $this->createMock(ShopContextAdapter::class);
++        $shopContext->method('getShops')->willReturn([1, 2]);
++
++        $contextInitializer = $this->createMock(EmployeeContextInitializer::class);
++        $contextInitializer->method('initializeWithFirstSuperAdmin')->willReturn(1);
++
++        return new CommandTester(new EmployeeCreateCommand($commandBus, $configuration, $shopContext, $contextInitializer));
++    }
++
++    private function mockConfiguration(): ConfigurationInterface
++    {
++        $configuration = $this->createMock(ConfigurationInterface::class);
++        $configuration->method('get')->willReturnMap([
++            ['_PS_ADMIN_PROFILE_', 1],
++            ['PS_LANG_DEFAULT', 1],
++            [PasswordPolicyConfiguration::CONFIGURATION_MINIMUM_LENGTH, 8],
++            [PasswordPolicyConfiguration::CONFIGURATION_MAXIMUM_LENGTH, 72],
++            [PasswordPolicyConfiguration::CONFIGURATION_MINIMUM_SCORE, 0],
++        ]);
++
++        return $configuration;
++    }
++}

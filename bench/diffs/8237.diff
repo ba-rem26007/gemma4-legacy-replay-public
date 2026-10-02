@@ -1,0 +1,91 @@
+diff --git a/classes/Group.php b/classes/Group.php
+index 162a42bf1ff73..5b9a597fc66f8 100644
+--- a/classes/Group.php
++++ b/classes/Group.php
+@@ -322,7 +322,13 @@ public static function addModulesRestrictions($id_group, $modules, $shops = arra
+         }
+ 
+         // Delete all record for this group
+-        Db::getInstance()->execute('DELETE FROM `' . _DB_PREFIX_ . 'module_group` WHERE `id_group` = ' . (int) $id_group);
++        Db::getInstance()->execute(
++            'DELETE FROM `' . _DB_PREFIX_ . 'module_group`
++            WHERE `id_group` = ' . (int) $id_group . '
++            AND `id_shop` IN ('
++              . (implode(',', array_map('intval', $shops)))
++            . ')'
++        );
+ 
+         $sql = 'INSERT INTO `' . _DB_PREFIX_ . 'module_group` (`id_module`, `id_shop`, `id_group`) VALUES ';
+         foreach ($modules as $module) {
+diff --git a/classes/module/Module.php b/classes/module/Module.php
+index 2560f924eaf02..0e22aec222e3a 100644
+--- a/classes/module/Module.php
++++ b/classes/module/Module.php
+@@ -2717,12 +2717,16 @@ public static function getPermissionStatic($id_module, $variable, $employee = nu
+      *
+      * @return array|null
+      */
+-    public static function getAuthorizedModules($group_id)
+-    {
+-        return Db::getInstance()->executeS('
+-        SELECT m.`id_module`, m.`name` FROM `' . _DB_PREFIX_ . 'module_group` mg
+-        LEFT JOIN `' . _DB_PREFIX_ . 'module` m ON (m.`id_module` = mg.`id_module`)
+-        WHERE mg.`id_group` = ' . (int) $group_id);
++    public static function getAuthorizedModules($group_id, $shops = array(1))
++    {
++        return Db::getInstance()->executeS(
++            'SELECT m.`id_module`, m.`name` FROM `' . _DB_PREFIX_ . 'module_group` mg
++            LEFT JOIN `' . _DB_PREFIX_ . 'module` m ON (m.`id_module` = mg.`id_module`)
++            WHERE mg.`id_group` = ' . (int) $group_id . '
++            AND `id_shop` IN ('
++                . (implode(',', array_map('intval', $shops)))
++            . ')'
++        );
+     }
+ 
+     /**
+diff --git a/controllers/admin/AdminGroupsController.php b/controllers/admin/AdminGroupsController.php
+index 47e5798575249..b71ddbd87a034 100644
+--- a/controllers/admin/AdminGroupsController.php
++++ b/controllers/admin/AdminGroupsController.php
+@@ -405,8 +405,10 @@ public function formatModuleListAuth($id_group)
+         $auth_modules = array();
+         $unauth_modules = array();
+ 
++        $shops = Shop::getContextListShopID();
++
+         if ($id_group) {
+-            $authorized_modules = Module::getAuthorizedModules($id_group);
++            $authorized_modules = Module::getAuthorizedModules($id_group, $shops);
+         }
+ 
+         if (is_array($authorized_modules)) {
+@@ -500,11 +502,10 @@ protected function updateRestrictions()
+         $auth_modules = Tools::getValue('modulesBoxAuth');
+         $return = true;
+         if ($id_group) {
+-            Group::truncateModulesRestrictions((int) $id_group);
+-        }
+-        $shops = Shop::getShops(true, null, true);
+-        if (is_array($auth_modules)) {
+-            $return &= Group::addModulesRestrictions($id_group, $auth_modules, $shops);
++            $shops = Shop::getContextListShopID();
++            if (is_array($auth_modules)) {
++                $return &= Group::addModulesRestrictions($id_group, $auth_modules, $shops);
++            }
+         }
+ 
+         // update module list by hook cache
+diff --git a/controllers/admin/AdminOrdersController.php b/controllers/admin/AdminOrdersController.php
+index 829fc09ef2ae5..878c72cf35ac8 100644
+--- a/controllers/admin/AdminOrdersController.php
++++ b/controllers/admin/AdminOrdersController.php
+@@ -2955,7 +2955,7 @@ protected function applyDiscountOnInvoice($order_invoice, $value_tax_incl, $valu
+     public function ajaxProcessChangePaymentMethod()
+     {
+         $customer = new Customer(Tools::getValue('id_customer'));
+-        $modules = Module::getAuthorizedModules($customer->id_default_group);
++        $modules = Module::getAuthorizedModules($customer->id_default_group, array($customer->id_shop));
+         $authorized_modules = array();
+ 
+         if (!Validate::isLoadedObject($customer) || !is_array($modules)) {

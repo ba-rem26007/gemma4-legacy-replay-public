@@ -1,0 +1,304 @@
+diff --git a/.github/PULL_REQUEST_TEMPLATE.md b/.github/PULL_REQUEST_TEMPLATE.md
+index b82ce077003ca..dc277a83ed33c 100644
+--- a/.github/PULL_REQUEST_TEMPLATE.md
++++ b/.github/PULL_REQUEST_TEMPLATE.md
+@@ -23,7 +23,7 @@ https://devdocs.prestashop-project.org/9/contribute/contribution-guidelines/pull
+ 
+ | Questions         | Answers
+ | ----------------- | -------------------------------------------------------
+-| Branch?           | develop / 9.2.x / 9.1.x
++| Branch?           | develop / 9.2.x
+ | Description?      | Please be specific when describing the PR. <br> Every detail helps: versions, browser/server configuration, specific module/theme, etc. Feel free to add more information below this table.
+ | Type?             | bug fix / improvement / new feature / refacto
+ | Category?         | FO / BO / CO / IN / WS / TE / LO / ME / PM / see explanations at https://devdocs.prestashop-project.org/9/contribute/contribution-guidelines/pull-requests/#type--category
+diff --git a/.github/release-bootstrap/transform-core.sh b/.github/release-bootstrap/transform-core.sh
+index 12b127b7c7add..1368a864816a5 100755
+--- a/.github/release-bootstrap/transform-core.sh
++++ b/.github/release-bootstrap/transform-core.sh
+@@ -70,6 +70,16 @@ for db in mysql mariadb; do
+   fi
+ done
+ 
++# 6b) auto_retry_failed_nightly_jobs.yml: watch the NEW branch nightly test
++#     workflows, placed right after the develop entries (anchored on the
++#     develop mariadb entry — develop is always present).
++insert_block_after "${WF}/auto_retry_failed_nightly_jobs.yml" \
++  "- 'Nightly tests and report - develop (mariadb)'" \
++  "Nightly tests and report - ${NEW} (mysql)" <<EOF
++      - 'Nightly tests and report - ${NEW} (mysql)'
++      - 'Nightly tests and report - ${NEW} (mariadb)'
++EOF
++
+ # 7) cron_create_merge_prs.yml: insert NEW into the merge-up CHAIN. Each stable
+ #    branch merges into the one just above it, not straight into develop:
+ #    the pair that currently targets develop is retargeted to NEW, then a new
+diff --git a/.github/workflows/auto_retry_failed_nightly_jobs.yml b/.github/workflows/auto_retry_failed_nightly_jobs.yml
+new file mode 100644
+index 0000000000000..e93ce5fb56b05
+--- /dev/null
++++ b/.github/workflows/auto_retry_failed_nightly_jobs.yml
+@@ -0,0 +1,47 @@
++# Automatically re-runs the failed jobs of a nightly test run, up to 3 retries
++# (run_attempt < 4). Each rerun re-executes only the failed campaigns plus their
++# dependents — including the "Combine all reports and upload them" job, which
++# re-merges all campaign reports and overwrites the same date-based file on GCS.
++# The report import cron (cron_nightly_tests_reports.yml) runs once, later, and
++# picks up the improved report.
++#
++# The rerun re-emits a `workflow_run: completed` event for the same run with an
++# incremented run_attempt, so the retry chain self-terminates at the cap.
++name: Auto-retry failed nightly jobs
++
++on:
++  workflow_run:
++    workflows:
++      - 'Nightly tests and report - develop (mysql)'
++      - 'Nightly tests and report - develop (mariadb)'
++      - 'Nightly tests and report - 9.2.x (mysql)'
++      - 'Nightly tests and report - 9.2.x (mariadb)'
++      - 'Nightly tests and report - 8.2.x'
++    types:
++      - completed
++
++permissions:
++  actions: write
++  contents: read
++
++jobs:
++  retry:
++    name: Re-run failed jobs (attempt ${{ github.event.workflow_run.run_attempt }})
++    if: >
++      github.event.workflow_run.conclusion == 'failure' &&
++      github.event.workflow_run.run_attempt < 4
++    runs-on: ubuntu-latest
++    steps:
++      - name: Re-run failed jobs
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_REPO: ${{ github.repository }}
++          RUN_ID: ${{ github.event.workflow_run.id }}
++          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
++          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
++          RUN_URL: ${{ github.event.workflow_run.html_url }}
++        run: |
++          echo "Workflow: $WORKFLOW_NAME"
++          echo "Run URL:  $RUN_URL"
++          echo "Attempt $RUN_ATTEMPT failed — triggering rerun of failed jobs only."
++          gh run rerun "$RUN_ID" --failed
+diff --git a/.github/workflows/cron_create_merge_prs.yml b/.github/workflows/cron_create_merge_prs.yml
+index a90a9fb73bba1..73db311a35ca4 100644
+--- a/.github/workflows/cron_create_merge_prs.yml
++++ b/.github/workflows/cron_create_merge_prs.yml
+@@ -25,8 +25,6 @@ jobs:
+         pair:
+           - source: 9.2.x
+             target: develop
+-          - source: 9.1.x
+-            target: 9.2.x
+     uses: ./.github/workflows/create-merge-pr.yml
+     with:
+       source_branch: ${{ matrix.pair.source }}
+diff --git a/.github/workflows/cron_js_routing.yml b/.github/workflows/cron_js_routing.yml
+index e80c68563da9e..e34efc45e2ff9 100644
+--- a/.github/workflows/cron_js_routing.yml
++++ b/.github/workflows/cron_js_routing.yml
+@@ -19,15 +19,12 @@ jobs:
+         BRANCH:
+           - develop
+           - 9.2.x
+-          - 9.1.x
+           - 8.2.x
+         include:
+           - BRANCH: develop
+             node: 20
+           - BRANCH: 9.2.x
+             node: 20
+-          - BRANCH: 9.1.x
+-            node: 20
+           - BRANCH: 8.2.x
+             node: 16
+ 
+diff --git a/.github/workflows/cron_nightly_build.yml b/.github/workflows/cron_nightly_build.yml
+index d24fb2e4c9abb..09595ab2d5af1 100644
+--- a/.github/workflows/cron_nightly_build.yml
++++ b/.github/workflows/cron_nightly_build.yml
+@@ -21,15 +21,12 @@ jobs:
+         BRANCH:
+           - develop
+           - 9.2.x
+-          - 9.1.x
+           - 8.2.x
+         include:
+           - BRANCH: develop
+             node: 20
+           - BRANCH: 9.2.x
+             node: 20
+-          - BRANCH: 9.1.x
+-            node: 20
+           - BRANCH: 8.2.x
+             node: 16
+ 
+diff --git a/.github/workflows/cron_nightly_tests_9.1.x_mariadb.yml b/.github/workflows/cron_nightly_tests_9.1.x_mariadb.yml
+deleted file mode 100644
+index 8b97a2c29e6a8..0000000000000
+--- a/.github/workflows/cron_nightly_tests_9.1.x_mariadb.yml
++++ /dev/null
+@@ -1,21 +0,0 @@
+-# This workflow aim to run all UI tests on active branches
+-# and upload the report on Google cloud platform storage
+-name: Nightly tests and report - 9.1.x (mariadb)
+-
+-on:
+-  workflow_run:
+-    workflows: [ 'Nightly Build' ]
+-    types:
+-      - requested
+-
+-jobs:
+-  test_9_1_x:
+-    uses: ./.github/workflows/cron_nightly_tests_reusable.yml
+-    with:
+-      BRANCH: 9.1.x
+-      PHP_VERSION: '8.1'
+-      NODE_VERSION: '20'
+-      DB_SERVER: 'mariadb'
+-    secrets:
+-      GC_PROJECT_ID: ${{ secrets.GC_PROJECT_ID }}
+-      GC_SERVICE_KEY: ${{ secrets.GC_SERVICE_KEY }}
+diff --git a/.github/workflows/cron_nightly_tests_9.1.x_mysql.yml b/.github/workflows/cron_nightly_tests_9.1.x_mysql.yml
+deleted file mode 100644
+index 3f1c6d56067ef..0000000000000
+--- a/.github/workflows/cron_nightly_tests_9.1.x_mysql.yml
++++ /dev/null
+@@ -1,21 +0,0 @@
+-# This workflow aim to run all UI tests on active branches
+-# and upload the report on Google cloud platform storage
+-name: Nightly tests and report - 9.1.x (mysql)
+-
+-on:
+-  workflow_run:
+-    workflows: [ 'Nightly Build' ]
+-    types:
+-      - requested
+-
+-jobs:
+-  test_9_1_x:
+-    uses: ./.github/workflows/cron_nightly_tests_reusable.yml
+-    with:
+-      BRANCH: 9.1.x
+-      PHP_VERSION: '8.1'
+-      NODE_VERSION: '20'
+-      DB_SERVER: 'mysql'
+-    secrets:
+-      GC_PROJECT_ID: ${{ secrets.GC_PROJECT_ID }}
+-      GC_SERVICE_KEY: ${{ secrets.GC_SERVICE_KEY }}
+diff --git a/.github/workflows/cron_nightly_tests_reports.yml b/.github/workflows/cron_nightly_tests_reports.yml
+index 1914998a04fd5..ada5d7279e07e 100644
+--- a/.github/workflows/cron_nightly_tests_reports.yml
++++ b/.github/workflows/cron_nightly_tests_reports.yml
+@@ -4,7 +4,7 @@ name: Nightly tests (Report)
+ 
+ on:
+   schedule:
+-    - cron: '0 5 * * *'
++    - cron: '0 7 * * *'
+   workflow_dispatch:
+ 
+ jobs:
+@@ -20,10 +20,6 @@ jobs:
+         include:
+           - branch: 8.2.x
+             database: mysql
+-          - branch: 9.1.x
+-            database: mysql
+-          - branch: 9.1.x
+-            database: mariadb
+           - branch: 9.2.x
+             database: mysql
+           - branch: 9.2.x
+diff --git a/.github/workflows/cron_nightly_tests_reusable.yml b/.github/workflows/cron_nightly_tests_reusable.yml
+index 76467388ddf94..7951ed49ade8e 100644
+--- a/.github/workflows/cron_nightly_tests_reusable.yml
++++ b/.github/workflows/cron_nightly_tests_reusable.yml
+@@ -118,13 +118,6 @@ jobs:
+             CAMPAIGN: 'modules:20-29'
+           - BRANCH: 8.2.x
+             CAMPAIGN: 'modules:30-39'
+-          ## 9.1.x
+-          - BRANCH: 9.1.x
+-            CAMPAIGN: 'sanity:productV2'
+-          - BRANCH: 9.1.x
+-            CAMPAIGN: 'functional:productV2'
+-          - BRANCH: 9.1.x
+-            CAMPAIGN: 'modules'
+           ## 9.2.x
+           - BRANCH: 9.2.x
+             CAMPAIGN: 'sanity:productV2'
+@@ -212,6 +205,9 @@ jobs:
+         with:
+           name: reports_${{ env.GH_BRANCH }}_${{ env.TEST_CAMPAIGN_ARTIFACT }}
+           path: ${{ env.REPORTS_DIR }}
++          # A retried job must be able to replace the artifact uploaded by a
++          # previous attempt of the same run (auto_retry_failed_nightly_jobs.yml)
++          overwrite: true
+ 
+   # Second job: Merge Mochawesome reports and upload them on GCP
+   ## Always executed even if tests are in error
+diff --git a/.github/workflows/cron_php_update_modules.yml b/.github/workflows/cron_php_update_modules.yml
+index ce7f6c4be4620..5408700e97470 100644
+--- a/.github/workflows/cron_php_update_modules.yml
++++ b/.github/workflows/cron_php_update_modules.yml
+@@ -16,7 +16,6 @@ jobs:
+         BRANCH:
+           - develop
+           - 9.2.x
+-          - 9.1.x
+     env:
+       GH_BRANCH: ${{ matrix.BRANCH }}
+       IGNORE_PRESTASHOP_PACKAGES: "prestashop/psgdpr prestashop/ps_apiresources"
+diff --git a/.github/workflows/stale_issues.yml b/.github/workflows/stale_issues.yml
+index 34ab5e0541754..6e8b3bc72a3fa 100644
+--- a/.github/workflows/stale_issues.yml
++++ b/.github/workflows/stale_issues.yml
+@@ -49,5 +49,5 @@ jobs:
+           exempt-issue-labels: "Critical, Security, Major, Good first issue, EPIC,
+             Topwatchers, Blocked, Must-have, Waiting for dev, Waiting for QA,
+             Waiting for QA by Community, Waiting for PM, Waiting for UX, Waiting
+-            for rebase, Waiting for wording, Release, Detected by TE, 9.1.x"
++            for rebase, Waiting for wording, Release, Detected by TE"
+           debug-only: ${{ github.event.inputs.debug-only || 'false' }}
+diff --git a/.github/workflows/sync-from-upstream.yml b/.github/workflows/sync-from-upstream.yml
+index 8795137a75f06..754986a44d697 100644
+--- a/.github/workflows/sync-from-upstream.yml
++++ b/.github/workflows/sync-from-upstream.yml
+@@ -70,7 +70,7 @@ jobs:
+       TARGET_REPO: ${{ github.repository }}
+       # Closed list on purpose: edit it (via PR upstream) when a version
+       # branch opens or reaches end of life.
+-      BRANCHES: "develop 9.2.x 9.1.x 8.2.x"
++      BRANCHES: "develop 9.2.x 8.2.x"
+     steps:
+       - name: Clone official repository (bare)
+         run: |
+diff --git a/.github/workflows/sync_localization_files.yml b/.github/workflows/sync_localization_files.yml
+index df1b440e48718..467883f5498a0 100644
+--- a/.github/workflows/sync_localization_files.yml
++++ b/.github/workflows/sync_localization_files.yml
+@@ -21,7 +21,7 @@ on:
+   workflow_dispatch:
+     inputs:
+       target:
+-        description: 'Core branch to open a sync PR for — "all" = develop + 9.2.x + 9.1.x, or any branch name (e.g. build-920)'
++        description: 'Core branch to open a sync PR for — "all" = develop + 9.2.x, or any branch name (e.g. build-920)'
+         type: string
+         default: all
+       lf_branch:
+@@ -46,7 +46,7 @@ jobs:
+           TARGET: ${{ inputs.target }}
+         run: |
+           if [ "$TARGET" = "all" ]; then
+-            echo 'matrix=["develop","9.2.x","9.1.x"]' >> "$GITHUB_OUTPUT"
++            echo 'matrix=["develop","9.2.x"]' >> "$GITHUB_OUTPUT"
+           else
+             echo "matrix=$(jq -cn --arg b "$TARGET" '[$b]')" >> "$GITHUB_OUTPUT"
+           fi

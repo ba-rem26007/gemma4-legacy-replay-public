@@ -1,0 +1,291 @@
+diff --git a/tools/profiling/Hook.php b/tools/profiling/Hook.php
+index 2fb6e190bf4ad..bef2eb06c50f8 100644
+--- a/tools/profiling/Hook.php
++++ b/tools/profiling/Hook.php
+@@ -44,6 +44,44 @@ public static function coreCallHook($module, $method, $params)
+             ]
+         );
+ 
++        Profiler::getInstance()->interceptModule(
++            [
++                'module' => $module->name,
++                'method' => $method,
++                'time' => microtime(true) - $timeStart,
++                'memory' => memory_get_usage() - $memoryStart,
++            ]
++        );
++
++        return $result;
++    }
++
++    public static function coreRenderWidget($module, $registeredHookName, $params)
++    {
++        $timeStart = microtime(true);
++        $memoryStart = memory_get_usage();
++
++        $result = parent::coreRenderWidget($module, $registeredHookName, $params);
++
++        Profiler::getInstance()->interceptHook(
++            $registeredHookName,
++            [
++                'module' => $module->name . ' (widget)',
++                'params' => $params,
++                'time' => microtime(true) - $timeStart,
++                'memory' => memory_get_usage() - $memoryStart,
++            ]
++        );
++
++        Profiler::getInstance()->interceptModule(
++            [
++                'module' => $module->name,
++                'method' => $registeredHookName,
++                'time' => microtime(true) - $timeStart,
++                'memory' => memory_get_usage() - $memoryStart,
++            ]
++        );
++
+         return $result;
+     }
+ }
+diff --git a/tools/profiling/Profiler.php b/tools/profiling/Profiler.php
+index 979b635094672..66c57684ccc1c 100644
+--- a/tools/profiling/Profiler.php
++++ b/tools/profiling/Profiler.php
+@@ -27,19 +27,47 @@
+ 
+ class Profiler
+ {
++    /** @var array */
+     protected $hooksPerfs = [];
++
++    /** @var array */
+     protected $modulesPerfs = [];
++
++    /** @var array */
+     protected $profiler = [];
++    /** @var array */
++    protected $globalVarSize = [];
++
++    /** @var array */
++    protected $queries = [];
+ 
++    /** @var int */
+     protected $totalFilesize = 0;
++
++    /** @var int */
+     protected $totalGlobalVarSize = 0;
++
++    /** @var float */
+     protected $totalQueryTime = 0;
++
++    /** @var float */
+     protected $totalModulesTime = 0;
++
++    /** @var int */
+     protected $totalModulesMemory = 0;
++
++    /** @var float */
+     protected $totalHooksTime = 0;
++
++    /** @var int */
+     protected $totalHooksMemory = 0;
++
++    /** @var float */
+     protected $startTime = 0;
+ 
++    /** @var int */
++    protected $totalCacheSize = 0;
++
+     protected static $instance = null;
+ 
+     private function __construct()
+@@ -159,7 +187,8 @@ public function interceptHook(string $hookName, array $params)
+      */
+     public function interceptModule(array $params)
+     {
+-        $this->modulesPerfs[] = $params;
++        $this->modulesPerfs[$params['module']][] = $params;
++
+         $this->totalModulesTime += $params['time'];
+         $this->totalModulesMemory += $params['memory'];
+     }
+@@ -214,7 +243,7 @@ public function processData()
+                 }
+ 
+                 foreach ($explain as $row) {
+-                    $queryRow['rows'] *= $row['rows'];
++                    $queryRow['rows'] *= (int) $row['rows'];
+                 }
+ 
+                 if (stristr($data['query'], 'group by') && !preg_match('/(avg|count|min|max|group_concat|sum)\s*\(/i', $data['query'])) {
+@@ -236,6 +265,37 @@ public function processData()
+         uasort($this->hooksPerfs, [$this, 'sortByQueryTime']);
+     }
+ 
++    /**
++     * Format performance details for modules
++     *
++     * @return array
++     */
++    public function getFormattedModulePerfs(): array
++    {
++        $formattedOutput = [];
++        foreach ($this->modulesPerfs as $moduleName => $perfs) {
++            $formattedOutput[$moduleName] = [
++                'total_time' => array_reduce(
++                    $perfs,
++                    function (&$res, $item) {
++                        return $res + $item['time'];
++                    },
++                    0
++                ),
++                'total_memory' => array_reduce(
++                    $perfs,
++                    function (&$res, $item) {
++                        return $res + $item['memory'];
++                    },
++                    0
++                ),
++                'details' => $perfs,
++            ];
++        }
++
++        return $formattedOutput;
++    }
++
+     /**
+      * Prepare and return smarty variables
+      *
+@@ -274,7 +334,7 @@ public function getSmartyVariables(): array
+                 'totalHooksMemory' => $this->totalHooksMemory,
+             ],
+             'modules' => [
+-                'perfs' => $this->modulesPerfs,
++                'perfs' => $this->getFormattedModulePerfs(),
+                 'totalHooksTime' => $this->totalModulesTime,
+                 'totalHooksMemory' => $this->totalModulesMemory,
+             ],
+diff --git a/tools/profiling/templates/hooks.tpl b/tools/profiling/templates/hooks.tpl
+index 91d007d2deb6c..c429477ea6c79 100644
+--- a/tools/profiling/templates/hooks.tpl
++++ b/tools/profiling/templates/hooks.tpl
+@@ -22,7 +22,7 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  *}
+-<div class="col-4">
++<div class="col-5">
+   <table class="table table-condensed">
+     <thead>
+       <tr>
+diff --git a/tools/profiling/templates/links.tpl b/tools/profiling/templates/links.tpl
+index 2709495f3ca38..002565b02d2ac 100644
+--- a/tools/profiling/templates/links.tpl
++++ b/tools/profiling/templates/links.tpl
+@@ -22,7 +22,7 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  *}
+-<div class="col-4">
++<div class="col-2">
+   <ol>
+     <li>
+       <a href="#stopwatch">Stopwatch SQL</a>
+diff --git a/tools/profiling/templates/modules.tpl b/tools/profiling/templates/modules.tpl
+index 2977f585e247c..ccb594c8dc59c 100644
+--- a/tools/profiling/templates/modules.tpl
++++ b/tools/profiling/templates/modules.tpl
+@@ -22,7 +22,7 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  *}
+-<div class="col-4">
++<div class="col-5">
+   <table class="table table-condensed">
+     <thead>
+       <tr>
+@@ -33,19 +33,35 @@
+     </thead>
+ 
+     <tbody>
+-      {foreach $modules.perfs as $modulePerfs}
++      {foreach $modules.perfs as $moduleName => $perfs}
+         <tr>
+           <td>
+-            {$modulePerfs['module']}
++            <a href="javascript:void(0);" onclick="$('.{$moduleName}_modules_details').toggle();">{$moduleName}</a>
++            </td>
++            
+           </td>
+           <td>
+-            {load_time data=$modulePerfs['time']}
++            {load_time data=$perfs['total_time']}
+           </td>
+           <td>
+-            {memory data=$modulePerfs['memory']}
++            {memory data=$perfs['total_memory']}
+           </td>
+         </tr>
++        {foreach $perfs['details'] as $perfs}
++          <tr class="{$moduleName}_modules_details" style="background-color:#EFEFEF;display:none">
++            <td>
++              {$perfs['method']}
++            </td>
++            <td>
++              {load_time data=$perfs['time']}
++            </td>
++            <td>
++              {memory data=$perfs['memory']}
++            </td>
++          </tr>
++        {/foreach}
+       {/foreach}
++      
+     </tbody>
+ 
+     <tfoot>
+diff --git a/tools/profiling/templates/styles.tpl b/tools/profiling/templates/styles.tpl
+index 481284651c9ae..2fe16996276b9 100644
+--- a/tools/profiling/templates/styles.tpl
++++ b/tools/profiling/templates/styles.tpl
+@@ -111,6 +111,40 @@
+     }
+   }
+ 
++  #prestashop-profiling .col-5 {
++    float: left;
++    padding: 0 10px;
++    width: 40%;
++  }
++
++  @media (max-width: 1200px) {
++    #prestashop-profiling .col-5 {
++      width: 50%;
++    }
++  }
++  @media (max-width: 600px) {
++    #prestashop-profiling .col-5 {
++      width: 100%;
++    }
++  }
++
++  #prestashop-profiling .col-2 {
++    float: left;
++    padding: 0 10px;
++    width: 20%;
++  }
++
++  @media (max-width: 1200px) {
++    #prestashop-profiling .col-2 {
++      width: 20%;
++    }
++  }
++  @media (max-width: 600px) {
++    #prestashop-profiling .col-2 {
++      width: 100%;
++    }
++  }
++
+   .success {
+     color: green;
+   }

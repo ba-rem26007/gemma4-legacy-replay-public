@@ -1,0 +1,200 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index edd71cb4da702..e3eb42907519f 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -1628,15 +1628,10 @@ public function _addCustomization($id_product, $id_product_attribute, $index, $t
+      */
+     public function orderExists()
+     {
+-        $cache_id = 'Cart::orderExists_' . (int) $this->id;
+-        if (!Cache::isStored($cache_id)) {
+-            $result = (bool) Db::getInstance()->getValue('SELECT count(*) FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $this->id);
+-            Cache::store($cache_id, $result);
+-
+-            return $result;
+-        }
+-
+-        return Cache::retrieve($cache_id);
++        return (bool) Db::getInstance()->getValue(
++            'SELECT count(*) FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $this->id,
++            false
++        );
+     }
+ 
+     /**
+diff --git a/classes/PaymentModule.php b/classes/PaymentModule.php
+index 47c467ac96af6..3b13761b1e18d 100644
+--- a/classes/PaymentModule.php
++++ b/classes/PaymentModule.php
+@@ -377,7 +377,7 @@ public function validateOrder(
+                     $transaction_id = null;
+                 }
+ 
+-                if (!$order->addOrderPayment($amount_paid, null, $transaction_id)) {
++                if (!isset($order) || !$order->addOrderPayment($amount_paid, null, $transaction_id)) {
+                     PrestaShopLogger::addLog('PaymentModule::validateOrder - Cannot save Order Payment', 3, null, 'Cart', (int) $id_cart, true);
+ 
+                     throw new PrestaShopException('Can\'t save Order Payment');
+@@ -398,7 +398,7 @@ public function validateOrder(
+                         $message .= '<br />' . $this->trans('Warning: the secure key is empty, check your payment account before validation', [], 'Admin.Payment.Notification');
+                     }
+                     // Optional message to attach to this order
+-                    if (isset($message) & !empty($message)) {
++                    if (!empty($message)) {
+                         $msg = new Message();
+                         $message = strip_tags($message, '<br>');
+                         if (Validate::isCleanHtml($message)) {
+diff --git a/tests/Integration/Behaviour/Features/Context/CustomerManagerFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CustomerManagerFeatureContext.php
+index 44d5621328877..8b5256144b1fe 100644
+--- a/tests/Integration/Behaviour/Features/Context/CustomerManagerFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CustomerManagerFeatureContext.php
+@@ -32,6 +32,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Customer\Command\DeleteCustomerCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\Command\EditCustomerCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\Command\TransformGuestToCustomerCommand;
++use PrestaShop\PrestaShop\Core\Domain\Customer\Exception\CustomerNotFoundException;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\Exception\DuplicateCustomerEmailException;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\Query\GetCustomerForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Customer\QueryResult\EditableCustomer;
+@@ -181,6 +182,14 @@ public function transformGuestIntoACustomer($customerReference)
+         $commandBus->handle($command);
+     }
+ 
++    /**
++     * @When I delete customer ":customerReference" with "allow registration after deletion" checked
++     */
++    public function deleteCustomerWithAllowCustomerRegistration($customerReference)
++    {
++        $this->deleteCustomer($customerReference, CustomerDeleteMethod::ALLOW_CUSTOMER_REGISTRATION);
++    }
++
+     /**
+      * @When /^I delete customer "(.+)" with method "(.+)"$/
+      */
+@@ -199,7 +208,7 @@ public function deleteCustomer($customerReference, $methodName)
+     }
+ 
+     /**
+-     * @Then /^if I query customer customer "(.+)" I should get a Customer with properties:$/
++     * @Then /^if I query customer "(.+)" I should get a Customer with properties:$/
+      */
+     public function assertQueryCustomerProperties($customerReference, TableNode $table)
+     {
+@@ -221,7 +230,27 @@ public function assertQueryCustomerProperties($customerReference, TableNode $tab
+     }
+ 
+     /**
+-     * @Then /^if I query customer customer "(.+)" I should get an error '(.+)'$/
++     * @Then the customer ":customerReference" should not be found
++     */
++    public function assertCustomerWasNotFound($customerReference)
++    {
++        $this->assertCustomerReferenceExistsInRegistry($customerReference);
++
++        $queryBus = $this->getQueryBus();
++        /* @var EditableCustomer $result */
++        try {
++            $result = $queryBus->handle(new GetCustomerForEditing($this->customerRegistry[$customerReference]));
++
++            throw new NoExceptionAlthoughExpectedException();
++        } catch (CustomerNotFoundException $e) {
++            return;
++        }
++
++        throw new \Exception('Customer exists');
++    }
++
++    /**
++     * @Then /^if I query customer "(.+)" I should get an error '(.+)'$/
+      */
+     public function assertQueryReturnsErrormessage($customerReference, $errorMessage)
+     {
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Customer/customer_management.feature b/tests/Integration/Behaviour/Features/Scenario/Customer/customer_management.feature
+index c8a2913c9b449..b8cff0a0896e6 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Customer/customer_management.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Customer/customer_management.feature
+@@ -13,13 +13,13 @@ Feature: Customer Management
+       | lastName  | Napoler                    |
+       | email     | napoler.dev@prestashop.com |
+       | password  | PrestaShopForever1_!       |
+-    Then if I query customer customer "CUST-1" I should get a Customer with properties:
++    Then if I query customer "CUST-1" I should get a Customer with properties:
+       | firstName | Mathieu                    |
+       | lastName  | Napoler                    |
+       | email     | napoler.dev@prestashop.com |
+     When I edit customer "CUST-1" and I change the following properties:
+       | firstName | Jean |
+-    Then if I query customer customer "CUST-1" I should get a Customer with properties:
++    Then if I query customer "CUST-1" I should get a Customer with properties:
+       | firstName | Jean |
+ 
+   Scenario: Fail to create a duplicate customer
+@@ -47,7 +47,7 @@ Feature: Customer Management
+       | isEnabled                 | false                     |
+       | isPartnerOffersSubscribed | true                      |
+       | birthday                  | 1987-02-22                |
+-    Then if I query customer customer "CUST-4" I should get a Customer with properties:
++    Then if I query customer "CUST-4" I should get a Customer with properties:
+       | firstName               | Mathieu                   |
+       | lastName                | Polarn                    |
+       | email                   | polarn.dev@prestashop.com |
+@@ -62,7 +62,7 @@ Feature: Customer Management
+       | defaultGroupId            | Customer   |
+       | isPartnerOffersSubscribed | false      |
+       | birthday                  | 1987-02-24 |
+-    Then if I query customer customer "CUST-4" I should get a Customer with properties:
++    Then if I query customer "CUST-4" I should get a Customer with properties:
+       | firstName            | Jean       |
+       | defaultGroupId       | Customer   |
+       | newsletterSubscribed | false      |
+@@ -76,5 +76,5 @@ Feature: Customer Management
+       | password       | PrestaShopForever1_!      |
+       | defaultGroupId | Guest                     |
+       | groupIds       | [Guest]                   |
+-    And I delete customer "CUST-5" with method "allow_registration_after"
+-    Then if I query customer customer "CUST-5" I should get an error 'Customer with id "5" was not found'
++    And I delete customer "CUST-5" with "allow registration after deletion" checked
++    Then the customer "CUST-5" should not be found
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+index ea8a59e13510d..64a0fd397b878 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Order/order_from_bo.feature
+@@ -280,9 +280,12 @@ Feature: Order from Back Office (BO)
+ 
+   @order-from-bo
+   Scenario: Add order from Back Office with free shipping
+-    And I set Free shipping to the cart "dummy_cart"
++    And I create an empty cart "dummy_cart2" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart2"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart2"
++    And I set Free shipping to the cart "dummy_cart2"
+     And I add order "bo_order2" with the following details:
+-      | cart                | dummy_cart          |
++      | cart                | dummy_cart2         |
+       | message             | test                |
+       | payment module name | dummy_payment       |
+       | status              | Payment accepted    |
+@@ -292,14 +295,19 @@ Feature: Order from Back Office (BO)
+ 
+   @order-from-bo
+   Scenario: Update multiple orders statuses using Bulk actions
+-    And I add order "bo_order2" with the following details:
+-      | cart                | dummy_cart          |
++    And I create an empty cart "dummy_cart3" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart3"
++    And I add 2 products "Mug The best is yet to come" to the cart "dummy_cart3"
++    And I set Free shipping to the cart "dummy_cart3"
++    And I add order "bo_order3" with the following details:
++      | cart                | dummy_cart3         |
+       | message             | test                |
+       | payment module name | dummy_payment       |
+       | status              | Payment accepted    |
+-    When I update orders "bo_order1,bo_order2" statuses to "Delivered"
++    When I update orders "bo_order1,bo_order3" statuses to "Delivered"
+     Then order "bo_order1" has status "Delivered"
+-    And order "bo_order2" has status "Delivered"
++    Then order "bo_order2" has status "Payment accepted"
++    And order "bo_order3" has status "Delivered"
+ 
+   @order-from-bo
+   Scenario: Change order shipping address

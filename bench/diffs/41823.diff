@@ -1,0 +1,1651 @@
+diff --git a/.github/release-healthcheck/ci-status.sh b/.github/release-healthcheck/ci-status.sh
+new file mode 100644
+index 0000000000000..0411bc76fd4ff
+--- /dev/null
++++ b/.github/release-healthcheck/ci-status.sh
+@@ -0,0 +1,47 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Quality gates / CI (env tier: gh).
++#
++# Verifies CI is green on the inspected HEAD commit.
++# Provenance: this was section E (E1) in issue #41804.
++#
++# No nightly/UI check here on purpose: nightly runs only on version branches (not
++# build branches) and UI tests are run manually per PR.
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Quality gates / CI"
++# REPO is the core repo under inspection — the one running the workflow (github.repository),
++# which on a private security mirror is NOT the canonical upstream.
++REPO="${REPO:-PrestaShop/PrestaShop}"
++
++# spec ref: E1 — CI green on HEAD
++# Judge from check-runs (the mechanism PrestaShop CI actually uses). The legacy combined
++# Status API returns "pending" when nothing posts commit statuses, so it is NOT treated as
++# authoritative — only an explicit "failure" there counts against the commit.
++check_ci_green_on_head() {
++  local sha runs failing pending state
++  sha="$(git rev-parse HEAD 2>/dev/null)"
++  if [ -z "$sha" ]; then
++    emit "ci/green-on-head" "CI green on HEAD" "$HC_FAIL" "$HC_SEV_FAIL" "could not resolve HEAD sha"
++    return
++  fi
++  HC_LINK="https://github.com/$REPO/commit/$sha/checks"
++
++  runs=$(gh api "repos/$REPO/commits/$sha/check-runs?per_page=100" 2>/dev/null)
++  failing=$(printf '%s' "$runs" | jq '[.check_runs[]? | select(.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out")] | length' 2>/dev/null)
++  pending=$(printf '%s' "$runs" | jq '[.check_runs[]? | select(.status!="completed")] | length' 2>/dev/null)
++  state=$(gh_json "repos/$REPO/commits/$sha/status" '.state')
++  failing="${failing:-0}"; pending="${pending:-0}"; state="${state:-unknown}"
++
++  if [ "$failing" -gt 0 ] || [ "$pending" -gt 0 ] || [ "$state" = "failure" ]; then
++    emit "ci/green-on-head" "CI green on HEAD" "$HC_FAIL" "$HC_SEV_FAIL" "HEAD ${sha:0:8}: $failing failing, $pending pending check-run(s), status=$state"
++  else
++    emit "ci/green-on-head" "CI green on HEAD" "$HC_PASS" "$HC_SEV_FAIL" "HEAD ${sha:0:8}: no failing/pending check-runs (status=$state)"
++  fi
++}
++
++run_ci_status_checks() {
++  HC_GROUP="Quality gates / CI"
++  guard check_ci_green_on_head
++}
+diff --git a/.github/release-healthcheck/cross-repo-readiness.sh b/.github/release-healthcheck/cross-repo-readiness.sh
+new file mode 100644
+index 0000000000000..06932056d6f7e
+--- /dev/null
++++ b/.github/release-healthcheck/cross-repo-readiness.sh
+@@ -0,0 +1,84 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Cross-repo / external readiness (env tier: gh/http).
++#
++# Read-only reachability of the satellite repos & PRs a release depends on. Everything
++# here is report-only (WARN): we cannot block a build on another repo's state.
++# Provenance: these were section F (F1–F5) in issue #41804.
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Cross-repo / external readiness"
++
++# spec ref: F1 — the max upgrade version for core_version is set in distribution-api's
++# canonical file public/json/autoupgrade.json. PR title/body text is unreliable, so assert the
++# FILE CONTENT: either the merged file already lists the version as a prestashop_max, or an
++# OPEN PR's diff adds it. Never relies on the PR title.
++check_autoupgrade_max_version_pr() {
++  local id="cross-repo/autoupgrade-max-version-pr" title="Autoupgrade max-version" af="public/json/autoupgrade.json" maxes n patch
++  # Default verify link: the canonical file (used by the merged + not-found outcomes).
++  HC_LINK="https://github.com/PrestaShop/distribution-api/blob/HEAD/$af"
++  # 1. Merged: the live file lists the version as a max upgrade target.
++  maxes=$(gh api "repos/PrestaShop/distribution-api/contents/$af" -q '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -r '.prestashop[]?.prestashop_max' 2>/dev/null)
++  if printf '%s\n' "$maxes" | grep -qx "$CORE_VERSION"; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "$af lists $CORE_VERSION as a max upgrade target"
++    return
++  fi
++  # 2. In progress: an open PR's diff to that file adds the version.
++  for n in $(gh pr list --repo PrestaShop/distribution-api --state open --json number -q '.[].number' 2>/dev/null); do
++    patch=$(gh api "repos/PrestaShop/distribution-api/pulls/$n/files" -q ".[] | select(.filename==\"$af\") | .patch" 2>/dev/null)
++    if printf '%s' "$patch" | grep -E '^\+' | grep -qF "\"$CORE_VERSION\""; then
++      HC_LINK="https://github.com/PrestaShop/distribution-api/pull/$n"
++      emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "open PR #$n adds $CORE_VERSION to $af (pending merge)"
++      return
++    fi
++  done
++  emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "no distribution-api change adds $CORE_VERSION to $af (critical for security releases)"
++}
++
++# spec ref: F2 — autoupgrade ships hook SQL for core_version. The module carries a per-version
++# file upgrade/sql/<version>.sql ONLY when schema/hooks changed; inspect its content for a
++# hook INSERT rather than guessing from PR text. Absence ⇒ no DB changes for this version.
++check_autoupgrade_sql_hooks() {
++  local id="cross-repo/autoupgrade-sql-hooks" title="Autoupgrade SQL hooks" sql
++  sql=$(gh api "repos/PrestaShop/autoupgrade/contents/upgrade/sql/${CORE_VERSION}.sql" -q '.content' 2>/dev/null | base64 -d 2>/dev/null)
++  if [ -z "$sql" ]; then
++    HC_LINK="https://github.com/PrestaShop/autoupgrade/tree/dev/upgrade/sql"
++    emit "$id" "$title" "$HC_NA" "$HC_SEV_WARN" "no upgrade/sql/${CORE_VERSION}.sql in autoupgrade — no schema/hook changes for this version"
++    return
++  fi
++  HC_LINK="https://github.com/PrestaShop/autoupgrade/blob/dev/upgrade/sql/${CORE_VERSION}.sql"
++  # The backticks below are literal SQL identifiers, intentionally inside single quotes.
++  # shellcheck disable=SC2016
++  if printf '%s' "$sql" | grep -qiE 'INSERT INTO `?PREFIX_hook`?'; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "autoupgrade upgrade/sql/${CORE_VERSION}.sql includes hook INSERTs"
++  else
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "autoupgrade upgrade/sql/${CORE_VERSION}.sql present (no hook INSERTs)"
++  fi
++}
++
++# NB: F3 (theme releases published) and F4 (api release published) were removed — both are
++# tautological: a GitHub release publishes the tag, so once a version is pinned in composer.lock
++# it has necessarily already shipped. The meaningful theme/api invariants live in B1/B2/B6.
++
++# spec ref: F5 — docs major branch exists (major releases only)
++check_devdoc_major_branch() {
++  if [ "$RELEASE_TYPE" != "major" ]; then
++    emit "cross-repo/devdoc-major-branch" "Devdoc branch (major)" "$HC_NA" "$HC_SEV_WARN" "only applies to major releases (this is $RELEASE_TYPE)"
++    return
++  fi
++  HC_LINK="https://github.com/PrestaShop/docs/tree/$MAJOR"
++  if gh_json "repos/PrestaShop/docs/branches/${MAJOR}" '.name' | grep -q "$MAJOR" \
++     || gh_json "repos/PrestaShop/docs/branches/${MAJOR}.x" '.name' | grep -q "$MAJOR"; then
++    emit "cross-repo/devdoc-major-branch" "Devdoc branch (major)" "$HC_PASS" "$HC_SEV_WARN" "PrestaShop/docs has a branch for major $MAJOR"
++  else
++    emit "cross-repo/devdoc-major-branch" "Devdoc branch (major)" "$HC_FAIL" "$HC_SEV_WARN" "no PrestaShop/docs branch for major $MAJOR"
++  fi
++}
++
++run_cross_repo_readiness_checks() {
++  HC_GROUP="Cross-repo / external readiness"
++  guard check_autoupgrade_max_version_pr
++  guard check_autoupgrade_sql_hooks
++  guard check_devdoc_major_branch
++}
+diff --git a/.github/release-healthcheck/dependencies.sh b/.github/release-healthcheck/dependencies.sh
+new file mode 100644
+index 0000000000000..1b7a85a29e242
+--- /dev/null
++++ b/.github/release-healthcheck/dependencies.sh
+@@ -0,0 +1,79 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Dependencies: modules & themes (env tier: composer + gh).
++#
++# Verifies that bundled PrestaShop packages are pinned to released tags (no dev
++# branches), are up to date, and that the lock file is coherent.
++# Provenance: section B (B1, B2, B7, B8) in issue #41804. B4/B5/B6 dropped (tautological/redundant).
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Dependencies — modules & themes"
++#
++# NB: B4/B5 (theme "pinned & released") and B6 (api "pinned & released") were removed —
++# "released"/"tag exists" is tautological (a release publishes the tag, so a lock pin implies
++# it shipped), and "outdated"/"no dev pin" are already covered by B1/B2.
++
++# spec ref: B1 — native modules up to date (excluding the blocked psgdpr V2)
++check_native_modules_up_to_date() {
++  local out names
++  HC_LINK="https://github.com/$REPO/blob/$REF/composer.json"
++  out=$(composer outdated -D -f json "prestashop/*" 2>/dev/null)
++  names=$(printf '%s' "$out" | jq -r '.installed[]? | select(.name != "prestashop/psgdpr") | "\(.name) \(.version)→\(.latest)"' 2>/dev/null)
++  if [ -z "$names" ]; then
++    emit "deps/native-modules-up-to-date" "Native modules up to date" "$HC_PASS" "$HC_SEV_FAIL" "no outdated prestashop/* packages (psgdpr excluded)"
++  else
++    emit "deps/native-modules-up-to-date" "Native modules up to date" "$HC_FAIL" "$HC_SEV_FAIL" "outdated: $(printf '%s' "$names" | paste -sd'; ' -)"
++  fi
++}
++
++# spec ref: B2 — no prestashop/* package pinned to a dev branch in the lock
++check_no_dev_branch_pins() {
++  local pins
++  HC_LINK="https://github.com/$REPO/blob/$REF/composer.lock"
++  pins=$(jq -r '(.packages + .["packages-dev"])[]? | select(.name|startswith("prestashop/")) | select((.version|test("^dev-")) or (.version|test("@dev$")) or (.version|test("-dev$"))) | "\(.name) (\(.version))"' composer.lock 2>/dev/null)
++  if [ -z "$pins" ]; then
++    emit "deps/no-dev-branch-pins" "No dev branches pinned" "$HC_PASS" "$HC_SEV_FAIL" "all prestashop/* packages pinned to released tags"
++  else
++    emit "deps/no-dev-branch-pins" "No dev branches pinned" "$HC_FAIL" "$HC_SEV_FAIL" "dev pins: $(printf '%s' "$pins" | paste -sd'; ' -)"
++  fi
++}
++
++# spec ref: B7 — composer audit (security vulnerabilities). NB: the psgdpr exclusion applies
++# only to module *updates* (B1), NOT to security audit — every advisory counts here.
++check_composer_audit() {
++  local out count
++  out=$(composer audit --no-interaction 2>&1)
++  if printf '%s' "$out" | grep -qiE 'No security vulnerability advisories found'; then
++    emit "deps/composer-audit" "Composer audit" "$HC_PASS" "$HC_SEV_WARN" "no security advisories"
++    return
++  fi
++  # Parse the canonical "Found N security vulnerability advisories affecting M packages" summary.
++  count=$(printf '%s' "$out" | grep -oiE 'Found [0-9]+ security vulnerabilit' | grep -oE '[0-9]+' | head -1)
++  if [ -n "$count" ]; then
++    local pkgs; pkgs=$(printf '%s' "$out" | grep -oiE 'affecting [0-9]+ package' | grep -oE '[0-9]+' | head -1)
++    emit "deps/composer-audit" "Composer audit" "$HC_FAIL" "$HC_SEV_WARN" "$count security advisory/ies affecting ${pkgs:-?} package(s)"
++  else
++    emit "deps/composer-audit" "Composer audit" "$HC_FAIL" "$HC_SEV_WARN" "could not parse composer audit output"
++  fi
++}
++
++# spec ref: B8 — composer.lock coherent with composer.json
++check_lock_json_in_sync() {
++  local out rc
++  HC_LINK="https://github.com/$REPO/blob/$REF/composer.json"
++  out=$(composer validate --no-check-publish --no-interaction 2>&1); rc=$?
++  if [ "$rc" -eq 0 ]; then
++    emit "deps/lock-json-in-sync" "Lock ↔ json in sync" "$HC_PASS" "$HC_SEV_FAIL" "composer validate passed"
++  else
++    emit "deps/lock-json-in-sync" "Lock ↔ json in sync" "$HC_FAIL" "$HC_SEV_FAIL" "composer validate failed: $(printf '%s' "$out" | grep -iE 'lock|invalid|error' | head -n1)"
++  fi
++}
++
++run_dependencies_checks() {
++  HC_GROUP="Dependencies — modules & themes"
++  guard check_native_modules_up_to_date
++  guard check_no_dev_branch_pins
++  guard check_composer_audit
++  guard check_lock_json_in_sync
++}
+diff --git a/.github/release-healthcheck/derive.sh b/.github/release-healthcheck/derive.sh
+new file mode 100644
+index 0000000000000..908746a34deee
+--- /dev/null
++++ b/.github/release-healthcheck/derive.sh
+@@ -0,0 +1,108 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — derive.sh
++#
++# Computes every derived value and runtime flag from the two real inputs
++# (branch, target_version) and writes them as `key=value` lines to stdout AND,
++# when running inside GitHub Actions, to $GITHUB_OUTPUT so downstream jobs can
++# consume them via `needs.derive.outputs.*`.
++#
++# Inputs (environment):
++#   HC_REF             the ref being inspected — a branch OR a tag (workflow input `ref`)
++#   HC_TARGET_VERSION  the anticipated/target full version (workflow input `target_version`)
++#
++# Runtime flags (release_published, classic_released) require a checkout with
++# tags/refs available and `gh` authenticated; they degrade to false if unknown.
++
++# No `pipefail`: classic_released greps a piped release list with grep -q, whose early
++# SIGPIPE would otherwise fail the pipeline (false negative).
++set -u
++
++SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++. "$SELF_DIR/lib.sh"
++
++REF="${HC_REF:?HC_REF is required}"
++TARGET_VERSION="${HC_TARGET_VERSION:?HC_TARGET_VERSION is required}"
++# UPSTREAM_REPO = the PUBLIC release target where the GitHub Release lands and from which
++# the public ecosystem propagates. Distinct from the inspected repo (github.repository),
++# because a private security mirror still publishes its release to the public org.
++UPSTREAM_REPO="${UPSTREAM_REPO:-PrestaShop/PrestaShop}"
++
++out() {
++  echo "$1=$2"
++  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$1=$2" >> "$GITHUB_OUTPUT"; fi
++}
++
++# --- core_version + components -------------------------------------------------
++if ! parse_semver "$TARGET_VERSION"; then
++  log "FATAL: target_version '$TARGET_VERSION' is not a valid version"
++  exit 1
++fi
++CORE_VERSION="$SV_CORE"
++MAJOR="$SV_MAJOR"; MINOR="$SV_MINOR"; PATCH="$SV_PATCH"
++VERSION_BRANCH="${MAJOR}.${MINOR}.x"
++
++# --- release_type --------------------------------------------------------------
++# pre-release suffix wins; else patch>0 ⇒ patch; else minor>0 ⇒ minor; else major.
++if [ -n "${SV_PRERELEASE_LABEL:-}" ]; then
++  RELEASE_TYPE="pre-release"
++elif [ "$PATCH" -gt 0 ]; then
++  RELEASE_TYPE="patch"
++elif [ "$MINOR" -gt 0 ]; then
++  RELEASE_TYPE="minor"
++else
++  RELEASE_TYPE="major"
++fi
++
++# --- branch_kind + canonical build branch name --------------------------------
++# Build branch convention (see .github/workflows/create-build-branch.yml):
++#   build-<major><minor><patch>           e.g. build-915
++#   build-<major><minor><patch>-<label><n> e.g. build-920-beta1
++if [ -n "${SV_PRERELEASE_LABEL:-}" ]; then
++  BUILD_BRANCH="build-${MAJOR}${MINOR}${PATCH}-${SV_PRERELEASE_LABEL}${SV_PRERELEASE_NUM}"
++else
++  BUILD_BRANCH="build-${MAJOR}${MINOR}${PATCH}"
++fi
++
++# Classify the ref. `tag` (a full-semver ref, i.e. a released/RC tag) grades strictly like
++# `build`; only `dev` (version branch / develop) downgrades FAILs to warnings.
++if [[ "$REF" =~ ^build-[0-9]+(-[a-z]+[0-9]+)?$ ]]; then
++  BRANCH_KIND="build"
++elif [[ "$REF" =~ ^[0-9]+\.[0-9]+\.x$ ]] || [ "$REF" = "develop" ]; then
++  BRANCH_KIND="dev"
++elif [[ "$REF" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
++  BRANCH_KIND="tag"
++else
++  # Unknown shape (a feature branch, a SHA, …). Treat as build so gates stay strict.
++  BRANCH_KIND="build"
++fi
++
++# --- runtime flags -------------------------------------------------------------
++# release_published: a non-draft GH release for CORE_VERSION exists on the public target.
++RELEASE_PUBLISHED="false"
++if gh_release_published "$UPSTREAM_REPO" "$CORE_VERSION"; then
++  RELEASE_PUBLISHED="true"
++fi
++
++# classic_released: a non-draft PrestaShopCorp/prestashop-classic release exists for the version.
++# Classic appends its own scope version to the tag (e.g. 9.1.4 ships as "9.1.4-5.0"), so match
++# the core version as a prefix. Best-effort: needs token access to the private repo.
++CLASSIC_RELEASED="false"
++if gh release list --repo PrestaShopCorp/prestashop-classic --limit 100 --json tagName,isDraft \
++     -q '.[] | select(.isDraft==false) | .tagName' 2>/dev/null | grep -qE "^${CORE_VERSION}(-|\$)"; then
++  CLASSIC_RELEASED="true"
++fi
++
++out core_version       "$CORE_VERSION"
++out major              "$MAJOR"
++out minor              "$MINOR"
++out patch              "$PATCH"
++out version_branch     "$VERSION_BRANCH"
++out release_type       "$RELEASE_TYPE"
++out branch_kind        "$BRANCH_KIND"
++out build_branch       "$BUILD_BRANCH"
++out release_published  "$RELEASE_PUBLISHED"
++out classic_released   "$CLASSIC_RELEASED"
++
++log "Derived: core=$CORE_VERSION type=$RELEASE_TYPE branch_kind=$BRANCH_KIND build_branch=$BUILD_BRANCH published=$RELEASE_PUBLISHED classic=$CLASSIC_RELEASED"
+diff --git a/.github/release-healthcheck/generated-files.sh b/.github/release-healthcheck/generated-files.sh
+new file mode 100644
+index 0000000000000..b15fea6cf059e
+--- /dev/null
++++ b/.github/release-healthcheck/generated-files.sh
+@@ -0,0 +1,149 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Generated files in sync (env tiers: app + composer + translation).
++#
++# Pattern: regenerate a tracked, generated file and expect NO git diff. A diff means
++# the committed artifact is stale. The working tree is restored afterwards (read-only contract).
++# Provenance: these were section C (C1–C6) in issue #41804.
++#
++# Tier split (callers pick the matching run_* function):
++#   app          : C1 hooks listing, C2 JS routing  (need a booted PrestaShop: PHP+MySQL+assets)
++#   composer     : C3 translation fixtures, C4 license headers, C5 linters (no DB)
++#   translation  : C6 default catalogue extraction (checks out the external TranslationTool)
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Generated files in sync"
++
++ge_9_1() { [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 1 ]; }; }
++ge_9_0() { [ "$MAJOR" -ge 9 ]; }
++
++# _regen_no_diff <id> <title> <base_sev> <regen-command> [path-spec]
++# Runs the regeneration command then asserts git is clean (over [path-spec], or whole tree).
++_regen_no_diff() {
++  local id="$1" title="$2" sev="$3" cmd="$4" paths="${5:-}" cmd_out
++  if ! cmd_out="$(eval "$cmd" 2>&1)"; then
++    emit "$id" "$title" "$HC_FAIL" "$sev" "regeneration command failed: $(printf '%s' "$cmd_out" | tail -n1)"
++    return
++  fi
++  # shellcheck disable=SC2086  # paths is an intentional word-split path spec (may be empty)
++  if git diff --quiet -- $paths 2>/dev/null; then
++    emit "$id" "$title" "$HC_PASS" "$sev" "no diff after regeneration${paths:+ ($paths)}"
++  else
++    # shellcheck disable=SC2086
++    local changed; changed="$(git diff --name-only -- $paths 2>/dev/null | paste -sd', ' -)"
++    emit "$id" "$title" "$HC_FAIL" "$sev" "regeneration produced a diff: $changed"
++    # shellcheck disable=SC2086
++    git checkout -- $paths 2>/dev/null || true
++  fi
++}
++
++# spec ref: C1 — hooks listing (hook.xml) regenerates clean
++check_hooks_listing_in_sync() {
++  _regen_no_diff "generated/hooks-listing" "Hooks listing (hook.xml)" "$HC_SEV_FAIL" \
++    "php bin/console prestashop:update:configuration-file-hooks-listing"
++}
++
++# spec ref: C2 — FOS JS routing dump regenerates clean
++check_js_routing_in_sync() {
++  HC_LINK="https://github.com/$REPO/blob/$REF/admin-dev/themes/new-theme/js/fos_js_routes.json"
++  _regen_no_diff "generated/js-routing" "FOS JS routing" "$HC_SEV_FAIL" \
++    "php bin/console fos:js-routing:dump --format=json --target=admin-dev/themes/new-theme/js/fos_js_routes.json" \
++    "admin-dev/themes/new-theme/js/fos_js_routes.json"
++}
++
++# spec ref: C3 — translation fixtures regenerate clean
++check_translation_fixtures_in_sync() {
++  _regen_no_diff "generated/translation-fixtures" "Translation fixtures" "$HC_SEV_FAIL" \
++    "php bin/console prestashop:translation:check-fixtures"
++}
++
++# spec ref: C4 — license headers stamped (≥9.1 via header-stamp, else legacy command)
++check_license_headers_in_sync() {
++  if ge_9_1; then
++    _regen_no_diff "generated/license-headers" "License headers" "$HC_SEV_WARN" "composer header-stamp-fix"
++  else
++    _regen_no_diff "generated/license-headers" "License headers" "$HC_SEV_WARN" "php bin/console prestashop:licenses:update"
++  fi
++}
++
++# spec ref: C5 — security-attribute & legacy-link linters pass
++check_linters_pass() {
++  local sev; if ge_9_0; then sev="$HC_SEV_WARN"; else sev="$HC_SEV_FAIL"; fi
++  local out rc
++  out=$(php bin/console prestashop:linter:security-attribute find-missing 2>&1 && php bin/console prestashop:linter:legacy-link 2>&1); rc=$?
++  if [ "$rc" -eq 0 ]; then
++    emit "generated/linters" "Security & legacy-link linters" "$HC_PASS" "$sev" "both linters passed"
++  else
++    emit "generated/linters" "Security & legacy-link linters" "$HC_FAIL" "$sev" "linter reported issues: $(printf '%s' "$out" | tail -n1)"
++  fi
++}
++
++# spec ref: C6 — default translation catalogue fully extracted (via external TranslationTool)
++# Highest-risk check: clones PrestaShop/TranslationTool and replays extract+export. Any tooling
++# failure degrades to a WARN ("could not verify") rather than crashing or hard-failing.
++check_default_catalogue_extracted() {
++  local id="generated/default-catalogue" title="Default catalogue fully extracted"
++  local core_dir tool_dir latest_tag
++  HC_LINK="https://github.com/$REPO/tree/$REF/translations/default"
++  core_dir="$(pwd)"
++  tool_dir="$(mktemp -d 2>/dev/null)" || { emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (no temp dir)"; return; }
++
++  # PrestaShopCorp/TranslationTool is private — clone with the token (works upstream with
++  # JARVIS_TOKEN; on forks/PRs without org access this fails and we degrade to ⚠️).
++  local clone_url="https://github.com/PrestaShopCorp/TranslationTool"
++  if [ -n "${GH_TOKEN:-}" ]; then
++    clone_url="https://x-access-token:${GH_TOKEN}@github.com/PrestaShopCorp/TranslationTool"
++  fi
++  if ! git clone --quiet "$clone_url" "$tool_dir" 2>/dev/null; then
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (TranslationTool clone failed — needs PrestaShopCorp access)"; return
++  fi
++  latest_tag="$(git -C "$tool_dir" tag -l | sort -V | tail -n1)"
++  [ -n "$latest_tag" ] && git -C "$tool_dir" checkout --quiet "$latest_tag" 2>/dev/null
++
++  if ! ( cd "$tool_dir" && COMPOSER_PROCESS_TIMEOUT=600 composer install --no-dev --ansi --no-interaction --no-progress ) >/dev/null 2>&1; then
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (TranslationTool composer install failed)"; return
++  fi
++
++  if ! ( cd "$tool_dir" \
++        && php bin/console prestashop:translation:extract "$core_dir/.t9n.yml" \
++        && php bin/console prestashop:translation:export ) >/dev/null 2>&1; then
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (extract/export failed — tool ${latest_tag:-default})"; return
++  fi
++
++  local dump="$tool_dir/app/dumps/translatables/default"
++  if [ ! -d "$dump" ]; then
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "could not verify (no dump produced at app/dumps/translatables/default)"; return
++  fi
++
++  # Replace the catalogue with the freshly extracted one. Use the `src/.` → `dest/` idiom
++  # (after a clean rm + mkdir) so we copy CONTENTS, never nesting default/default — this is
++  # portable across GNU cp (Linux CI) and BSD cp (macOS), regardless of dest pre-existence.
++  rm -rf "$core_dir/translations/default"
++  mkdir -p "$core_dir/translations/default"
++  cp -R "$dump/." "$core_dir/translations/default/"
++  if git -C "$core_dir" diff --quiet -- translations/ 2>/dev/null; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_FAIL" "catalogue fully extracted (no diff under translations/)"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_FAIL" "catalogue not fully extracted: $(git -C "$core_dir" diff --name-only -- translations/ | wc -l | tr -d ' ') file(s) differ"
++  fi
++  git -C "$core_dir" checkout -- translations/ 2>/dev/null || true
++}
++
++run_generated_files_app_checks() {
++  HC_GROUP="Generated files in sync"
++  guard check_hooks_listing_in_sync
++  guard check_js_routing_in_sync
++}
++
++run_generated_files_deps_checks() {
++  HC_GROUP="Generated files in sync"
++  guard check_translation_fixtures_in_sync
++  guard check_license_headers_in_sync
++  guard check_linters_pass
++}
++
++run_generated_files_translation_checks() {
++  HC_GROUP="Generated files in sync"
++  guard check_default_catalogue_extracted
++}
+diff --git a/.github/release-healthcheck/lib.sh b/.github/release-healthcheck/lib.sh
+new file mode 100644
+index 0000000000000..46f57f5d040ad
+--- /dev/null
++++ b/.github/release-healthcheck/lib.sh
+@@ -0,0 +1,150 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — shared library.
++#
++# Sourced by every check script and by run-tier.sh / derive.sh.
++# Provides:
++#   - emit()            : append one structured result (JSON line) to $HC_RESULTS_FILE
++#   - the PASS/FAIL/NA/PENDING raw states and FAIL/WARN base severities
++#   - parse_semver()    : split a version string into its components
++#   - gh_*/http_* helpers (read-only, never fatal)
++#   - guard()           : run a check function, converting an unexpected crash into a WARN
++#
++# This library performs NO mutation of the repository or any remote — it only reads.
++
++# The HC_*/SV_* constants and parse_semver outputs below are part of this library's
++# API: they are consumed by the section check scripts that source this file. shellcheck
++# cannot follow that cross-file usage, so SC2034 ("appears unused") is silenced here.
++# shellcheck disable=SC2034
++
++# Raw result states a check may report.
++readonly HC_PASS="PASS"       # the thing is in the expected state
++readonly HC_FAIL="FAIL"       # the thing is NOT in the expected state
++readonly HC_NA="NA"           # the check does not apply to this run
++readonly HC_PENDING="PENDING" # the check is publication-gated and not yet gradable
++
++# Base severities. The effective severity (and whether a FAIL gates the run) is
++# decided at render time, where the dev-branch downgrade is applied in one place.
++readonly HC_SEV_FAIL="FAIL"   # release-blocking gate on a build branch
++readonly HC_SEV_WARN="WARN"   # report-only
++
++# Per-script section title. Each check script sets this before defining its checks.
++HC_GROUP="${HC_GROUP:-Uncategorised}"
++
++# Destination for emitted results (one compact JSON object per line).
++HC_RESULTS_FILE="${HC_RESULTS_FILE:-results.json}"
++
++log() { echo "[healthcheck] $*" >&2; }
++
++# emit <id> <title> <raw> <base_sev> <detail> [applies]
++#
++# <id>       semantic slug, e.g. "version/core-constants"
++# <title>    human label shown in the checklist
++# <raw>      one of HC_PASS|HC_FAIL|HC_NA|HC_PENDING
++# <base_sev> one of HC_SEV_FAIL|HC_SEV_WARN
++# <detail>   one-line explanation (actual vs expected, etc.)
++# <applies>  optional free text describing scope (default "All")
++#
++# Optional: set HC_LINK to a URL before calling emit to attach a manual-verify link
++# (rendered in the report's "Verify" column). It is consumed and reset on every call.
++emit() {
++  local id="$1" title="$2" raw="$3" sev="$4" detail="$5" applies="${6:-All}" link="${HC_LINK:-}"
++  jq -nc \
++    --arg id "$id" \
++    --arg group "$HC_GROUP" \
++    --arg title "$title" \
++    --arg raw "$raw" \
++    --arg sev "$sev" \
++    --arg detail "$detail" \
++    --arg applies "$applies" \
++    --arg link "$link" \
++    '{id:$id, group:$group, title:$title, raw:$raw, base_sev:$sev, detail:$detail, applies:$applies, link:$link}' \
++    >> "$HC_RESULTS_FILE"
++  log "$id -> $raw ($sev): $detail"
++  HC_LINK=""
++}
++
++# guard <check_function>
++#
++# Runs a check in a subshell so a crash (set -e abort, unexpected non-zero) cannot
++# kill the whole tier. If the function exits non-zero WITHOUT having emitted a line,
++# we record a "could not verify" WARN so the slot is never silently dropped.
++guard() {
++  local fn="$1"
++  local before after
++  before="$(wc -l < "$HC_RESULTS_FILE" 2>/dev/null || echo 0)"
++  ( set +e; "$fn" ) || true
++  after="$(wc -l < "$HC_RESULTS_FILE" 2>/dev/null || echo 0)"
++  if [ "$after" -le "$before" ]; then
++    emit "internal/${fn}" "$fn" "$HC_FAIL" "$HC_SEV_WARN" "check crashed before emitting a result"
++  fi
++}
++
++# parse_semver <version>
++# Sets globals: SV_MAJOR SV_MINOR SV_PATCH SV_PRERELEASE_LABEL SV_PRERELEASE_NUM SV_CORE
++# Accepts "9.1.5", "9.2.0-beta.1", "9.2.0-rc.2", "9.2.0-alpha.1". Returns non-zero on garbage.
++parse_semver() {
++  local v="$1"
++  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-(alpha|beta|rc)\.([0-9]+))?$ ]]; then
++    SV_MAJOR="${BASH_REMATCH[1]}"
++    SV_MINOR="${BASH_REMATCH[2]}"
++    SV_PATCH="${BASH_REMATCH[3]}"
++    SV_PRERELEASE_LABEL="${BASH_REMATCH[5]}"
++    SV_PRERELEASE_NUM="${BASH_REMATCH[6]}"
++    SV_CORE="${SV_MAJOR}.${SV_MINOR}.${SV_PATCH}"
++    return 0
++  fi
++  return 1
++}
++
++# php_const_string <file> <CONST>  -> echoes the single-quoted string value of `const CONST = '...'`
++php_const_string() {
++  sed -nE "s/.*${2} = '([^']*)';.*/\1/p" "$1" | head -n1
++}
++
++# php_const_int <file> <CONST>  -> echoes the integer value of `const CONST = N;`
++php_const_int() {
++  sed -nE "s/.*${2} = ([0-9]+);.*/\1/p" "$1" | head -n1
++}
++
++# php_define_string <file> <NAME>  -> echoes value of define('NAME', '...')
++php_define_string() {
++  sed -nE "s/.*define\('${2}', '([^']*)'\).*/\1/p" "$1" | head -n1
++}
++
++# --- GitHub / HTTP read-only helpers (never fatal) -----------------------------
++
++# gh_json <api-path> [jq-filter]  -> echoes filtered JSON, or empty on any error.
++gh_json() {
++  local path="$1" filter="${2:-.}"
++  gh api "$path" 2>/dev/null | jq -r "$filter" 2>/dev/null || true
++}
++
++# gh_tag_exists <owner/repo> <tag>  -> returns 0 if the tag ref exists (tries with and without a leading "v").
++gh_tag_exists() {
++  local repo="$1" tag="$2"
++  if gh api "repos/${repo}/git/refs/tags/${tag}" >/dev/null 2>&1; then return 0; fi
++  if gh api "repos/${repo}/git/refs/tags/v${tag}" >/dev/null 2>&1; then return 0; fi
++  return 1
++}
++
++# gh_release_published <owner/repo> <tag>  -> returns 0 if a NON-draft release exists for the tag (tries "v" too).
++gh_release_published() {
++  local repo="$1" tag="$2" draft
++  draft="$(gh release view "$tag" --repo "$repo" --json isDraft -q '.isDraft' 2>/dev/null)"
++  if [ "$draft" = "false" ]; then return 0; fi
++  draft="$(gh release view "v$tag" --repo "$repo" --json isDraft -q '.isDraft' 2>/dev/null)"
++  if [ "$draft" = "false" ]; then return 0; fi
++  return 1
++}
++
++# http_get <url>  -> echoes the body on HTTP 2xx, otherwise empty (non-fatal).
++http_get() {
++  curl -fsSL --max-time 30 "$1" 2>/dev/null || true
++}
++
++# http_body_contains <url> <needle>  -> returns 0 if a successful fetch contains <needle>.
++# Uses a here-string (not a pipe) so grep -q's early exit can't SIGPIPE-fail curl.
++http_body_contains() {
++  grep -qF -- "$2" <<<"$(http_get "$1")"
++}
+diff --git a/.github/release-healthcheck/post-release.sh b/.github/release-healthcheck/post-release.sh
+new file mode 100644
+index 0000000000000..d4111ac3ad45a
+--- /dev/null
++++ b/.github/release-healthcheck/post-release.sh
+@@ -0,0 +1,138 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Post-release verification (env tier: gh/http/git).
++#
++# These run every time but are only graded once the release is published; before that
++# each reports PENDING (➖) and never gates. G3/G5 additionally wait for the Classic release.
++# Provenance: these were section G (G1–G7) in issue #41804.
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Post-release verification"
++REPO="${REPO:-PrestaShop/PrestaShop}"
++
++# Emit PENDING and signal "skip" (return 1) when the release is not yet published.
++_gate_published() {
++  if [ "$RELEASE_PUBLISHED" != "true" ]; then
++    emit "$1" "$2" "$HC_PENDING" "$3" "pending — release not yet published"
++    return 1
++  fi
++  return 0
++}
++
++# spec ref: G1 — build branch merged back into the version branch
++check_build_branch_merged_back() {
++  local id="post-release/build-branch-merged-back" title="Build branch merged back"
++  # A build branch is cut for every release — including pre-releases (e.g. build-920-beta1) —
++  # and merged back, so this applies to all release types.
++  HC_LINK="https://github.com/$REPO/compare/$VERSION_BRANCH...$BUILD_BRANCH"
++  _gate_published "$id" "$title" "$HC_SEV_FAIL" || return
++  # A merged build branch is typically deleted afterwards — absence ⇒ merged & cleaned up.
++  if ! git ls-remote --exit-code --heads origin "$BUILD_BRANCH" >/dev/null 2>&1; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_FAIL" "$BUILD_BRANCH absent on origin — merged and cleaned up"
++    return
++  fi
++  git fetch --quiet origin "$BUILD_BRANCH" "$VERSION_BRANCH" 2>/dev/null || true
++  if git merge-base --is-ancestor "origin/$BUILD_BRANCH" "origin/$VERSION_BRANCH" 2>/dev/null; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_FAIL" "$BUILD_BRANCH merged into $VERSION_BRANCH"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_FAIL" "$BUILD_BRANCH not yet merged into $VERSION_BRANCH"
++  fi
++}
++
++# spec ref: G2 — tag + non-draft GitHub release published (== release_published)
++check_tag_and_release_published() {
++  local id="post-release/tag-and-release-published" title="Tag & GitHub release published"
++  HC_LINK="https://github.com/$UPSTREAM_REPO/releases/tag/$CORE_VERSION"
++  if [ "$RELEASE_PUBLISHED" = "true" ]; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_FAIL" "tag $CORE_VERSION published with a non-draft release"
++  else
++    emit "$id" "$title" "$HC_PENDING" "$HC_SEV_FAIL" "pending — no published release for $CORE_VERSION yet"
++  fi
++}
++
++# spec ref: G3 — distribution API lists core_version (independent of the Classic release)
++check_distribution_api_fresh_install() {
++  local id="post-release/distribution-api" title="Distribution API — fresh install"
++  HC_LINK="https://api.prestashop-project.org/prestashop"
++  _gate_published "$id" "$title" "$HC_SEV_WARN" || return
++  if http_body_contains "https://api.prestashop-project.org/prestashop" "\"version\":\"$CORE_VERSION\""; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "distribution API lists $CORE_VERSION"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "distribution API does not list $CORE_VERSION yet"
++  fi
++}
++
++# spec ref: G4 — Docker images published (auto-PR merged + publish ran)
++check_docker_images_published() {
++  local id="post-release/docker-images" title="Docker images published"
++  HC_LINK="https://hub.docker.com/r/prestashop/prestashop/tags?name=$CORE_VERSION"
++  _gate_published "$id" "$title" "$HC_SEV_WARN" || return
++  # Docker PRs have generic titles ("Sync backlog …") — verify the published image tag instead.
++  local name
++  name=$(http_get "https://hub.docker.com/v2/repositories/prestashop/prestashop/tags/$CORE_VERSION" | jq -r '.name // empty' 2>/dev/null)
++  if [ -n "$name" ]; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "Docker Hub image prestashop/prestashop:$CORE_VERSION published"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "no prestashop/prestashop:$CORE_VERSION image on Docker Hub yet"
++  fi
++}
++
++# spec ref: G5 — classic feeds updated (independent of the Classic-release flag)
++check_classic_feeds_updated() {
++  local id="post-release/classic-feeds" title="Classic feeds updated"
++  local base="https://assets.prestashop3.com/dst/edition/corporate"
++  HC_LINK="$base/edition_versions.js"
++  _gate_published "$id" "$title" "$HC_SEV_WARN" || return
++  # BOTH feeds must reference the version — one alone is an incomplete update.
++  local ev="no" lc="no"
++  http_body_contains "$base/edition_versions.js" "$CORE_VERSION" && ev="yes"
++  http_body_contains "$base/latest-classic.js"   "$CORE_VERSION" && lc="yes"
++  if [ "$ev" = "yes" ] && [ "$lc" = "yes" ]; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "both classic feeds reference $CORE_VERSION"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "classic feeds incomplete: edition_versions=$ev, latest-classic=$lc"
++  fi
++}
++
++# spec ref: G6 — localization packs available (minor/major only)
++check_localization_packs() {
++  local id="post-release/localization-packs" title="Localization packs"
++  if [ "$RELEASE_TYPE" != "minor" ] && [ "$RELEASE_TYPE" != "major" ]; then
++    emit "$id" "$title" "$HC_NA" "$HC_SEV_WARN" "only applies to minor/major (this is $RELEASE_TYPE)"
++    return
++  fi
++  HC_LINK="https://api.prestashop-project.org/localization/full/${CORE_VERSION}.xml"
++  _gate_published "$id" "$title" "$HC_SEV_WARN" || return
++  if http_body_contains "https://api.prestashop-project.org/localization/full/${CORE_VERSION}.xml" "<"; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "localization pack reachable for $CORE_VERSION"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "localization pack not yet available for $CORE_VERSION"
++  fi
++}
++
++# spec ref: G7 — the distribution-api max-version change (F1) is now LIVE. Rather than trust a
++# merged-PR search, verify the deployed result: the autoupgrade API lists the version as a
++# max upgrade target (the end state of merging public/json/autoupgrade.json).
++check_autoupgrade_pr_merged() {
++  local id="post-release/autoupgrade-pr-merged" title="Autoupgrade max-version live" maxes
++  HC_LINK="https://api.prestashop-project.org/autoupgrade"
++  _gate_published "$id" "$title" "$HC_SEV_WARN" || return
++  maxes=$(http_get "https://api.prestashop-project.org/autoupgrade" | jq -r '.prestashop[]?.prestashop_max' 2>/dev/null)
++  if printf '%s\n' "$maxes" | grep -qx "$CORE_VERSION"; then
++    emit "$id" "$title" "$HC_PASS" "$HC_SEV_WARN" "autoupgrade API lists $CORE_VERSION as a max upgrade target"
++  else
++    emit "$id" "$title" "$HC_FAIL" "$HC_SEV_WARN" "autoupgrade API does not list $CORE_VERSION as a max upgrade target yet"
++  fi
++}
++
++run_post_release_checks() {
++  HC_GROUP="Post-release verification"
++  guard check_build_branch_merged_back
++  guard check_tag_and_release_published
++  guard check_distribution_api_fresh_install
++  guard check_docker_images_published
++  guard check_classic_feeds_updated
++  guard check_localization_packs
++  guard check_autoupgrade_pr_merged
++}
+diff --git a/.github/release-healthcheck/release-content.sh b/.github/release-healthcheck/release-content.sh
+new file mode 100644
+index 0000000000000..958e509fe3b3e
+--- /dev/null
++++ b/.github/release-healthcheck/release-content.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Release content artifacts (env tier: static).
++#
++# Verifies the human-authored release artifacts: changelog and contributors.
++# Provenance: these were section D (D1–D3) in issue #41804.
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Release content artifacts"
++
++CHANGELOG_FILE="docs/CHANGELOG.txt"   # NB: under docs/, not repo root
++
++# spec ref: D1 — CHANGELOG.txt has an entry for core_version (header e.g. "#   v9.1.4 - (2026-06-03)")
++check_changelog_updated() {
++  HC_LINK="https://github.com/$REPO/blob/$REF/$CHANGELOG_FILE"
++  if [ ! -f "$CHANGELOG_FILE" ]; then
++    emit "release/changelog-updated" "Changelog updated" "$HC_FAIL" "$HC_SEV_FAIL" "$CHANGELOG_FILE not found"
++    return
++  fi
++  if grep -qF "v$CORE_VERSION" "$CHANGELOG_FILE"; then
++    emit "release/changelog-updated" "Changelog updated" "$HC_PASS" "$HC_SEV_FAIL" "$CHANGELOG_FILE has an entry for v$CORE_VERSION"
++  else
++    emit "release/changelog-updated" "Changelog updated" "$HC_FAIL" "$HC_SEV_FAIL" "no v$CORE_VERSION entry in $CHANGELOG_FILE"
++  fi
++}
++
++# NB: D2 (contributors updated) was removed — it only checked CONTRIBUTORS.md exists (always
++# true), and a release can legitimately add no new contributors, so it carried no signal.
++
++# spec ref: D3 — the changelog commit is HEAD (the tag should point at it)
++check_changelog_is_last_commit() {
++  local subject sha
++  sha="$(git rev-parse HEAD 2>/dev/null)"
++  HC_LINK="https://github.com/$REPO/commit/$sha"
++  subject="$(git log -1 --pretty=%s 2>/dev/null)"
++  if printf '%s' "$subject" | grep -qiE 'changelog'; then
++    emit "release/changelog-last-commit" "Changelog is last commit" "$HC_PASS" "$HC_SEV_WARN" "HEAD subject: $subject"
++  else
++    emit "release/changelog-last-commit" "Changelog is last commit" "$HC_FAIL" "$HC_SEV_WARN" "HEAD subject is not a changelog commit: $subject"
++  fi
++}
++
++run_release_content_checks() {
++  HC_GROUP="Release content artifacts"
++  guard check_changelog_updated
++  guard check_changelog_is_last_commit
++}
+diff --git a/.github/release-healthcheck/render.sh b/.github/release-healthcheck/render.sh
+new file mode 100644
+index 0000000000000..bca3d67951bca
+--- /dev/null
++++ b/.github/release-healthcheck/render.sh
+@@ -0,0 +1,129 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — render.sh
++#
++# Aggregates the per-tier results (JSON lines) into a single grouped Markdown
++# checklist, applies the dev-branch severity downgrade, and prints the report to
++# stdout (the workflow appends it to $GITHUB_STEP_SUMMARY).
++#
++# Usage: render.sh [results-file ...]   (defaults to results-*.json in CWD)
++#
++# Effective emoji per result:
++#   PASS                                   -> ✅
++#   NA | PENDING                           -> ➖
++#   FAIL & base_sev=FAIL & branch_kind!=dev -> ❌ (release-blocking, shown in the verdict)
++#   FAIL (any other case)                  -> ⚠️ (report-only)
++#
++# The full report is printed to stdout FIRST, then the script exits 1 if any ❌ is present
++# (else 0). Because the report is emitted before the exit, it is always displayed (and the
++# summary job runs with `if: always()`), yet the run is only green when everything is green.
++
++set -uo pipefail
++
++SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib.sh
++. "$SELF_DIR/lib.sh"
++
++BRANCH_KIND="${BRANCH_KIND:-build}"
++
++# Collect input files.
++if [ "$#" -gt 0 ]; then
++  FILES=("$@")
++else
++  # shellcheck disable=SC2206
++  FILES=(results-*.json)
++fi
++
++COMBINED="$(mktemp 2>/dev/null || echo combined-results.json)"
++: > "$COMBINED"
++for f in "${FILES[@]}"; do
++  [ -f "$f" ] && cat "$f" >> "$COMBINED"
++done
++
++if [ ! -s "$COMBINED" ]; then
++  echo "No healthcheck results found (looked in: ${FILES[*]})."
++  exit 1
++fi
++
++# jq snippet computing the effective emoji for one result object given $bk.
++# $bk is a jq parameter, not a shell variable — single quotes are intentional.
++# shellcheck disable=SC2016
++EMOJI_DEF='def emoji($bk):
++  if .raw=="PASS" then "✅"
++  elif .raw=="NA" or .raw=="PENDING" then "➖"
++  elif .raw=="FAIL" then (if (.base_sev=="FAIL" and $bk!="dev") then "❌" else "⚠️" end)
++  else "❓" end;'
++
++# Tallies.
++count() { jq -s "$EMOJI_DEF"' [.[] | emoji($bk)] | map(select(. == $e)) | length' --arg bk "$BRANCH_KIND" --arg e "$1" "$COMBINED"; }
++N_PASS=$(count "✅"); N_FAIL=$(count "❌"); N_WARN=$(count "⚠️"); N_NA=$(count "➖")
++
++# The full report is printed first (below), THEN the script exits non-zero when any ❌ is
++# present — so the report is always displayed, but the run is only green when everything is.
++if [ "${N_FAIL:-0}" -gt 0 ]; then
++  VERDICT="❌ FAIL"
++  EXIT_CODE=1
++else
++  VERDICT="✅ PASS"
++  EXIT_CODE=0
++fi
++
++case "$BRANCH_KIND" in
++  dev) MODE="dev (anticipatory — failures shown as ⚠️)" ;;
++  tag) MODE="tag (released ref)" ;;
++  *)   MODE="build" ;;
++esac
++
++# --- Markdown report -----------------------------------------------------------
++{
++  echo "## 🩺 Release Healthcheck — ${CORE_VERSION:-?} on \`${REF:-?}\`"
++  echo
++  echo "**Target:** \`${TARGET_VERSION:-?}\` · **Type:** ${RELEASE_TYPE:-?} · **Mode:** ${MODE}"
++  echo "**Release published:** ${RELEASE_PUBLISHED:-?} · **Classic released:** ${CLASSIC_RELEASED:-?}"
++  echo
++  echo "**Result: ${VERDICT}** — ✅ ${N_PASS} · ❌ ${N_FAIL} · ⚠️ ${N_WARN} · ➖ ${N_NA}"
++  echo
++
++  # Fixed section order (A → G). NB: do NOT name this `GROUPS` — that is a bash
++  # special variable (the caller's Unix group IDs) and cannot be reassigned.
++  SECTION_ORDER=(
++    "Version & branch integrity"
++    "Dependencies — modules & themes"
++    "Generated files in sync"
++    "Release content artifacts"
++    "Quality gates / CI"
++    "Cross-repo / external readiness"
++    "Post-release verification"
++  )
++  for g in "${SECTION_ORDER[@]}"; do
++    local_rows=$(jq -rs "$EMOJI_DEF"'
++      map(select(.group==$g))
++      | sort_by(.id)
++      | .[]
++      | "| \(emoji($bk)) | \(.title) | \(.detail) | \(if (.link // "") != "" then "[🔗](\(.link))" else "" end) |"' \
++      --arg bk "$BRANCH_KIND" --arg g "$g" "$COMBINED")
++    [ -z "$local_rows" ] && continue
++    echo "### ${g}"
++    echo "| | Check | Detail | Verify |"
++    echo "|---|---|---|---|"
++    echo "$local_rows"
++    echo
++  done
++
++  # Any result whose group is not in the fixed list (defensive: internal crashes, new sections).
++  other=$(jq -rs "$EMOJI_DEF"'
++    map(select(.group as $g | ["Version & branch integrity","Dependencies — modules & themes","Generated files in sync","Release content artifacts","Quality gates / CI","Cross-repo / external readiness","Post-release verification"] | index($g) | not))
++    | sort_by(.id) | .[]
++    | "| \(emoji($bk)) | \(.title) | \(.detail) | \(if (.link // "") != "" then "[🔗](\(.link))" else "" end) |"' \
++    --arg bk "$BRANCH_KIND" "$COMBINED")
++  if [ -n "$other" ]; then
++    echo "### Other"
++    echo "| | Check | Detail | Verify |"
++    echo "|---|---|---|---|"
++    echo "$other"
++    echo
++  fi
++}
++
++log "Verdict: $VERDICT (exit $EXIT_CODE) — pass=$N_PASS fail=$N_FAIL warn=$N_WARN na=$N_NA"
++exit "$EXIT_CODE"
+diff --git a/.github/release-healthcheck/run-tier.sh b/.github/release-healthcheck/run-tier.sh
+new file mode 100644
+index 0000000000000..1f88ec49cda67
+--- /dev/null
++++ b/.github/release-healthcheck/run-tier.sh
+@@ -0,0 +1,80 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — run-tier.sh
++#
++# Entry point for one environment tier. Sources the relevant section scripts and
++# runs their checks, appending JSON-line results to results-<tier>.json.
++#
++# Usage: run-tier.sh <static|deps|app|translation|gh>
++#
++# Expects the derived values in the environment (set by the workflow from the
++# `derive` job outputs):
++#   REF TARGET_VERSION CORE_VERSION MAJOR MINOR PATCH VERSION_BRANCH
++#   RELEASE_TYPE BRANCH_KIND BUILD_BRANCH RELEASE_PUBLISHED CLASSIC_RELEASED
++#   REPO (inspected repo) · UPSTREAM_REPO (public release target)
++#
++# This script is read-only with respect to the repository and all remotes.
++
++# NB: no `pipefail` — checks use `cmd | grep -q` extensively, and pipefail turns the
++# SIGPIPE that grep -q sends upstream into a false-negative for the whole pipeline.
++set -u
++
++TIER="${1:?usage: run-tier.sh <static|deps|app|translation|gh>}"
++SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++# Results sink for this tier (consumed later by render.sh).
++export HC_RESULTS_FILE="${HC_RESULTS_FILE:-results-${TIER}.json}"
++: > "$HC_RESULTS_FILE"
++
++# shellcheck source=lib.sh
++. "$SELF_DIR/lib.sh"
++
++# Validate the derived environment contract up front.
++: "${REF:?REF is required}"
++: "${TARGET_VERSION:?TARGET_VERSION is required}"
++: "${CORE_VERSION:?CORE_VERSION is required}"
++: "${MAJOR:?}" "${MINOR:?}" "${PATCH:?}"
++: "${VERSION_BRANCH:?}" "${RELEASE_TYPE:?}" "${BRANCH_KIND:?}" "${BUILD_BRANCH:?}"
++: "${RELEASE_PUBLISHED:?}" "${CLASSIC_RELEASED:?}"
++# REPO = inspected repo (github.repository); UPSTREAM_REPO = public release target.
++export REPO="${REPO:-PrestaShop/PrestaShop}"
++export UPSTREAM_REPO="${UPSTREAM_REPO:-PrestaShop/PrestaShop}"
++
++log "Running tier '$TIER' for $CORE_VERSION on $REF ($BRANCH_KIND) → $HC_RESULTS_FILE"
++
++case "$TIER" in
++  static)
++    . "$SELF_DIR/version-integrity.sh"
++    . "$SELF_DIR/release-content.sh"
++    run_version_integrity_checks
++    run_release_content_checks
++    ;;
++  deps)
++    . "$SELF_DIR/dependencies.sh"
++    . "$SELF_DIR/generated-files.sh"
++    run_dependencies_checks
++    run_generated_files_deps_checks
++    ;;
++  app)
++    . "$SELF_DIR/generated-files.sh"
++    run_generated_files_app_checks
++    ;;
++  translation)
++    . "$SELF_DIR/generated-files.sh"
++    run_generated_files_translation_checks
++    ;;
++  gh)
++    . "$SELF_DIR/ci-status.sh"
++    . "$SELF_DIR/cross-repo-readiness.sh"
++    . "$SELF_DIR/post-release.sh"
++    run_ci_status_checks
++    run_cross_repo_readiness_checks
++    run_post_release_checks
++    ;;
++  *)
++    log "FATAL: unknown tier '$TIER'"
++    exit 2
++    ;;
++esac
++
++log "Tier '$TIER' produced $(wc -l < "$HC_RESULTS_FILE" | tr -d ' ') result(s)"
+diff --git a/.github/release-healthcheck/version-integrity.sh b/.github/release-healthcheck/version-integrity.sh
+new file mode 100644
+index 0000000000000..fa212b3bd7b0a
+--- /dev/null
++++ b/.github/release-healthcheck/version-integrity.sh
+@@ -0,0 +1,130 @@
++#!/usr/bin/env bash
++#
++# Release Healthcheck — Version & branch integrity (env tier: static).
++#
++# Verifies the version constants and the build branch's lineage / naming / tag state.
++# Provenance: these were section A (A1–A6) in issue #41804.
++
++# HC_GROUP is read by emit() in lib.sh (sourced separately) — silence cross-file SC2034.
++# shellcheck disable=SC2034
++HC_GROUP="Version & branch integrity"
++REPO="${REPO:-PrestaShop/PrestaShop}"
++
++# spec ref: A1 — core version constants in src/Core/Version.php
++check_core_version_constants() {
++  local f="src/Core/Version.php" v mvs mv miv rv detail
++  HC_LINK="https://github.com/$REPO/blob/$REF/$f"
++  if [ ! -f "$f" ]; then
++    emit "version/core-constants" "Core version constants" "$HC_FAIL" "$HC_SEV_FAIL" "$f not found"
++    return
++  fi
++  v=$(php_const_string "$f" "VERSION")
++  mvs=$(php_const_string "$f" "MAJOR_VERSION_STRING")
++  mv=$(php_const_int "$f" "MAJOR_VERSION")
++  miv=$(php_const_int "$f" "MINOR_VERSION")
++  rv=$(php_const_int "$f" "RELEASE_VERSION")
++  detail="VERSION=$v, MAJOR_VERSION_STRING=$mvs, MAJOR=$mv, MINOR=$miv, RELEASE=$rv (expected $CORE_VERSION / $MAJOR.$MINOR.$PATCH)"
++  if [ "$v" = "$CORE_VERSION" ] && [ "$mvs" = "$MAJOR" ] && [ "$mv" = "$MAJOR" ] && [ "$miv" = "$MINOR" ] && [ "$rv" = "$PATCH" ]; then
++    emit "version/core-constants" "Core version constants" "$HC_PASS" "$HC_SEV_FAIL" "$detail"
++  else
++    emit "version/core-constants" "Core version constants" "$HC_FAIL" "$HC_SEV_FAIL" "$detail"
++  fi
++}
++
++# spec ref: A2 — installer version in install-dev/install_version.php
++check_installer_version_constant() {
++  local f="install-dev/install_version.php" iv detail
++  HC_LINK="https://github.com/$REPO/blob/$REF/$f"
++  if [ ! -f "$f" ]; then
++    emit "version/installer-constant" "Installer version constant" "$HC_FAIL" "$HC_SEV_FAIL" "$f not found"
++    return
++  fi
++  iv=$(php_define_string "$f" "_PS_INSTALL_VERSION_")
++  detail="_PS_INSTALL_VERSION_=$iv (expected $CORE_VERSION)"
++  if [ "$iv" = "$CORE_VERSION" ] \
++     && grep -q "_PS_INSTALL_MINIMUM_PHP_VERSION_ID_" "$f" \
++     && grep -q "_PS_INSTALL_MAXIMUM_PHP_VERSION_ID_" "$f"; then
++    emit "version/installer-constant" "Installer version constant" "$HC_PASS" "$HC_SEV_FAIL" "$detail; min/max PHP id present"
++  else
++    emit "version/installer-constant" "Installer version constant" "$HC_FAIL" "$HC_SEV_FAIL" "$detail"
++  fi
++}
++
++# spec ref: A3 — Version.php VERSION === install_version.php === core_version
++check_version_consistency() {
++  local v iv
++  HC_LINK="https://github.com/$REPO/blob/$REF/src/Core/Version.php"
++  v=$(php_const_string "src/Core/Version.php" "VERSION")
++  iv=$(php_define_string "install-dev/install_version.php" "_PS_INSTALL_VERSION_")
++  if [ "$v" = "$CORE_VERSION" ] && [ "$iv" = "$CORE_VERSION" ]; then
++    emit "version/consistency" "Version consistency" "$HC_PASS" "$HC_SEV_FAIL" "Version.php=$v, installer=$iv, target=$CORE_VERSION"
++  else
++    emit "version/consistency" "Version consistency" "$HC_FAIL" "$HC_SEV_FAIL" "Version.php=$v, installer=$iv, target=$CORE_VERSION"
++  fi
++}
++
++# spec ref: A4 — build branch descends from the version branch OR the previous patch tag
++check_build_branch_base() {
++  if [ "$BRANCH_KIND" != "build" ]; then
++    emit "version/build-branch-base" "Build branch base" "$HC_NA" "$HC_SEV_WARN" "ref kind '$BRANCH_KIND' — build-branch lineage check N/A"
++    return
++  fi
++  HC_LINK="https://github.com/$REPO/compare/$VERSION_BRANCH...$REF"
++  local detail=""
++  if git fetch --quiet origin "$VERSION_BRANCH" 2>/dev/null && git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
++    emit "version/build-branch-base" "Build branch base" "$HC_PASS" "$HC_SEV_WARN" "HEAD descends from origin/$VERSION_BRANCH"
++    return
++  fi
++  if [ "$PATCH" -gt 0 ]; then
++    local prev="$MAJOR.$MINOR.$((PATCH - 1))"
++    if git fetch --quiet origin "refs/tags/$prev:refs/tags/$prev" 2>/dev/null && git merge-base --is-ancestor "$prev" HEAD 2>/dev/null; then
++      emit "version/build-branch-base" "Build branch base" "$HC_PASS" "$HC_SEV_WARN" "HEAD descends from previous patch tag $prev"
++      return
++    fi
++    detail=" (also not a descendant of tag $prev)"
++  fi
++  emit "version/build-branch-base" "Build branch base" "$HC_FAIL" "$HC_SEV_WARN" "HEAD does not descend from origin/$VERSION_BRANCH$detail"
++}
++
++# spec ref: A5 — branch follows the build-branch naming convention for target_version
++check_branch_naming() {
++  if [ "$BRANCH_KIND" != "build" ]; then
++    emit "version/branch-naming" "Branch naming" "$HC_NA" "$HC_SEV_WARN" "ref kind '$BRANCH_KIND' — build-branch naming check N/A"
++    return
++  fi
++  if [ "$REF" = "$BUILD_BRANCH" ]; then
++    emit "version/branch-naming" "Branch naming" "$HC_PASS" "$HC_SEV_WARN" "branch '$REF' matches convention"
++  else
++    emit "version/branch-naming" "Branch naming" "$HC_FAIL" "$HC_SEV_WARN" "branch '$REF', expected '$BUILD_BRANCH'"
++  fi
++}
++
++# spec ref: A6 — tag presence is the inverse of publication state
++check_tag_state_vs_publication() {
++  local tag_present=0
++  HC_LINK="https://github.com/$REPO/tags"
++  gh_tag_exists "$REPO" "$CORE_VERSION" && tag_present=1
++  if [ "$RELEASE_PUBLISHED" = "true" ]; then
++    if [ "$tag_present" = 1 ]; then
++      emit "version/tag-state" "Tag state vs publication" "$HC_PASS" "$HC_SEV_WARN" "tag $CORE_VERSION present (release published)"
++    else
++      emit "version/tag-state" "Tag state vs publication" "$HC_FAIL" "$HC_SEV_WARN" "release published but tag $CORE_VERSION missing"
++    fi
++  else
++    if [ "$tag_present" = 0 ]; then
++      emit "version/tag-state" "Tag state vs publication" "$HC_PASS" "$HC_SEV_WARN" "tag $CORE_VERSION absent (not yet published)"
++    else
++      emit "version/tag-state" "Tag state vs publication" "$HC_FAIL" "$HC_SEV_WARN" "tag $CORE_VERSION already exists before publication"
++    fi
++  fi
++}
++
++run_version_integrity_checks() {
++  HC_GROUP="Version & branch integrity"
++  guard check_core_version_constants
++  guard check_installer_version_constant
++  guard check_version_consistency
++  guard check_build_branch_base
++  guard check_branch_naming
++  guard check_tag_state_vs_publication
++}
+diff --git a/.github/workflows/release-healthcheck.yml b/.github/workflows/release-healthcheck.yml
+new file mode 100644
+index 0000000000000..33c64f7e051c1
+--- /dev/null
++++ b/.github/workflows/release-healthcheck.yml
+@@ -0,0 +1,437 @@
++name: Release Healthcheck
++
++# Read-only health check of a PrestaShop release.
++#
++# Inspects a build branch (e.g. build-915) — or, anticipatorily, a dev/version branch
++# (9.1.x, develop) — and reports an exhaustive ✅/❌/⚠️/➖ checklist covering version
++# constants, dependency pinning, generated-file freshness, CI, and cross-repo / post-release
++# propagation. It NEVER modifies the repository or any remote.
++#
++# Two checkouts per job:
++#   _tools   = the check scripts, from THIS workflow's ref (github.sha) — so the inspected
++#              branch never needs to carry the tooling (a build branch can predate it).
++#   target   = the branch under inspection (inputs.ref); all checks run with it as CWD.
++#
++# All check logic lives in .github/release-healthcheck/*.sh; this workflow only orchestrates
++# the env tiers in parallel and aggregates their results.
++
++on:
++  workflow_dispatch:
++    inputs:
++      ref:
++        description: 'Ref to inspect — a branch (build-915, 9.1.x, develop) or a tag (9.1.4, 9.2.0-beta.1)'
++        required: true
++        type: string
++      target_version:
++        description: 'Full target version (e.g. 9.1.5, 9.2.0-beta.1)'
++        required: true
++        type: string
++
++permissions:
++  contents: read
++
++concurrency:
++  group: release-healthcheck-${{ github.event.inputs.ref }}-${{ github.event.inputs.target_version }}
++  cancel-in-progress: true
++
++env:
++  PHP_VERSION: '8.3'
++  NODE_VERSION: '20'
++  # Prefer a PAT with cross-repo / read:org scope; fall back to the default token for public reads.
++  GH_TOKEN: ${{ secrets.JARVIS_TOKEN || secrets.GITHUB_TOKEN }}
++  # Public release target — where the GitHub Release lands and the public ecosystem propagates.
++  # Distinct from the inspected repo (github.repository); override for a different canonical.
++  UPSTREAM_REPO: PrestaShop/PrestaShop
++
++jobs:
++  # ---------------------------------------------------------------------------
++  # Derive every value/flag once, expose as job outputs consumed by all tiers.
++  # Needs only the scripts (no inspected tree): derive.sh reads inputs + gh, not repo files.
++  # ---------------------------------------------------------------------------
++  derive:
++    name: Derive release context
++    runs-on: ubuntu-latest
++    outputs:
++      core_version: ${{ steps.derive.outputs.core_version }}
++      major: ${{ steps.derive.outputs.major }}
++      minor: ${{ steps.derive.outputs.minor }}
++      patch: ${{ steps.derive.outputs.patch }}
++      version_branch: ${{ steps.derive.outputs.version_branch }}
++      release_type: ${{ steps.derive.outputs.release_type }}
++      branch_kind: ${{ steps.derive.outputs.branch_kind }}
++      build_branch: ${{ steps.derive.outputs.build_branch }}
++      release_published: ${{ steps.derive.outputs.release_published }}
++      classic_released: ${{ steps.derive.outputs.classic_released }}
++    steps:
++      - name: Show run context
++        run: |
++          head_json=$(gh api "repos/${{ github.repository }}/commits/${{ inputs.ref }}" 2>/dev/null || echo '{}')
++          head_sha=$(printf '%s' "$head_json" | jq -r '.sha // "unknown"')
++          head_msg=$(printf '%s' "$head_json" | jq -r '(.commit.message // "") | split("\n")[0]')
++          {
++            echo "## 🩺 Release Healthcheck — run context"
++            echo ""
++            echo "| Item | Value |"
++            echo "|------|-------|"
++            echo "| Workflow repo (\`github.repository\`) | \`${{ github.repository }}\` |"
++            echo "| Workflow scripts ref (\`github.sha\`)  | \`${{ github.sha }}\` |"
++            echo "| Inspected ref (input)             | \`${{ inputs.ref }}\` |"
++            echo "| Inspected ref HEAD                | \`$head_sha\` |"
++            echo "| Inspected HEAD subject               | $head_msg |"
++            echo "| Target version (input)               | \`${{ inputs.target_version }}\` |"
++            echo ""
++          } | tee -a "$GITHUB_STEP_SUMMARY"
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Derive values
++        id: derive
++        env:
++          HC_REF: ${{ inputs.ref }}
++          HC_TARGET_VERSION: ${{ inputs.target_version }}
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/derive.sh"
++
++  # ---------------------------------------------------------------------------
++  # Tier: static — version & branch integrity + release content (no PHP/DB).
++  # ---------------------------------------------------------------------------
++  static:
++    name: Checks — static
++    runs-on: ubuntu-latest
++    needs: derive
++    defaults:
++      run:
++        working-directory: target
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      MAJOR: ${{ needs.derive.outputs.major }}
++      MINOR: ${{ needs.derive.outputs.minor }}
++      PATCH: ${{ needs.derive.outputs.patch }}
++      VERSION_BRANCH: ${{ needs.derive.outputs.version_branch }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      BUILD_BRANCH: ${{ needs.derive.outputs.build_branch }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++      REPO: ${{ github.repository }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Checkout inspected branch
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ inputs.ref }}
++          fetch-depth: 0
++          path: target
++      - name: Run static checks
++        env:
++          HC_RESULTS_FILE: ${{ github.workspace }}/results-static.json
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/run-tier.sh" static
++      - uses: actions/upload-artifact@v7
++        if: always()
++        with:
++          name: results-static
++          path: results-static.json
++          retention-days: 7
++
++  # ---------------------------------------------------------------------------
++  # Tier: deps — dependency pinning/audit + composer-tier generated files (no DB).
++  # ---------------------------------------------------------------------------
++  deps:
++    name: Checks — dependencies
++    runs-on: ubuntu-latest
++    needs: derive
++    defaults:
++      run:
++        working-directory: target
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      MAJOR: ${{ needs.derive.outputs.major }}
++      MINOR: ${{ needs.derive.outputs.minor }}
++      PATCH: ${{ needs.derive.outputs.patch }}
++      VERSION_BRANCH: ${{ needs.derive.outputs.version_branch }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      BUILD_BRANCH: ${{ needs.derive.outputs.build_branch }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++      REPO: ${{ github.repository }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Checkout inspected branch
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ inputs.ref }}
++          fetch-depth: 0
++          path: target
++      - name: Setup PHP
++        uses: shivammathur/setup-php@v2
++        with:
++          php-version: ${{ env.PHP_VERSION }}
++          extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv, simplexml
++      - name: Get Composer cache directory
++        id: composer-cache
++        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
++      - name: Cache Composer directory
++        uses: actions/cache@v6
++        with:
++          path: ${{ steps.composer-cache.outputs.dir }}
++          key: ${{ runner.os }}-composer-${{ hashFiles('target/composer.lock') }}
++          restore-keys: ${{ runner.os }}-composer-
++      - name: Install Composer dependencies
++        run: COMPOSER_PROCESS_TIMEOUT=600 composer install --ansi --prefer-dist --no-interaction --no-progress
++      - name: Run dependency checks
++        env:
++          HC_RESULTS_FILE: ${{ github.workspace }}/results-deps.json
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/run-tier.sh" deps
++      - uses: actions/upload-artifact@v7
++        if: always()
++        with:
++          name: results-deps
++          path: results-deps.json
++          retention-days: 7
++
++  # ---------------------------------------------------------------------------
++  # Tier: app — generated files needing a booted PrestaShop (PHP + MySQL + assets).
++  # Mirrors the proven cron_js_routing.yml install pattern.
++  # ---------------------------------------------------------------------------
++  app:
++    name: Checks — app (booted)
++    runs-on: ubuntu-latest
++    needs: derive
++    defaults:
++      run:
++        working-directory: target
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      MAJOR: ${{ needs.derive.outputs.major }}
++      MINOR: ${{ needs.derive.outputs.minor }}
++      PATCH: ${{ needs.derive.outputs.patch }}
++      VERSION_BRANCH: ${{ needs.derive.outputs.version_branch }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      BUILD_BRANCH: ${{ needs.derive.outputs.build_branch }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++      REPO: ${{ github.repository }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Checkout inspected branch
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ inputs.ref }}
++          fetch-depth: 0
++          path: target
++      - name: Setup PHP
++        uses: shivammathur/setup-php@v2
++        with:
++          php-version: ${{ env.PHP_VERSION }}
++          extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv, simplexml
++      - name: Setup MySQL
++        uses: shogo82148/actions-setup-mysql@v1
++        with:
++          mysql-version: '8.0'
++          root-password: 'password'
++      - name: Setup Node
++        uses: actions/setup-node@v6
++        with:
++          node-version: ${{ env.NODE_VERSION }}
++      - name: PrestaShop configuration
++        run: cp .github/workflows/phpunit/parameters.yml app/config/parameters.yml
++      - name: Get Composer cache directory
++        id: composer-cache
++        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
++      - name: Cache Composer directory
++        uses: actions/cache@v6
++        with:
++          path: ${{ steps.composer-cache.outputs.dir }}
++          key: ${{ runner.os }}-composer-${{ hashFiles('target/composer.lock') }}
++          restore-keys: ${{ runner.os }}-composer-
++      - name: Cache Node directory
++        uses: actions/cache@v6
++        with:
++          path: ~/.npm
++          key: ${{ runner.os }}-node-${{ hashFiles('target/package-lock.json') }}
++          restore-keys: ${{ runner.os }}-node-
++      - name: Install Composer dependencies
++        run: COMPOSER_PROCESS_TIMEOUT=600 composer install --ansi --prefer-dist --no-interaction --no-progress
++      - name: Build assets
++        run: make assets
++      - name: Install PrestaShop
++        run: php install-dev/index_cli.php --language=en --country=fr --domain=localhost --db_server=127.0.0.1 --db_password=password --db_name=prestashop --db_create=1 --name=prestashop.unit.test --email=demo@prestashop.com --password=prestashop_demo
++      - name: Run app checks
++        env:
++          HC_RESULTS_FILE: ${{ github.workspace }}/results-app.json
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/run-tier.sh" app
++      - uses: actions/upload-artifact@v7
++        if: always()
++        with:
++          name: results-app
++          path: results-app.json
++          retention-days: 7
++
++  # ---------------------------------------------------------------------------
++  # Tier: translation — default catalogue extraction via the external TranslationTool.
++  # Isolated so its flakiness never blocks the cheaper tiers.
++  # ---------------------------------------------------------------------------
++  translation:
++    name: Checks — translation catalogue
++    runs-on: ubuntu-latest
++    needs: derive
++    defaults:
++      run:
++        working-directory: target
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      MAJOR: ${{ needs.derive.outputs.major }}
++      MINOR: ${{ needs.derive.outputs.minor }}
++      PATCH: ${{ needs.derive.outputs.patch }}
++      VERSION_BRANCH: ${{ needs.derive.outputs.version_branch }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      BUILD_BRANCH: ${{ needs.derive.outputs.build_branch }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++      REPO: ${{ github.repository }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Checkout inspected branch
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ inputs.ref }}
++          fetch-depth: 0
++          path: target
++      - name: Setup PHP
++        uses: shivammathur/setup-php@v2
++        with:
++          php-version: ${{ env.PHP_VERSION }}
++          extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv, simplexml
++      - name: Install Composer dependencies
++        run: COMPOSER_PROCESS_TIMEOUT=600 composer install --ansi --prefer-dist --no-interaction --no-progress
++      - name: Run translation catalogue check
++        env:
++          HC_RESULTS_FILE: ${{ github.workspace }}/results-translation.json
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/run-tier.sh" translation
++      - uses: actions/upload-artifact@v7
++        if: always()
++        with:
++          name: results-translation
++          path: results-translation.json
++          retention-days: 7
++
++  # ---------------------------------------------------------------------------
++  # Tier: gh — CI status + cross-repo readiness + post-release propagation.
++  # ---------------------------------------------------------------------------
++  gh:
++    name: Checks — cross-repo / CI / post-release
++    runs-on: ubuntu-latest
++    needs: derive
++    defaults:
++      run:
++        working-directory: target
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      MAJOR: ${{ needs.derive.outputs.major }}
++      MINOR: ${{ needs.derive.outputs.minor }}
++      PATCH: ${{ needs.derive.outputs.patch }}
++      VERSION_BRANCH: ${{ needs.derive.outputs.version_branch }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      BUILD_BRANCH: ${{ needs.derive.outputs.build_branch }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++      # Core repo under inspection (CI status, tags, releases) = the repo running this
++      # workflow — a private security mirror on a security run, not a hard-coded upstream.
++      REPO: ${{ github.repository }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Checkout inspected branch
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ inputs.ref }}
++          fetch-depth: 0
++          path: target
++      - name: Run gh / cross-repo / post-release checks
++        env:
++          HC_RESULTS_FILE: ${{ github.workspace }}/results-gh.json
++        run: bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/run-tier.sh" gh
++      - uses: actions/upload-artifact@v7
++        if: always()
++        with:
++          name: results-gh
++          path: results-gh.json
++          retention-days: 7
++
++  # ---------------------------------------------------------------------------
++  # Summary — aggregate all tiers, render the checklist, set the final exit code.
++  # ---------------------------------------------------------------------------
++  summary:
++    name: Healthcheck summary
++    runs-on: ubuntu-latest
++    needs: [ derive, static, deps, app, translation, gh ]
++    if: always()
++    env:
++      REF: ${{ inputs.ref }}
++      TARGET_VERSION: ${{ inputs.target_version }}
++      CORE_VERSION: ${{ needs.derive.outputs.core_version }}
++      RELEASE_TYPE: ${{ needs.derive.outputs.release_type }}
++      BRANCH_KIND: ${{ needs.derive.outputs.branch_kind }}
++      RELEASE_PUBLISHED: ${{ needs.derive.outputs.release_published }}
++      CLASSIC_RELEASED: ${{ needs.derive.outputs.classic_released }}
++    steps:
++      - name: Checkout healthcheck scripts
++        uses: actions/checkout@v7
++        with:
++          ref: ${{ github.sha }}
++          sparse-checkout: .github/release-healthcheck
++          path: _tools
++      - name: Download all tier results
++        uses: actions/download-artifact@v8
++        with:
++          path: artifacts
++      - name: Render checklist
++        run: |
++          set -o pipefail
++          files=$(find artifacts -name 'results-*.json' 2>/dev/null)
++          if [ -z "$files" ]; then
++            echo "No tier produced results." | tee -a "$GITHUB_STEP_SUMMARY"
++            exit 1
++          fi
++          # shellcheck disable=SC2086
++          bash "$GITHUB_WORKSPACE/_tools/.github/release-healthcheck/render.sh" $files | tee -a "$GITHUB_STEP_SUMMARY"

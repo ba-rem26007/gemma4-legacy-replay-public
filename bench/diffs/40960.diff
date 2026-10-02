@@ -1,0 +1,454 @@
+diff --git a/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php b/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
+index 4a65be686734e..8ec18d68b240d 100644
+--- a/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
++++ b/src/Adapter/Order/CommandHandler/UpdateProductInOrderHandler.php
+@@ -17,6 +17,7 @@
+ use PrestaShop\PrestaShop\Adapter\ContextStateManager;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderDetailUpdater;
+ use PrestaShop\PrestaShop\Adapter\Order\OrderProductQuantityUpdater;
++use PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotEditDeliveredOrderProductException;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Exception\CannotFindProductInOrderException;
+@@ -25,6 +26,8 @@
+ use PrestaShop\PrestaShop\Core\Domain\Order\Product\Command\UpdateProductInOrderCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Order\Product\CommandHandler\UpdateProductInOrderHandlerInterface;
+ use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductOutOfStockException;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use Product;
+ use StockAvailable;
+ use Validate;
+@@ -35,36 +38,13 @@
+ #[AsCommandHandler]
+ final class UpdateProductInOrderHandler extends AbstractOrderCommandHandler implements UpdateProductInOrderHandlerInterface
+ {
+-    /**
+-     * @var ContextStateManager
+-     */
+-    private $contextStateManager;
+-
+-    /**
+-     * @var OrderProductQuantityUpdater
+-     */
+-    private $orderProductQuantityUpdater;
+-
+-    /**
+-     * @var OrderDetailUpdater
+-     */
+-    private $orderDetailUpdater;
+-
+-    /**
+-     * UpdateProductInOrderHandler constructor.
+-     *
+-     * @param OrderProductQuantityUpdater $orderProductQuantityUpdater
+-     * @param OrderDetailUpdater $orderDetailUpdater
+-     * @param ContextStateManager $contextStateManager
+-     */
+     public function __construct(
+-        OrderProductQuantityUpdater $orderProductQuantityUpdater,
+-        OrderDetailUpdater $orderDetailUpdater,
+-        ContextStateManager $contextStateManager
++        private OrderProductQuantityUpdater $orderProductQuantityUpdater,
++        private OrderDetailUpdater $orderDetailUpdater,
++        private ContextStateManager $contextStateManager,
++        private ?ShipmentProductQuantityUpdater $shipmentProductQuantityUpdater = null,
++        private ?FeatureFlagStateCheckerInterface $featureflagStateCheckerInterface = null,
+     ) {
+-        $this->orderProductQuantityUpdater = $orderProductQuantityUpdater;
+-        $this->orderDetailUpdater = $orderDetailUpdater;
+-        $this->contextStateManager = $contextStateManager;
+     }
+ 
+     /**
+@@ -105,8 +85,17 @@ public function handle(UpdateProductInOrderCommand $command)
+                 (int) $orderDetail->id_customization
+             );
+ 
+-            // Update invoice, quantity and amounts
+-            $order = $this->orderProductQuantityUpdater->update($order, $orderDetail, $command->getQuantity(), $orderInvoice);
++            if ($this->featureflagStateCheckerInterface !== null && $this->featureflagStateCheckerInterface->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT) && !empty($command->getShipmentsQuantities())) {
++                $totalProductQuantity = array_sum(array_column($command->getShipmentsQuantities(), 'quantity'));
++
++                // Update invoice, quantity and amounts
++                $order = $this->orderProductQuantityUpdater->update($order, $orderDetail, $totalProductQuantity, $orderInvoice);
++
++                $this->shipmentProductQuantityUpdater->updateShipmentQuantity($command->getOrderDetailId(), $command->getShipmentsQuantities());
++            } else {
++                // Update invoice, quantity and amounts
++                $order = $this->orderProductQuantityUpdater->update($order, $orderDetail, $command->getQuantity(), $orderInvoice);
++            }
+ 
+             // Update order_detail_tax table without modifying prices
+             $this->orderDetailUpdater->updateOrderDetailTaxTableOnly($order);
+diff --git a/src/Adapter/Shipment/ShipmentProductQuantityUpdater.php b/src/Adapter/Shipment/ShipmentProductQuantityUpdater.php
+new file mode 100644
+index 0000000000000..63318ee78e80c
+--- /dev/null
++++ b/src/Adapter/Shipment/ShipmentProductQuantityUpdater.php
+@@ -0,0 +1,31 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
++
++class ShipmentProductQuantityUpdater
++{
++    public function __construct(private ShipmentRepository $shipmentRepository)
++    {
++    }
++
++    /**
++     * @param array<int, array{
++     *     shipment_id: int,
++     *     quantity: int
++     * }> $shipmentsQuantities
++     */
++    public function updateShipmentQuantity(int $orderDetailId, array $shipmentsQuantities): void
++    {
++        foreach ($shipmentsQuantities as $shipmentQuantity) {
++            $this->shipmentRepository->updateShipmentProductQuantity($shipmentQuantity['shipment_id'], $orderDetailId, $shipmentQuantity['quantity']);
++        }
++    }
++}
+diff --git a/src/Core/Domain/Order/Product/Command/UpdateProductInOrderCommand.php b/src/Core/Domain/Order/Product/Command/UpdateProductInOrderCommand.php
+index 63481f149375f..ead6d66bc46ef 100644
+--- a/src/Core/Domain/Order/Product/Command/UpdateProductInOrderCommand.php
++++ b/src/Core/Domain/Order/Product/Command/UpdateProductInOrderCommand.php
+@@ -47,6 +47,14 @@ class UpdateProductInOrderCommand
+      */
+     private $orderInvoiceId;
+ 
++    /**
++     * @var null|array<int, array{
++     *     shipment_id: int,
++     *     quantity: int
++     * }>
++     */
++    private ?array $shipmentsQuantities;
++
+     /**
+      * @param int $orderId
+      * @param int $orderDetailId
+@@ -54,6 +62,10 @@ class UpdateProductInOrderCommand
+      * @param string $priceTaxExcluded
+      * @param int $quantity
+      * @param int|null $orderInvoiceId
++     * @param null|array<int, array{
++     *     shipment_id: int,
++     *     quantity: int
++     * }> $shipmentsQuantities
+      */
+     public function __construct(
+         int $orderId,
+@@ -61,7 +73,8 @@ public function __construct(
+         string $priceTaxIncluded,
+         string $priceTaxExcluded,
+         int $quantity,
+-        ?int $orderInvoiceId = null
++        ?int $orderInvoiceId = null,
++        ?array $shipmentsQuantities = null
+     ) {
+         $this->orderId = new OrderId($orderId);
+         $this->orderDetailId = $orderDetailId;
+@@ -72,6 +85,7 @@ public function __construct(
+             throw new InvalidAmountException();
+         }
+         $this->setQuantity($quantity);
++        $this->setShipmentsQuantities($shipmentsQuantities);
+         $this->orderInvoiceId = $orderInvoiceId;
+     }
+ 
+@@ -135,4 +149,48 @@ private function setQuantity(int $quantity): void
+         }
+         $this->quantity = $quantity;
+     }
++
++    /**
++     * @param null|array<int, array{
++     *     shipment_id: int,
++     *     quantity: int
++     * }> $shipmentsQuantities
++     *
++     * @throws InvalidProductQuantityException
++     */
++    private function setShipmentsQuantities(?array $shipmentsQuantities): void
++    {
++        if (!empty($shipmentsQuantities)) {
++            $hasPositiveQuantity = false;
++
++            foreach ($shipmentsQuantities as $shipmentQuantity) {
++                if ($shipmentQuantity['quantity'] < 0) {
++                    throw new InvalidProductQuantityException('Shipment quantity must be positive');
++                }
++
++                if ($shipmentQuantity['quantity'] >= 1) {
++                    $hasPositiveQuantity = true;
++                }
++            }
++
++            if (!$hasPositiveQuantity) {
++                throw new InvalidProductQuantityException(
++                    'At least one shipment quantity must be greater than or equal to 1'
++                );
++            }
++        }
++
++        $this->shipmentsQuantities = $shipmentsQuantities;
++    }
++
++    /**
++     * @return null|array<int, array{
++     *     shipment_id: int,
++     *     quantity: int
++     * }>
++     */
++    public function getShipmentsQuantities()
++    {
++        return $this->shipmentsQuantities;
++    }
+ }
+diff --git a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+index d45ea2758967b..99f4cf641f3d6 100644
+--- a/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/ShipmentRepository.php
+@@ -11,6 +11,7 @@
+ 
+ use Doctrine\ORM\EntityRepository;
+ use PrestaShopBundle\Entity\Shipment;
++use Throwable;
+ 
+ class ShipmentRepository extends EntityRepository
+ {
+@@ -182,4 +183,57 @@ public function deleteEmptyShipmentByOrder(
+             ->setParameter('orderId', $orderId)
+             ->executeStatement();
+     }
++
++    public function updateShipmentProductQuantity(
++        int $shipmentId,
++        int $orderDetailId,
++        int $quantity
++    ): void {
++        $conn = $this->getEntityManager()->getConnection();
++
++        $conn->beginTransaction();
++
++        try {
++            if ($quantity <= 0) {
++                $conn->createQueryBuilder()
++                    ->delete($this->tablePrefix . 'shipment_product')
++                    ->where('id_shipment = :shipmentId')
++                    ->andWhere('id_order_detail = :orderDetailId')
++                    ->setParameter('shipmentId', $shipmentId)
++                    ->setParameter('orderDetailId', $orderDetailId)
++                    ->executeStatement();
++            } else {
++                $conn->createQueryBuilder()
++                    ->update($this->tablePrefix . 'shipment_product')
++                    ->set('quantity', ':quantity')
++                    ->where('id_shipment = :shipmentId')
++                    ->andWhere('id_order_detail = :orderDetailId')
++                    ->setParameter('quantity', $quantity)
++                    ->setParameter('shipmentId', $shipmentId)
++                    ->setParameter('orderDetailId', $orderDetailId)
++                    ->executeStatement();
++            }
++
++            $remainingProducts = $conn->createQueryBuilder()
++                ->select('COUNT(*)')
++                ->from($this->tablePrefix . 'shipment_product')
++                ->where('id_shipment = :shipmentId')
++                ->setParameter('shipmentId', $shipmentId)
++                ->fetchOne();
++
++            if ((int) $remainingProducts === 0) {
++                $conn->createQueryBuilder()
++                    ->update($this->tablePrefix . 'shipment')
++                    ->set('deleted', '1')
++                    ->where('id_shipment = :shipmentId')
++                    ->setParameter('shipmentId', $shipmentId)
++                    ->executeStatement();
++            }
++
++            $conn->commit();
++        } catch (Throwable $e) {
++            $conn->rollBack();
++            throw $e;
++        }
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+index 7db54d7fcb939..99bcb91c8a693 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/order.yml
+@@ -35,6 +35,8 @@ services:
+       - '@prestashop.adapter.order.product_quantity.updater'
+       - '@prestashop.adapter.order.order_detail.updater'
+       - '@prestashop.adapter.context_state_manager'
++      - '@PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater'
++      - '@PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface'
+ 
+   prestashop.adapter.order.command_handler.change_order_delivery_address_handler:
+     class: PrestaShop\PrestaShop\Adapter\Order\CommandHandler\ChangeOrderDeliveryAddressHandler
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/shipment.yml b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+index 099b0bfab6622..cb196ed0841c5 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/shipment.yml
+@@ -8,3 +8,5 @@ services:
+ 
+   PrestaShop\PrestaShop\Core\Domain\Shipment\Service\ShipmentMergerInterface:
+     class: PrestaShop\PrestaShop\Adapter\Shipment\ShipmentMerger
++
++  PrestaShop\PrestaShop\Adapter\Shipment\ShipmentProductQuantityUpdater:
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+index 06debb98427cf..8eb5958f176a4 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/OrderFeatureContext.php
+@@ -657,6 +657,20 @@ private function updateProductInOrder(int $orderId, array $productOrderDetail, a
+                 ->addTaxes($data['price']);
+         }
+ 
++        $shipments = null;
++
++        if (!empty($data['shipment_mapping'])) {
++            $shipments = [];
++
++            foreach (explode(',', $data['shipment_mapping']) as $pair) {
++                list($shipmentId, $qty) = explode(':', trim($pair));
++                $shipments[] = [
++                    'shipment_id' => (int) $shipmentId,
++                    'quantity' => (int) $qty,
++                ];
++            }
++        }
++
+         try {
+             $this->getCommandBus()->handle(
+                 new UpdateProductInOrderCommand(
+@@ -665,7 +679,8 @@ private function updateProductInOrder(int $orderId, array $productOrderDetail, a
+                     $data['price_tax_incl'],
+                     $data['price'],
+                     (int) $data['amount'],
+-                    $invoiceId
++                    $invoiceId,
++                    $shipments
+                 )
+             );
+         } catch (InvalidProductQuantityException $e) {
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature
+new file mode 100644
+index 0000000000000..5c7c2a37a226b
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Shipment/order_products_update.feature
+@@ -0,0 +1,103 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s shipment --tags order_products_update
++@restore-all-tables-before-feature
++@clear-cache-before-feature
++@order-products-update-with-shipments
++Feature: Update order products with shipments
++  As a BO users
++  I want to update order products with shipments
++
++  Background:
++    Given I enable feature flag "improved_shipment"
++    And the current currency is "USD"
++    And country "US" is enabled
++    And the module "dummy_payment" is installed
++    And I am logged in as "test@prestashop.com" employee
++    And there is customer "testCustomer" with email "pub@prestashop.com"
++    And customer "testCustomer" has address in "US" country
++    And a carrier "default_carrier" with name "My carrier" exists
++    And I create an empty cart "dummy_cart" for customer "testCustomer"
++    And I select "US" address as delivery and invoice address for customer "testCustomer" in cart "dummy_cart"
++    And I add 1 products "Mug The best is yet to come" to the cart "dummy_cart"
++    And I add 2 products "Mug Today is a good day" to the cart "dummy_cart"
++
++  Scenario: Update product in order with shipments
++    Given I add order "bo_order1" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order1" delivery address as "US"
++    And the order "bo_order1" should have the following shipments:
++      | shipment  | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment1 | default_carrier |                 | US      |                    7.0 |                   7.42 |
++    And the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come |        1 |
++      | Mug Today is a good day     |        2 |
++    And I create carrier "pickup_carrier" with specified properties:
++      | name | Pickup |
++    And I split the shipment "shipment1" to create a new shipment with "pickup_carrier" with following products:
++      | product_name             | quantity |
++      | Mug Today is a good day  | 1        |
++    And the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 1        |
++      | Mug Today is a good day     | 1        |
++    And the order "bo_order1" should have "2" shipments:
++    And the shipment "shipment2" should have the following products:
++      | product_name               | quantity |
++      | Mug Today is a good day    | 1        |
++    When I edit product "Mug Today is a good day" to order "bo_order1" with following products details:
++      | shipment_mapping       | 1:2, 2:3     |
++      | price                  | 11.90        |
++      | amount                 | 5            |
++    Then order "bo_order1" should contain 5 products "Mug Today is a good day"
++    And product "Mug Today is a good day" in order "bo_order1" should have no specific price
++    And product "Mug Today is a good day" in order "bo_order1" has following details:
++      | product_quantity            | 5      |
++    Then the shipment "shipment1" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 1        |
++      | Mug Today is a good day     | 2        |
++    Then the shipment "shipment2" should have the following products:
++      | product_name               | quantity |
++      | Mug Today is a good day    | 3        |
++
++  Scenario: Update product in order with shipments with zero quantity
++    Given I add order "bo_order2" with the following details:
++      | cart                | dummy_cart                 |
++      | message             | test                       |
++      | payment module name | dummy_payment              |
++      | status              | Awaiting bank wire payment |
++    And I reference order "bo_order2" delivery address as "US"
++    And the order "bo_order2" should have the following shipments:
++      | shipment  | carrier         | tracking_number | address | shipping_cost_tax_excl | shipping_cost_tax_incl |
++      | shipment3 | default_carrier |                 | US      |                    7.0 |                   7.42 |
++    And the shipment "shipment3" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come |        1 |
++      | Mug Today is a good day     |        2 |
++    And I split the shipment "shipment3" to create a new shipment with "pickup_carrier" with following products:
++      | product_name             | quantity |
++      | Mug Today is a good day  | 1        |
++    And the shipment "shipment3" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 1        |
++      | Mug Today is a good day     | 1        |
++    And the order "bo_order2" should have "2" shipments:
++    And the shipment "shipment4" should have the following products:
++      | product_name               | quantity |
++      | Mug Today is a good day    | 1        |
++    When I edit product "Mug Today is a good day" to order "bo_order2" with following products details:
++      | shipment_mapping       | 3:1, 4:0     |
++      | price                  | 11.90        |
++      | amount                 | 1            |
++    Then order "bo_order2" should contain 1 products "Mug Today is a good day"
++    And product "Mug Today is a good day" in order "bo_order2" should have no specific price
++    And product "Mug Today is a good day" in order "bo_order2" has following details:
++      | product_quantity            | 1      |
++    Then the shipment "shipment3" should have the following products:
++      | product_name                | quantity |
++      | Mug The best is yet to come | 1        |
++      | Mug Today is a good day     | 1        |
++    Then the shipment "shipment4" should be deleted

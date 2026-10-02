@@ -1,0 +1,159 @@
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/EventListener/ProductTypeListener.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/EventListener/ProductTypeListener.php
+index cd07385958501..0a30d5a36dead 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/EventListener/ProductTypeListener.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/EventListener/ProductTypeListener.php
+@@ -83,12 +83,25 @@ public function adaptProductForm(FormEvent $event): void
+         }
+ 
+         if (ProductType::TYPE_COMBINATIONS === $productType) {
+-            $this->removeSuppliers($form);
++            $this->removeProductSuppliers($form);
+             $this->removeStock($form);
+         } elseif ($initialProductType !== ProductType::TYPE_COMBINATIONS) {
+             $this->removeCombinations($form);
+         }
+ 
++        $optionsField = $form->get('options');
++
++        // As this is also executed on pre-submit, we need to verify that suppliers exist before removing it
++        if ($optionsField->has('suppliers')) {
++            $suppliers = $optionsField->get('suppliers')->get('supplier_ids')->getConfig()->getOptions()['choices'];
++
++            // Don't display the suppliers part if there are no suppliers
++            if (count($suppliers) <= 0) {
++                $this->removeSuppliers($form);
++                $this->removeProductSuppliers($form);
++            }
++        }
++
+         if (ProductType::TYPE_PACK !== $productType) {
+             $this->removePackStockType($form);
+             $this->removePack($form);
+@@ -117,11 +130,25 @@ protected function removeCombinations(FormInterface $form): void
+         }
+     }
+ 
++    protected function removeProductSuppliers(FormInterface $form): void
++    {
++        if ($form->has('options')) {
++            $optionsForm = $form->get('options');
++
++            if ($optionsForm->has('product_suppliers')) {
++                $optionsForm->remove('product_suppliers');
++            }
++        }
++    }
++
+     protected function removeSuppliers(FormInterface $form): void
+     {
+         if ($form->has('options')) {
+             $optionsForm = $form->get('options');
+-            $optionsForm->remove('product_suppliers');
++
++            if ($optionsForm->has('suppliers')) {
++                $optionsForm->remove('suppliers');
++            }
+         }
+     }
+ 
+diff --git a/tests/Integration/PrestaShopBundle/Form/EventListener/ProductTypeListenerTest.php b/tests/Integration/PrestaShopBundle/Form/EventListener/ProductTypeListenerTest.php
+index 021ecd1c64b7f..3cd9a61b2e180 100644
+--- a/tests/Integration/PrestaShopBundle/Form/EventListener/ProductTypeListenerTest.php
++++ b/tests/Integration/PrestaShopBundle/Form/EventListener/ProductTypeListenerTest.php
+@@ -67,9 +67,10 @@ public function testFormTypeExistsInFormDependingOnProductType(string $productTy
+ 
+     public function getFormTypeExpectationsBasedOnProductType(): iterable
+     {
+-        yield 'product_supplier in standard context' => [ProductType::TYPE_STANDARD, 'options.product_suppliers', true];
+-        yield 'product_supplier in pack context' => [ProductType::TYPE_PACK, 'options.product_suppliers', true];
+-        yield 'product_supplier in virtual context' => [ProductType::TYPE_VIRTUAL, 'options.product_suppliers', true];
++        // Since data is empty all product types remove this field see testSuppliers for more details
++        yield 'product_supplier in standard context' => [ProductType::TYPE_STANDARD, 'options.product_suppliers', false];
++        yield 'product_supplier in pack context' => [ProductType::TYPE_PACK, 'options.product_suppliers', false];
++        yield 'product_supplier in virtual context' => [ProductType::TYPE_VIRTUAL, 'options.product_suppliers', false];
+         yield 'product_supplier in combination context' => [ProductType::TYPE_COMBINATIONS, 'options.product_suppliers', false];
+ 
+         yield 'stock in standard context' => [ProductType::TYPE_STANDARD, 'stock', true];
+@@ -252,6 +253,38 @@ public function getVirtualData(): iterable
+         ];
+     }
+ 
++    /**
++     * @dataProvider getExpectedSuppliers
++     *
++     * @param string $formType
++     * @param array $suppliers
++     * @param bool $suppliersExpected
++     * @param bool $productSuppliersExpected
++     */
++    public function testSuppliers(string $formType, array $suppliers, bool $suppliersExpected, bool $productSuppliersExpected): void
++    {
++        $form = $this->createForm(TestProductFormType::class, ['suppliers' => $suppliers]);
++
++        $this->assertFormTypeExistsInForm($form, 'options.suppliers', true);
++        $this->assertFormTypeExistsInForm($form, 'options.product_suppliers', true);
++        $this->adaptProductFormBasedOnProductType($form, $formType);
++        $this->assertFormTypeExistsInForm($form, 'options.suppliers', $suppliersExpected);
++        $this->assertFormTypeExistsInForm($form, 'options.product_suppliers', $productSuppliersExpected);
++    }
++
++    public function getExpectedSuppliers(): iterable
++    {
++        yield 'standard type with suppliers' => [ProductType::TYPE_STANDARD, [42, 69], true, true];
++        yield 'virtual type with suppliers' => [ProductType::TYPE_VIRTUAL, [42, 69], true, true];
++        yield 'pack type with suppliers' => [ProductType::TYPE_PACK, [42, 69], true, true];
++        yield 'combinations type with suppliers' => [ProductType::TYPE_COMBINATIONS, [42, 69], true, false];
++
++        yield 'standard type without suppliers' => [ProductType::TYPE_STANDARD, [], false, false];
++        yield 'virtual type without suppliers' => [ProductType::TYPE_VIRTUAL, [], false, false];
++        yield 'pack type without suppliers' => [ProductType::TYPE_PACK, [], false, false];
++        yield 'combination type without suppliers' => [ProductType::TYPE_COMBINATIONS, [], false, false];
++    }
++
+     /**
+      * @dataProvider getProductTypes
+      *
+diff --git a/tests/Integration/PrestaShopBundle/Form/TestProductFormType.php b/tests/Integration/PrestaShopBundle/Form/TestProductFormType.php
+index 49a1263240e04..b468ec2214298 100644
+--- a/tests/Integration/PrestaShopBundle/Form/TestProductFormType.php
++++ b/tests/Integration/PrestaShopBundle/Form/TestProductFormType.php
+@@ -33,6 +33,7 @@
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+ use Symfony\Component\Form\Extension\Core\Type\FormType;
+ use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
+ 
+ /**
+  * This form type is not used in the project but in the tests, it allows to build a simple
+@@ -64,6 +65,12 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         $quantities->add('stock_movements', FormType::class);
+ 
+         $optionsForm = $builder->get('options');
++
++        $optionsForm->add('suppliers', FormType::class);
++        $suppliersForm = $optionsForm->get('suppliers');
++        $suppliersForm->add('supplier_ids', ChoiceType::class, [
++            'choices' => $options['suppliers'],
++        ]);
+         $optionsForm->add('product_suppliers', ChoiceType::class);
+ 
+         $pricingForm = $builder->get('pricing');
+@@ -73,4 +80,18 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+         $retailPricingForm->add('ecotax_tax_excluded', UnavailableType::class);
+         $retailPricingForm->add('ecotax_tax_included', UnavailableType::class);
+     }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function configureOptions(OptionsResolver $resolver)
++    {
++        parent::configureOptions($resolver);
++        $resolver
++            ->setDefaults([
++                'suppliers' => [],
++            ])
++            ->setAllowedTypes('suppliers', 'array')
++        ;
++    }
+ }

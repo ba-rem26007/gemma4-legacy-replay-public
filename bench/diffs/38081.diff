@@ -1,0 +1,770 @@
+diff --git a/src/Adapter/CartRule/CartRuleBuilder.php b/src/Adapter/CartRule/CartRuleBuilder.php
+index 73941be8b300e..0a79fa4288b2c 100644
+--- a/src/Adapter/CartRule/CartRuleBuilder.php
++++ b/src/Adapter/CartRule/CartRuleBuilder.php
+@@ -28,6 +28,7 @@
+ 
+ use CartRule;
+ use DateTimeImmutable;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Util\DateTime\DateTime as DateTimeUtil;
+@@ -55,6 +56,20 @@ public function build(AddDiscountCommand $command): CartRule
+         $cartRule->type = $command->getDiscountType()->getValue();
+         $cartRule->free_shipping = $command instanceof AddFreeShippingDiscountCommand;
+ 
++        if ($command instanceof AddCartLevelDiscountCommand) {
++            if ($command->getPercentDiscount()) {
++                $cartRule->reduction_percent = (float) (string) $command->getPercentDiscount();
++                $cartRule->reduction_amount = 0;
++                $cartRule->reduction_currency = 0;
++                $cartRule->reduction_tax = false;
++            } elseif ($command->getAmountDiscount()) {
++                $cartRule->reduction_percent = 0;
++                $cartRule->reduction_amount = (float) (string) $command->getAmountDiscount()->getAmount();
++                $cartRule->reduction_currency = $command->getAmountDiscount()->getCurrencyId()->getValue();
++                $cartRule->reduction_tax = $command->getAmountDiscount()->isTaxIncluded();
++            }
++        }
++
+         return $cartRule;
+     }
+ }
+diff --git a/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php b/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php
+new file mode 100644
+index 0000000000000..034964b188705
+--- /dev/null
++++ b/src/Adapter/Discount/CommandHandler/AddCartLevelDiscountHandler.php
+@@ -0,0 +1,52 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Adapter\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Adapter\CartRule\CartRuleBuilder;
++use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
++use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler\AddCartLevelDiscountHandlerInterface;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++#[AsCommandHandler]
++class AddCartLevelDiscountHandler implements AddCartLevelDiscountHandlerInterface
++{
++    public function __construct(
++        private readonly DiscountRepository $discountRepository,
++        private readonly CartRuleBuilder $cartRuleBuilder
++    ) {
++    }
++
++    public function handle(AddCartLevelDiscountCommand $command): DiscountId
++    {
++        $BuiltCartRule = $this->cartRuleBuilder->build($command);
++        $discount = $this->discountRepository->add($BuiltCartRule);
++
++        return new DiscountId((int) $discount->id);
++    }
++}
+diff --git a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+index c53fa095d0dfd..d73e91cd12e64 100644
+--- a/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
++++ b/src/Adapter/Discount/QueryHandler/GetDiscountForEditingHandler.php
+@@ -28,6 +28,7 @@
+ 
+ use DateTimeImmutable;
+ use Exception;
++use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountRepository;
+ use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsQueryHandler;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+@@ -62,7 +63,11 @@ public function handle(GetDiscountForEditing $query): DiscountForEditing
+             (int) $cartRule->id_customer,
+             $cartRule->highlight,
+             $cartRule->partial_use,
+-            $cartRule->type
++            $cartRule->type,
++            new DecimalNumber($cartRule->reduction_percent),
++            new DecimalNumber($cartRule->reduction_amount),
++            $cartRule->reduction_currency,
++            $cartRule->reduction_tax
+         );
+     }
+ }
+diff --git a/src/Core/Domain/Discount/Command/AddCartLevelDiscountCommand.php b/src/Core/Domain/Discount/Command/AddCartLevelDiscountCommand.php
+new file mode 100644
+index 0000000000000..fef6ac212a626
+--- /dev/null
++++ b/src/Core/Domain/Discount/Command/AddCartLevelDiscountCommand.php
+@@ -0,0 +1,88 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\Command;
++
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
++use PrestaShop\PrestaShop\Core\Domain\Exception\DomainConstraintException;
++use PrestaShop\PrestaShop\Core\Domain\ValueObject\Money;
++
++class AddCartLevelDiscountCommand extends AddDiscountCommand
++{
++    private ?DecimalNumber $percentDiscount = null;
++    private ?Money $amountDiscount = null;
++
++    public function __construct(
++    ) {
++        parent::__construct(DiscountType::CART_DISCOUNT);
++    }
++
++    public function getPercentDiscount(): ?DecimalNumber
++    {
++        return $this->percentDiscount;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     */
++    public function setPercentDiscount(DecimalNumber $percentDiscount): self
++    {
++        if ($this->getAmountDiscount() !== null) {
++            throw new DiscountConstraintException('Amount discount is already set.', DiscountConstraintException::INVALID_AMOUNT_DISCOUNT_ALREADY_SET);
++        }
++        if ($percentDiscount->isLowerThanZero() || $percentDiscount->isGreaterThan(new DecimalNumber('100.0'))) {
++            throw new DiscountConstraintException(sprintf('Invalid percent reduction "%s".', $percentDiscount), DiscountConstraintException::INVALID_REDUCTION_PERCENT);
++        }
++        $this->percentDiscount = $percentDiscount;
++
++        return $this;
++    }
++
++    public function getAmountDiscount(): ?Money
++    {
++        return $this->amountDiscount;
++    }
++
++    /**
++     * @throws DiscountConstraintException
++     * @throws DomainConstraintException
++     */
++    public function setAmountDiscount(DecimalNumber $amountDiscount, CurrencyId $currencyId, bool $taxIncluded): self
++    {
++        if ($this->getPercentDiscount() !== null) {
++            throw new DiscountConstraintException('Percent discount is already set.', DiscountConstraintException::INVALID_PERCENT_DISCOUNT_ALREADY_SET);
++        }
++        if ($amountDiscount->isLowerThanZero()) {
++            throw new DiscountConstraintException(sprintf('Invalid amount reduction "%s".', $amountDiscount), DiscountConstraintException::INVALID_REDUCTION_AMOUNT);
++        }
++        $this->amountDiscount = new Money($amountDiscount, $currencyId, $taxIncluded);
++
++        return $this;
++    }
++}
+diff --git a/src/Core/Domain/Discount/CommandHandler/AddCartLevelDiscountHandlerInterface.php b/src/Core/Domain/Discount/CommandHandler/AddCartLevelDiscountHandlerInterface.php
+new file mode 100644
+index 0000000000000..27b6f56d428c7
+--- /dev/null
++++ b/src/Core/Domain/Discount/CommandHandler/AddCartLevelDiscountHandlerInterface.php
+@@ -0,0 +1,35 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\Domain\Discount\CommandHandler;
++
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
++use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountId;
++
++interface AddCartLevelDiscountHandlerInterface
++{
++    public function handle(AddCartLevelDiscountCommand $command): DiscountId;
++}
+diff --git a/src/Core/Domain/Discount/Exception/DiscountConstraintException.php b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+index fabf2cd8c0606..ee3c5983483f4 100644
+--- a/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
++++ b/src/Core/Domain/Discount/Exception/DiscountConstraintException.php
+@@ -73,4 +73,8 @@ class DiscountConstraintException extends DiscountException
+     public const EMPTY_RESTRICTION_RULE_IDS = 42;
+     public const EMPTY_RESTRICTION_RULES = 43;
+     public const INVALID_PROPERTY_FOR_TYPE = 44;
++
++    public const INVALID_AMOUNT_DISCOUNT_ALREADY_SET = 45;
++
++    public const INVALID_PERCENT_DISCOUNT_ALREADY_SET = 46;
+ }
+diff --git a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+index a662a791abcbf..f5e10a7c77af3 100644
+--- a/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
++++ b/src/Core/Domain/Discount/QueryResult/DiscountForEditing.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Domain\Discount\QueryResult;
+ 
+ use DateTimeImmutable;
++use PrestaShop\Decimal\DecimalNumber;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ValueObject\DiscountType;
+ 
+ class DiscountForEditing
+@@ -45,6 +46,10 @@ public function __construct(
+         private readonly bool $highlightInCart,
+         private readonly bool $allowPartialUse,
+         private readonly string $type,
++        private readonly ?DecimalNumber $percentDiscount,
++        private readonly ?DecimalNumber $amountDiscount,
++        private readonly ?int $currencyId,
++        private readonly ?bool $taxIncluded,
+     ) {
+     }
+ 
+@@ -112,4 +117,24 @@ public function getType(): DiscountType
+     {
+         return new DiscountType($this->type);
+     }
++
++    public function getPercentDiscount(): ?DecimalNumber
++    {
++        return $this->percentDiscount;
++    }
++
++    public function getAmountDiscount(): ?DecimalNumber
++    {
++        return $this->amountDiscount;
++    }
++
++    public function getCurrencyId(): ?int
++    {
++        return $this->currencyId;
++    }
++
++    public function isTaxIncluded(): ?bool
++    {
++        return $this->taxIncluded;
++    }
+ }
+diff --git a/src/Core/Domain/Discount/ValueObject/DiscountType.php b/src/Core/Domain/Discount/ValueObject/DiscountType.php
+index 8186c62ac5149..031a93ba21b88 100644
+--- a/src/Core/Domain/Discount/ValueObject/DiscountType.php
++++ b/src/Core/Domain/Discount/ValueObject/DiscountType.php
+@@ -29,8 +29,7 @@
+ class DiscountType
+ {
+     public const FREE_SHIPPING = 'free_shipping';
+-    public const PERCENT_DISCOUNT = 'percent_discount';
+-    public const AMOUNT_DISCOUNT = 'amount_discount';
++    public const CART_DISCOUNT = 'cart_discount';
+     public const FREE_GIFT = 'free_gift';
+ 
+     public function __construct(private readonly string $value)
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+index fcc2372641026..efa6fc9949739 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/discount.yml
+@@ -7,6 +7,11 @@ services:
+     public: false
+     autoconfigure: true
+ 
++  PrestaShop\PrestaShop\Adapter\Discount\CommandHandler\AddCartLevelDiscountHandler:
++    autowire: true
++    public: false
++    autoconfigure: true
++
+   PrestaShop\PrestaShop\Adapter\Discount\QueryHandler\GetDiscountForEditingHandler:
+     autowire: true
+     public: false
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index c38248eaa0e79..f85293ea1d7f5 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -30,6 +30,9 @@
+ use DateTimeImmutable;
+ use Exception;
+ use PHPUnit\Framework\Assert;
++use PrestaShop\Decimal\DecimalNumber;
++use PrestaShop\PrestaShop\Core\Domain\Currency\ValueObject\CurrencyId;
++use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddCartLevelDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Command\AddFreeShippingDiscountCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Exception\DiscountConstraintException;
+@@ -61,6 +64,46 @@ public function createFreeShippingDiscount(string $discountReference, TableNode
+         }
+     }
+ 
++    /**
++     * @When I create a cart level discount :discountReference with following properties:
++     *
++     * @param string $discountReference
++     * @param TableNode $node
++     *
++     * @return void
++     *
++     * @throws Exception
++     */
++    public function createCartLevelDiscountIfNotExists(string $discountReference, TableNode $node): void
++    {
++        $data = $this->localizeByRows($node);
++        try {
++            $command = new AddCartLevelDiscountCommand();
++            $this->createDiscount($discountReference, $data, $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
++    /**
++     * @When I create a cart level discount :discountReference
++     *
++     * @param string $discountReference
++     *
++     * @return void
++     *
++     * @throws Exception
++     */
++    public function createSimpleCartLevelDiscountIfNotExists(string $discountReference): void
++    {
++        try {
++            $command = new AddCartLevelDiscountCommand();
++            $this->createDiscount($discountReference, [], $command);
++        } catch (DiscountConstraintException $e) {
++            $this->setLastException($e);
++        }
++    }
++
+     /**
+      * @When I create a free shipping discount :discountReference
+      *
+@@ -151,6 +194,20 @@ protected function createDiscount(string $cartRuleReference, array $data, AddDis
+             $command->setCode($data['code']);
+         }
+ 
++        if ($command instanceof AddCartLevelDiscountCommand) {
++            if (!empty($data['reduction_percent'])) {
++                $command->setPercentDiscount(new DecimalNumber($data['reduction_percent']));
++            }
++
++            if (!empty($data['reduction_amount'])) {
++                $command->setAmountDiscount(
++                    new DecimalNumber($data['reduction_amount']),
++                    new CurrencyId($this->getSharedStorage()->get($data['reduction_currency'])),
++                    PrimitiveUtils::castStringBooleanIntoBoolean($data['taxIncluded']),
++                );
++            }
++        }
++
+         /** @var DiscountId $discountId */
+         $discountId = $this->getCommandBus()->handle($command);
+         $this->getSharedStorage()->set($cartRuleReference, $discountId->getValue());
+@@ -215,6 +272,23 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+         if (isset($expectedData['quantity_per_user'])) {
+             Assert::assertSame((int) $expectedData['quantity_per_user'], $discountForEditing->getQuantityPerUser(), 'Unexpected quantity_per_user');
+         }
++
++        if (isset($expectedData['reduction_percent'])) {
++            Assert::assertSame((float) $expectedData['reduction_percent'], (float) (string) $discountForEditing->getPercentDiscount(), 'Unexpected percent discount');
++        }
++
++        if (isset($expectedData['reduction_amount'])) {
++            Assert::assertSame((float) $expectedData['reduction_amount'], (float) (string) $discountForEditing->getAmountDiscount(), 'Unexpected amount discount');
++        }
++        if (isset($expectedData['reduction_currency'])) {
++            Assert::assertSame($this->getSharedStorage()->get($expectedData['reduction_currency']), $discountForEditing->getCurrencyId(), 'Unexpected reduction currency');
++        }
++        if (isset($expectedData['taxIncluded'])) {
++            Assert::assertSame(PrimitiveUtils::castStringBooleanIntoBoolean($expectedData['taxIncluded']), $discountForEditing->isTaxIncluded(), 'Unexpected tax included');
++        }
++        if (isset($expectedData['type'])) {
++            Assert::assertSame($expectedData['type'], $discountForEditing->getType()->getValue(), 'Unexpected type');
++        }
+     }
+ 
+     protected function getDiscountForEditing(string $discountReference): DiscountForEditing
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_cart_level_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_cart_level_discount.feature
+new file mode 100644
+index 0000000000000..c85f1b62994fa
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_cart_level_discount.feature
+@@ -0,0 +1,120 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-cart-level-discount
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-cart-level-discount
++Feature: Add discount
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given there is a currency named "chf" with iso code "CHF" and exchange rate of 1.25
++    Given currency "usd" is the default one
++    And language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++
++  Scenario: Create a simple cart level discount
++    When I create a cart level discount "basic_cart_level_discount"
++    And discount "basic_cart_level_discount" should have the following properties:
++      | active | false         |
++      | type   | cart_discount |
++
++  Scenario: Create a complete cart level discount
++    When I create a cart level discount "complete_percent_cart_level_discount" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_CART_2019     |
++      | reduction_percent | 10.0                |
++    And discount "complete_percent_cart_level_discount" should have the following properties:
++      | name[en-US]       | Promotion           |
++      | type              | cart_discount       |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_CART_2019     |
++      | reduction_percent | 10.0                |
++    When I create a cart level discount "complete_amount_cart_level_discount" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_CART_2019_2   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    And discount "complete_amount_cart_level_discount" should have the following properties:
++      | name[en-US]        | Promotion           |
++      | type               | cart_discount       |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_CART_2019_2   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | true                |
++    When I create a cart level discount "complete_amount_cart_level_discount_tax_excluded" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_CART_2019_3   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++    And discount "complete_amount_cart_level_discount_tax_excluded" should have the following properties:
++      | name[en-US]        | Promotion           |
++      | type               | cart_discount       |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_CART_2019_3   |
++      | reduction_amount   | 10.0                |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++
++  Scenario: Create an active cart level discount but without names should be forbidden
++    When I create a cart level discount "invalid_cart_level_discount" with following properties:
++      | active | true          |
++      | type   | cart_discount |
++    Then I should get error that discount field name is invalid
++    # Discount online with name only in default language is valid though
++    When I create a cart level discount "default_language_cart_level_discount" with following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
++    Then discount "default_language_cart_level_discount" should have the following properties:
++      | active      | true      |
++      | name[en-US] | Promotion |
++      | name[fr-FR] |           |
++
++  Scenario: Create an active cart level discount with wrong values
++    When I create a cart level discount "invalid_percent_cart_level_discount_1" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_CART_2019_4   |
++      | reduction_percent | -10.0               |
++    Then I should get error that discount field reduction_percent is invalid
++    When I create a cart level discount "invalid_percent_cart_level_discount_2" with following properties:
++      | name[en-US]       | Promotion           |
++      | active            | true                |
++      | valid_from        | 2019-01-01 11:05:00 |
++      | valid_to          | 2019-12-01 00:00:00 |
++      | code              | PROMO_CART_2019_5   |
++      | reduction_percent | 102.0               |
++    Then I should get error that discount field reduction_percent is invalid
++    When I create a cart level discount "invalid_amount_cart_level_discount" with following properties:
++      | name[en-US]        | Promotion           |
++      | active             | true                |
++      | valid_from         | 2019-01-01 11:05:00 |
++      | valid_to           | 2019-12-01 00:00:00 |
++      | code               | PROMO_CART_2019_5   |
++      | reduction_amount   | -102.0              |
++      | reduction_currency | usd                 |
++      | taxIncluded        | false               |
++    Then I should get error that discount field reduction_amount is invalid
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_shipping_discount.feature
+similarity index 77%
+rename from tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature
+rename to tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_shipping_discount.feature
+index 0f9259b1529b4..68ddee29e66e1 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_free_shipping_discount.feature
+@@ -1,7 +1,7 @@
+-# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-free-shipping-discount
+ @restore-all-tables-before-feature
+ @restore-languages-after-feature
+-@add-discount
++@add-free-shipping-discount
+ Feature: Add discount
+   PrestaShop allows BO users to create discounts
+   As a BO user
+@@ -18,36 +18,22 @@ Feature: Add discount
+   Scenario: Create a simple discount with free shipping
+     When I create a free shipping discount "basic_free_shipping_discount"
+     Then discount "basic_free_shipping_discount" should have the following properties:
+-      | free_shipping | true  |
+       | active        | false |
+ 
+   Scenario: Create a complete discount with free shipping
+     When I create a free shipping discount "complete_free_shipping_discount" with following properties:
+       | name[en-US]       | Promotion              |
+       | name[fr-FR]       | Promotion fr           |
+-      | description       | Promotion for holidays |
+-      | highlight         | false                  |
+       | active            | true                   |
+-      | allow_partial_use | false                  |
+-      | priority          | 2                      |
+       | valid_from        | 2019-01-01 11:05:00    |
+       | valid_to          | 2019-12-01 00:00:00    |
+-      | total_quantity    | 10                     |
+-      | quantity_per_user | 1                      |
+       | code              | PROMO_2019             |
+     Then discount "complete_free_shipping_discount" should have the following properties:
+       | name[en-US]       | Promotion              |
+       | name[fr-FR]       | Promotion fr           |
+-      | description       | Promotion for holidays |
+-      | highlight         | false                  |
+       | active            | true                   |
+-      | allow_partial_use | false                  |
+-      | priority          | 2                      |
+       | valid_from        | 2019-01-01 11:05:00    |
+       | valid_to          | 2019-12-01 00:00:00    |
+-      | total_quantity    | 10                     |
+-      | quantity_per_user | 1                      |
+-      | free_shipping     | true                   |
+       | code              | PROMO_2019             |
+ 
+   Scenario: Create a discount with free shipping online but without names should be forbidden
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_cart_level.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_cart_level.feature
+new file mode 100644
+index 0000000000000..b214da55a5da6
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_cart_level.feature
+@@ -0,0 +1,74 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags full-ux-discount-test-cart-level
++@restore-all-tables-before-feature
++@full-ux-discount-test-cart-level
++
++Feature: Full UX discount test
++  PrestaShop allows BO users to create discounts
++  As a BO user
++  I must be able to create discounts using the new discounts
++
++  Background:
++    Given I have an empty default cart
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    And there is a product in the catalog named "product1" with a price of 19.812 and 1000 items in stock
++    And language with iso code "en" is the default one
++
++  Scenario: Create a complete cart level flat discount using new CQRS
++    When I create a cart level discount "complete_amount_cart_level_discount" with following properties:
++      | type               | amount_discount        |
++      | name[en-US]        | Promotion              |
++      | active             | true                   |
++      | valid_from         | 2025-01-01 11:05:00    |
++      | valid_to           | 2025-12-01 00:00:00    |
++      | code               | PROMO_CART_2025        |
++      | reduction_amount   | 10.0                   |
++      | reduction_currency | usd                    |
++      | taxIncluded        | true                   |
++    And discount "complete_amount_cart_level_discount" should have the following properties:
++      | name[en-US]        | Promotion              |
++      | active             | true                   |
++      | valid_from         | 2025-01-01 11:05:00    |
++      | valid_to           | 2025-12-01 00:00:00    |
++      | code               | PROMO_CART_2025        |
++      | reduction_amount   | 10.0                   |
++      | reduction_currency | usd                    |
++      | taxIncluded        | true                   |
++
++  Scenario: One product in cart, one amount cart level discount
++    Given discount "complete_amount_cart_level_discount" should have the following properties:
++      | name[en-US]   | Promotion       |
++      | code          | PROMO_CART_2025 |
++    And I add 1 items of product "product1" in my cart
++    And my cart total shipping fees should be 7.0 tax included
++    And my cart total should be 26.812 tax included
++    When I apply the voucher code "complete_amount_cart_level_discount"
++    Then my cart total should be 16.812 tax included
++
++  Scenario: Create a complete cart level percent discount using new CQRS
++    When I create a cart level discount "complete_percent_cart_level_discount" with following properties:
++      | type              | percent_discount       |
++      | name[en-US]       | Promotion              |
++      | active            | true                   |
++      | valid_from        | 2025-01-01 11:05:00    |
++      | valid_to          | 2025-12-01 00:00:00    |
++      | code              | PROMO_CART_2025_2      |
++      | reduction_percent | 50.0                   |
++    And discount "complete_percent_cart_level_discount" should have the following properties:
++      | name[en-US]       | Promotion              |
++      | active            | true                   |
++      | valid_from        | 2025-01-01 11:05:00    |
++      | valid_to          | 2025-12-01 00:00:00    |
++      | code              | PROMO_CART_2025_2      |
++      | reduction_percent | 50.0                   |
++
++  Scenario: One product in cart, one percent cart level discount
++    Given discount "complete_percent_cart_level_discount" should have the following properties:
++      | name[en-US]   | Promotion         |
++      | code          | PROMO_CART_2025_2 |
++    And I add 1 items of product "product1" in my cart
++    And my cart total shipping fees should be 7.0 tax included
++    And my cart total should be 26.812 tax included
++    When I apply the voucher code "complete_percent_cart_level_discount"
++    Then my cart total should be 16.906 tax included
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_shipping.feature
+similarity index 60%
+rename from tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature
+rename to tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_shipping.feature
+index ce7a16b6d1356..527ec48e6f6f5 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/full_user_experience_test_with_discount_free_shipping.feature
+@@ -1,6 +1,6 @@
+-# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags full-ux-discount-test
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags full-ux-discount-test-free-shipping
+ @restore-all-tables-before-feature
+-@full-ux-discount-test
++@full-ux-discount-test-free-shipping
+ 
+ Feature: Full UX discount test
+   PrestaShop allows BO users to create discounts
+@@ -16,41 +16,26 @@ Feature: Full UX discount test
+     And language with iso code "en" is the default one
+ 
+   Scenario: Create a complete discount with free shipping using new CQRS
+-    When I create a free shipping discount "discount_1" with following properties:
++    When I create a free shipping discount "complete_free_shipping_discount" with following properties:
+       | name[en-US]       | Promotion              |
+-      | description       | Promotion for holidays |
+-      | highlight         | false                  |
+       | active            | true                   |
+-      | allow_partial_use | false                  |
+-      | priority          | 2                      |
+       | valid_from        | 2025-01-01 11:05:00    |
+       | valid_to          | 2025-12-01 00:00:00    |
+-      | total_quantity    | 10                     |
+-      | quantity_per_user | 1                      |
+-      | free_shipping     | true                   |
+       | code              | PROMO_2025             |
+-    And discount "discount_1" should have the following properties:
++    And discount "complete_free_shipping_discount" should have the following properties:
+       | name[en-US]       | Promotion              |
+-      | description       | Promotion for holidays |
+-      | highlight         | false                  |
+       | active            | true                   |
+-      | allow_partial_use | false                  |
+-      | priority          | 2                      |
+       | valid_from        | 2025-01-01 11:05:00    |
+       | valid_to          | 2025-12-01 00:00:00    |
+-      | total_quantity    | 10                     |
+-      | quantity_per_user | 1                      |
+-      | free_shipping     | true                   |
+       | code              | PROMO_2025             |
+ 
+   Scenario: One product in cart, one discount offering only free shipping
+-    Given discount "discount_1" should have the following properties:
++    Given discount "complete_free_shipping_discount" should have the following properties:
+       | name[en-US]   | Promotion  |
+-      | priority      | 2          |
+       | free_shipping | true       |
+       | code          | PROMO_2025 |
+     And I add 1 items of product "product1" in my cart
+     And my cart total shipping fees should be 7.0 tax included
+     And my cart total should be 26.812 tax included
+-    When I apply the voucher code "discount_1"
++    When I apply the voucher code "complete_free_shipping_discount"
+     Then my cart total should be 19.812 tax included

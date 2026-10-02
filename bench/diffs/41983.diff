@@ -1,0 +1,241 @@
+diff --git a/classes/Image.php b/classes/Image.php
+index 9bd45f460e8ee..33c8df3488e24 100644
+--- a/classes/Image.php
++++ b/classes/Image.php
+@@ -366,14 +366,20 @@ public static function deleteCover($idProduct)
+      * Get product cover.
+      *
+      * @param int $idProduct Product ID
++     * @param int|null $idShop Shop ID (defaults to the current context shop)
+      *
+      * @return mixed result
+      */
+-    public static function getCover($idProduct)
++    public static function getCover($idProduct, ?int $idShop = null)
+     {
++        if (null === $idShop) {
++            $idShop = Context::getContext()->shop->id;
++        }
++
+         return Db::getInstance()->getRow('
+ 			SELECT * FROM `' . _DB_PREFIX_ . 'image_shop` image_shop
+ 			WHERE image_shop.`id_product` = ' . (int) $idProduct . '
++			AND image_shop.`id_shop` = ' . (int) $idShop . '
+ 			AND image_shop.`cover`= 1');
+     }
+ 
+diff --git a/classes/Link.php b/classes/Link.php
+index f08f9ee0089b5..0dab5a2aa2936 100644
+--- a/classes/Link.php
++++ b/classes/Link.php
+@@ -518,7 +518,10 @@ public function getCMSCategoryLink(
+         $params = [];
+         $params['id'] = $cmsCategory->id;
+         $params['rewrite'] = (!$alias) ? $cmsCategory->link_rewrite : $alias;
+-        $params['meta_title'] = Tools::str2url($cmsCategory->meta_title);
++
++        if ($dispatcher->hasKeyword('cms_category_rule', $idLang, 'meta_title', $idShop)) {
++            $params['meta_title'] = Tools::str2url($cmsCategory->meta_title);
++        }
+ 
+         return $url . $dispatcher->createUrl('cms_category_rule', $idLang, $params, $this->allow, '', $idShop);
+     }
+@@ -562,8 +565,7 @@ public function getCMSLink(
+         $params['id'] = $cms->id;
+         $params['rewrite'] = (!$alias) ? (is_array($cms->link_rewrite) ? $cms->link_rewrite[(int) $idLang] : $cms->link_rewrite) : $alias;
+ 
+-        $params['meta_title'] = '';
+-        if (isset($cms->meta_title) && !empty($cms->meta_title)) {
++        if ($dispatcher->hasKeyword('cms_rule', $idLang, 'meta_title', $idShop)) {
+             $params['meta_title'] = is_array($cms->meta_title) ? Tools::str2url($cms->meta_title[(int) $idLang]) : Tools::str2url($cms->meta_title);
+         }
+ 
+@@ -615,7 +617,10 @@ public function getSupplierLink(
+         $params = [];
+         $params['id'] = $supplier->id;
+         $params['rewrite'] = (!$alias) ? $supplier->link_rewrite : $alias;
+-        $params['meta_title'] = Tools::str2url($supplier->meta_title);
++
++        if ($dispatcher->hasKeyword('supplier_rule', $idLang, 'meta_title', $idShop)) {
++            $params['meta_title'] = Tools::str2url($supplier->meta_title);
++        }
+ 
+         return $url . $dispatcher->createUrl('supplier_rule', $idLang, $params, $this->allow, '', $idShop);
+     }
+@@ -656,7 +661,10 @@ public function getManufacturerLink(
+         $params = [];
+         $params['id'] = $manufacturer->id;
+         $params['rewrite'] = (!$alias) ? $manufacturer->link_rewrite : $alias;
+-        $params['meta_title'] = Tools::str2url($manufacturer->meta_title);
++
++        if ($dispatcher->hasKeyword('manufacturer_rule', $idLang, 'meta_title', $idShop)) {
++            $params['meta_title'] = Tools::str2url($manufacturer->meta_title);
++        }
+ 
+         return $url . $dispatcher->createUrl('manufacturer_rule', $idLang, $params, $this->allow, '', $idShop);
+     }
+diff --git a/tests/Integration/Classes/ImageGetCoverShopScopeTest.php b/tests/Integration/Classes/ImageGetCoverShopScopeTest.php
+new file mode 100644
+index 0000000000000..b994e27ba6ff6
+--- /dev/null
++++ b/tests/Integration/Classes/ImageGetCoverShopScopeTest.php
+@@ -0,0 +1,76 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\Classes;
++
++use Configuration as LegacyConfiguration;
++use Db;
++use Image;
++use Shop as LegacyShop;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Tests\Resources\DatabaseDump;
++
++class ImageGetCoverShopScopeTest extends KernelTestCase
++{
++    private const TABLES_TO_RESTORE = ['shop', 'shop_group', 'image_shop', 'configuration'];
++
++    private static int $secondShopId;
++
++    public static function setUpBeforeClass(): void
++    {
++        parent::setUpBeforeClass();
++        DatabaseDump::restoreTables(self::TABLES_TO_RESTORE);
++        LegacyConfiguration::resetStaticCache();
++        LegacyShop::resetStaticCache();
++        self::bootKernel();
++
++        $configuration = self::$kernel->getContainer()->get('prestashop.adapter.legacy.configuration');
++        $configuration->set('PS_MULTISHOP_FEATURE_ACTIVE', 1);
++
++        $db = Db::getInstance();
++        // Second shop group + shop.
++        $db->insert('shop_group', [
++            'name' => 'test_group_img', 'color' => '', 'share_customer' => 0,
++            'share_order' => 0, 'share_stock' => 0, 'active' => 1, 'deleted' => 0,
++        ]);
++        $secondGroupId = (int) $db->Insert_ID();
++        $db->insert('shop', [
++            'id_shop_group' => $secondGroupId, 'name' => 'test_shop_img', 'color' => '',
++            'id_category' => 2, 'theme_name' => 'classic', 'active' => 1, 'deleted' => 0,
++        ]);
++        self::$secondShopId = (int) $db->Insert_ID();
++        LegacyShop::resetStaticCache();
++
++        // Product 1 ships images 1 (cover in shop 1) and 2. Make image 2 the cover in the new shop.
++        $db->insert('image_shop', ['id_product' => 1, 'id_image' => 1, 'id_shop' => self::$secondShopId, 'cover' => 0]);
++        $db->insert('image_shop', ['id_product' => 1, 'id_image' => 2, 'id_shop' => self::$secondShopId, 'cover' => 1]);
++    }
++
++    public static function tearDownAfterClass(): void
++    {
++        parent::tearDownAfterClass();
++        DatabaseDump::restoreTables(self::TABLES_TO_RESTORE);
++        LegacyShop::resetStaticCache();
++        LegacyConfiguration::resetStaticCache();
++    }
++
++    /**
++     * The product cover is stored per shop in image_shop. Image::getCover() queried it without an
++     * id_shop filter, returning an arbitrary shop's cover. Each shop must get its own cover.
++     */
++    public function testGetCoverIsShopScoped(): void
++    {
++        self::bootKernel();
++
++        $coverShop1 = Image::getCover(1, 1);
++        $coverShop2 = Image::getCover(1, self::$secondShopId);
++
++        self::assertSame(1, (int) $coverShop1['id_image'], 'shop 1 cover is image 1');
++        self::assertSame(2, (int) $coverShop2['id_image'], 'second shop cover is image 2');
++    }
++}
+diff --git a/tests/Integration/Classes/LinkTest.php b/tests/Integration/Classes/LinkTest.php
+index 16d670ac5a24b..6a83457743180 100644
+--- a/tests/Integration/Classes/LinkTest.php
++++ b/tests/Integration/Classes/LinkTest.php
+@@ -12,11 +12,40 @@
+ use Dispatcher;
+ use PHPUnit\Framework\TestCase;
+ use ReflectionClass;
++use ReflectionProperty;
+ 
+ class LinkTest extends TestCase
+ {
+-    private function getProductLink(bool $statusUseRoutes, int $id_product, ?int $id_product_attribute): array
++    private $originalUseRoutes;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++        $this->originalUseRoutes = $this->getUseRoutesProperty()->getValue(Dispatcher::getInstance());
++    }
++
++    protected function tearDown(): void
++    {
++        // Restore the Dispatcher singleton state mutated by the tests, otherwise the forced
++        // use_routes value leaks into other test classes and changes their generated URLs.
++        $this->getUseRoutesProperty()->setValue(Dispatcher::getInstance(), $this->originalUseRoutes);
++        parent::tearDown();
++    }
++
++    private function getUseRoutesProperty(): ReflectionProperty
+     {
++        $property = (new ReflectionClass('Dispatcher'))->getProperty('use_routes');
++        $property->setAccessible(true);
++
++        return $property;
++    }
++
++    private function getProductLink(
++        bool $statusUseRoutes,
++        int $id_product,
++        ?int $id_product_attribute,
++        ?string $ean13 = null
++    ): array {
+         $reflectionDispatcher = new ReflectionClass('Dispatcher');
+         $property = $reflectionDispatcher->getProperty('use_routes');
+         $property->setAccessible(true);
+@@ -26,7 +55,7 @@ private function getProductLink(bool $statusUseRoutes, int $id_product, ?int $id
+             $id_product,
+             null,
+             null,
+-            null,
++            $ean13,
+             Context::getContext()->language->id,
+             null,
+             $id_product_attribute,
+@@ -67,4 +96,27 @@ public function testUrlIgnoresVariantIfNotSpecifiedWithoutUrlRewriting(): void
+         $this->assertEquals(1, $query['id_product']);
+         $this->assertArrayNotHasKey('id_product_attribute', $query);
+     }
++
++    public function testSupplierUrlOmitsMetaTitleWhenRouteHasNoMetaTitleKeyword(): void
++    {
++        $reflectionDispatcher = new ReflectionClass('Dispatcher');
++        $property = $reflectionDispatcher->getProperty('use_routes');
++        $property->setAccessible(true);
++        $property->setValue(Dispatcher::getInstance(), true);
++
++        $url = Context::getContext()->link->getSupplierLink(1);
++        parse_str(parse_url($url)['query'] ?? '', $query);
++
++        $this->assertArrayNotHasKey('meta_title', $query);
++    }
++
++    public function testProductUrlOmitsEan13WhenRouteHasNoEan13Keyword(): void
++    {
++        parse_str(
++            $this->getProductLink(true, 1, null, '1234567890128')['query'] ?? '',
++            $query
++        );
++
++        $this->assertArrayNotHasKey('ean13', $query);
++    }
+ }

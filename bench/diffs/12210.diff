@@ -1,0 +1,119 @@
+diff --git a/.travis.yml b/.travis.yml
+index cc6c23ac2a50d..c7a836ab1ea1c 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -114,19 +114,19 @@ before_deploy:
+   - |
+       if [ "${TRAVIS_EVENT_TYPE}" = "cron" ]; then
+         mkdir -p ${HOME}/.ssh/;
+-        echo $GC_INSTANCE_KEY | base64 --decode -i > ${HOME}/.ssh/google_compute_engine;
+-        echo $GC_INSTANCE_PUB | base64 --decode -i > ${HOME}/.ssh/google_compute_engine.pub;
+-        chmod 600 ${HOME}/.ssh/*;
+-        echo $GC_SERVICE_KEY | base64 --decode -i > ${HOME}/gcloud-service-key.json;
+-        gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json;
+-        gcloud config set project $GC_PROJECT_ID;
++        echo $GC_INSTANCE_KEY | base64 --decode -i > ${HOME}/.ssh/google_compute_engine && \
++        echo $GC_INSTANCE_PUB | base64 --decode -i > ${HOME}/.ssh/google_compute_engine.pub && \
++        chmod 600 ${HOME}/.ssh/* && \
++        echo $GC_SERVICE_KEY | base64 --decode -i > ${HOME}/gcloud-service-key.json && \
++        gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json && \
++        gcloud config set project $GC_PROJECT_ID
+       fi
+ 
+ after_deploy:
+   - |
+     if [ "${TRAVIS_EVENT_TYPE}" = "cron" ]; then
+       [[ $TRAVIS_BRANCH = "develop" ]] && INSTANCE_TYPE="develop" || INSTANCE_TYPE="release";
+-      gcloud compute instances add-metadata "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}" --zone $GC_ZONE --metadata=TRAVIS_BRANCH=$TRAVIS_BRANCH;
+-      gcloud compute instances add-metadata "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}" --zone $GC_ZONE --metadata-from-file startup-script=tests/E2E/scripts/run-nightly-tests.sh;
+-      gcloud compute instances start --zone $GC_ZONE "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}";
++      gcloud compute instances add-metadata "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}" --zone $GC_ZONE --metadata=TRAVIS_BRANCH=$TRAVIS_BRANCH && \
++      gcloud compute instances add-metadata "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}" --zone $GC_ZONE --metadata-from-file startup-tests-script=tests/E2E/scripts/run-nightly-tests.sh && \
++      gcloud compute instances start --zone $GC_ZONE "${GC_INSTANCE_NAME}-${INSTANCE_TYPE}"
+     fi
+diff --git a/tests/E2E/.docker/prestashop/Dockerfile b/tests/E2E/.docker/prestashop/Dockerfile
+index 4c0debb07bee8..89ff6fd699623 100644
+--- a/tests/E2E/.docker/prestashop/Dockerfile
++++ b/tests/E2E/.docker/prestashop/Dockerfile
+@@ -17,7 +17,8 @@ RUN apt install -y \
+     curl \
+     git \
+     software-properties-common \
+-    nodejs
++    nodejs \
++    poppler-utils
+ 
+ RUN curl --insecure https://getcomposer.org/composer.phar -o /usr/bin/composer && chmod +x /usr/bin/composer
+ 
+diff --git a/tests/E2E/.docker/run-tests.sh b/tests/E2E/.docker/run-tests.sh
+index 0eac6e4809781..567ed26e71152 100755
+--- a/tests/E2E/.docker/run-tests.sh
++++ b/tests/E2E/.docker/run-tests.sh
+@@ -5,7 +5,8 @@ URL="${URL:-prestashop}"
+ MODULE="${MODULE:-}"
+ SAUCELABS="${SAUCELABS:-}"
+ SCRIPT="${SCRIPT:-index.webdriverio.js}"
+-COMMAND_PARAMETERS="--URL=$URL --HEADLESS"
++DIR="${DIR:-`mktemp -d`}/"
++COMMAND_PARAMETERS="--URL=$URL --HEADLESS --DIR=$DIR"
+ 
+ if [ ! -z "$MODULE" ]; then
+   COMMAND_PARAMETERS="$COMMAND_PARAMETERS --MODULE=$MODULE"
+diff --git a/tests/E2E/scripts/run-nightly-tests.sh b/tests/E2E/scripts/run-nightly-tests.sh
+index ace485fa2a901..7a90cbd7acf89 100755
+--- a/tests/E2E/scripts/run-nightly-tests.sh
++++ b/tests/E2E/scripts/run-nightly-tests.sh
+@@ -6,37 +6,42 @@
+ # Otherwise it will shutdown your computer.
+ #
+ 
++set -x
++
+ BRANCH=$(curl http://metadata.google.internal/computeMetadata/v1/instance/attributes/TRAVIS_BRANCH -H "Metadata-Flavor: Google")
+ DIR_PATH=$(mktemp -d)
+-REPORT_PATH=$(mktemp -d)
++REPORT_PATH="${DIR_PATH}/campaigns"
+ REPORT_OUTPUT_NAME="$(date +%Y-%m-%d)-${BRANCH}"
+ 
++exec &> >(tee -a "/var/log/ps-${REPORT_OUTPUT_NAME}.log")
++
+ if [ -d $DIR_PATH ]; then
+   rm -rf $DIR_PATH
+ fi
+ 
+-git clone https://github.com/PrestaShop/PrestaShop.git $DIR_PATH
++git clone https://github.com/PrestaShop/PrestaShop.git $DIR_PATH/prestashop
+ 
+-cd $DIR_PATH
++cd $DIR_PATH/prestashop
+ git checkout $BRANCH
+-mkdir -p "${REPORT_PATH}/campaigns"
++mkdir -p $REPORT_PATH
+ 
+-cd "${DIR_PATH}/tests/E2E"
+-for test_file in test/campaigns/full/* ; do
+-  if [ -f "${test_file}" ]; then
++cd "${DIR_PATH}/prestashop/tests/E2E"
++for test_directory in test/campaigns/full/* ; do
++  if [ -d "${test_directory}" ]; then
++    docker volume prune -f
+     docker stop $(docker ps -qa)
+ 
+     docker-compose up -d --build --force-recreate
+ 
+     echo "Run ${TEST_PATH}"
+     echo "Wait for docker-compose..."
+-    sleep 5
++    sleep 10
+ 
+-    TEST_PATH=${test_file/test\/campaigns\//}
+-    docker-compose exec -e TEST_PATH=$TEST_PATH tests /tmp/wait-for-it.sh --timeout=720 --strict prestashop-web:80 -- bash /tmp/run-tests.sh
++    TEST_PATH=${test_directory/test\/campaigns\//}
++    docker-compose exec -T -e TEST_PATH=$TEST_PATH tests /tmp/wait-for-it.sh --timeout=720 --strict prestashop-web:80 -- bash /tmp/run-tests.sh
+ 
+     if [ -f "mochawesome-report/mochawesome.json" ]; then
+-      cp mochawesome-report/mochawesome.json "${REPORT_PATH}/campaigns/${TEST_PATH//\//-}.json"
++      cp mochawesome-report/mochawesome.json "${REPORT_PATH}/${TEST_PATH//\//-}.json"
+     fi
+ 
+     docker-compose down

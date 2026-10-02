@@ -1,0 +1,92 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index 733228bb933e2..86afc2a190d47 100755
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -4827,6 +4827,26 @@ public static function isGuestCartByCartId($id_cart)
+             WHERE ca.`id_cart` = ' . (int) $id_cart);
+     }
+ 
++    /**
++     * Are all products of the Cart still available in the current state ? They might have been converted to another
++     * type of product since then
++     *
++     * @return bool False if one of the products from the cart has been changed into a new type of product
++     */
++    public function checkAllProductsAreStillAvailableInThisState()
++    {
++        foreach ($this->getProducts(false, false, null, false) as $product) {
++            $currentProduct = new Product();
++            $currentProduct->hydrate($product);
++
++            if ($currentProduct->hasAttributes() && $product['id_product_attribute'] === '0') {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
+     /**
+      * Are all products of the Cart in stock?
+      *
+diff --git a/classes/checkout/CheckoutPaymentStep.php b/classes/checkout/CheckoutPaymentStep.php
+index 9cf5ce1b0aa31..87e800ff50652 100644
+--- a/classes/checkout/CheckoutPaymentStep.php
++++ b/classes/checkout/CheckoutPaymentStep.php
+@@ -43,9 +43,11 @@ public function __construct(
+ 
+     public function handleRequest(array $requestParams = array())
+     {
+-        $allProductsInStock = $this->getCheckoutSession()->getCart()->isAllProductsInStock();
++        $cart = $this->getCheckoutSession()->getCart();
++        $allProductsInStock = $cart->isAllProductsInStock();
++        $allProductsExist = $cart->checkAllProductsAreStillAvailableInThisState();
+ 
+-        if ($allProductsInStock !== true) {
++        if ($allProductsInStock !== true || $allProductsExist !== true) {
+             $cartShowUrl = $this->context->link->getPageLink(
+                 'cart',
+                 null,
+diff --git a/controllers/front/CartController.php b/controllers/front/CartController.php
+index 08fb47c011d42..30ee5d5b32986 100644
+--- a/controllers/front/CartController.php
++++ b/controllers/front/CartController.php
+@@ -520,8 +520,8 @@ protected function processChangeProductInCart()
+                 } elseif ($this->shouldAvailabilityErrorBeRaised($product, $qty_to_check)) {
+                     // check quantity after cart quantity update
+                     $this->{$ErrorKey}[] = $this->trans(
+-                        'The item %product% in your cart is no longer available in this quantity. You cannot proceed with your order until the quantity is adjusted.',
+-                        array('%product%' => $product->name),
++                        'The product is no longer available in this quantity.',
++                        array(),
+                         'Shop.Notifications.Error'
+                     );
+                 }
+@@ -597,11 +597,27 @@ protected function shouldAvailabilityErrorBeRaised($product, $qtyToCheck)
+      */
+     protected function areProductsAvailable()
+     {
++        $products = $this->context->cart->getProducts();
++
++        foreach ($products as $product) {
++            $currentProduct = new Product();
++            $currentProduct->hydrate($product);
++
++            if ($currentProduct->hasAttributes() && $product['id_product_attribute'] === '0') {
++                return $this->trans(
++                   'The item %product% in your cart is now a product with attributes. Please delete it and choose one of its combinations to proceed with your order.',
++                    array('%product%' => $product['name']),
++                    'Shop.Notifications.Error'
++                );
++            }
++        }
++
+         $product = $this->context->cart->checkQuantities(true);
+ 
+         if (true === $product || !is_array($product)) {
+             return true;
+         }
++
+         if ($product['active']) {
+             return $this->trans(
+                 'The item %product% in your cart is no longer available in this quantity. You cannot proceed with your order until the quantity is adjusted.',

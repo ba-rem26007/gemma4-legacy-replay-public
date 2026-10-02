@@ -1,0 +1,389 @@
+diff --git a/classes/pdf/HTMLTemplateInvoice.php b/classes/pdf/HTMLTemplateInvoice.php
+index 12274fb987bef..2ccaca6f85ad6 100644
+--- a/classes/pdf/HTMLTemplateInvoice.php
++++ b/classes/pdf/HTMLTemplateInvoice.php
+@@ -4,7 +4,9 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  */
+ 
++use PrestaShop\PrestaShop\Adapter\ContainerFinder;
+ use PrestaShop\PrestaShop\Core\Util\Sorter;
++use PrestaShopBundle\Entity\Repository\ShipmentRepository;
+ 
+ class HTMLTemplateInvoiceCore extends HTMLTemplate
+ {
+@@ -23,6 +25,11 @@ class HTMLTemplateInvoiceCore extends HTMLTemplate
+      */
+     public $available_in_your_account = false;
+ 
++    /**
++     * @var ShipmentRepository
++     */
++    private $shipmentRepository;
++
+     /**
+      * @param OrderInvoice $order_invoice
+      * @param Smarty $smarty
+@@ -37,6 +44,9 @@ public function __construct(OrderInvoice $order_invoice, Smarty $smarty, $bulk_m
+         $this->smarty = $smarty;
+         $this->smarty->assign('isTaxEnabled', (bool) Configuration::get('PS_TAX'));
+ 
++        $containerFinder = new ContainerFinder(Context::getContext());
++        $this->shipmentRepository = $containerFinder->getContainer()->get(ShipmentRepository::class);
++
+         // If shop_address is null, then update it with current one.
+         // But no DB save required here to avoid massive updates for bulk PDF generation case.
+         // (DB: bug fixed in 1.6.1.1 with upgrade SQL script to avoid null shop_address in old orderInvoices)
+@@ -221,6 +231,11 @@ public function getContent()
+         $sorter = new Sorter();
+         $order_details = $sorter->natural($order_details, Sorter::ORDER_DESC, 'product_reference', 'product_supplier_reference');
+ 
++        $shipmentCarrierNames = $this->getCarrierNamesFromShipments($this->order->id);
++        if (!empty($shipmentCarrierNames)) {
++            $carrier->name = $shipmentCarrierNames;
++        }
++
+         $cart_rules = $this->order->getCartRules();
+         $free_shipping = false;
+         foreach ($cart_rules as $key => $cart_rule) {
+@@ -369,9 +384,8 @@ public function getTaxTabContent()
+     {
+         $address = new Address((int) $this->order->{Configuration::get('PS_TAX_ADDRESS_TYPE')});
+         $tax_exempt = Configuration::get('VATNUMBER_MANAGEMENT')
+-                            && !empty($address->vat_number)
+-                            && $address->id_country != Configuration::get('VATNUMBER_COUNTRY');
+-        $carrier = new Carrier($this->order->id_carrier);
++            && !empty($address->vat_number)
++            && $address->id_country != Configuration::get('VATNUMBER_COUNTRY');
+ 
+         $data = [
+             'tax_exempt' => $tax_exempt,
+@@ -384,7 +398,6 @@ public function getTaxTabContent()
+             'tax_breakdowns' => $this->getTaxBreakdown(),
+             'order' => $this->order,
+             'order_invoice' => $this->order_invoice,
+-            'carrier' => $carrier,
+         ];
+ 
+         $this->smarty->assign($data);
+@@ -479,4 +492,31 @@ public function getFilename()
+             $this->order_invoice->getInvoiceNumberFormatted($id_lang, $id_shop)
+         );
+     }
++
++    /**
++     * Get all carrier names from shipments for an order, joined by ", ".
++     * Falls back to an empty string if no shipments exist or on error.
++     */
++    private function getCarrierNamesFromShipments(int $orderId): string
++    {
++        try {
++            $shipments = $this->shipmentRepository->findByOrderId($orderId);
++        } catch (Throwable $e) {
++            return '';
++        }
++
++        if (empty($shipments)) {
++            return '';
++        }
++
++        $carrierNames = [];
++        foreach ($shipments as $shipment) {
++            $carrier = new Carrier($shipment->getCarrierId());
++            if ($carrier->name && !in_array($carrier->name, $carrierNames)) {
++                $carrierNames[] = $carrier->name;
++            }
++        }
++
++        return implode(', ', $carrierNames);
++    }
+ }
+diff --git a/pdf/invoice.note-tab.tpl b/pdf/invoice.note-tab.tpl
+index 11cc127265538..2355ebbe86e3d 100644
+--- a/pdf/invoice.note-tab.tpl
++++ b/pdf/invoice.note-tab.tpl
+@@ -3,21 +3,25 @@
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  *}
+ {if isset($order_invoice->note) && $order_invoice->note}
+-	<tr>
+-		<td colspan="12" height="10">&nbsp;</td>
+-	</tr>
++  <tr>
++    <td colspan="12" height="10">&nbsp;</td>
++  </tr>
+ 
+-	<tr>
+-		<td colspan="6" class="left">
+-			<table id="note-tab" style="width: 100%">
+-				<tr>
+-					<td class="grey">{l s='Note' d='Shop.Pdf' pdf='true'}</td>
+-				</tr>
+-				<tr>
+-					<td class="note">{$order_invoice->note|escape:"html"}</td>
+-				</tr>
+-			</table>
+-		</td>
+-		<td colspan="1">&nbsp;</td>
+-	</tr>
++  <tr>
++    <td colspan="6" class="left">
++      <table id="note-tab" style="width: 100%">
++        <thead>
++          <tr>
++            <th class="header small">{l s='Note' d='Shop.Pdf' pdf='true'}</th>
++          </tr>
++        </thead>
++        <tbody>
++          <tr>
++            <td class="left white">{$order_invoice->note|escape:"html"}</td>
++          </tr>
++        </tbody>
++      </table>
++    </td>
++    <td colspan="1">&nbsp;</td>
++  </tr>
+ {/if}
+diff --git a/pdf/invoice.product-tab.tpl b/pdf/invoice.product-tab.tpl
+index 636549975d3c4..e7cf6c5d7270b 100644
+--- a/pdf/invoice.product-tab.tpl
++++ b/pdf/invoice.product-tab.tpl
+@@ -2,6 +2,7 @@
+  * For the full copyright and license information, please view the
+  * docs/licenses/LICENSE.txt file that was distributed with this source code.
+  *}
++
+ <table class="product" width="100%" cellpadding="4" cellspacing="0">
+ 
+   {assign var='widthColProduct' value=$layout.product.width}
+diff --git a/pdf/invoice.style-tab.tpl b/pdf/invoice.style-tab.tpl
+index 17976f549ca68..827d1e942ec55 100644
+--- a/pdf/invoice.style-tab.tpl
++++ b/pdf/invoice.style-tab.tpl
+@@ -45,10 +45,11 @@
+ 		}
+ 		table#note-tab {
+ 			padding: {$table_padding};
++			word-wrap: break-word;
+ 			border: 1px solid {$color_border};
+ 		}
+-		table#note-tab td.note{
+-			word-wrap: break-word;
++		table#note-tab th {
++			text-align: left;
+ 		}
+ 		table#tax-tab {
+ 			padding: {$table_padding};
+diff --git a/pdf/invoice.tax-tab.tpl b/pdf/invoice.tax-tab.tpl
+index 3496964c07f67..2c2e19ad90724 100644
+--- a/pdf/invoice.tax-tab.tpl
++++ b/pdf/invoice.tax-tab.tpl
+@@ -27,7 +27,7 @@
+       {foreach $tax_breakdowns as $label => $bd}
+         {assign var=label_printed value=false}
+ 
+-			  {foreach $bd as $line}
++        {foreach $bd as $line}
+           {* We force the display of the ecotax even if the ecotax rate is equals to 0 *}
+           {if $line.rate == 0 and $label != 'ecotax_tax'}
+             {continue}
+diff --git a/pdf/invoice.tpl b/pdf/invoice.tpl
+index 258e69d8148f7..d9c9eb97c323a 100644
+--- a/pdf/invoice.tpl
++++ b/pdf/invoice.tpl
+@@ -7,115 +7,115 @@
+ 
+ 
+ <table width="100%" id="body" border="0" cellpadding="0" cellspacing="0" style="margin:0;">
+-	<!-- Invoicing -->
+-	<tr>
+-		<td colspan="12">
++    <!-- Invoicing -->
++    <tr>
++        <td colspan="12">
+ 
+-			{$addresses_tab}
++            {$addresses_tab}
+ 
+-		</td>
+-	</tr>
++        </td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="12" height="30">&nbsp;</td>
+-	</tr>
++    <tr>
++        <td colspan="12" height="30">&nbsp;</td>
++    </tr>
+ 
+-	<!-- TVA Info -->
+-	<tr>
+-		<td colspan="12">
++    <!-- TVA Info -->
++    <tr>
++        <td colspan="12">
+ 
+-			{$summary_tab}
++            {$summary_tab}
+ 
+-		</td>
+-	</tr>
++        </td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="12" height="20">&nbsp;</td>
+-	</tr>
++    <tr>
++        <td colspan="12" height="20">&nbsp;</td>
++    </tr>
+ 
+-	<!-- Product -->
+-	<tr>
+-		<td colspan="12">
++    <!-- Product -->
++    <tr>
++        <td colspan="12">
+ 
+-			{$product_tab}
++            {$product_tab}
+ 
+-		</td>
+-	</tr>
++        </td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="12" height="10">&nbsp;</td>
+-	</tr>
++    <tr>
++        <td colspan="12" height="10">&nbsp;</td>
++    </tr>
+ 
+-	<!-- TVA -->
+-	<tr>
+-		<!-- Code TVA -->
+-		<td colspan="6" class="left">
++    <!-- TVA -->
++    <tr>
++        <!-- Code TVA -->
++        <td colspan="6" class="left">
+ 
+-			{$tax_tab}
++            {$tax_tab}
+ 
+-		</td>
+-		<td colspan="1">&nbsp;</td>
+-		<!-- Calcule TVA -->
+-		<td colspan="5" rowspan="5" class="right">
++        </td>
++        <td colspan="1">&nbsp;</td>
++        <!-- Calcule TVA -->
++        <td colspan="5" rowspan="5" class="right">
+ 
+-			{$total_tab}
++            {$total_tab}
+ 
+-		</td>
+-	</tr>
++        </td>
++    </tr>
+ 
+-	{$note_tab}
++    {$note_tab}
+ 
+-	<tr>
+-		<td colspan="12" height="10">&nbsp;</td>
+-	</tr>
++    <tr>
++        <td colspan="12" height="10">&nbsp;</td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="6" class="left">
++    <tr>
++        <td colspan="6" class="left">
+ 
+-			{$payment_tab}
++            {$payment_tab}
+ 
+-		</td>
+-		<td colspan="1">&nbsp;</td>
+-	</tr>
++        </td>
++        <td colspan="1">&nbsp;</td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="6" class="left">
++    <tr>
++        <td colspan="6" class="left">
+ 
+-			{$shipping_tab}
++            {$shipping_tab}
+ 
+-		</td>
+-		<td colspan="1">&nbsp;</td>
+-	</tr>
++        </td>
++        <td colspan="1">&nbsp;</td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="12" height="10">&nbsp;</td>
+-	</tr>
++    <tr>
++        <td colspan="12" height="10">&nbsp;</td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="7" class="left small">
++    <tr>
++        <td colspan="7" class="left small">
+ 
+-			<table>
+-				<tr>
+-					<td>
+-						<p>{$legal_free_text|escape:'html':'UTF-8'|nl2br}</p>
+-					</td>
+-				</tr>
+-			</table>
++            <table>
++                <tr>
++                    <td>
++                        <p>{$legal_free_text|escape:'html':'UTF-8'|nl2br}</p>
++                    </td>
++                </tr>
++            </table>
+ 
+-		</td>
+-	</tr>
++        </td>
++    </tr>
+ 
+-	<!-- Hook -->
+-	{if isset($HOOK_DISPLAY_PDF)}
+-	<tr>
+-		<td colspan="12" height="30">&nbsp;</td>
+-	</tr>
++    <!-- Hook -->
++    {if isset($HOOK_DISPLAY_PDF)}
++    <tr>
++        <td colspan="12" height="30">&nbsp;</td>
++    </tr>
+ 
+-	<tr>
+-		<td colspan="12">
+-			{$HOOK_DISPLAY_PDF}
+-		</td>
+-	</tr>
+-	{/if}
++    <tr>
++        <td colspan="12">
++            {$HOOK_DISPLAY_PDF}
++        </td>
++    </tr>
++    {/if}
+ 
+ </table>

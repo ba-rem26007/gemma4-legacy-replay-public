@@ -1,0 +1,179 @@
+diff --git a/classes/order/OrderHistory.php b/classes/order/OrderHistory.php
+index cf888d4521cbb..1b8b093ce7b70 100644
+--- a/classes/order/OrderHistory.php
++++ b/classes/order/OrderHistory.php
+@@ -136,16 +136,17 @@ public function changeIdOrderState($new_order_state, $id_order, $use_existing_pa
+                 $customer = new Customer((int) $order->id_customer);
+                 $links = array();
+                 foreach ($assign as $product) {
+-                    $text = Tools::htmlentitiesUTF8($product['name']);
++                    $complementaryText = array();
+                     if (isset($product['deadline'])) {
+-                        $text .= '&nbsp;' . $this->trans('expires on %s.', array($product['deadline']), 'Admin.Orderscustomers.Notification');
++                        $complementaryText[] = $this->trans('expires on %s.', array($product['deadline']), 'Admin.Orderscustomers.Notification');
+                     }
+                     if (isset($product['downloadable'])) {
+-                        $text .= '&nbsp;' . $this->trans('downloadable %d time(s)', array((int) $product['downloadable']), 'Admin.Orderscustomers.Notification');
++                        $complementaryText[] = $this->trans('downloadable %d time(s)', array((int) $product['downloadable']), 'Admin.Orderscustomers.Notification');
+                     }
+                     $links[] = array(
+-                        'text' => $text,
++                        'text' => Tools::htmlentitiesUTF8($product['name']),
+                         'url' => $product['link'],
++                        'complementary_text' => implode(' ', $complementaryText),
+                     );
+                 }
+ 
+diff --git a/mails/_partials/download_product_virtual_products.tpl b/mails/_partials/download_product_virtual_products.tpl
+index 2ab35aca7be3d..30712565da347 100644
+--- a/mails/_partials/download_product_virtual_products.tpl
++++ b/mails/_partials/download_product_virtual_products.tpl
+@@ -24,6 +24,6 @@
+  *}
+ <ul>
+ {foreach $list as $product}
+-  <li><a href="{$product.url}">{$product.text}</a></li>
++  <li><a href="{$product.url}">{$product.text}</a> {$product.complementary_text}</li>
+ {/foreach}
+ </ul>
+diff --git a/mails/_partials/download_product_virtual_products.txt b/mails/_partials/download_product_virtual_products.txt
+index c3639fb9b6452..47a72639bb640 100644
+--- a/mails/_partials/download_product_virtual_products.txt
++++ b/mails/_partials/download_product_virtual_products.txt
+@@ -1,3 +1,3 @@
+ {foreach $list as $product}
+-  [{$product.text}]({$product.url})
++  [{$product.text}]({$product.url}) {$product.complementary_text}
+ {/foreach}
+diff --git a/src/Adapter/MailTemplate/MailPreviewVariablesBuilder.php b/src/Adapter/MailTemplate/MailPreviewVariablesBuilder.php
+index e5a61c47cbff9..a1fdc192b1f3f 100644
+--- a/src/Adapter/MailTemplate/MailPreviewVariablesBuilder.php
++++ b/src/Adapter/MailTemplate/MailPreviewVariablesBuilder.php
+@@ -31,6 +31,7 @@
+ use PrestaShop\PrestaShop\Core\Employee\ContextEmployeeProviderInterface;
+ use PrestaShop\PrestaShop\Core\Localization\Locale;
+ use PrestaShop\PrestaShop\Core\MailTemplate\Layout\LayoutInterface;
++use Symfony\Component\Translation\TranslatorInterface;
+ use Address;
+ use AddressFormat;
+ use Carrier;
+@@ -47,6 +48,8 @@ final class MailPreviewVariablesBuilder
+ {
+     const ORDER_CONFIRMATION = 'order_conf';
+ 
++    const DOWNLOAD_PRODUCT = 'download_product';
++
+     const EMAIL_ALERTS_MODULE = 'ps_emailalerts';
+     const NEW_ORDER = 'new_order';
+     const RETURN_SLIP = 'return_slip';
+@@ -71,6 +74,11 @@ final class MailPreviewVariablesBuilder
+     /** @var MailPartialTemplateRenderer */
+     private $mailPartialTemplateRenderer;
+ 
++    /**
++     * @var TranslatorInterface
++     */
++    private $translator;
++
+     /**
+      * MailPreviewVariablesBuilder constructor.
+      *
+@@ -79,13 +87,15 @@ final class MailPreviewVariablesBuilder
+      * @param ContextEmployeeProviderInterface $employeeProvider
+      * @param MailPartialTemplateRenderer $mailPartialTemplateRenderer
+      * @param Locale $locale
++     * @param TranslatorInterface $translatorComponent
+      */
+     public function __construct(
+         ConfigurationInterface $configuration,
+         LegacyContext $legacyContext,
+         ContextEmployeeProviderInterface $employeeProvider,
+         MailPartialTemplateRenderer $mailPartialTemplateRenderer,
+-        Locale $locale
++        Locale $locale,
++        TranslatorInterface $translatorComponent
+     ) {
+         $this->configuration = $configuration;
+         $this->legacyContext = $legacyContext;
+@@ -93,6 +103,7 @@ public function __construct(
+         $this->employeeProvider = $employeeProvider;
+         $this->mailPartialTemplateRenderer = $mailPartialTemplateRenderer;
+         $this->locale = $locale;
++        $this->translator = $translatorComponent;
+     }
+ 
+     /**
+@@ -136,6 +147,19 @@ public function buildTemplateVariables(LayoutInterface $mailLayout)
+         return $templateVars;
+     }
+ 
++    /**
++     * @param $id
++     * @param array $parameters
++     * @param null $domain
++     * @param null $local
++     *
++     * @return string
++     */
++    protected function trans($id, $parameters = [], $domain = null, $local = null)
++    {
++        return $this->translator->trans($id, $parameters, $domain, $local);
++    }
++
+     /**
+      * @return array
+      *
+@@ -166,6 +190,15 @@ private function buildOrderVariables(LayoutInterface $mailLayout)
+                 '{discounts}' => $cartRulesListHtml,
+                 '{discounts_txt}' => $cartRulesListTxt,
+             ];
++        } elseif (self::DOWNLOAD_PRODUCT == $mailLayout->getName()) {
++            $virtualProductTemplateList = $this->getFakeVirtualProductList();
++            $virtualProductListTxt = $this->mailPartialTemplateRenderer->render('download_product_virtual_products.txt', $this->context->language, $virtualProductTemplateList);
++            $virtualProductListHtml = $this->mailPartialTemplateRenderer->render('download_product_virtual_products.tpl', $this->context->language, $virtualProductTemplateList);
++            $productVariables = [
++                '{nbProducts}' => count($virtualProductTemplateList),
++                '{virtualProducts}' => $virtualProductListHtml,
++                '{virtualProductsTxt}' => $virtualProductListTxt,
++            ];
+         } elseif (self::EMAIL_ALERTS_MODULE == $mailLayout->getModuleName() && self::NEW_ORDER == $mailLayout->getName()) {
+             $productVariables = [
+                 '{items}' => $this->getNewOrderItems($order),
+@@ -368,6 +401,28 @@ private function getProductList(Order $order)
+         return $productTemplateList;
+     }
+ 
++    /**
++     * @return array
++     */
++    private function getFakeVirtualProductList()
++    {
++        $products = Product::getProducts($this->context->language->getId(), 0, 2, 'id_product', 'ASC');
++        $results = [];
++
++        foreach ($products as $productData) {
++            $product = new Product($productData['id_product']);
++            $results[] = [
++                'text' => Product::getProductName($productData['id_product']),
++                'url' => $product->getLink(),
++                'complementary_text' => '',
++            ];
++        }
++        $results[1]['complementary_text'] = ' ' . $this->trans('expires on %s.', array(date('Y-m-d')), 'Admin.Orderscustomers.Notification');
++        $results[1]['complementary_text'] .= ' ' . $this->trans('downloadable %d time(s)', array(10), 'Admin.Orderscustomers.Notification');
++
++        return $results;
++    }
++
+     /**
+      * @param Address $address Address $the_address that needs to be txt formated
+      * @param string $lineSeparator Line separator
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml b/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
+index fe04a6a72f654..41c746588c97f 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/mail_template.yml
+@@ -29,3 +29,4 @@ services:
+       - '@prestashop.adapter.data_provider.employee'
+       - "@prestashop.adapter.mail_template.partial_template_renderer"
+       - "@prestashop.core.localization.locale.context_locale"
++      - "@translator"

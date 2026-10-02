@@ -1,0 +1,1536 @@
+diff --git a/src/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractor.php b/src/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractor.php
+new file mode 100644
+index 0000000000000..c6b4dcdafd1b6
+--- /dev/null
++++ b/src/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractor.php
+@@ -0,0 +1,82 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Translation\Storage\Extractor;
++
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use Symfony\Component\Translation\MessageCatalogue;
++
++/**
++ * Builds a MessageCatalogue from the extra property registry so that the label and description
++ * wordings declared by modules (and the core) become translatable from the back office.
++ *
++ * Each definition contributes up to two wordings (label and description), each stored under the
++ * domain declared alongside it (e.g. "Modules.Demoextrafield.Admin"). A wording without a paired
++ * domain falls back to the "messages" domain — the same default Symfony uses — instead of being
++ * dropped.
++ *
++ * The returned catalogue is intentionally not filtered by module or type: callers (the catalogue
++ * providers) keep only the domains relevant to their context, reusing the same domain filtering
++ * already applied to wordings extracted from source code.
++ */
++class ExtraPropertyTranslationExtractor
++{
++    /**
++     * @var array<string, MessageCatalogue> built catalogues indexed by locale
++     */
++    private array $catalogueCache = [];
++
++    public function __construct(
++        private readonly ExtraPropertyDefinitionRepositoryInterface $definitionRepository,
++    ) {
++    }
++
++    /**
++     * Returns every registered label/description wording, keyed under its declared translation
++     * domain. The catalogue is NOT filtered by context: each catalogue provider narrows it to
++     * its own domains. Domain names contain separating dots, like the wordings extracted from
++     * source code.
++     *
++     * @param string $locale The locale used for the message catalogue. Note that wordings won't be translated in this locale.
++     */
++    public function extract(string $locale): MessageCatalogue
++    {
++        if (!isset($this->catalogueCache[$locale])) {
++            $this->catalogueCache[$locale] = $this->buildCatalogue($locale);
++        }
++
++        return $this->catalogueCache[$locale];
++    }
++
++    private function buildCatalogue(string $locale): MessageCatalogue
++    {
++        $catalogue = new MessageCatalogue($locale);
++
++        foreach ($this->definitionRepository->getAllDefinitions() as $definition) {
++            $this->addWording($catalogue, $definition->getLabelWording(), $definition->getLabelDomain());
++            $this->addWording($catalogue, $definition->getDescriptionWording(), $definition->getDescriptionDomain());
++        }
++
++        return $catalogue;
++    }
++
++    /**
++     * Adds a single wording under its domain, using the wording as both translation key and value
++     * (default-catalogue convention). No-op when the wording itself is missing; a missing domain
++     * falls back to Symfony's default "messages" domain rather than dropping the wording.
++     */
++    private function addWording(MessageCatalogue $catalogue, ?string $wording, ?string $domain): void
++    {
++        if (null === $wording || '' === $wording) {
++            return;
++        }
++
++        // "messages" is Symfony's default translation domain, used here when none is declared.
++        $catalogue->set($wording, $wording, null === $domain || '' === $domain ? 'messages' : $domain);
++    }
++}
+diff --git a/src/Core/Translation/Storage/Provider/CatalogueDomainConverter.php b/src/Core/Translation/Storage/Provider/CatalogueDomainConverter.php
+new file mode 100644
+index 0000000000000..79b11a14e8ea7
+--- /dev/null
++++ b/src/Core/Translation/Storage/Provider/CatalogueDomainConverter.php
+@@ -0,0 +1,57 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\Translation\Storage\Provider;
++
++use PrestaShop\PrestaShop\Core\Translation\Storage\Normalizer\DomainNormalizer;
++use Symfony\Component\Translation\MessageCatalogue;
++
++/**
++ * Normalizes the domain names of a source catalogue (removing dots, e.g. "Modules.Foo.Admin"
++ * becomes "ModulesFooAdmin") and keeps only the domains matching one of the given filename
++ * filter patterns.
++ *
++ * Shared by the module and core catalogue providers so the same per-context domain filtering is
++ * applied to wordings gathered from any source (source code templates, the extra property
++ * registry, …): when wordings are extracted, the domain names are in format
++ * Modules.MODULENAME.DOMAIN.DOMAIN, while the catalogue domains must be camelcased with the dots
++ * removed (ModulesModulenameDomain…).
++ */
++class CatalogueDomainConverter
++{
++    /**
++     * @param MessageCatalogue $catalogue source catalogue, with dot-separated domain names
++     * @param array<int, string> $filenameFilters regex patterns; a normalized domain is kept only when it matches one of them
++     *
++     * @return MessageCatalogue a new catalogue with normalized domains, restricted to the matching ones
++     */
++    public function normalizeAndFilter(MessageCatalogue $catalogue, array $filenameFilters): MessageCatalogue
++    {
++        $normalizer = new DomainNormalizer();
++        $newCatalogue = new MessageCatalogue($catalogue->getLocale());
++
++        foreach ($catalogue->getDomains() as $domain) {
++            // remove dots
++            $newDomain = $normalizer->normalize($domain);
++
++            // add delimiters
++            // only add if the domain is relevant to one of the desired filters
++            foreach ($filenameFilters as $pattern) {
++                if (preg_match($pattern, $newDomain)) {
++                    $newCatalogue->add(
++                        $catalogue->all($domain),
++                        $newDomain
++                    );
++                    break;
++                }
++            }
++        }
++
++        return $newCatalogue;
++    }
++}
+diff --git a/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php b/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
+index f830d29e386fc..87ef8385baab1 100644
+--- a/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
++++ b/src/Core/Translation/Storage/Provider/CatalogueProviderFactory.php
+@@ -9,6 +9,7 @@
+ 
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeRepository;
+ use PrestaShop\PrestaShop\Core\Translation\Exception\UnexpectedTranslationTypeException;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ThemeExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
+@@ -57,6 +58,11 @@ class CatalogueProviderFactory
+      */
+     private $translationsDirectory;
+ 
++    /**
++     * @var ExtraPropertyTranslationExtractor
++     */
++    private $extraPropertyTranslationExtractor;
++
+     /**
+      * @var ThemeExtractor
+      */
+@@ -92,6 +98,7 @@ class CatalogueProviderFactory
+      * @param string $themesDirectory
+      * @param string $modulesDirectory
+      * @param string $translationsDirectory
++     * @param ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+      */
+     public function __construct(
+         DatabaseTranslationLoader $databaseTranslationLoader,
+@@ -102,7 +109,8 @@ public function __construct(
+         Filesystem $filesystem,
+         string $themesDirectory,
+         string $modulesDirectory,
+-        string $translationsDirectory
++        string $translationsDirectory,
++        ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+     ) {
+         $this->databaseTranslationLoader = $databaseTranslationLoader;
+         $this->legacyModuleExtractor = $legacyModuleExtractor;
+@@ -113,12 +121,14 @@ public function __construct(
+         $this->themeRepository = $themeRepository;
+         $this->filesystem = $filesystem;
+         $this->themesDirectory = $themesDirectory;
++        $this->extraPropertyTranslationExtractor = $extraPropertyTranslationExtractor;
+         $this->moduleCatalogueProviderFactory = new ModuleCatalogueProviderFactory(
+             $this->databaseTranslationLoader,
+             $this->legacyModuleExtractor,
+             $this->legacyFileLoader,
+             $this->modulesDirectory,
+-            $this->translationsDirectory
++            $this->translationsDirectory,
++            $this->extraPropertyTranslationExtractor
+         );
+     }
+ 
+@@ -160,7 +170,8 @@ private function getCoreCatalogueProvider(ProviderDefinitionInterface $providerD
+                 $this->databaseTranslationLoader,
+                 $this->translationsDirectory,
+                 $providerDefinition->getFilenameFilters(),
+-                $providerDefinition->getTranslationDomains()
++                $providerDefinition->getTranslationDomains(),
++                $this->extraPropertyTranslationExtractor
+             );
+         }
+ 
+@@ -187,7 +198,8 @@ private function getThemeCatalogueProvider(ThemeProviderDefinition $providerDefi
+                 array_merge(
+                     $coreFrontProviderDefinition->getTranslationDomains(),
+                     $modulesProviderDefinition->getTranslationDomains()
+-                )
++                ),
++                $this->extraPropertyTranslationExtractor
+             );
+ 
+             $this->providers[$providerDefinition->getType()] = new ThemeCatalogueLayersProvider(
+diff --git a/src/Core/Translation/Storage/Provider/CoreCatalogueLayersProvider.php b/src/Core/Translation/Storage/Provider/CoreCatalogueLayersProvider.php
+index 7aaee885959b9..438a82a679eac 100644
+--- a/src/Core/Translation/Storage/Provider/CoreCatalogueLayersProvider.php
++++ b/src/Core/Translation/Storage/Provider/CoreCatalogueLayersProvider.php
+@@ -8,6 +8,7 @@
+ namespace PrestaShop\PrestaShop\Core\Translation\Storage\Provider;
+ 
+ use PrestaShop\PrestaShop\Core\Translation\Exception\TranslationFilesNotFoundException;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\DefaultCatalogueFinder;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\FileTranslatedCatalogueFinder;
+@@ -66,22 +67,30 @@ class CoreCatalogueLayersProvider implements CatalogueLayersProviderInterface
+      */
+     private $translationDomains;
+ 
++    /**
++     * @var ExtraPropertyTranslationExtractor
++     */
++    private $extraPropertyTranslationExtractor;
++
+     /**
+      * @param DatabaseTranslationLoader $databaseTranslationLoader
+      * @param string $resourceDirectory
+      * @param array<int, string> $filenameFilters
+      * @param array<int, string> $translationDomains
++     * @param ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+      */
+     public function __construct(
+         DatabaseTranslationLoader $databaseTranslationLoader,
+         string $resourceDirectory,
+         array $filenameFilters,
+-        array $translationDomains
++        array $translationDomains,
++        ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+     ) {
+         $this->databaseTranslationLoader = $databaseTranslationLoader;
+         $this->resourceDirectory = $resourceDirectory;
+         $this->filenameFilters = $filenameFilters;
+         $this->translationDomains = $translationDomains;
++        $this->extraPropertyTranslationExtractor = $extraPropertyTranslationExtractor;
+     }
+ 
+     /**
+@@ -91,7 +100,27 @@ public function __construct(
+      */
+     public function getDefaultCatalogue(string $locale): MessageCatalogue
+     {
+-        return $this->getDefaultCatalogueFinder()->getCatalogue($locale);
++        // A core domain may exist only through the extra property registry (no XLF file is shipped
++        // for it), so a missing default file is not an error here: fall back to an empty catalogue
++        // and let the registry wordings below populate it.
++        try {
++            $defaultCatalogue = $this->getDefaultCatalogueFinder()->getCatalogue($locale);
++        } catch (TranslationFilesNotFoundException) {
++            $defaultCatalogue = new MessageCatalogue($locale);
++        }
++
++        // add the label/description wordings declared in the extra property registry (by the core
++        // or by modules) whose normalized domain belongs to this catalogue type, so they become
++        // translatable too
++        $extraPropertyCatalogue = (new CatalogueDomainConverter())->normalizeAndFilter(
++            $this->extraPropertyTranslationExtractor->extract($locale),
++            $this->filenameFilters
++        );
++        foreach ($extraPropertyCatalogue->getDomains() as $domain) {
++            $defaultCatalogue->add($extraPropertyCatalogue->all($domain), $domain);
++        }
++
++        return $defaultCatalogue;
+     }
+ 
+     /**
+@@ -99,7 +128,13 @@ public function getDefaultCatalogue(string $locale): MessageCatalogue
+      */
+     public function getFileTranslatedCatalogue(string $locale): MessageCatalogue
+     {
+-        return $this->getFileTranslatedCatalogueFinder()->getCatalogue($locale);
++        // A registry-only core domain has no XLF translation file; that is not an error, it simply
++        // has no file-provided translations yet (its wordings come from the registry and the DB).
++        try {
++            return $this->getFileTranslatedCatalogueFinder()->getCatalogue($locale);
++        } catch (TranslationFilesNotFoundException) {
++            return new MessageCatalogue($locale);
++        }
+     }
+ 
+     /**
+diff --git a/src/Core/Translation/Storage/Provider/ModuleCatalogueLayersProvider.php b/src/Core/Translation/Storage/Provider/ModuleCatalogueLayersProvider.php
+index e0d128fdc7d13..8b12f70f8edf2 100644
+--- a/src/Core/Translation/Storage/Provider/ModuleCatalogueLayersProvider.php
++++ b/src/Core/Translation/Storage/Provider/ModuleCatalogueLayersProvider.php
+@@ -9,9 +9,9 @@
+ 
+ use PrestaShop\PrestaShop\Core\Translation\Exception\TranslationFilesNotFoundException;
+ use PrestaShop\PrestaShop\Core\Translation\Exception\UnsupportedLocaleException;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
+-use PrestaShop\PrestaShop\Core\Translation\Storage\Normalizer\DomainNormalizer;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\DefaultCatalogueFinder;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\FileTranslatedCatalogueFinder;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Finder\UserTranslatedCatalogueFinder;
+@@ -97,6 +97,11 @@ class ModuleCatalogueLayersProvider implements CatalogueLayersProviderInterface
+      */
+     private $translationDomains;
+ 
++    /**
++     * @var ExtraPropertyTranslationExtractor
++     */
++    private $extraPropertyTranslationExtractor;
++
+     /**
+      * @param DatabaseTranslationLoader $databaseTranslationLoader
+      * @param LegacyModuleExtractorInterface $legacyModuleExtractor
+@@ -106,6 +111,7 @@ class ModuleCatalogueLayersProvider implements CatalogueLayersProviderInterface
+      * @param string $moduleName
+      * @param array<int, string> $filenameFilters
+      * @param array<int, string> $translationDomains
++     * @param ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+      */
+     public function __construct(
+         DatabaseTranslationLoader $databaseTranslationLoader,
+@@ -115,7 +121,8 @@ public function __construct(
+         string $translationsDirectory,
+         string $moduleName,
+         array $filenameFilters,
+-        array $translationDomains
++        array $translationDomains,
++        ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+     ) {
+         $this->databaseTranslationLoader = $databaseTranslationLoader;
+         $this->moduleName = $moduleName;
+@@ -125,6 +132,7 @@ public function __construct(
+         $this->legacyFileLoader = $legacyFileLoader;
+         $this->filenameFilters = $filenameFilters;
+         $this->translationDomains = $translationDomains;
++        $this->extraPropertyTranslationExtractor = $extraPropertyTranslationExtractor;
+     }
+ 
+     /**
+@@ -345,6 +353,15 @@ private function buildFreshDefaultCatalogueFromTemplates(string $locale): Messag
+             // analyze template files and extract wordings
+             /** @var MessageCatalogue $additionalDefaultCatalogue */
+             $additionalDefaultCatalogue = $this->legacyModuleExtractor->extract($this->moduleName, $locale);
++
++            // add the label/description wordings declared in the extra property registry so they
++            // become translatable too; convertDomainsAndFilterCatalogue() then normalizes their
++            // domains and keeps only the ones belonging to this module
++            $extraPropertyCatalogue = $this->extraPropertyTranslationExtractor->extract($locale);
++            foreach ($extraPropertyCatalogue->getDomains() as $domain) {
++                $additionalDefaultCatalogue->add($extraPropertyCatalogue->all($domain), $domain);
++            }
++
+             $defaultCatalogue = $this->convertDomainsAndFilterCatalogue($additionalDefaultCatalogue);
+         } catch (UnsupportedLocaleException) {
+             // Do nothing as support of legacy files is deprecated
+@@ -366,26 +383,6 @@ private function buildFreshDefaultCatalogueFromTemplates(string $locale): Messag
+      */
+     private function convertDomainsAndFilterCatalogue(MessageCatalogue $catalogue): MessageCatalogue
+     {
+-        $normalizer = new DomainNormalizer();
+-        $newCatalogue = new MessageCatalogue($catalogue->getLocale());
+-
+-        foreach ($catalogue->getDomains() as $domain) {
+-            // remove dots
+-            $newDomain = $normalizer->normalize($domain);
+-
+-            // add delimiters
+-            // only add if the domain is relevant to this module
+-            foreach ($this->filenameFilters as $pattern) {
+-                if (preg_match($pattern, $newDomain)) {
+-                    $newCatalogue->add(
+-                        $catalogue->all($domain),
+-                        $newDomain
+-                    );
+-                    break;
+-                }
+-            }
+-        }
+-
+-        return $newCatalogue;
++        return (new CatalogueDomainConverter())->normalizeAndFilter($catalogue, $this->filenameFilters);
+     }
+ }
+diff --git a/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php b/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php
+index 9da1b1de0820a..8ea7885567824 100644
+--- a/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php
++++ b/src/Core/Translation/Storage/Provider/ModuleCatalogueProviderFactory.php
+@@ -7,6 +7,7 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Translation\Storage\Provider;
+ 
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\ModuleProviderDefinition;
+@@ -39,18 +40,25 @@ class ModuleCatalogueProviderFactory
+      */
+     private $translationsDirectory;
+ 
++    /**
++     * @var ExtraPropertyTranslationExtractor
++     */
++    private $extraPropertyTranslationExtractor;
++
+     public function __construct(
+         DatabaseTranslationLoader $databaseTranslationLoader,
+         LegacyModuleExtractorInterface $legacyModuleExtractor,
+         LoaderInterface $legacyFileLoader,
+         string $modulesDirectory,
+-        string $translationsDirectory
++        string $translationsDirectory,
++        ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor
+     ) {
+         $this->databaseTranslationLoader = $databaseTranslationLoader;
+         $this->legacyModuleExtractor = $legacyModuleExtractor;
+         $this->legacyFileLoader = $legacyFileLoader;
+         $this->modulesDirectory = $modulesDirectory;
+         $this->translationsDirectory = $translationsDirectory;
++        $this->extraPropertyTranslationExtractor = $extraPropertyTranslationExtractor;
+     }
+ 
+     public function getModuleCatalogueProvider(ModuleProviderDefinition $providerDefinition): CatalogueLayersProviderInterface
+@@ -63,7 +71,8 @@ public function getModuleCatalogueProvider(ModuleProviderDefinition $providerDef
+             $this->translationsDirectory,
+             $providerDefinition->getModuleName(),
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->extraPropertyTranslationExtractor
+         );
+     }
+ }
+diff --git a/src/PrestaShopBundle/DependencyInjection/Compiler/OverrideTranslatorServiceCompilerPass.php b/src/PrestaShopBundle/DependencyInjection/Compiler/OverrideTranslatorServiceCompilerPass.php
+index 288510a84ae9e..27aee50d8f170 100644
+--- a/src/PrestaShopBundle/DependencyInjection/Compiler/OverrideTranslatorServiceCompilerPass.php
++++ b/src/PrestaShopBundle/DependencyInjection/Compiler/OverrideTranslatorServiceCompilerPass.php
+@@ -8,6 +8,7 @@
+ 
+ use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
++use Symfony\Component\DependencyInjection\Reference;
+ 
+ /**
+  * On Symfony 3.x, the parameters like `translator.class` are not used anymore and cannot override the original services.
+@@ -20,6 +21,10 @@ public function process(ContainerBuilder $container)
+     {
+         $definition = $container->getDefinition('translator.default');
+         $definition->setClass($container->getParameter('translator.class'));
++        // Feed the extra property registry wordings into the back-office translator so their domains
++        // exist in its catalogue (makes Module::isUsingNewTranslationSystem() detect a module whose
++        // only new-system wordings come from extra properties).
++        $definition->addMethodCall('setExtraPropertyTranslationLoader', [new Reference('prestashop.translation.loader.extra_property')]);
+ 
+         if (!in_array($container->getParameter('kernel.environment'), ['dev', 'test'])) {
+             return;
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/translation.yml b/src/PrestaShopBundle/Resources/config/services/bundle/translation.yml
+index eab99cae4448a..98c826294e311 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/translation.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/translation.yml
+@@ -6,6 +6,7 @@ services:
+     class: PrestaShopBundle\Translation\TranslatorLanguageLoader
+     arguments:
+       - '@prestashop.adapter.module.repository.module_repository'
++      - '@prestashop.translation.extractor.extra_property'
+ 
+   prestashop.translation.builder.translation_tree:
+     class: PrestaShop\PrestaShop\Core\Translation\Builder\TranslationsTreeBuilder
+@@ -60,6 +61,7 @@ services:
+       - '%themes_translations_dir%'
+       - '%modules_dir%'
+       - "%translations_dir%"
++      - '@prestashop.translation.extractor.extra_property'
+ 
+   prestashop.translation.backoffice_provider:
+     class: PrestaShopBundle\Translation\Provider\BackOfficeProvider
+@@ -168,6 +170,13 @@ services:
+     tags:
+       - { name: translation.loader, alias: db }
+ 
++  prestashop.translation.loader.extra_property:
++    class: PrestaShopBundle\Translation\Loader\ExtraPropertyTranslationLoader
++    arguments:
++      - '@prestashop.translation.extractor.extra_property'
++    tags:
++      - { name: translation.loader, alias: extra_property }
++
+   prestashop.translation.reader.legacy_file:
+     class: PrestaShop\PrestaShop\Core\Translation\Storage\Loader\LegacyFileReader
+     arguments:
+@@ -220,6 +229,11 @@ services:
+       - "%modules_dir%"
+       - "%translations_catalogue_extract_excluded_dirs%"
+ 
++  prestashop.translation.extractor.extra_property:
++    class: PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor
++    arguments:
++      - '@PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface'
++
+   prestashop.translation.legacy_module.extractor:
+     class: PrestaShopBundle\Translation\Extractor\LegacyModuleExtractor
+     arguments:
+diff --git a/src/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoader.php b/src/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoader.php
+new file mode 100644
+index 0000000000000..e6f968fe3830b
+--- /dev/null
++++ b/src/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoader.php
+@@ -0,0 +1,86 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShopBundle\Translation\Loader;
++
++use Doctrine\DBAL\Exception as DBALException;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Normalizer\DomainNormalizer;
++use Symfony\Component\Translation\Loader\LoaderInterface;
++use Symfony\Component\Translation\MessageCatalogue;
++
++/**
++ * Exposes the label/description wordings declared in the extra property registry as a translation
++ * resource ("extra_property" format), so the back-office (FrameworkBundle) translator bakes them
++ * into its compiled catalogue — the same way XLF-declared wordings are.
++ *
++ * The registry domains are dot-separated (e.g. "Modules.Foo.Admin"); they are normalized to the
++ * catalogue convention ("ModulesFooAdmin") so they line up with the rest of the catalogue and with
++ * Module::isUsingNewTranslationSystem().
++ */
++class ExtraPropertyTranslationLoader implements LoaderInterface
++{
++    private DomainNormalizer $domainNormalizer;
++
++    public function __construct(
++        private readonly ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor,
++    ) {
++        $this->domainNormalizer = new DomainNormalizer();
++    }
++
++    /**
++     * Lists the normalized catalogue domains the registry contributes for a locale, so callers can
++     * register one resource per domain.
++     *
++     * @return list<string>
++     */
++    public function getNormalizedDomains(string $locale): array
++    {
++        $domains = [];
++        foreach ($this->extractSafely($locale)->getDomains() as $domain) {
++            $domains[$this->domainNormalizer->normalize($domain)] = true;
++        }
++
++        return array_keys($domains);
++    }
++
++    /**
++     * {@inheritdoc}
++     *
++     * Returns the registry wordings whose normalized domain matches the requested one, as a default
++     * catalogue (key == value). Several dotted domains may normalize to the same catalogue domain;
++     * all their wordings are merged.
++     */
++    public function load($resource, $locale, $domain = 'messages'): MessageCatalogue
++    {
++        $catalogue = new MessageCatalogue($locale);
++        $sourceCatalogue = $this->extractSafely($locale);
++
++        foreach ($sourceCatalogue->getDomains() as $sourceDomain) {
++            if ($this->domainNormalizer->normalize($sourceDomain) === $domain) {
++                $catalogue->add($sourceCatalogue->all($sourceDomain), $domain);
++            }
++        }
++
++        return $catalogue;
++    }
++
++    /**
++     * Reads the registry, tolerating an unavailable database: the translation cache is warmed by CLI
++     * commands (e.g. cache:clear) that can run without a configured/reachable database, so a connection
++     * failure must contribute no wordings rather than break the whole catalogue build.
++     */
++    private function extractSafely(string $locale): MessageCatalogue
++    {
++        try {
++            return $this->extraPropertyTranslationExtractor->extract($locale);
++        } catch (DBALException) {
++            return new MessageCatalogue($locale);
++        }
++    }
++}
+diff --git a/src/PrestaShopBundle/Translation/Translator.php b/src/PrestaShopBundle/Translation/Translator.php
+index 6f365b9a24e07..d2045d889aa9c 100644
+--- a/src/PrestaShopBundle/Translation/Translator.php
++++ b/src/PrestaShopBundle/Translation/Translator.php
+@@ -6,6 +6,7 @@
+ 
+ namespace PrestaShopBundle\Translation;
+ 
++use PrestaShopBundle\Translation\Loader\ExtraPropertyTranslationLoader;
+ use Symfony\Bundle\FrameworkBundle\Translation\Translator as BaseTranslator;
+ 
+ /**
+@@ -16,6 +17,17 @@ class Translator extends BaseTranslator implements TranslatorInterface
+     use PrestaShopTranslatorTrait;
+     use TranslatorLanguageTrait;
+ 
++    private ?ExtraPropertyTranslationLoader $extraPropertyTranslationLoader = null;
++
++    /**
++     * Injected via OverrideTranslatorServiceCompilerPass (the FrameworkBundle builds this service
++     * with a fixed constructor signature, so the dependency is set through a method call instead).
++     */
++    public function setExtraPropertyTranslationLoader(ExtraPropertyTranslationLoader $extraPropertyTranslationLoader): void
++    {
++        $this->extraPropertyTranslationLoader = $extraPropertyTranslationLoader;
++    }
++
+     /**
+      * {@inheritdoc}
+      */
+@@ -24,4 +36,32 @@ public function addResource($format, $resource, $locale, $domain = null): void
+         parent::addResource($format, $resource, $locale, $domain);
+         parent::addResource('db', $domain . '.' . $locale . '.db', $locale, $domain);
+     }
++
++    /**
++     * {@inheritdoc}
++     *
++     * Registers the extra property registry wordings as "extra_property" resources before the
++     * catalogue is built, so they are baked into the compiled (cached) catalogue like any other
++     * resource. The addResource() override above also pairs each with a "db" resource, so admin
++     * translations of those wordings are loaded alongside their source values.
++     */
++    protected function initializeCatalogue(string $locale): void
++    {
++        // Register the registry wordings (and, via the addResource() override, their paired "db"
++        // resource) so they are baked into the compiled catalogue. Only real locales are handled:
++        // - addResource() resets ALL catalogues when given a fallback locale (Symfony behaviour),
++        //   which would corrupt the catalogue being built as initializeCatalogue() recurses into
++        //   fallbacks ("en", "default");
++        // - the "default" pseudo-locale is not a database language, so its paired "db" resource would
++        //   make SqlTranslationLoader throw.
++        // This is enough: each real-locale catalogue carries the source wordings (key == value)
++        // directly, so trans() resolves them without ever needing the fallback catalogue.
++        if (null !== $this->extraPropertyTranslationLoader && !in_array($locale, $this->getFallbackLocales(), true)) {
++            foreach ($this->extraPropertyTranslationLoader->getNormalizedDomains($locale) as $domain) {
++                $this->addResource('extra_property', 'extra_property', $locale, $domain);
++            }
++        }
++
++        parent::initializeCatalogue($locale);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+index fc809fa5111f0..5ef21b1285922 100644
+--- a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
++++ b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+@@ -6,8 +6,11 @@
+ 
+ namespace PrestaShopBundle\Translation;
+ 
++use Doctrine\DBAL\Exception as DBALException;
+ use PrestaShop\PrestaShop\Adapter\Module\Repository\ModuleRepository;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\Theme;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Normalizer\DomainNormalizer;
+ use PrestaShop\TranslationToolsBundle\Translation\Helper\DomainHelper;
+ use PrestaShopBundle\Translation\Loader\SqlTranslationLoader;
+ use Symfony\Component\Finder\Finder;
+@@ -29,6 +32,7 @@ class TranslatorLanguageLoader
+ 
+     public function __construct(
+         private readonly ModuleRepository $moduleRepository,
++        private readonly ?ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor = null,
+     ) {
+         $this->xliffFileLoader = new XliffFileLoader();
+     }
+@@ -106,6 +110,58 @@ public function loadLanguage(TranslatorInterface $translator, $locale, $withDB =
+         foreach ($activeModulesPaths as $activeModuleName => $activeModulePath) {
+             $this->loadModuleTranslations($translator, $activeModuleName, $activeModulePath, $locale, $withDB);
+         }
++
++        // The label/description wordings declared in the extra property registry (by the core or by
++        // modules) live in the database, not in XLF files or trans() calls, so they are only available
++        // when DB access is enabled. Inject them here so their domains exist in the runtime catalogue
++        // for every locale (this is what makes Module::isUsingNewTranslationSystem() detect a module
++        // whose only new-system wordings come from extra properties).
++        if ($withDB && null !== $this->extraPropertyTranslationExtractor) {
++            $this->loadExtraPropertyTranslations($translator, $locale);
++        }
++    }
++
++    /**
++     * Adds the extra property registry wordings to the catalogue, normalizing their dot-separated
++     * domains to the catalogue convention (e.g. "Modules.Foo.Admin" -> "ModulesFooAdmin") and
++     * registering a database resource per domain so admin-provided translations of those wordings
++     * are loaded too.
++     */
++    private function loadExtraPropertyTranslations(TranslatorInterface $translator, string $locale): void
++    {
++        try {
++            $extraPropertyCatalogue = $this->extraPropertyTranslationExtractor->extract($locale);
++        } catch (DBALException) {
++            // The catalogue may be warmed by CLI commands that run without a reachable database;
++            // a connection failure must contribute no wordings rather than break loading.
++            return;
++        }
++        $normalizer = new DomainNormalizer();
++
++        $messagesByDomain = [];
++        foreach ($extraPropertyCatalogue->getDomains() as $domain) {
++            $normalizedDomain = $normalizer->normalize($domain);
++            // Two distinct raw domains can normalize to the same catalogue domain (e.g. a malformed
++            // "Modules.FooAdmin" alongside "Modules.Foo.Admin"). Merge instead of overwrite so no
++            // wordings are silently dropped when that happens.
++            $messagesByDomain[$normalizedDomain] = array_merge(
++                $messagesByDomain[$normalizedDomain] ?? [],
++                $extraPropertyCatalogue->all($domain)
++            );
++        }
++
++        if (method_exists($translator, 'addResource')) {
++            foreach (array_keys($messagesByDomain) as $domain) {
++                $translator->addResource('db', $domain . '.' . $locale . '.db', $locale, $domain);
++            }
++        }
++
++        if ($translator instanceof TranslatorBagInterface) {
++            $catalogue = $translator->getCatalogue($locale);
++            foreach ($messagesByDomain as $domain => $messages) {
++                $catalogue->add($messages, $domain);
++            }
++        }
+     }
+ 
+     /**
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/AbstractCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/AbstractCatalogueLayersProviderTestCase.php
+index 7d17be62643ad..b841698cd9956 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/AbstractCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/AbstractCatalogueLayersProviderTestCase.php
+@@ -7,6 +7,7 @@
+ 
+ namespace Tests\Integration\Core\Translation\Storage\Provider;
+ 
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+ use Symfony\Component\Translation\MessageCatalogue;
+ 
+@@ -28,6 +29,20 @@ public function setUp(): void
+ 
+     abstract protected function getProvider(array $databaseContent = []);
+ 
++    /**
++     * Builds an extra property extractor that contributes nothing, so the catalogue is unchanged.
++     */
++    protected function createEmptyExtraPropertyTranslationExtractor(): ExtraPropertyTranslationExtractor
++    {
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                return new MessageCatalogue($locale);
++            });
++
++        return $extractor;
++    }
++
+     protected function getDefaultCatalogue($locale): MessageCatalogue
+     {
+         return $this->getProvider()->getDefaultCatalogue($locale);
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/BackofficeCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/BackofficeCatalogueLayersProviderTestCase.php
+index 7091003c32bf0..1b20961f545d3 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/BackofficeCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/BackofficeCatalogueLayersProviderTestCase.php
+@@ -115,7 +115,8 @@ protected function getProvider(array $databaseContent = []): CoreCatalogueLayers
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/CoreDomainCatalogueLayersProviderTest.php b/tests/Integration/Core/Translation/Storage/Provider/CoreDomainCatalogueLayersProviderTest.php
+index 68b3f0df25656..60fe439d33b28 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/CoreDomainCatalogueLayersProviderTest.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/CoreDomainCatalogueLayersProviderTest.php
+@@ -9,6 +9,7 @@
+ 
+ use Generator;
+ use PrestaShop\PrestaShop\Core\Language\LanguageRepositoryInterface;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\CoreCatalogueLayersProvider;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\Definition\CoreDomainProviderDefinition;
+ use PrestaShop\PrestaShop\Core\Translation\TranslationRepositoryInterface;
+@@ -187,6 +188,58 @@ public function getValuesForLoadCatalogueFromDatabase(): Generator
+         ];
+     }
+ 
++    /**
++     * Test it merges the label/description wordings declared in the extra property registry into the
++     * default catalogue, keeping only the domains that belong to this core type.
++     */
++    public function testItMergesExtraPropertyWordingsIntoDefaultCatalogue(): void
++    {
++        $extraPropertyTranslationExtractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extraPropertyTranslationExtractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                $catalogue = new MessageCatalogue($locale);
++                // belongs to this core domain: must be kept (normalized to AdminActions)
++                $catalogue->set('A core registry label', 'A core registry label', 'Admin.Actions');
++                // belongs to another domain: must be filtered out
++                $catalogue->set('A foreign label', 'A foreign label', 'Admin.Catalog');
++
++                return $catalogue;
++            });
++
++        $catalogue = $this->getProvider('AdminActions', [], $extraPropertyTranslationExtractor)->getDefaultCatalogue('fr-FR');
++
++        // the core registry wording is present under the normalized domain, with key == value
++        $this->assertSame('A core registry label', $catalogue->get('A core registry label', 'AdminActions'));
++
++        // a wording belonging to another domain is filtered out
++        $this->assertNotContains('AdminCatalog', $catalogue->getDomains());
++    }
++
++    /**
++     * A core domain can exist only through the extra property registry, with no XLF file shipped for
++     * it. Opening such a domain must not fail: the default catalogue serves the registry wording and
++     * the file-translated catalogue is simply empty (regression test for the per-domain editor 400).
++     */
++    public function testItServesARegistryOnlyCoreDomainWithoutAnXlfFile(): void
++    {
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                $catalogue = new MessageCatalogue($locale);
++                $catalogue->set('Core only label', 'Core only label', 'Admin.Coreextrafield.Test');
++
++                return $catalogue;
++            });
++
++        $provider = $this->getProvider('AdminCoreextrafieldTest', [], $extractor);
++
++        $defaultCatalogue = $provider->getDefaultCatalogue('fr-FR');
++        $this->assertSame('Core only label', $defaultCatalogue->get('Core only label', 'AdminCoreextrafieldTest'));
++
++        // no XLF file exists for this domain: the file-translated catalogue must be empty, not throw
++        $this->assertSame([], $provider->getFileTranslatedCatalogue('fr-FR')->getDomains());
++    }
++
+     private function getDefaultCatalogue(string $domain, string $locale): MessageCatalogue
+     {
+         return $this->getProvider($domain)->getDefaultCatalogue($locale);
+@@ -233,7 +286,7 @@ private function assertResultIsAsExpected(array $expected, MessageCatalogue $cat
+      *
+      * @return CoreCatalogueLayersProvider
+      */
+-    private function getProvider(string $domain, array $databaseContent = []): CoreCatalogueLayersProvider
++    private function getProvider(string $domain, array $databaseContent = [], ?ExtraPropertyTranslationExtractor $extraPropertyTranslationExtractor = null): CoreCatalogueLayersProvider
+     {
+         $providerDefinition = new CoreDomainProviderDefinition($domain);
+ 
+@@ -245,7 +298,22 @@ private function getProvider(string $domain, array $databaseContent = []): CoreC
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $extraPropertyTranslationExtractor ?? $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
++
++    /**
++     * Builds an extra property extractor that contributes nothing, so the catalogue is unchanged.
++     */
++    private function createEmptyExtraPropertyTranslationExtractor(): ExtraPropertyTranslationExtractor
++    {
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                return new MessageCatalogue($locale);
++            });
++
++        return $extractor;
++    }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/FrontofficeCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/FrontofficeCatalogueLayersProviderTestCase.php
+index d3a70ebbc9a29..242bae306d724 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/FrontofficeCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/FrontofficeCatalogueLayersProviderTestCase.php
+@@ -160,7 +160,8 @@ protected function getProvider(array $databaseContent = []): CoreCatalogueLayers
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/MailsBodyCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/MailsBodyCatalogueLayersProviderTestCase.php
+index 678fded46e4bf..1d4dfa440bfae 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/MailsBodyCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/MailsBodyCatalogueLayersProviderTestCase.php
+@@ -162,7 +162,8 @@ protected function getProvider(array $databaseContent = []): CoreCatalogueLayers
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/MailsCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/MailsCatalogueLayersProviderTestCase.php
+index 370ed553e78f7..ee3ccefdccf83 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/MailsCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/MailsCatalogueLayersProviderTestCase.php
+@@ -162,7 +162,8 @@ protected function getProvider(array $databaseContent = []): CoreCatalogueLayers
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/ModuleCatalogueLayersProviderTest.php b/tests/Integration/Core/Translation/Storage/Provider/ModuleCatalogueLayersProviderTest.php
+index 956208f11534a..8ab3e7e2709c4 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/ModuleCatalogueLayersProviderTest.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/ModuleCatalogueLayersProviderTest.php
+@@ -10,6 +10,7 @@
+ use PHPUnit\Framework\MockObject\MockObject;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\Theme;
+ use PrestaShop\PrestaShop\Core\Language\LanguageRepositoryInterface;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\LegacyFileLoader;
+@@ -41,6 +42,11 @@ class ModuleCatalogueLayersProviderTest extends KernelTestCase
+      */
+     private $legacyFileLoader;
+ 
++    /**
++     * @var MockObject|ExtraPropertyTranslationExtractor
++     */
++    private $extraPropertyTranslationExtractor;
++
+     /**
+      * @var mixed
+      */
+@@ -78,6 +84,13 @@ public function setUp(): void
+             });
+ 
+         $this->legacyFileLoader = $this->createMock(LoaderInterface::class);
++
++        // by default the extra property registry contributes nothing, so the existing expectations are unchanged
++        $this->extraPropertyTranslationExtractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $this->extraPropertyTranslationExtractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                return new MessageCatalogue($locale);
++            });
+     }
+ 
+     /**
+@@ -162,7 +175,8 @@ public function testItLoadsCatalogueFromXliffWhenLocaleDirectoryNotFound(): void
+             $this->translationsDir,
+             $providerDefinition->getModuleName(),
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->extraPropertyTranslationExtractor
+         );
+ 
+         // load catalogue from translations/fr-FR
+@@ -249,7 +263,8 @@ public function testItBuildsCatalogueFromLegacyWhenDefaultCatalogueNotFound(): v
+             $this->translationsDir,
+             $providerDefinition->getModuleName(),
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->extraPropertyTranslationExtractor
+         );
+ 
+         // load catalogue from translations/default
+@@ -282,6 +297,52 @@ public function testItBuildsCatalogueFromLegacyWhenDefaultCatalogueNotFound(): v
+         $this->assertResultIsAsExpected($expected, $catalogue);
+     }
+ 
++    /**
++     * Test it merges the label/description wordings declared in the extra property registry into the
++     * default catalogue, keeping only the domains that belong to the module being translated.
++     */
++    public function testItMergesExtraPropertyWordingsIntoDefaultCatalogue(): void
++    {
++        $extraPropertyTranslationExtractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extraPropertyTranslationExtractor->method('extract')
++            ->willReturnCallback(function (string $locale) {
++                $catalogue = new MessageCatalogue($locale);
++                // belongs to the translated module: must be kept (normalized to ModulesTranslationtestAdmin)
++                $catalogue->set('A registry label', 'A registry label', 'Modules.Translationtest.Admin');
++                $catalogue->set('A registry description', 'A registry description', 'Modules.Translationtest.Admin');
++                // belongs to another module: must be filtered out
++                $catalogue->set('A foreign label', 'A foreign label', 'Modules.Othermodule.Admin');
++
++                return $catalogue;
++            });
++
++        $providerDefinition = new ModuleProviderDefinition('translationtest');
++        $provider = new ModuleCatalogueLayersProvider(
++            new MockDatabaseTranslationLoader(
++                [],
++                $this->createMock(LanguageRepositoryInterface::class),
++                $this->createMock(TranslationRepositoryInterface::class)
++            ),
++            $this->legacyModuleExtractor,
++            $this->legacyFileLoader,
++            $this->modulesDir,
++            $this->translationsDir,
++            $providerDefinition->getModuleName(),
++            $providerDefinition->getFilenameFilters(),
++            $providerDefinition->getTranslationDomains(),
++            $extraPropertyTranslationExtractor
++        );
++
++        $catalogue = $provider->getDefaultCatalogue('fr-FR');
++
++        // the module's registry wordings are present under the normalized domain, with key == value
++        $this->assertSame('A registry label', $catalogue->get('A registry label', 'ModulesTranslationtestAdmin'));
++        $this->assertSame('A registry description', $catalogue->get('A registry description', 'ModulesTranslationtestAdmin'));
++
++        // a wording belonging to another module is filtered out
++        $this->assertNotContains('ModulesOthermoduleAdmin', $catalogue->getDomains());
++    }
++
+     public function testItDoesntLoadsCustomizedTranslationsWithThemeDefinedFromDatabase(): void
+     {
+         $databaseContent = [
+@@ -393,7 +454,8 @@ private function getProvider(string $moduleName, array $databaseContent = []): M
+             $this->translationsDir,
+             $providerDefinition->getModuleName(),
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->extraPropertyTranslationExtractor
+         );
+     }
+ 
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/OthersCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/OthersCatalogueLayersProviderTestCase.php
+index 0c1ceedf04409..c99dcb5306acb 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/OthersCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/OthersCatalogueLayersProviderTestCase.php
+@@ -162,7 +162,8 @@ protected function getProvider(array $databaseContent = []): CoreCatalogueLayers
+             ),
+             $this->translationsDir,
+             $providerDefinition->getFilenameFilters(),
+-            $providerDefinition->getTranslationDomains()
++            $providerDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+     }
+ }
+diff --git a/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTestCase.php b/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTestCase.php
+index 20419ad971b0a..410dadd9efae6 100644
+--- a/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTestCase.php
++++ b/tests/Integration/Core/Translation/Storage/Provider/ThemeCatalogueLayersProviderTestCase.php
+@@ -112,7 +112,8 @@ public function testItExtractsDefaultCatalogueFromThemeFiles(): void
+             $databaseTranslationLoader,
+             $this->translationsDir,
+             $coreFrontProviderDefinition->getFilenameFilters(),
+-            $coreFrontProviderDefinition->getTranslationDomains()
++            $coreFrontProviderDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+ 
+         $provider = new ThemeCatalogueLayersProvider(
+@@ -252,7 +253,8 @@ protected function getProvider(array $databaseContent = []): ThemeCatalogueLayer
+             $databaseTranslationLoader,
+             $this->translationsDir,
+             $coreFrontProviderDefinition->getFilenameFilters(),
+-            $coreFrontProviderDefinition->getTranslationDomains()
++            $coreFrontProviderDefinition->getTranslationDomains(),
++            $this->createEmptyExtraPropertyTranslationExtractor()
+         );
+ 
+         return new ThemeCatalogueLayersProvider(
+diff --git a/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php b/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php
+new file mode 100644
+index 0000000000000..42832e4655d5d
+--- /dev/null
++++ b/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php
+@@ -0,0 +1,74 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Integration\PrestaShopBundle\Translation;
++
++use PrestaShop\PrestaShop\Adapter\Module\Repository\ModuleRepository;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
++use PrestaShopBundle\Translation\TranslatorComponent;
++use PrestaShopBundle\Translation\TranslatorLanguageLoader;
++use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Symfony\Component\Translation\MessageCatalogue;
++
++/**
++ * Ensures TranslatorLanguageLoader injects the extra property registry wordings (which live in the
++ * database, not in XLF files) into the runtime translator catalogue, with their domains normalized
++ * to the catalogue convention. This is what lets Module::isUsingNewTranslationSystem() detect a
++ * module whose only new-system wordings come from extra properties, in any locale.
++ *
++ * ./vendor/bin/phpunit -c tests/Integration/phpunit.xml --filter=TranslatorLanguageLoaderTest
++ */
++class TranslatorLanguageLoaderTest extends KernelTestCase
++{
++    public function testItInjectsExtraPropertyWordingsUnderNormalizedDomains(): void
++    {
++        // An unused locale keeps the core XLF scan empty so the test isolates the extra-property injection.
++        $locale = 'zz-ZZ';
++
++        $moduleRepository = $this->createMock(ModuleRepository::class);
++        $moduleRepository->method('getPresentModulesPaths')->willReturn([]);
++
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')->willReturnCallback(function (string $extractLocale): MessageCatalogue {
++            $catalogue = new MessageCatalogue($extractLocale);
++            // Dotted domain, as declared by a module's extra property definition.
++            $catalogue->set('Video link', 'Video link', 'Modules.Demoextrafield.Admin');
++
++            return $catalogue;
++        });
++
++        $translator = new TranslatorComponent($locale);
++        (new TranslatorLanguageLoader($moduleRepository, $extractor))
++            ->setIsAdminContext(true)
++            ->loadLanguage($translator, $locale, true);
++
++        $catalogue = $translator->getCatalogue($locale);
++
++        // Dots removed -> matches the catalogue convention and Module::isUsingNewTranslationSystem().
++        $this->assertContains('ModulesDemoextrafieldAdmin', $catalogue->getDomains());
++        $this->assertSame('Video link', $catalogue->get('Video link', 'ModulesDemoextrafieldAdmin'));
++    }
++
++    public function testItSkipsExtraPropertyWordingsWhenDatabaseIsDisabled(): void
++    {
++        $locale = 'zz-ZZ';
++
++        $moduleRepository = $this->createMock(ModuleRepository::class);
++        $moduleRepository->method('getPresentModulesPaths')->willReturn([]);
++
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->expects($this->never())->method('extract');
++
++        $translator = new TranslatorComponent($locale);
++        (new TranslatorLanguageLoader($moduleRepository, $extractor))
++            ->setIsAdminContext(true)
++            ->loadLanguage($translator, $locale, false);
++
++        $this->assertNotContains('ModulesDemoextrafieldAdmin', $translator->getCatalogue($locale)->getDomains());
++    }
++}
+diff --git a/tests/Unit/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractorTest.php b/tests/Unit/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractorTest.php
+new file mode 100644
+index 0000000000000..87b535ce08f40
+--- /dev/null
++++ b/tests/Unit/Core/Translation/Storage/Extractor/ExtraPropertyTranslationExtractorTest.php
+@@ -0,0 +1,134 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Translation\Storage\Extractor;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionCollection;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepositoryInterface;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
++
++class ExtraPropertyTranslationExtractorTest extends TestCase
++{
++    public function testItExtractsLabelAndDescriptionAsSeparateKeysUnderTheirDomain(): void
++    {
++        $extractor = $this->buildExtractor([
++            new ExtraPropertyDefinition(
++                'product',
++                'video_link',
++                labelWording: 'Video link',
++                labelDomain: 'Modules.Demoextrafield.Admin',
++                descriptionWording: 'Video URL per language',
++                descriptionDomain: 'Modules.Demoextrafield.Admin',
++            ),
++        ]);
++
++        $catalogue = $extractor->extract('en-US');
++
++        $this->assertSame('en-US', $catalogue->getLocale());
++        $this->assertSame(['Modules.Demoextrafield.Admin'], $catalogue->getDomains());
++        // default catalogue convention: translation key == translation value
++        $this->assertSame('Video link', $catalogue->get('Video link', 'Modules.Demoextrafield.Admin'));
++        $this->assertSame('Video URL per language', $catalogue->get('Video URL per language', 'Modules.Demoextrafield.Admin'));
++        $this->assertCount(2, $catalogue->all('Modules.Demoextrafield.Admin'));
++    }
++
++    public function testItKeepsWordingsFromDifferentDomainsSeparate(): void
++    {
++        $extractor = $this->buildExtractor([
++            new ExtraPropertyDefinition('product', 'video_link', labelWording: 'Video link', labelDomain: 'Modules.Demoextrafield.Admin'),
++            new ExtraPropertyDefinition('cms', 'revision_code', labelWording: 'Revision code', labelDomain: 'Modules.Other.Admin'),
++        ]);
++
++        $catalogue = $extractor->extract('en-US');
++
++        $domains = $catalogue->getDomains();
++        sort($domains);
++        $this->assertSame(['Modules.Demoextrafield.Admin', 'Modules.Other.Admin'], $domains);
++    }
++
++    public function testItFallsBackToTheMessagesDomainForWordingsWithoutADomain(): void
++    {
++        $extractor = $this->buildExtractor([
++            new ExtraPropertyDefinition(
++                'customer',
++                'credit_limit',
++                labelWording: 'Credit limit',
++                labelDomain: null,
++                descriptionWording: 'Maximum customer credit amount',
++                descriptionDomain: '',
++            ),
++        ]);
++
++        $catalogue = $extractor->extract('en-US');
++
++        // A wording without a paired domain falls back to Symfony's default "messages" domain.
++        $this->assertSame(['messages'], $catalogue->getDomains());
++        $this->assertSame('Credit limit', $catalogue->get('Credit limit', 'messages'));
++        $this->assertSame('Maximum customer credit amount', $catalogue->get('Maximum customer credit amount', 'messages'));
++    }
++
++    public function testItSkipsAMissingLabelButKeepsTheDescription(): void
++    {
++        $extractor = $this->buildExtractor([
++            new ExtraPropertyDefinition(
++                'cms',
++                'promo_banner',
++                labelWording: null,
++                labelDomain: 'Modules.Demoextrafield.Admin',
++                descriptionWording: 'Translated promotional text displayed on the CMS page',
++                descriptionDomain: 'Modules.Demoextrafield.Admin',
++            ),
++        ]);
++
++        $catalogue = $extractor->extract('en-US');
++
++        $this->assertSame(
++            ['Translated promotional text displayed on the CMS page' => 'Translated promotional text displayed on the CMS page'],
++            $catalogue->all('Modules.Demoextrafield.Admin')
++        );
++    }
++
++    public function testItCollapsesDuplicateWordingsInTheSameDomain(): void
++    {
++        $extractor = $this->buildExtractor([
++            new ExtraPropertyDefinition('product', 'field_a', labelWording: 'Shared label', labelDomain: 'Modules.Demoextrafield.Admin'),
++            new ExtraPropertyDefinition('product', 'field_b', labelWording: 'Shared label', labelDomain: 'Modules.Demoextrafield.Admin'),
++        ]);
++
++        $catalogue = $extractor->extract('en-US');
++
++        $this->assertCount(1, $catalogue->all('Modules.Demoextrafield.Admin'));
++    }
++
++    public function testItBuildsTheCatalogueOnlyOncePerLocale(): void
++    {
++        $repository = $this->createMock(ExtraPropertyDefinitionRepositoryInterface::class);
++        $repository->expects($this->once())
++            ->method('getAllDefinitions')
++            ->willReturn(new ExtraPropertyDefinitionCollection([]));
++
++        $extractor = new ExtraPropertyTranslationExtractor($repository);
++
++        $extractor->extract('en-US');
++        $extractor->extract('en-US');
++    }
++
++    /**
++     * @param list<ExtraPropertyDefinition> $definitions
++     */
++    private function buildExtractor(array $definitions): ExtraPropertyTranslationExtractor
++    {
++        $repository = $this->createMock(ExtraPropertyDefinitionRepositoryInterface::class);
++        $repository->method('getAllDefinitions')
++            ->willReturn(new ExtraPropertyDefinitionCollection($definitions));
++
++        return new ExtraPropertyTranslationExtractor($repository);
++    }
++}
+diff --git a/tests/Unit/Core/Translation/Storage/Provider/CatalogueDomainConverterTest.php b/tests/Unit/Core/Translation/Storage/Provider/CatalogueDomainConverterTest.php
+new file mode 100644
+index 0000000000000..51b013731254c
+--- /dev/null
++++ b/tests/Unit/Core/Translation/Storage/Provider/CatalogueDomainConverterTest.php
+@@ -0,0 +1,51 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\Translation\Storage\Provider;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Provider\CatalogueDomainConverter;
++use Symfony\Component\Translation\MessageCatalogue;
++
++class CatalogueDomainConverterTest extends TestCase
++{
++    public function testItNormalizesDottedDomainsAndKeepsOnlyMatchingOnes(): void
++    {
++        $source = new MessageCatalogue('en-US');
++        $source->set('Video link', 'Video link', 'Modules.Demoextrafield.Admin');
++        $source->set('Foreign label', 'Foreign label', 'Modules.Othermodule.Admin');
++
++        $result = (new CatalogueDomainConverter())->normalizeAndFilter($source, ['#^ModulesDemoextrafield([A-Z]|\.|$)#']);
++
++        $this->assertSame(['ModulesDemoextrafieldAdmin'], $result->getDomains());
++        $this->assertSame('Video link', $result->get('Video link', 'ModulesDemoextrafieldAdmin'));
++    }
++
++    public function testItReturnsAnEmptyCatalogueWhenNothingMatches(): void
++    {
++        $source = new MessageCatalogue('en-US');
++        $source->set('Foreign label', 'Foreign label', 'Modules.Othermodule.Admin');
++
++        $result = (new CatalogueDomainConverter())->normalizeAndFilter($source, ['#^ModulesDemoextrafield([A-Z]|\.|$)#']);
++
++        $this->assertSame([], $result->getDomains());
++        $this->assertSame('en-US', $result->getLocale());
++    }
++
++    public function testItRemovesOnlyTheFirstTwoDots(): void
++    {
++        // third-level domains can carry a dot in their last segment, which must be preserved
++        $source = new MessageCatalogue('en-US');
++        $source->set('Hello', 'Hello', 'Modules.Demoextrafield.Some.Thing');
++
++        $result = (new CatalogueDomainConverter())->normalizeAndFilter($source, ['#^ModulesDemoextrafield([A-Z]|\.|$)#']);
++
++        $this->assertSame(['ModulesDemoextrafieldSome.Thing'], $result->getDomains());
++        $this->assertSame('Hello', $result->get('Hello', 'ModulesDemoextrafieldSome.Thing'));
++    }
++}
+diff --git a/tests/Unit/Core/Translation/Storage/Provider/CatalogueProviderFactoryTest.php b/tests/Unit/Core/Translation/Storage/Provider/CatalogueProviderFactoryTest.php
+index 90df2c7891621..f423d1b609ddf 100644
+--- a/tests/Unit/Core/Translation/Storage/Provider/CatalogueProviderFactoryTest.php
++++ b/tests/Unit/Core/Translation/Storage/Provider/CatalogueProviderFactoryTest.php
+@@ -11,6 +11,7 @@
+ use PrestaShop\PrestaShop\Core\Addon\Theme\Theme;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeRepository;
+ use PrestaShop\PrestaShop\Core\Translation\Exception\UnexpectedTranslationTypeException;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\LegacyModuleExtractorInterface;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ThemeExtractor;
+ use PrestaShop\PrestaShop\Core\Translation\Storage\Loader\DatabaseTranslationLoader;
+@@ -44,6 +45,7 @@ protected function setUp(): void
+         $themeExtractor = $this->createMock(ThemeExtractor::class);
+         $themeRepository = $this->createMock(ThemeRepository::class);
+         $filesystem = $this->createMock(Filesystem::class);
++        $extraPropertyTranslationExtractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
+ 
+         $themeRepository
+             ->method('getInstanceByName')
+@@ -61,7 +63,8 @@ protected function setUp(): void
+             $filesystem,
+             'themesDirectory',
+             'modulesDirectory',
+-            'translationsDirectory'
++            'translationsDirectory',
++            $extraPropertyTranslationExtractor
+         );
+     }
+ 
+diff --git a/tests/Unit/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoaderTest.php b/tests/Unit/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoaderTest.php
+new file mode 100644
+index 0000000000000..6097c3ccb60aa
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Translation/Loader/ExtraPropertyTranslationLoaderTest.php
+@@ -0,0 +1,101 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Translation\Loader;
++
++use Doctrine\DBAL\Exception as DBALException;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\Translation\Storage\Extractor\ExtraPropertyTranslationExtractor;
++use PrestaShopBundle\Translation\Loader\ExtraPropertyTranslationLoader;
++use Symfony\Component\Translation\MessageCatalogue;
++
++class ExtraPropertyTranslationLoaderTest extends TestCase
++{
++    public function testItExposesRegistryDomainsNormalizedToTheCatalogueConvention(): void
++    {
++        $loader = $this->buildLoader([
++            'Modules.Demoextrafield.Admin' => ['Video link' => 'Video link'],
++            'Modules.Other.Admin' => ['Code' => 'Code'],
++        ]);
++
++        $this->assertSame(
++            ['ModulesDemoextrafieldAdmin', 'ModulesOtherAdmin'],
++            $loader->getNormalizedDomains('en-US')
++        );
++    }
++
++    public function testItLoadsTheWordingsOfTheRequestedNormalizedDomain(): void
++    {
++        $loader = $this->buildLoader([
++            'Modules.Demoextrafield.Admin' => ['Video link' => 'Video link'],
++            'Modules.Other.Admin' => ['Code' => 'Code'],
++        ]);
++
++        $catalogue = $loader->load('extra_property', 'en-US', 'ModulesDemoextrafieldAdmin');
++
++        $this->assertSame(['ModulesDemoextrafieldAdmin'], $catalogue->getDomains());
++        // Default-catalogue convention: key == value.
++        $this->assertSame(['Video link' => 'Video link'], $catalogue->all('ModulesDemoextrafieldAdmin'));
++    }
++
++    public function testItMergesDottedDomainsThatNormalizeToTheSameCatalogueDomain(): void
++    {
++        // "Modules.Foo.Admin.Help" keeps its third-level dot once normalized, but a flat domain and a
++        // sub-domain may still collapse together; all matching wordings must be merged.
++        $loader = $this->buildLoader([
++            'Modules.Demoextrafield.Admin' => ['Label A' => 'Label A'],
++            'Modules.Demoextrafield.AdminExtra' => ['Label B' => 'Label B'],
++        ]);
++
++        $catalogue = $loader->load('extra_property', 'en-US', 'ModulesDemoextrafieldAdmin');
++
++        $this->assertSame(['Label A' => 'Label A'], $catalogue->all('ModulesDemoextrafieldAdmin'));
++    }
++
++    public function testItReturnsAnEmptyCatalogueForAnUnknownDomain(): void
++    {
++        $loader = $this->buildLoader(['Modules.Demoextrafield.Admin' => ['Video link' => 'Video link']]);
++
++        $catalogue = $loader->load('extra_property', 'en-US', 'ModulesUnknownAdmin');
++
++        $this->assertSame([], $catalogue->all('ModulesUnknownAdmin'));
++    }
++
++    public function testItContributesNothingWhenTheDatabaseIsUnavailable(): void
++    {
++        // The translator catalogue is warmed by CLI commands (cache:clear) that may run without a
++        // reachable database; a connection failure must not break the build.
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')->willThrowException(new DBALException('Access denied'));
++
++        $loader = new ExtraPropertyTranslationLoader($extractor);
++
++        $this->assertSame([], $loader->getNormalizedDomains('en-US'));
++        $this->assertSame([], $loader->load('extra_property', 'en-US', 'ModulesDemoextrafieldAdmin')->all('ModulesDemoextrafieldAdmin'));
++    }
++
++    /**
++     * @param array<string, array<string, string>> $messagesByDottedDomain
++     */
++    private function buildLoader(array $messagesByDottedDomain): ExtraPropertyTranslationLoader
++    {
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')->willReturnCallback(
++            function (string $locale) use ($messagesByDottedDomain): MessageCatalogue {
++                $catalogue = new MessageCatalogue($locale);
++                foreach ($messagesByDottedDomain as $domain => $messages) {
++                    $catalogue->add($messages, $domain);
++                }
++
++                return $catalogue;
++            }
++        );
++
++        return new ExtraPropertyTranslationLoader($extractor);
++    }
++}

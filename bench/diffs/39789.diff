@@ -1,0 +1,672 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index 8ecd9b3639bf7..f0bdb803f448d 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -29,6 +29,7 @@ import CreateFreeGiftDiscount from '@pages/discount/form/create-free-gift-discou
+ import SpecificProducts from '@pages/discount/form/specific-products';
+ import initGroupedItemCollection from '@PSVue/components/grouped-item-collection';
+ import {getAllAttributeGroups, getAllFeatureGroups} from '@pages/discount/form/services';
++import CustomerSearchInput from '@components/form/customer-search-input';
+ 
+ $(() => {
+   window.prestashop.component.initComponents(
+@@ -44,6 +45,17 @@ $(() => {
+   new CreateFreeGiftDiscount();
+   new SpecificProducts();
+ 
++  // Initialize customer search for single customer eligibility
++  const customerSearchContainer = '#discount_usability_customer_eligibility_single_customer';
++
++  if ($(customerSearchContainer).length > 0) {
++    new CustomerSearchInput(
++      customerSearchContainer,
++      '.js-customer-item',
++      () => null,
++    );
++  }
++
+   const reductionTypeSelect = document.querySelector(DiscountMap.reductionTypeSelect);
+ 
+   if (reductionTypeSelect) {
+diff --git a/classes/Customer.php b/classes/Customer.php
+index 5060a366c4e91..c2277d3e3be9b 100644
+--- a/classes/Customer.php
++++ b/classes/Customer.php
+@@ -901,7 +901,8 @@ public static function searchByName($query, $limit = null, ?ShopConstraint $shop
+                 GROUP_CONCAT(cg.id_group SEPARATOR \',\') AS group_ids
+                 FROM `' . _DB_PREFIX_ . 'customer` c
+                 LEFT JOIN `' . _DB_PREFIX_ . 'customer_group` cg ON c.id_customer = cg.id_customer
+-                WHERE 1';
++                WHERE 1
++                AND c.is_guest = 0';
+ 
+         if ($shopConstraint) {
+             if ($shopConstraint->getShopGroupId()) {
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index fe2b9f7037c9d..30dca0f0bd2b9 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -47,6 +47,7 @@
+ use PrestaShopBundle\Form\Admin\Sell\Discount\CartConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DeliveryConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountConditionsType;
++use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountCustomerEligibilityType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountUsabilityModeType;
+ use RuntimeException;
+ use Symfony\Component\DependencyInjection\Attribute\Autowire;
+@@ -110,6 +111,7 @@ public function create(array $data)
+             $command->setCode('');
+         }
+ 
++        $this->handleCustomerEligibility($command, $data);
+         $command->setTotalQuantity(100);
+ 
+         /** @var DiscountId $discountId */
+@@ -162,6 +164,8 @@ public function update($id, array $data): void
+             $command->setCode('');
+         }
+ 
++        $this->handleCustomerEligibility($command, $data);
++
+         $this->commandBus->handle($command);
+         $this->updateDiscountConditions($id, $data);
+         $this->updateDiscountCompatibility($id, $data);
+@@ -288,4 +292,27 @@ private function updateDiscountCompatibility(int $discountId, array $data): void
+ 
+         $this->discountTypeRepository->setCompatibleTypesForDiscount($discountId, $compatibleTypeIds);
+     }
++
++    /**
++     * Handle customer eligibility and set customer ID on the command if needed.
++     *
++     * @param AddDiscountCommand|UpdateDiscountCommand $command
++     * @param array $data
++     */
++    private function handleCustomerEligibility(mixed $command, array $data): void
++    {
++        if (!isset($data['usability']['customer_eligibility'])) {
++            return;
++        }
++
++        $customerEligibility = $data['usability']['customer_eligibility'];
++        $selectedOption = $customerEligibility['children_selector'] ?? DiscountCustomerEligibilityType::ALL_CUSTOMERS;
++
++        if ($selectedOption === DiscountCustomerEligibilityType::SINGLE_CUSTOMER) {
++            $customerData = $customerEligibility[DiscountCustomerEligibilityType::SINGLE_CUSTOMER] ?? [];
++            if (!empty($customerData) && isset($customerData[0]['id_customer'])) {
++                $command->setCustomerId((int) $customerData[0]['id_customer']);
++            }
++        }
++    }
+ }
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 8a747e12a6026..7f520ac163373 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShop\PrestaShop\Core\Form\IdentifiableObject\DataProvider;
+ 
+ use PrestaShop\PrestaShop\Adapter\Attribute\Repository\AttributeRepository;
++use PrestaShop\PrestaShop\Adapter\Customer\Repository\CustomerRepository;
+ use PrestaShop\PrestaShop\Adapter\Discount\Repository\DiscountTypeRepository;
+ use PrestaShop\PrestaShop\Adapter\Feature\Repository\FeatureValueRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Combination\Repository\CombinationRepository;
+@@ -34,6 +35,8 @@
+ use PrestaShop\PrestaShop\Core\CommandBus\CommandBusInterface;
+ use PrestaShop\PrestaShop\Core\Context\LanguageContext;
+ use PrestaShop\PrestaShop\Core\Context\ShopContext;
++use PrestaShop\PrestaShop\Core\Domain\Customer\Exception\CustomerNotFoundException;
++use PrestaShop\PrestaShop\Core\Domain\Customer\ValueObject\CustomerId;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\DiscountSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\ProductRuleType;
+ use PrestaShop\PrestaShop\Core\Domain\Discount\Query\GetDiscountForEditing;
+@@ -53,6 +56,7 @@
+ use PrestaShopBundle\Form\Admin\Sell\Discount\CartConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DeliveryConditionsType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountConditionsType;
++use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountCustomerEligibilityType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountProductSegmentType;
+ use PrestaShopBundle\Form\Admin\Sell\Discount\DiscountUsabilityModeType;
+ use Symfony\Component\HttpFoundation\RequestStack;
+@@ -72,6 +76,7 @@ public function __construct(
+         private readonly ShopContext $shopContext,
+         private readonly RequestStack $requestStack,
+         private readonly DiscountTypeRepository $discountTypeRepository,
++        private readonly CustomerRepository $customerRepository,
+     ) {
+     }
+ 
+@@ -83,6 +88,10 @@ public function getDefaultData()
+                     'children_selector' => DiscountUsabilityModeType::AUTO_MODE,
+                     'code' => '',
+                 ],
++                'customer_eligibility' => [
++                    'children_selector' => DiscountCustomerEligibilityType::ALL_CUSTOMERS,
++                    DiscountCustomerEligibilityType::SINGLE_CUSTOMER => [],
++                ],
+             ],
+             'compatibility' => $this->getCompatibilityData(),
+         ];
+@@ -181,6 +190,7 @@ public function getData($id)
+                     'children_selector' => $discountForEditing->getCode() ? DiscountUsabilityModeType::CODE_MODE : DiscountUsabilityModeType::AUTO_MODE,
+                     'code' => $discountForEditing->getCode(),
+                 ],
++                'customer_eligibility' => $this->getCustomerEligibilityData($discountForEditing),
+             ],
+             'compatibility' => $this->getCompatibilityData($id),
+         ];
+@@ -393,4 +403,42 @@ private function getCompatibilityData(?int $discountId = null): array
+ 
+         return $compatibilityData;
+     }
++
++    private function getCustomerEligibilityData(DiscountForEditing $discountForEditing): array
++    {
++        $customerId = $discountForEditing->getCustomerId();
++
++        if (!$customerId) {
++            return [
++                'children_selector' => DiscountCustomerEligibilityType::ALL_CUSTOMERS,
++                DiscountCustomerEligibilityType::SINGLE_CUSTOMER => [],
++            ];
++        }
++
++        try {
++            $customer = $this->customerRepository->get(new CustomerId($customerId));
++        } catch (CustomerNotFoundException $e) {
++            return [
++                'children_selector' => DiscountCustomerEligibilityType::ALL_CUSTOMERS,
++                DiscountCustomerEligibilityType::SINGLE_CUSTOMER => [],
++            ];
++        }
++
++        $fullnameAndEmail = sprintf(
++            '%s %s - %s',
++            $customer->firstname,
++            $customer->lastname,
++            $customer->email
++        );
++
++        return [
++            'children_selector' => DiscountCustomerEligibilityType::SINGLE_CUSTOMER,
++            DiscountCustomerEligibilityType::SINGLE_CUSTOMER => [
++                [
++                    'id_customer' => $customerId,
++                    'fullname_and_email' => $fullnameAndEmail,
++                ],
++            ],
++        ];
++    }
+ }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountCustomerEligibilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountCustomerEligibilityType.php
+new file mode 100644
+index 0000000000000..b85d55ef93217
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountCustomerEligibilityType.php
+@@ -0,0 +1,94 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Form\Admin\Sell\Discount;
++
++use PrestaShopBundle\Form\Admin\Type\CustomerSearchType;
++use PrestaShopBundle\Form\Admin\Type\EntitySearchInputType;
++use PrestaShopBundle\Form\Admin\Type\ToggleChildrenChoiceType;
++use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\NotBlank;
++use Symfony\Component\Validator\Constraints\When;
++
++class DiscountCustomerEligibilityType extends TranslatorAwareType
++{
++    public const ALL_CUSTOMERS = 'all_customers';
++    public const CUSTOMER_GROUPS = 'customer_groups';
++    public const SINGLE_CUSTOMER = 'single_customer';
++
++    public function buildForm(FormBuilderInterface $builder, array $options)
++    {
++        $builder
++            ->add(self::ALL_CUSTOMERS, HiddenType::class, [
++                'label' => $this->trans('All customers', 'Admin.Catalog.Feature'),
++            ])
++            ->add(self::CUSTOMER_GROUPS, HiddenType::class, [
++                'label' => $this->trans('Customer groups', 'Admin.Catalog.Feature'),
++                'disabled' => true,
++                'attr' => [
++                    'class' => 'js-customer-groups-placeholder',
++                ],
++            ])
++            ->add(self::SINGLE_CUSTOMER, CustomerSearchType::class, [
++                'label' => $this->trans('Single customer', 'Admin.Catalog.Feature'),
++                'layout' => EntitySearchInputType::LIST_LAYOUT,
++                'required' => false,
++                'constraints' => [
++                    new When(
++                        expression: sprintf(
++                            'this.getParent().get("children_selector").getData() === "%s"',
++                            self::SINGLE_CUSTOMER,
++                        ),
++                        constraints: [
++                            new NotBlank([
++                                'message' => $this->trans(
++                                    'You must select a customer when using the "Single customer" option.',
++                                    'Admin.Catalog.Notification'
++                                ),
++                            ]),
++                        ],
++                    ),
++                ],
++            ])
++        ;
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        parent::configureOptions($resolver);
++        $resolver->setDefaults([
++            'required' => false,
++        ]);
++    }
++
++    public function getParent()
++    {
++        return ToggleChildrenChoiceType::class;
++    }
++}
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+index 3960c67a64f53..6393366f03e0c 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountUsabilityType.php
+@@ -40,6 +40,11 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label_tag_name' => 'h3',
+                 'required' => false,
+             ])
++            ->add('customer_eligibility', DiscountCustomerEligibilityType::class, [
++                'label' => $this->trans('Select customer eligibility', 'Admin.Catalog.Feature'),
++                'label_tag_name' => 'h3',
++                'required' => false,
++            ])
+         ;
+     }
+ 
+diff --git a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+index c4432c3388f8f..ea91d717e4c9e 100644
+--- a/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/Domain/Discount/DiscountFeatureContext.php
+@@ -152,6 +152,10 @@ public function createDiscount(string $discountReference, string $discountType,
+             $command->setCode($data['code']);
+         }
+ 
++        if (isset($data['customer']) && !empty($data['customer'])) {
++            $command->setCustomerId($this->getSharedStorage()->get($data['customer']));
++        }
++
+         if ($command->getDiscountType()->getValue() === DiscountType::CART_LEVEL
+             || $command->getDiscountType()->getValue() === DiscountType::PRODUCT_LEVEL
+             || $command->getDiscountType()->getValue() === DiscountType::ORDER_LEVEL
+@@ -245,6 +249,15 @@ public function editDiscount(string $discountReference, TableNode $node): void
+             $command->setCode($data['code']);
+         }
+ 
++        if (isset($data['customer'])) {
++            if (!empty($data['customer'])) {
++                $command->setCustomerId($this->getSharedStorage()->get($data['customer']));
++            } else {
++                // Empty string means remove customer restriction
++                $command->setCustomerId(0);
++            }
++        }
++
+         if (!empty($data['reduction_percent'])) {
+             $command->setPercentDiscount(new DecimalNumber($data['reduction_percent']));
+         }
+@@ -339,9 +352,11 @@ protected function assertDiscountProperties(DiscountForEditing $discountForEditi
+             Assert::assertSame($expectedData['code'], $discountForEditing->getCode(), 'Unexpected code');
+         }
+         if (isset($expectedData['customer'])) {
++            $expectedCustomerId = !empty($expectedData['customer']) ? (int) $this->getSharedStorage()->get($expectedData['customer']) : 0;
++            $actualCustomerId = $discountForEditing->getCustomerId() ?? 0;
+             Assert::assertSame(
+-                !empty($expectedData['customer']) ? $this->getSharedStorage()->get($expectedData['customer']) : 0,
+-                $discountForEditing->getCustomerId(),
++                $expectedCustomerId,
++                $actualCustomerId,
+                 'Unexpected customer id'
+             );
+         }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_single_customer_eligibility.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_single_customer_eligibility.feature
+new file mode 100644
+index 0000000000000..03ed39ac554d1
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_single_customer_eligibility.feature
+@@ -0,0 +1,128 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount-single-customer
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-discount-single-customer
++Feature: Add discount with single customer eligibility
++  PrestaShop allows BO users to create discounts limited to a single customer
++  As a BO user
++  I must be able to create discounts that are only available to a specific customer
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given currency "usd" is the default one
++    And language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given there is a customer named "john_doe" whose email is "john.doe@example.com"
++    And there is a customer named "jane_smith" whose email is "jane.smith@example.com"
++
++  Scenario: Create a discount limited to a single customer
++    When I create a "cart_level" discount "discount_for_john" with following properties:
++      | name[en-US]              | VIP Customer Discount |
++      | name[fr-FR]              | Réduction VIP         |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2025-12-31 23:59:59   |
++      | code                     | VIP_JOHN_2025         |
++      | reduction_percent        | 20.0                  |
++      | customer                 | john_doe              |
++      | total_quantity           | 100                   |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    Then discount "discount_for_john" should have the following properties:
++      | name[en-US]       | VIP Customer Discount |
++      | name[fr-FR]       | Réduction VIP         |
++      | type              | cart_level            |
++      | active            | true                  |
++      | valid_from        | 2025-01-01 00:00:00   |
++      | valid_to          | 2025-12-31 23:59:59   |
++      | code              | VIP_JOHN_2025         |
++      | reduction_percent | 20.0                  |
++      | customer          | john_doe              |
++
++  Scenario: Create a discount without customer restriction (all customers)
++    When I create a "cart_level" discount "discount_for_all" with following properties:
++      | name[en-US]              | Public Discount     |
++      | name[fr-FR]              | Réduction           |
++      | active                   | true                |
++      | valid_from               | 2025-01-01 00:00:00 |
++      | valid_to                 | 2025-12-31 23:59:59 |
++      | code                     | PUBLIC_2025         |
++      | reduction_percent        | 10.0                |
++      | total_quantity           | 100                 |
++      | quantity_per_user        | 1                   |
++      | minimum_product_quantity | 0                   |
++    Then discount "discount_for_all" should have the following properties:
++      | name[en-US]       | Public Discount |
++      | name[fr-FR]       | Réduction       |
++      | type              | cart_level      |
++      | active            | true            |
++      | valid_from        | 2025-01-01 00:00:00 |
++      | valid_to          | 2025-12-31 23:59:59 |
++      | code              | PUBLIC_2025     |
++      | reduction_percent | 10.0            |
++
++  Scenario: Update a discount to limit it to a single customer
++    When I create a "cart_level" discount "discount_public_to_vip" with following properties:
++      | name[en-US]              | General Discount    |
++      | name[fr-FR]              | Réduction           |
++      | active                   | true                |
++      | valid_from               | 2025-01-01 00:00:00 |
++      | valid_to                 | 2025-12-31 23:59:59 |
++      | code                     | GENERAL_2025        |
++      | reduction_percent        | 15.0                |
++      | total_quantity           | 100                 |
++      | quantity_per_user        | 1                   |
++      | minimum_product_quantity | 0                   |
++    And discount "discount_public_to_vip" should have the following properties:
++      | name[en-US]       | General Discount |
++      | name[fr-FR]       | Réduction        |
++    When I update discount "discount_public_to_vip" with the following properties:
++      | name[en-US]       | VIP Discount     |
++      | name[fr-FR]       | Réduction VIP    |
++      | customer          | jane_smith       |
++    Then discount "discount_public_to_vip" should have the following properties:
++      | name[en-US]       | VIP Discount     |
++      | name[fr-FR]       | Réduction VIP    |
++      | customer          | jane_smith       |
++
++  Scenario: Update a discount to change customer restriction
++    When I create a "cart_level" discount "discount_vip_to_public" with following properties:
++      | name[en-US]              | VIP Discount        |
++      | active                   | true                |
++      | valid_from               | 2025-01-01 00:00:00 |
++      | valid_to                 | 2025-12-31 23:59:59 |
++      | code                     | VIP_2025            |
++      | reduction_percent        | 25.0                |
++      | customer                 | john_doe            |
++      | total_quantity           | 100                 |
++      | quantity_per_user        | 1                   |
++      | minimum_product_quantity | 0                   |
++    And discount "discount_vip_to_public" should have the following properties:
++      | customer          | john_doe        |
++    When I update discount "discount_vip_to_public" with the following properties:
++      | name[en-US]       | Public Discount |
++      | name[fr-FR]       | Réduction       |
++      | customer          | jane_smith      |
++    Then discount "discount_vip_to_public" should have the following properties:
++      | name[en-US]       | Public Discount |
++      | name[fr-FR]       | Réduction       |
++      | customer          | jane_smith      |
++
++  Scenario: Create a free shipping discount limited to a single customer
++    When I create a "free_shipping" discount "free_shipping_for_jane" with following properties:
++      | name[en-US]              | Free Shipping for Jane |
++      | active                   | true                   |
++      | valid_from               | 2025-01-01 00:00:00    |
++      | valid_to                 | 2025-12-31 23:59:59    |
++      | code                     | FREESHIP_JANE          |
++      | customer                 | jane_smith             |
++      | total_quantity           | 100                    |
++      | quantity_per_user        | 1                      |
++      | minimum_product_quantity | 0                      |
++    Then discount "free_shipping_for_jane" should have the following properties:
++      | name[en-US] | Free Shipping for Jane |
++      | name[fr-FR] |                        |
++      | type        | free_shipping          |
++      | customer    | jane_smith             |
++
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_single_customer_eligibility.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_single_customer_eligibility.feature
+new file mode 100644
+index 0000000000000..04af4f31bc4a6
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_single_customer_eligibility.feature
+@@ -0,0 +1,171 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-single-customer-fo
++@restore-all-tables-before-feature
++@discount-single-customer-fo
++Feature: Customer using discount with single customer eligibility
++  PrestaShop allows customers to use discounts that are limited to them
++  As a customer
++  I should be able to use a discount code that is available only for me
++  And I should not be able to use a discount code that is not available for me
++
++  Background:
++    Given language with iso code "en" is the default one
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And there is a product in the catalog named "product1" with a price of 25.00 and 1000 items in stock
++    And there is a product in the catalog named "product2" with a price of 15.00 and 1000 items in stock
++    Given there is a customer named "john_doe" whose email is "john.doe@example.com"
++    And there is a customer named "jane_smith" whose email is "jane.smith@example.com"
++    And there is a customer named "bob_johnson" whose email is "bob.johnson@example.com"
++
++  Scenario: Customer can use a discount code that is available only for them
++    Given I create a "cart_level" discount "vip_discount_john" with following properties:
++      | name[en-US]              | VIP Discount for John |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2025-12-31 23:59:59   |
++      | code                     | JOHN_VIP_20           |
++      | reduction_percent        | 20.0                  |
++      | customer                 | john_doe              |
++      | total_quantity           | 100                   |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount_john" should have the following properties:
++      | customer          | john_doe              |
++    When I create an empty cart "john_cart" for customer "john_doe"
++    And I add 2 product "product1" to the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$57.00'
++    And my cart "john_cart" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $57.00 |
++    When I use a voucher "vip_discount_john" on the cart "john_cart"
++    Then cart "john_cart" total with tax included should be '$47.00'
++    And my cart "john_cart" should have the following details:
++      | total_products | $50.00  |
++      | shipping       | $7.00   |
++      | total_discount | -$10.00 |
++      | total          | $47.00  |
++
++  Scenario: Customer cannot use a discount code that is not available for them
++    Given I create a "cart_level" discount "vip_discount_jane" with following properties:
++      | name[en-US]              | VIP Discount for Jane |
++      | active                   | true                  |
++      | valid_from               | 2025-01-01 00:00:00   |
++      | valid_to                 | 2025-12-31 23:59:59   |
++      | code                     | JANE_VIP_25           |
++      | reduction_percent        | 25.0                  |
++      | customer                 | jane_smith            |
++      | total_quantity           | 100                   |
++      | quantity_per_user        | 1                     |
++      | minimum_product_quantity | 0                     |
++    And discount "vip_discount_jane" should have the following properties:
++      | customer          | jane_smith            |
++    When I create an empty cart "bob_cart" for customer "bob_johnson"
++    And I add 2 product "product1" to the cart "bob_cart"
++    Then cart "bob_cart" total with tax included should be '$57.00'
++    And my cart "bob_cart" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $57.00 |
++    # Bob tries to use Jane's discount code
++    When I use a voucher "vip_discount_jane" on the cart "bob_cart"
++    Then I should get cart rule validation error
++    And cart "bob_cart" total with tax included should be '$57.00'
++    And my cart "bob_cart" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $57.00 |
++
++  Scenario: Customer who owns the discount tries to use it - should succeed
++    Given I create a "cart_level" discount "vip_discount_bob" with following properties:
++      | name[en-US]              | VIP Discount for Bob |
++      | active                   | true                 |
++      | valid_from               | 2025-01-01 00:00:00  |
++      | valid_to                 | 2025-12-31 23:59:59  |
++      | code                     | BOB_VIP_30           |
++      | reduction_percent        | 30.0                 |
++      | customer                 | bob_johnson          |
++      | total_quantity           | 100                  |
++      | quantity_per_user        | 1                    |
++      | minimum_product_quantity | 0                    |
++    When I create an empty cart "bob_vip_cart" for customer "bob_johnson"
++    And I add 3 product "product2" to the cart "bob_vip_cart"
++    Then cart "bob_vip_cart" total with tax included should be '$52.00'
++    And my cart "bob_vip_cart" should have the following details:
++      | total_products | $45.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $52.00 |
++    When I use a voucher "vip_discount_bob" on the cart "bob_vip_cart"
++    Then cart "bob_vip_cart" total with tax included should be '$38.50'
++    And my cart "bob_vip_cart" should have the following details:
++      | total_products | $45.00  |
++      | shipping       | $7.00   |
++      | total_discount | -$13.50 |
++      | total          | $38.50  |
++
++  Scenario: Public discount can be used by any customer
++    Given I create a "cart_level" discount "public_discount" with following properties:
++      | name[en-US]              | Public Summer Sale  |
++      | active                   | true                |
++      | valid_from               | 2025-01-01 00:00:00 |
++      | valid_to                 | 2025-12-31 23:59:59 |
++      | code                     | SUMMER_10           |
++      | reduction_percent        | 10.0                |
++      | total_quantity           | 100                 |
++      | quantity_per_user        | 1                   |
++      | minimum_product_quantity | 0                   |
++    And discount "public_discount" should have the following properties:
++      | name[en-US]       | Public Summer Sale |
++    # John can use it
++    When I create an empty cart "john_public_cart" for customer "john_doe"
++    And I add 2 product "product1" to the cart "john_public_cart"
++    And I use a voucher "public_discount" on the cart "john_public_cart"
++    Then cart "john_public_cart" total with tax included should be '$52.00'
++    And my cart "john_public_cart" should have the following details:
++      | total_products | $50.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$5.00 |
++      | total          | $52.00 |
++    # Jane can use it too
++    When I create an empty cart "jane_public_cart" for customer "jane_smith"
++    And I add 2 product "product2" to the cart "jane_public_cart"
++    And I use a voucher "public_discount" on the cart "jane_public_cart"
++    Then cart "jane_public_cart" total with tax included should be '$34.00'
++    And my cart "jane_public_cart" should have the following details:
++      | total_products | $30.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$3.00 |
++      | total          | $34.00 |
++
++  Scenario: Free shipping discount limited to a customer
++    Given I create a "free_shipping" discount "free_ship_jane" with following properties:
++      | name[en-US]              | Free Shipping for Jane |
++      | active                   | true                   |
++      | valid_from               | 2025-01-01 00:00:00    |
++      | valid_to                 | 2025-12-31 23:59:59    |
++      | code                     | FREESHIP_JANE          |
++      | customer                 | jane_smith             |
++      | total_quantity           | 100                    |
++      | quantity_per_user        | 1                      |
++      | minimum_product_quantity | 0                      |
++    When I create an empty cart "jane_shipping_cart" for customer "jane_smith"
++    And I add 1 product "product1" to the cart "jane_shipping_cart"
++    Then cart "jane_shipping_cart" total with tax included should be '$32.00'
++    When I use a voucher "free_ship_jane" on the cart "jane_shipping_cart"
++    Then cart "jane_shipping_cart" total with tax included should be '$25.00'
++    And my cart "jane_shipping_cart" should have the following details:
++      | total_products | $25.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$7.00 |
++      | total          | $25.00 |
++    # John tries to use Jane's free shipping code
++    When I create an empty cart "john_shipping_cart" for customer "john_doe"
++    And I add 1 product "product1" to the cart "john_shipping_cart"
++    And I use a voucher "free_ship_jane" on the cart "john_shipping_cart"
++    Then I should get cart rule validation error
++    And cart "john_shipping_cart" total with tax included should be '$32.00'
++

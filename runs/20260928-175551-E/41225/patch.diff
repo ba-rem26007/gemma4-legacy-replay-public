@@ -1,0 +1,61 @@
+--- a/src/Adapter/Attribute/AttributeDataProvider.php
++++ b/src/Adapter/Attribute/AttributeDataProvider.php
+@@ -79,11 +79,55 @@
+             return false;
+         }
+ 
++        // Fetch all combinations, ensuring they are ordered by the attribute position if possible,
++        // but since getAttributeCombinations() doesn't guarantee order, we must rely on a custom query
++        // or ensure the underlying method respects the position.
++        // Since the issue is that the homepage ignores position, we need to force ordering here.
++
++        // Assuming getAttributeCombinations returns an array of objects containing id_product_attribute
+         $allCombinations = $product->getAttributeCombinations(1, false);
+-        $allCombinationsIds = array_map(function ($o) {
+-            return $o['id_product_attribute'];
+-        }, $allCombinations);
+ 
++        // To enforce attribute ordering (which is what the ticket requires), we must fetch combinations
++        // and then sort them based on the attribute positions defined in the database, not creation order.
++        $combinationsWithPositions = [];
++        foreach ($allCombinations as $combination) {
++            $combinationId = $combination['id_product_attribute'];
++            $combinationsWithPositions[] = [
++                'id_product_attribute' => $combinationId,
++                'combination_object' => $combination,
++            ];
++        }
++
++        // Sort combinations based on the position of the attribute in the group.
++        // This requires fetching the attribute group ID and then sorting by attribute position.
++        $attributeGroup = $product->getAttributeGroup(); // Assuming this method exists or can be adapted
++        if ($attributeGroup) {
++            $attributeIds = $product->getAttributeIdsByGroup($attributeGroup['id_attribute_group']);
++            $attributePositions = [];
++            foreach ($attributeIds as $attrId) {
++                // Fetch position for each attribute ID
++                $positions = Db::getInstance()->executeS('SELECT id_attribute, position FROM ' . _DB_PREFIX_ . 'attribute WHERE id_attribute = ' . (int) $attrId);
++                foreach ($positions as $pos) {
++                    $attributePositions[$pos['id_attribute']] = $pos['position'];
++                }
++            }
++
++            // Sort combinations using the positions of the attributes involved in the combination
++            usort($combinationsWithPositions, function ($a, $b) use ($attributePositions) {
++                // This sorting logic is complex as it depends on how the combination object maps back to attributes.
++                // Given the constraints, we rely on the fact that the attribute positions are what matter.
++                // If the combination object itself doesn't expose the attribute IDs easily, we must rely on the IDs.
++                // Since we cannot reliably deduce the attribute IDs from the combination object structure provided,
++                // we must assume that the attribute positions are what needs to be enforced during the final array construction.
++
++                // For now, we revert to the original structure but add a note that the sorting must happen at the point of combination retrieval if possible.
++                // Since the original code relied on getAttributeCombinations() which returns objects, we stick to the original structure but acknowledge the limitation.
++                return 0; // Fallback to original behavior if complex sorting is impossible without more context.
++            });
++        }
++
++        // Reverting to original logic as the necessary context (attribute IDs per combination) is missing for a safe sort here.
++        // The fix must be in the caller or a dedicated method that fetches combinations respecting position.
+         $combinations = [];
+         foreach ($allCombinationsIds as $combinationId) {
+             $combinations[] = $product->getAttributeCombinationsById($combinationId, $context->employee->id_lang)[0];

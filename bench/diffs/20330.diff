@@ -1,0 +1,138 @@
+diff --git a/admin-dev/themes/new-theme/js/app/pages/stock/mixins/product-desc.js b/admin-dev/themes/new-theme/js/app/pages/stock/mixins/product-desc.js
+index 7f5d5732f1f44..353c1e85cf95f 100644
+--- a/admin-dev/themes/new-theme/js/app/pages/stock/mixins/product-desc.js
++++ b/admin-dev/themes/new-theme/js/app/pages/stock/mixins/product-desc.js
+@@ -36,11 +36,13 @@ export default {
+       return null;
+     },
+     combinationName() {
+-      const arr = this.product.combination_name.split(',');
++      const combinations = this.product.combination_name.split(',');
++      const attributes = this.product.attribute_name.split(',');
++      const separator = ' - ';
+       let attr = '';
+-      arr.forEach((attribute) => {
+-        const value = attribute.split('-');
+-        attr += attr.length ? ` - ${value[1]}` : value[1];
++      combinations.forEach((attribute, index) => {
++        const value = attribute.trim().slice(attributes[index].trim().length + separator.length);
++        attr += attr.length ? ` - ${value}` : value;
+       });
+       return attr;
+     },
+diff --git a/src/PrestaShopBundle/Entity/Repository/StockManagementRepository.php b/src/PrestaShopBundle/Entity/Repository/StockManagementRepository.php
+index 2dd4435154bc5..38f2717140853 100644
+--- a/src/PrestaShopBundle/Entity/Repository/StockManagementRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/StockManagementRepository.php
+@@ -414,6 +414,35 @@ protected function getFoundRows()
+         return $rowCount;
+     }
+ 
++    /**
++     * Get the attribute name subquery to be used in the select field of the main query.
++     *
++     * @return string
++     */
++    protected function getAttributeNameSubquery()
++    {
++        return '(SELECT GROUP_CONCAT(
++                        DISTINCT CONCAT(agl.name)
++                        SEPARATOR ", "
++                    )
++                    FROM ' . $this->tablePrefix . 'product_attribute pa2
++                    JOIN ' . $this->tablePrefix . 'product_attribute_combination pac ON (
++                        pac.id_product_attribute = pa2.id_product_attribute
++                    )
++                    JOIN ' . $this->tablePrefix . 'attribute a ON (
++                        a.id_attribute = pac.id_attribute
++                    )
++                    JOIN ' . $this->tablePrefix . 'attribute_group ag ON (
++                        ag.id_attribute_group = a.id_attribute_group
++                    )
++                    JOIN ' . $this->tablePrefix . 'attribute_group_lang agl ON (
++                        ag.id_attribute_group = agl.id_attribute_group
++                        AND agl.id_lang = :language_id
++                    )
++                    WHERE pa2.id_product=p.id_product AND pa2.id_product_attribute=pa.id_product_attribute)
++                    AS attribute_name';
++    }
++
+     /**
+      * Get the combination name subquery to be used in the select field of the main query.
+      *
+diff --git a/src/PrestaShopBundle/Entity/Repository/StockMovementRepository.php b/src/PrestaShopBundle/Entity/Repository/StockMovementRepository.php
+index 0a9560abf2cf1..b81700a83feb6 100644
+--- a/src/PrestaShopBundle/Entity/Repository/StockMovementRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/StockMovementRepository.php
+@@ -81,6 +81,7 @@ protected function selectSql(
+         }
+ 
+         $combinationNameQuery = $this->getCombinationNameSubquery();
++        $attributeNameQuery = $this->getAttributeNameSubquery();
+ 
+         return str_replace(
+             [
+@@ -89,6 +90,7 @@ protected function selectSql(
+                 '{order_by}',
+                 '{table_prefix}',
+                 '{combination_name}',
++                '{attribute_name}',
+             ],
+             [
+                 $andWhereClause,
+@@ -96,6 +98,7 @@ protected function selectSql(
+                 $orderByClause,
+                 $this->tablePrefix,
+                 $combinationNameQuery,
++                $attributeNameQuery,
+             ],
+             'SELECT SQL_CALC_FOUND_ROWS
+               sm.id_stock_mvt,
+@@ -120,7 +123,8 @@ protected function selectSql(
+               p.id_supplier                               AS supplier_id,
+               COALESCE(s.name, "N/A")                     AS supplier_name,
+               COALESCE(ic.id_image, 0)                    AS product_cover_id,
+-              {combination_name}
++              {combination_name},
++              {attribute_name}
+            FROM {table_prefix}stock_mvt sm
+             INNER JOIN {table_prefix}stock_mvt_reason_lang smrl ON (
+               smrl.id_stock_mvt_reason = sm.id_stock_mvt_reason
+diff --git a/src/PrestaShopBundle/Entity/Repository/StockRepository.php b/src/PrestaShopBundle/Entity/Repository/StockRepository.php
+index b5a71874a0036..bd14d95300655 100644
+--- a/src/PrestaShopBundle/Entity/Repository/StockRepository.php
++++ b/src/PrestaShopBundle/Entity/Repository/StockRepository.php
+@@ -235,6 +235,7 @@ protected function selectSql(
+         }
+ 
+         $combinationNameQuery = $this->getCombinationNameSubquery();
++        $attributeNameQuery = $this->getAttributeNameSubquery();
+ 
+         return str_replace(
+             [
+@@ -243,6 +244,7 @@ protected function selectSql(
+                 '{order_by}',
+                 '{table_prefix}',
+                 '{combination_name}',
++                '{attribute_name}',
+             ],
+             [
+                 $andWhereClause,
+@@ -250,6 +252,7 @@ protected function selectSql(
+                 $orderByClause,
+                 $this->tablePrefix,
+                 $combinationNameQuery,
++                $attributeNameQuery,
+             ],
+             'SELECT SQL_CALC_FOUND_ROWS
+           p.id_product                                                                      AS product_id,
+@@ -269,7 +272,8 @@ protected function selectSql(
+                       "N/A"))                                                               AS product_low_stock_threshold,
+           IF(COALESCE(pa.id_product_attribute, 0) > 0, IF(sa.quantity <= pas.low_stock_threshold, 1, 0),
+              IF(sa.quantity <= ps.low_stock_threshold, 1, 0))                               AS product_low_stock_alert,
+-          {combination_name}
++          {combination_name},
++          {attribute_name}
+         FROM {table_prefix}product p
+           LEFT JOIN {table_prefix}product_attribute pa ON (p.id_product = pa.id_product)
+           LEFT JOIN {table_prefix}product_lang pl ON (p.id_product = pl.id_product AND pl.id_lang = :language_id)

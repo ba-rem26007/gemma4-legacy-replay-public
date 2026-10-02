@@ -1,0 +1,635 @@
+diff --git a/classes/log/PSRLoggerAdapter.php b/classes/log/PSRLoggerAdapter.php
+index 1d1990d2bee47..efc0278dfc919 100644
+--- a/classes/log/PSRLoggerAdapter.php
++++ b/classes/log/PSRLoggerAdapter.php
+@@ -39,6 +39,12 @@ class PSRLoggerAdapter implements LoggerInterface
+      */
+     private $logger;
+ 
++    private bool $saveMessages = false;
++    /**
++     * @var array<string, string[]>
++     */
++    private array $savedMessages;
++
+     public function __construct(PrestaShopLoggerInterface $logger)
+     {
+         $this->logger = $logger;
+@@ -47,36 +53,43 @@ public function __construct(PrestaShopLoggerInterface $logger)
+     public function emergency($message, array $context = []): void
+     {
+         $this->logger->logError($message);
++        $this->saveMessage(LogLevel::EMERGENCY, $message);
+     }
+ 
+     public function alert($message, array $context = []): void
+     {
+         $this->logger->logError($message);
++        $this->saveMessage(LogLevel::ALERT, $message);
+     }
+ 
+     public function critical($message, array $context = []): void
+     {
+         $this->logger->logError($message);
++        $this->saveMessage(LogLevel::CRITICAL, $message);
+     }
+ 
+     public function error($message, array $context = []): void
+     {
+         $this->logger->logError($message);
++        $this->saveMessage(LogLevel::ERROR, $message);
+     }
+ 
+     public function warning($message, array $context = []): void
+     {
+         $this->logger->logWarning($message);
++        $this->saveMessage(LogLevel::WARNING, $message);
+     }
+ 
+     public function notice($message, array $context = []): void
+     {
+         $this->logger->logInfo($message);
++        $this->saveMessage(LogLevel::NOTICE, $message);
+     }
+ 
+     public function info($message, array $context = []): void
+     {
+         $this->logger->logInfo($message);
++        $this->saveMessage(LogLevel::INFO, $message);
+     }
+ 
+     public function debug($message, array $context = []): void
+@@ -106,5 +119,43 @@ public function log($level, $message, array $context = []): void
+                 break;
+         }
+         $this->logger->log($message, $legacyLevel);
++        if ($level == LogLevel::DEBUG) {
++            $this->saveMessage($level, $message);
++        }
++    }
++
++    /**
++     * All messages logged after this method is called are stored in a class field.
++     */
++    public function startSavingMessages(): void
++    {
++        $this->saveMessages = true;
++    }
++
++    /**
++     * Stop saving log records and clear the saved records.
++     */
++    public function stopSavingMessages(): void
++    {
++        $this->saveMessages = false;
++        $this->savedMessages = [];
++    }
++
++    public function getAllSavedMessages(): array
++    {
++        return $this->savedMessages;
++    }
++
++    public function getSavedMessages(string $level): array
++    {
++        return $this->savedMessages[$level] ?? [];
++    }
++
++    protected function saveMessage($level, $message): void
++    {
++        if (!$this->saveMessages) {
++            return;
++        }
++        $this->savedMessages[$level][] = $message;
+     }
+ }
+diff --git a/config/services/admin/services_prod.yml b/config/services/admin/services_prod.yml
+index 18a4f4a8248f3..d823690dcdab2 100644
+--- a/config/services/admin/services_prod.yml
++++ b/config/services/admin/services_prod.yml
+@@ -17,7 +17,7 @@ services:
+ 
+     hook_configurator:
+         class: PrestaShop\PrestaShop\Core\Module\HookConfigurator
+-        arguments: ["@hook_repository"]
++        arguments: ["@hook_repository", "@logger", "@prestashop.module.manager"]
+ 
+     theme_validator:
+         class: PrestaShop\PrestaShop\Core\Addon\Theme\ThemeValidator
+diff --git a/install-dev/classes/controllerHttp.php b/install-dev/classes/controllerHttp.php
+index 42f4b661f5013..ffeee4584a353 100644
+--- a/install-dev/classes/controllerHttp.php
++++ b/install-dev/classes/controllerHttp.php
+@@ -378,7 +378,7 @@ public function isStepFinished(string $step): bool
+      * @param bool $success
+      * @param string $message
+      */
+-    public function ajaxJsonAnswer(bool $success, $message = ''): void
++    public function ajaxJsonAnswer(bool $success, $message = '', $warning = ''): void
+     {
+         if (!$success && empty($message)) {
+             $message = print_r(@error_get_last(), true);
+@@ -387,6 +387,7 @@ public function ajaxJsonAnswer(bool $success, $message = ''): void
+         die(json_encode([
+             'success' => (bool) $success,
+             'message' => $message,
++            'warning' => $warning,
+         ]));
+     }
+ 
+diff --git a/install-dev/controllers/http/process.php b/install-dev/controllers/http/process.php
+index 1f5bf600ff0cb..dbbe93c96817f 100644
+--- a/install-dev/controllers/http/process.php
++++ b/install-dev/controllers/http/process.php
+@@ -317,7 +317,12 @@ public function processInstallTheme()
+             $this->ajaxJsonAnswer(false, $this->model_install->getErrors());
+         }
+         $this->session->process_validated = array_merge($this->session->process_validated, ['installTheme' => true]);
+-        $this->ajaxJsonAnswer(true);
++        $warning = '';
++        if (!empty($this->model_install->getWarnings())) {
++            $warning = implode('<br />', $this->model_install->getWarnings());
++            $this->model_install->resetWarnings();
++        }
++        $this->ajaxJsonAnswer(true, '', $warning);
+     }
+ 
+     /**
+diff --git a/install-dev/theme/js/process.js b/install-dev/theme/js/process.js
+index c3737e758552a..15aa81112d1af 100644
+--- a/install-dev/theme/js/process.js
++++ b/install-dev/theme/js/process.js
+@@ -68,6 +68,10 @@ function process_install(step) {
+     success: function(json) {
+       // No error during this step
+       if (json && json.success === true) {
++        if (json.warning && json.warning !== '') {
++          install_warning(json.warning);
++        }
++
+         $('#process_step_'+step.key).addClass('success');
+         current_step++;
+         if (current_step >= process_steps.length) {
+@@ -125,6 +129,10 @@ function process_install_subtask(step, current_subtask) {
+         $('#progress_bar .total .progress').animate({'width': '+='+subtask_process_pixel+'px'}, 500);
+         $('#progress_bar .total span').html(Math.ceil((current_step * (100 / process_steps.length)) + Math.ceil(current_subtask * ((100 / process_steps.length) / step.subtasks.length)))+'%');
+ 
++        if (json.warning && json.warning !== '') {
++          install_warning(json.warning);
++        }
++
+         if (current_subtask >= step.subtasks.length) {
+           current_step++;
+           $('#process_step_'+step.key).show().addClass('success');
+@@ -148,6 +156,12 @@ function process_install_subtask(step, current_subtask) {
+   });
+ }
+ 
++function install_warning(warning) {
++  console.log('install_warning', warning);
++  $('#warning_process').show();
++  $('#warning_process').append('<p>' + warning + '</p>');
++}
++
+ function install_error(step, errors) {
+   current_step = 0;
+   is_installing = false;
+diff --git a/install-dev/theme/view.css b/install-dev/theme/view.css
+index 75fd1402c8bdd..54005c7f049b1 100644
+--- a/install-dev/theme/view.css
++++ b/install-dev/theme/view.css
+@@ -1095,6 +1095,27 @@ ul#optional_update li.ok {
+   text-decoration: underline;
+ }
+ 
++#warning_process {
++  background: var(--cdk-yellow-50) url(img/warning.svg) no-repeat calc(100% - var(--cdk-size-8)) center;
++  padding: var(--cdk-size-16);
++  border: 1px solid var(--cdk-yellow-500);
++  margin: var(--cdk-size-16) 0;
++  display: none;
++}
++#warning_process h3 {
++  color: var(--cdk-red-500);
++}
++#warning_process p {
++  margin-left: 20px;
++}
++#warning_process p a {
++  font-weight: bold;
++}
++#warning_process p a:hover {
++  text-decoration: underline;
++}
++
++
+ #install_process_success {
+   display: none;
+ }
+@@ -1719,4 +1740,4 @@ ul#optional_update li.ok {
+ @keyframes spin {
+   0% { transform: rotate(360deg); }
+   100% { transform: rotate(0deg); }
+-}
+\ No newline at end of file
++}
+diff --git a/install-dev/theme/views/process.php b/install-dev/theme/views/process.php
+index a606b735fadc7..308de43ca57e4 100644
+--- a/install-dev/theme/views/process.php
++++ b/install-dev/theme/views/process.php
+@@ -56,6 +56,10 @@
+     </div>
+ </div>
+ 
++<div id="warning_process">
++    <h3><?php echo $this->translator->trans('A warning was triggered during installation', [], 'Install'); ?></h3>
++</div>
++
+ <div id="install_process_success">
+     <div class="clearfix">
+         <h2><?php echo $this->translator->trans('Your installation is finished!', [], 'Install'); ?></h2>
+@@ -98,7 +102,7 @@
+                 </a>
+               </div>
+           </div>
+-  
++
+           <div id="foBlock" class="blockInfoEnd last clearfix" onclick="window.open('../')">
+               <img src="theme/img/visu_foBlock.png" alt="" />
+               <div class="bo-infos">
+diff --git a/src/Core/Addon/Theme/ThemeManager.php b/src/Core/Addon/Theme/ThemeManager.php
+index 553106ab78bc8..decf4d6bdf778 100644
+--- a/src/Core/Addon/Theme/ThemeManager.php
++++ b/src/Core/Addon/Theme/ThemeManager.php
+@@ -297,6 +297,12 @@ private function doDisableModules(array $modules): self
+         $moduleManager = $moduleManagerBuilder->build();
+ 
+         foreach ($modules as $moduleName) {
++            // If module has been removed we ignore it but inform via a warning
++            if (!$moduleManager->isOnDisk($moduleName)) {
++                $this->logger->warning(sprintf('Module %s was removed from disk, no need to disable it', $moduleName));
++                continue;
++            }
++
+             if ($moduleManager->isInstalled($moduleName) && $moduleManager->isEnabled($moduleName)) {
+                 $moduleManager->disable($moduleName);
+             }
+@@ -318,6 +324,12 @@ private function doEnableModules(array $modules): self
+         $moduleManager = $moduleManagerBuilder->build();
+ 
+         foreach ($modules as $moduleName) {
++            // If module has been removed we ignore it but inform via a warning
++            if (!$moduleManager->isOnDisk($moduleName)) {
++                $this->logger->warning(sprintf('Module %s was removed from disk, impossible to enable it', $moduleName));
++                continue;
++            }
++
+             if (!$moduleManager->isInstalled($moduleName)
+                 && !$moduleManager->install($moduleName)
+             ) {
+@@ -344,6 +356,12 @@ private function doResetModules(array $modules): self
+         $moduleManager = $moduleManagerBuilder->build();
+ 
+         foreach ($modules as $moduleName) {
++            // If module has been removed we ignore it but inform via a warning
++            if (!$moduleManager->isOnDisk($moduleName)) {
++                $this->logger->warning(sprintf('Module %s was removed from disk, impossible to reset it', $moduleName));
++                continue;
++            }
++
+             if ($moduleManager->isInstalled($moduleName)) {
+                 $moduleManager->reset($moduleName);
+             }
+diff --git a/src/Core/Addon/Theme/ThemeManagerBuilder.php b/src/Core/Addon/Theme/ThemeManagerBuilder.php
+index f7bf183d405b0..33bc32b6306a1 100644
+--- a/src/Core/Addon/Theme/ThemeManagerBuilder.php
++++ b/src/Core/Addon/Theme/ThemeManagerBuilder.php
+@@ -31,6 +31,7 @@
+ use Employee;
+ use PrestaShop\PrestaShop\Adapter\Configuration;
+ use PrestaShop\PrestaShop\Adapter\Hook\HookInformationProvider;
++use PrestaShop\PrestaShop\Core\Addon\Module\ModuleManagerBuilder;
+ use PrestaShop\PrestaShop\Core\Context\ApiClientContext;
+ use PrestaShop\PrestaShop\Core\Image\ImageTypeRepository;
+ use PrestaShop\PrestaShop\Core\Module\HookConfigurator;
+@@ -68,6 +69,9 @@ public function build()
+             $this->context->employee = new Employee();
+         }
+ 
++        $moduleManagerBuilder = ModuleManagerBuilder::getInstance();
++        $moduleManager = $moduleManagerBuilder->build();
++
+         return new ThemeManager(
+             $this->context->shop,
+             $configuration,
+@@ -81,7 +85,9 @@ public function build()
+                     new HookInformationProvider(),
+                     $this->context->shop,
+                     $this->db
+-                )
++                ),
++                $this->logger,
++                $moduleManager,
+             ),
+             $this->buildRepository($this->context->shop),
+             new ImageTypeRepository($this->db),
+diff --git a/src/Core/Module/HookConfigurator.php b/src/Core/Module/HookConfigurator.php
+index 2bc5a84e3e587..3d43d4b852569 100644
+--- a/src/Core/Module/HookConfigurator.php
++++ b/src/Core/Module/HookConfigurator.php
+@@ -26,13 +26,15 @@
+ 
+ namespace PrestaShop\PrestaShop\Core\Module;
+ 
++use Psr\Log\LoggerInterface;
++
+ class HookConfigurator
+ {
+-    private $hookRepository;
+-
+-    public function __construct(HookRepository $hookRepository)
+-    {
+-        $this->hookRepository = $hookRepository;
++    public function __construct(
++        private readonly HookRepository $hookRepository,
++        private readonly ?LoggerInterface $logger = null,
++        private readonly ?ModuleManager $moduleManager = null,
++    ) {
+     }
+ 
+     /**
+@@ -77,11 +79,26 @@ public function getThemeHooksConfiguration(array $hooks)
+                 if ($module === null && $firstNullValueFound) {
+                     $firstNullValueFound = false;
+                     foreach ($existing as $m) {
++                        // If module has been removed we ignore it but inform via a warning
++                        if ($this->moduleManager && !$this->moduleManager->isOnDisk($m)) {
++                            $this->logger?->warning(sprintf('Module %s was removed from disk, impossible to hook it', $m));
++                            continue;
++                        }
+                         $currentHooks[$hookName][] = $m;
+                     }
+                 } elseif (is_array($module)) {
++                    // If module has been removed we ignore it but inform via a warning
++                    if ($this->moduleManager && !$this->moduleManager->isOnDisk($key)) {
++                        $this->logger?->warning(sprintf('Module %s was removed from disk, impossible to hook it', $key));
++                        continue;
++                    }
+                     $currentHooks[$hookName][$key] = $module;
+                 } elseif ($module !== null) {
++                    // If module has been removed we ignore it but inform via a warning
++                    if ($this->moduleManager && !$this->moduleManager->isOnDisk($module)) {
++                        $this->logger?->warning(sprintf('Module %s was removed from disk, impossible to hook it', $module));
++                        continue;
++                    }
+                     $currentHooks[$hookName][] = $module;
+                 }
+             }
+diff --git a/src/Core/Module/ModuleManager.php b/src/Core/Module/ModuleManager.php
+index 72be4fbd445c4..3c660920f14ad 100644
+--- a/src/Core/Module/ModuleManager.php
++++ b/src/Core/Module/ModuleManager.php
+@@ -321,6 +321,11 @@ public function isEnabled(string $name): bool
+         return $this->moduleDataProvider->isEnabled($name);
+     }
+ 
++    public function isOnDisk(string $name): bool
++    {
++        return $this->moduleDataProvider->isOnDisk($name);
++    }
++
+     public function getError(string $name): string
+     {
+         $module = $this->moduleRepository->getModule($name);
+diff --git a/src/PrestaShopBundle/Controller/Admin/Improve/Design/ThemeController.php b/src/PrestaShopBundle/Controller/Admin/Improve/Design/ThemeController.php
+index 59e73a15052d1..c8685f2e07cf4 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Improve/Design/ThemeController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Improve/Design/ThemeController.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Controller\Admin\Improve\Design;
+ 
+ use Exception;
++use Monolog\Logger;
+ use PrestaShop\PrestaShop\Adapter\Language\RTL\InstalledLanguageChecker;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemeExporter;
+ use PrestaShop\PrestaShop\Core\Addon\Theme\ThemePageLayoutsCustomizer;
+@@ -63,6 +64,7 @@
+ use PrestaShopBundle\Form\Admin\Improve\Design\Theme\PageLayoutCustomizationFormFactory;
+ use PrestaShopBundle\Security\Attribute\AdminSecurity;
+ use PrestaShopBundle\Security\Attribute\DemoRestricted;
++use PrestaShopBundle\Service\Log\LogHandler;
+ use Symfony\Component\DependencyInjection\Attribute\Autowire;
+ use Symfony\Component\Form\FormInterface;
+ use Symfony\Component\HttpFoundation\File\UploadedFile;
+@@ -245,9 +247,10 @@ public function importAction(Request $request): Response
+      */
+     #[DemoRestricted(redirectRoute: 'admin_themes_index')]
+     #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_themes_index', message: 'You do not have permission to edit this.')]
+-    public function enableAction(string $themeName): RedirectResponse
++    public function enableAction(string $themeName, LogHandler $handler): RedirectResponse
+     {
+         try {
++            $handler->startSavingRecords();
+             $this->dispatchCommand(new EnableThemeCommand(new ThemeName($themeName)));
+             $this->addFlash('success', $this->trans('Successful update', [], 'Admin.Notifications.Success'));
+         } catch (ThemeException $e) {
+@@ -260,6 +263,15 @@ public function enableAction(string $themeName): RedirectResponse
+             );
+ 
+             return $this->redirectToRoute('admin_themes_index');
++        } finally {
++            $warnings = $handler->getSavedRecords(Logger::WARNING);
++            $handler->stopSavingRecords();
++            foreach ($warnings as $warning) {
++                $this->addFlash(
++                    'warning',
++                    $warning['message'],
++                );
++            }
+         }
+ 
+         return $this->redirectToRoute('admin_themes_index');
+diff --git a/src/PrestaShopBundle/Install/AbstractInstall.php b/src/PrestaShopBundle/Install/AbstractInstall.php
+index 1cd95a16e14a3..060bccf559a23 100644
+--- a/src/PrestaShopBundle/Install/AbstractInstall.php
++++ b/src/PrestaShopBundle/Install/AbstractInstall.php
+@@ -45,6 +45,10 @@ abstract class AbstractInstall
+      * @var array List of errors
+      */
+     protected $errors = [];
++    /**
++     * @var array List of warnings
++     */
++    protected $warnings = [];
+ 
+     /**
+      * @var PrestaShopLoggerInterface|null
+@@ -75,6 +79,25 @@ public function resetErrors(): void
+         $this->errors = [];
+     }
+ 
++    public function setWarning($warnings): void
++    {
++        if (!is_array($warnings)) {
++            $warnings = [$warnings];
++        }
++
++        $this->warnings = array_merge($this->warnings, $warnings);
++    }
++
++    public function getWarnings(): array
++    {
++        return $this->warnings;
++    }
++
++    public function resetWarnings(): void
++    {
++        $this->warnings = [];
++    }
++
+     public function setTranslator($translator)
+     {
+         $this->translator = $translator;
+diff --git a/src/PrestaShopBundle/Install/Install.php b/src/PrestaShopBundle/Install/Install.php
+index b439e0de49d43..12c857764f9c8 100644
+--- a/src/PrestaShopBundle/Install/Install.php
++++ b/src/PrestaShopBundle/Install/Install.php
+@@ -68,6 +68,7 @@
+ use PrestaShopException;
+ use PrestashopInstallerException;
+ use PrestaShopLoggerInterface;
++use Psr\Log\LogLevel;
+ use PSRLoggerAdapter;
+ use Symfony\Component\Finder\Finder;
+ use Symfony\Component\Yaml\Yaml;
+@@ -1181,11 +1182,13 @@ public function installTheme(?string $themeName = null): bool
+         $themeName = $themeName ?: _THEME_NAME_;
+         $this->getLogger()->logInfo('Installing theme ' . $themeName);
+ 
++        $logger = new PSRLoggerAdapter($this->getLogger());
++        $logger->startSavingMessages();
+         $builder = new ThemeManagerBuilder(
+             Context::getContext(),
+             Db::getInstance(),
+             null,
+-            new PSRLoggerAdapter($this->getLogger())
++            $logger,
+         );
+ 
+         $theme_manager = $builder->build();
+@@ -1197,6 +1200,12 @@ public function installTheme(?string $themeName = null): bool
+             return false;
+         }
+ 
++        $warnings = $logger->getSavedMessages(LogLevel::WARNING);
++        $logger->stopSavingMessages();
++        if (!empty($warnings)) {
++            $this->setWarning($warnings);
++        }
++
+         /*
+          * Copy language default images.
+          * We do this action after install theme because we
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+index 5648759310f66..28229525ffe31 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/services.yml
+@@ -69,11 +69,17 @@ services:
+     class: PrestaShopBundle\Service\Hook\HookFinder
+ 
+   # EVENT HANDLER
+-  prestashop.handler.log:
+-    class: PrestaShopBundle\Service\Log\LogHandler
++  PrestaShopBundle\Service\Log\LogHandler:
++    public: false
+     arguments:
+       - "@service_container"
+ 
++  prestashop.handler.log:
++    alias: PrestaShopBundle\Service\Log\LogHandler
++    deprecated:
++      package: PrestaShop\PrestaShop
++      version: 9.1
++
+   # CSRF/XSS additional protection middleware
+   PrestaShopBundle\Service\DataProvider\UserProvider:
+     autowire: true
+diff --git a/src/PrestaShopBundle/Resources/config/services/legacy.yml b/src/PrestaShopBundle/Resources/config/services/legacy.yml
+index 7b8cf1c1ffc55..9a60259d4e421 100644
+--- a/src/PrestaShopBundle/Resources/config/services/legacy.yml
++++ b/src/PrestaShopBundle/Resources/config/services/legacy.yml
+@@ -19,3 +19,5 @@ services:
+     class: PrestaShop\PrestaShop\Core\Module\HookConfigurator
+     arguments:
+       - "@hook_repository"
++      - "@logger"
++      - "@prestashop.module.manager"
+diff --git a/src/PrestaShopBundle/Service/Log/LogHandler.php b/src/PrestaShopBundle/Service/Log/LogHandler.php
+index c3c715aae83ea..07853598a8180 100644
+--- a/src/PrestaShopBundle/Service/Log/LogHandler.php
++++ b/src/PrestaShopBundle/Service/Log/LogHandler.php
+@@ -37,11 +37,23 @@
+  * @phpstan-import-type Record from Logger
+  *
+  * @phpstan-type FormattedRecord array{message: string, context: mixed[], level: Level, level_name: LevelName, channel: string, datetime: \DateTimeImmutable, extra: mixed[], formatted: mixed}
++ *
++ * This handler is an interface between Monolog and the legacy logger.
++ *
++ * It also provides a feature that allows you saving log records, it is always disabled by default, but you can temporarily
++ * enable the saving of recors, which may be useful to get warning messages and then display them as flash messages in controllers.
+  */
+ class LogHandler extends AbstractProcessingHandler
+ {
+     protected $container;
+ 
++    /**
++     * @var array<int, array<int, array{level: int, message: string, context: array}>>
++     */
++    protected array $savedRecords = [];
++
++    protected bool $recordsSaved = false;
++
+     public function __construct(Container $container, $level = Logger::DEBUG, $bubble = true)
+     {
+         $this->container = $container;
+@@ -58,5 +70,40 @@ protected function write(array $record): void
+         /** @var LegacyLogger $logger */
+         $logger = $this->container->get('prestashop.adapter.legacy.logger');
+         $logger->log($record['level'], $record['message'], $record['context']);
++        if (!empty($record['level']) && $record['level'] > Logger::DEBUG && $this->recordsSaved) {
++            $this->savedRecords[$record['level']][] = $record;
++        }
++    }
++
++    public function isRecordsSaved(): bool
++    {
++        return $this->recordsSaved;
++    }
++
++    /**
++     * All messages logged after this method is called are stored in a class field.
++     */
++    public function startSavingRecords(): void
++    {
++        $this->recordsSaved = true;
++    }
++
++    /**
++     * Stop saving log records and clear the saved records.
++     */
++    public function stopSavingRecords(): void
++    {
++        $this->recordsSaved = false;
++        $this->savedRecords = [];
++    }
++
++    public function getSavedRecords(int $level): array
++    {
++        return $this->savedRecords[$level] ?? [];
++    }
++
++    public function getAllSavedRecords(): array
++    {
++        return $this->savedRecords;
+     }
+ }

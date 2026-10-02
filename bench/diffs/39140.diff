@@ -1,0 +1,480 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+index 1c9da45da269f..5ab4190176f58 100644
+--- a/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/discount/form/index.ts
+@@ -34,6 +34,7 @@ $(() => {
+       'TranslatableInput',
+       'ToggleChildrenChoice',
+       'GeneratableInput',
++      'ChoiceTree',
+     ],
+   );
+ 
+@@ -57,4 +58,6 @@ $(() => {
+       $(DiscountMap.currencySelect).fadeIn();
+     }
+   }
++
++  new window.prestashop.component.ChoiceTree('#discount_conditions_cart_conditions_product_segment_category');
+ });
+diff --git a/src/Core/ConstraintValidator/Constraints/DiscountProductSegment.php b/src/Core/ConstraintValidator/Constraints/DiscountProductSegment.php
+new file mode 100644
+index 0000000000000..639879d9be699
+--- /dev/null
++++ b/src/Core/ConstraintValidator/Constraints/DiscountProductSegment.php
+@@ -0,0 +1,38 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\DiscountProductSegmentValidator;
++use Symfony\Component\Validator\Constraint;
++
++class DiscountProductSegment extends Constraint
++{
++    public function validatedBy()
++    {
++        return DiscountProductSegmentValidator::class;
++    }
++}
+diff --git a/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php b/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php
+new file mode 100644
+index 0000000000000..29a4f47892eba
+--- /dev/null
++++ b/src/Core/ConstraintValidator/DiscountProductSegmentValidator.php
+@@ -0,0 +1,56 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShop\PrestaShop\Core\ConstraintValidator;
++
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DiscountProductSegment;
++use Symfony\Component\Validator\Constraint;
++use Symfony\Component\Validator\ConstraintValidator;
++use Symfony\Component\Validator\Exception\UnexpectedTypeException;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class DiscountProductSegmentValidator extends ConstraintValidator
++{
++    public function __construct(private readonly TranslatorInterface $translator)
++    {
++    }
++
++    public function validate(mixed $value, Constraint $constraint)
++    {
++        if (!$constraint instanceof DiscountProductSegment) {
++            throw new UnexpectedTypeException($constraint, DiscountProductSegment::class);
++        }
++
++        $manufacturer = $value['manufacturer'] ?? null;
++        $category = $value['category'] ?? null;
++
++        if (empty($manufacturer) && empty($category)) {
++            $this->context->buildViolation($this->translator->trans('At least one product segment must be selected.', [], 'Admin.Notifications.Error'))
++                ->atPath('manufacturer')
++                ->addViolation();
++        }
++    }
++}
+diff --git a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+index c33bf75d10595..ea9519b2904d2 100644
+--- a/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
++++ b/src/Core/Form/IdentifiableObject/DataHandler/DiscountFormDataHandler.php
+@@ -206,14 +206,26 @@ private function updateDiscountConditions(int $discountId, array $data): void
+                 $conditionsCommand->setProductConditions($productRuleGroups);
+             } elseif ($data['conditions']['cart_conditions']['children_selector'] === CartConditionsType::PRODUCT_SEGMENT) {
+                 $manufacturer = $data['conditions']['cart_conditions']['product_segment']['manufacturer'] ?? [];
++                $category = $data['conditions']['cart_conditions']['product_segment']['category'] ?? '';
++                $productRuleGroups = [];
+                 if (!empty($manufacturer)) {
+-                    $productRuleGroups = [];
+                     $productRuleGroups[] = new ProductRuleGroup(
+                         $data['conditions']['cart_conditions']['product_segment']['quantity'],
+                         [
+                             new ProductRule(ProductRuleType::MANUFACTURERS, [(int) $manufacturer]),
+                         ]
+                     );
++                }
++                if (!empty($category)) {
++                    $productRuleGroups[] = new ProductRuleGroup(
++                        $data['conditions']['cart_conditions']['product_segment']['quantity'],
++                        [
++                            new ProductRule(ProductRuleType::CATEGORIES, [(int) $category]),
++                        ]
++                    );
++                }
++
++                if (!empty($productRuleGroups)) {
+                     $conditionsCommand->setProductConditions($productRuleGroups);
+                 }
+             }
+diff --git a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+index 965fe60d0d534..d122d9e44f167 100644
+--- a/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
++++ b/src/Core/Form/IdentifiableObject/DataProvider/DiscountFormDataProvider.php
+@@ -105,7 +105,7 @@ public function getData($id)
+         } elseif (!empty($specificProducts)) {
+             $selectedCondition = 'cart_conditions';
+             $selectedCartCondition = 'specific_products';
+-        } elseif (!empty($productSegment['manufacturer'])) {
++        } elseif (!empty($productSegment['manufacturer']) || !empty($productSegment['category'])) {
+             $selectedCondition = 'cart_conditions';
+             $selectedCartCondition = 'product_segment';
+         }
+@@ -270,6 +270,7 @@ private function getProductSegmentDetails(DiscountForEditing $discountForEditing
+         $productSegment = [
+             'manufacturer' => 0,
+             'quantity' => 0,
++            'category' => '',
+         ];
+ 
+         foreach ($discountForEditing->getProductConditions() as $condition) {
+@@ -279,6 +280,9 @@ private function getProductSegmentDetails(DiscountForEditing $discountForEditing
+                         $productSegment['manufacturer'] = $manufacturerId;
+                     }
+                 }
++                if ($rule->getType() === ProductRuleType::CATEGORIES) {
++                    $productSegment['category'] = $rule->getItemIds()[0];
++                }
+             }
+ 
+             $productSegment['quantity'] = $condition->getQuantity();
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+index 3023a7f447a25..46c674fd10bd4 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/CartConditionsType.php
+@@ -26,6 +26,7 @@
+ 
+ namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+ 
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\DiscountProductSegment;
+ use PrestaShopBundle\Form\Admin\Type\EntitySearchInputType;
+ use PrestaShopBundle\Form\Admin\Type\ProductSearchType;
+ use PrestaShopBundle\Form\Admin\Type\ToggleChildrenChoiceType;
+@@ -109,6 +110,18 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+             ])
+             ->add(self::PRODUCT_SEGMENT, DiscountProductSegmentType::class, [
+                 'label' => $this->trans('Product segment', 'Admin.Catalog.Feature'),
++                'constraints' => [
++                    new When(
++                        expression: sprintf(
++                            'this.getParent().getParent().get("children_selector").getData() === "%s" && this.getParent().get("children_selector").getData() === "%s"',
++                            DiscountConditionsType::CART_CONDITIONS,
++                            self::PRODUCT_SEGMENT
++                        ),
++                        constraints: [
++                            new DiscountProductSegment(),
++                        ]
++                    ),
++                ],
+             ])
+         ;
+     }
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+index 338a747551b83..8f96a414681bd 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Discount/DiscountProductSegmentType.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Form\Admin\Sell\Discount;
+ 
+ use PrestaShopBundle\Form\Admin\Sell\Product\Description\ManufacturerType;
++use PrestaShopBundle\Form\Admin\Type\CategoryChoiceTreeType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use Symfony\Component\Form\Extension\Core\Type\IntegerType;
+ use Symfony\Component\Form\FormBuilderInterface;
+@@ -37,6 +38,7 @@
+ 
+ class DiscountProductSegmentType extends TranslatorAwareType
+ {
++    public const CATEGORY = 'category';
+     public const MANUFACTURER = 'manufacturer';
+ 
+     public function buildForm(FormBuilderInterface $builder, array $options)
+@@ -46,6 +48,10 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Brand', 'Admin.Catalog.Feature'),
+                 'required' => false,
+             ])
++            ->add(self::CATEGORY, CategoryChoiceTreeType::class, [
++                'label' => $this->trans('Category', 'Admin.Catalog.Feature'),
++                'required' => false,
++            ])
+             ->add('quantity', IntegerType::class, [
+                 'label' => $this->trans('Minimum product quantity', 'Admin.Catalog.Feature'),
+                 'attr' => [
+diff --git a/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml b/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
+index 49a1c143f7bb0..e16068ade75dd 100644
+--- a/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
++++ b/src/PrestaShopBundle/Resources/config/services/core/constraint_validator.yml
+@@ -43,6 +43,12 @@ services:
+     tags:
+       - { name: validator.constraint_validator }
+ 
++  PrestaShop\PrestaShop\Core\ConstraintValidator\DiscountProductSegmentValidator:
++    arguments:
++      - '@translator'
++    tags:
++      - { name: validator.constraint_validator }
++
+   prestashop.core.constraint_validator.address_country_dni_validator:
+     class: 'PrestaShop\PrestaShop\Core\ConstraintValidator\AddressDniRequiredValidator'
+     arguments:
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_category_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_category_trigger.feature
+new file mode 100644
+index 0000000000000..82fa6a3193b23
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/BO/add_discount_with_category_trigger.feature
+@@ -0,0 +1,31 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags add-discount-with-category-trigger
++@restore-all-tables-before-feature
++@restore-languages-after-feature
++@add-discount-with-category-trigger
++Feature: Add discount with category trigger
++  PrestaShop allows BO users to update discounts conditions
++  As a BO user
++  I must be able to create discounts
++
++  Background:
++    Given shop "shop1" with name "test_shop" exists
++    Given there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    Given language with iso code "en" is the default one
++    And category "home" in default language named "Home" exists
++
++  Scenario: Create discount with category trigger
++    When I create a "free_shipping" discount "discount_with_category_trigger" with following properties:
++      | name[en-US] | Promotion |
++    Then discount "discount_with_category_trigger" should have the following properties:
++      | name[en-US] | Promotion     |
++      | type        | free_shipping |
++    When I update discount "discount_with_category_trigger" with following conditions matching at least 42 products:
++      | condition_type | items  |
++      | categories     | home  |
++    Then discount "discount_with_category_trigger" should have the following properties:
++      | name[en-US]              | Promotion     |
++      | type                     | free_shipping |
++      | minimum_product_quantity | 0             |
++    Then discount "discount_with_category_trigger" should have the following product conditions matching at least 42 products:
++      | condition_type | items  |
++      | categories     | home  |
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_category_trigger.feature b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_category_trigger.feature
+new file mode 100644
+index 0000000000000..5127bd738dffa
+--- /dev/null
++++ b/tests/Integration/Behaviour/Features/Scenario/Discount/FO/discount_with_category_trigger.feature
+@@ -0,0 +1,157 @@
++# ./vendor/bin/behat -c tests/Integration/Behaviour/behat.yml -s discount --tags discount-with-category-trigger
++@restore-all-tables-before-feature
++@discount-with-category-trigger
++Feature: Add discount with category trigger on FO
++  PrestaShop allows discounts with restricted products as the condition
++
++  Background:
++    Given there is a customer named "testCustomer" whose email is "pub@prestashop.com"
++    Given language with iso code "en" is the default one
++    And language "french" with locale "fr-FR" exists
++    Given shop "shop1" with name "test_shop" exists
++    And there is a currency named "usd" with iso code "USD" and exchange rate of 0.92
++    And shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    And category "home" in default language named "Home" exists
++    And category "clothes" in default language named "Clothes" exists
++    And category "clothes" parent is category "home"
++    And category "accessories" in default language named "Accessories" exists
++    And category "accessories" parent is category "home"
++
++  Scenario: First create products and the discount that will be used in following scenarios
++    Given I add product "product1" with following information:
++      | name[en-US] | eastern european tracksuit |
++      | type        | standard                   |
++    And product "product1" should be assigned to following categories:
++      | id reference | name | is default |
++      | home         | Home | true       |
++    Then product product1 should be assigned to following categories:
++      | id reference | name | is default |
++      | home         | Home | true       |
++    When I assign product product1 to following categories:
++      | categories       | [home, clothes] |
++      | default category | clothes         |
++    Then product product1 should be assigned to following categories:
++      | id reference | name    | is default |
++      | home         | Home    | false      |
++      | clothes      | Clothes | true       |
++    And I update product "product1" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "product1"
++    And I update product "product1" with following values:
++      | price | 5.00 |
++    Given I add product "product2" with following information:
++      | name[en-US] | shoes    |
++      | type        | standard |
++    And product "product2" should be assigned to following categories:
++      | id reference | name | is default |
++      | home         | Home | true       |
++    Then product product2 should be assigned to following categories:
++      | id reference | name | is default |
++      | home         | Home | true       |
++    When I assign product product2 to following categories:
++      | categories       | [home, accessories] |
++      | default category | accessories         |
++    Then product product2 should be assigned to following categories:
++      | id reference | name        | is default |
++      | home         | Home        | false      |
++      | accessories  | Accessories | true       |
++    And I update product "product2" stock with following information:
++      | delta_quantity | 123 |
++    And I enable product "product2"
++    And I update product "product2" with following values:
++      | price | 10.00 |
++    When I create a "cart_level" discount "discount_with_category_trigger" with following properties:
++      | name[en-US]        | Promotion                   |
++      | name[fr-FR]        | Promotion                   |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER |
++      | active             | true                        |
++      | reduction_amount   | 3.0                         |
++      | reduction_currency | usd                         |
++      | taxIncluded        | true                        |
++    Then discount "discount_with_category_trigger" should have the following properties:
++      | name[en-US]        | Promotion                   |
++      | name[fr-FR]        | Promotion                   |
++      | type               | cart_level                  |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER |
++      | active             | true                        |
++      | reduction_amount   | 3.0                         |
++      | reduction_currency | usd                         |
++      | taxIncluded        | true                        |
++    When I update discount "discount_with_category_trigger" with following conditions matching at least 1 products:
++      | condition_type | items   |
++      | categories     | clothes |
++    Then discount "discount_with_category_trigger" should have the following properties:
++      | minimum_product_quantity | 0 |
++    And discount "discount_with_category_trigger" should have the following product conditions matching at least 1 products:
++      | condition_type | items   |
++      | categories     | clothes |
++
++  Scenario: Reduction with category trigger on FO
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 product "shoes" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$17.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $17.00 |
++    When I use a voucher "discount_with_category_trigger" on the cart "dummy_cart"
++    Then I should get cart rule validation error
++    And cart "dummy_cart" total with tax included should be '$17.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $17.00 |
++    When I add 1 product "eastern european tracksuit" to the cart "dummy_cart"
++    When I use a voucher "discount_with_category_trigger" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$19.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $15.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$3.00 |
++      | total          | $19.00 |
++
++  Scenario: Discount on category that is not default:
++    When I create a "cart_level" discount "discount_with_category_trigger_2" with following properties:
++      | name[en-US]        | Promotion                     |
++      | name[fr-FR]        | Promotion                     |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER_2 |
++      | active             | true                          |
++      | reduction_amount   | 3.0                           |
++      | reduction_currency | usd                           |
++      | taxIncluded        | true                          |
++    Then discount "discount_with_category_trigger_2" should have the following properties:
++      | name[en-US]        | Promotion                     |
++      | name[fr-FR]        | Promotion                     |
++      | type               | cart_level                    |
++      | code               | CART_LEVEL_CATEGORY_TRIGGER_2 |
++      | active             | true                          |
++      | reduction_amount   | 3.0                           |
++      | reduction_currency | usd                           |
++      | taxIncluded        | true                          |
++    When I update discount "discount_with_category_trigger_2" with following conditions matching at least 1 products:
++      | condition_type | items |
++      | categories     | home  |
++    Then discount "discount_with_category_trigger_2" should have the following properties:
++      | minimum_product_quantity | 0 |
++    And discount "discount_with_category_trigger_2" should have the following product conditions matching at least 1 products:
++      | condition_type | items |
++      | categories     | home  |
++
++  Scenario: Reduction with category trigger on FO
++    Given I create an empty cart "dummy_cart" for customer "testCustomer"
++    When I add 1 product "shoes" to the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$17.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | $0.00  |
++      | total          | $17.00 |
++    When I use a voucher "discount_with_category_trigger_2" on the cart "dummy_cart"
++    And cart "dummy_cart" total with tax included should be '$14.00'
++    And my cart "dummy_cart" should have the following details:
++      | total_products | $10.00 |
++      | shipping       | $7.00  |
++      | total_discount | -$3.00 |
++      | total          | $14.00 |
+diff --git a/tests/Integration/Behaviour/behat.yml b/tests/Integration/Behaviour/behat.yml
+index f6bbcbee0ea7c..81fe15007134a 100644
+--- a/tests/Integration/Behaviour/behat.yml
++++ b/tests/Integration/Behaviour/behat.yml
+@@ -297,6 +297,8 @@ default:
+         - Tests\Integration\Behaviour\Features\Context\CarrierFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CartRuleFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\CategoryFeatureContext
++        - Tests\Integration\Behaviour\Features\Context\Domain\Product\UpdateCategoriesFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\CommonFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\Configuration\CommonConfigurationFeatureContext
+         - Tests\Integration\Behaviour\Features\Context\ContextFeatureContext

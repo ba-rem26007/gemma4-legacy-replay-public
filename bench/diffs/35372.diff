@@ -1,0 +1,94 @@
+diff --git a/classes/Cart.php b/classes/Cart.php
+index b662c5f4d4f2b..34972da7c5b79 100644
+--- a/classes/Cart.php
++++ b/classes/Cart.php
+@@ -755,6 +755,19 @@ public function getProducts($refresh = false, $id_product = false, $id_country =
+                     $reduction_type_row = ['reduction_type' => 0];
+                 }
+ 
++                /*
++                 * In case of packs, we need to properly calculate the quantity in stock. We can't just use
++                 * the quantity from the query, because stocks can be set to use the quantity of the products
++                 * in them. The quantity in stock_available then has no meaning and could be always zero.
++                 *
++                 * When calling Pack::getQuantity here, you MUST use null for $cart parameter. Otherwise it
++                 * will subtract the quantity that is already in the cart. Basically resulting in a nonsense,
++                 * half of quantity you have. We need the REAL quantity.
++                 */
++                if (Pack::isPack($product['id_product'])) {
++                    $product['quantity_available'] = Pack::getQuantity((int) $product['id_product'], (int) $product['id_product_attribute']);
++                }
++
+                 $products[$key] = array_merge($product, $reduction_type_row);
+             }
+         }
+@@ -4088,8 +4101,7 @@ public function checkQuantities($returnProductOnFailure = false)
+              */
+             if (
+                 !$product['active'] ||
+-                !$product['available_for_order'] ||
+-                (!$product['allow_oosp'] && $product['stock_quantity'] < $product['cart_quantity'])
++                !$product['available_for_order']
+             ) {
+                 return $returnProductOnFailure ? $product : false;
+             }
+diff --git a/controllers/front/CartController.php b/controllers/front/CartController.php
+index becc47469f7a1..a45985b5e0ab2 100644
+--- a/controllers/front/CartController.php
++++ b/controllers/front/CartController.php
+@@ -434,14 +434,8 @@ protected function processChangeProductInCart()
+              * If the product can't be in the cart in this quantity, we raise an error.
+              * For the purpose of this error message, we must get the real quantity in stock.
+              * No subtracting of quantity in the cart here.
+-             *
+-             * @todo StockAvailable::getQuantityAvailableByProduct does not work for packs
+-             * which depend on quantity of products inside.
+              */
+-            $availableProductQuantity = StockAvailable::getQuantityAvailableByProduct(
+-                $this->id_product,
+-                $this->id_product_attribute
+-            );
++            $availableProductQuantity = Product::getQuantity($this->id_product, $this->id_product_attribute);
+             $this->errors[] = $this->trans(
+                 'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
+                 [
+@@ -533,14 +527,8 @@ protected function processChangeProductInCart()
+                  * If the product can't be in the cart in this quantity, we raise an error.
+                  * For the purpose of this error message, we must get the real quantity in stock.
+                  * No subtracting of quantity in the cart here.
+-                 *
+-                 * @todo StockAvailable::getQuantityAvailableByProduct does not work for packs
+-                 * which depend on quantity of products inside.
+                  */
+-                $availableProductQuantity = StockAvailable::getQuantityAvailableByProduct(
+-                    $this->id_product,
+-                    $this->id_product_attribute
+-                );
++                $availableProductQuantity = Product::getQuantity($this->id_product, $this->id_product_attribute);
+                 $this->{$ErrorKey}[] = $this->trans(
+                     'You can only buy %quantity% "%product%". Please adjust the quantity in your cart to continue.',
+                     [
+@@ -552,6 +540,7 @@ protected function processChangeProductInCart()
+             }
+         }
+ 
++        // Check validity of all cart rules in cart and check if there are some automatic ones that should be applied
+         CartRule::autoRemoveFromCart();
+         CartRule::autoAddToCart();
+ 
+@@ -617,14 +606,8 @@ protected function shouldAvailabilityErrorBeRaised($product, $qtyToCheck)
+ 
+         /*
+          * We check if this product is out-of-stock.
+-         *
+-         * @todo StockAvailable::getQuantityAvailableByProduct does not work for packs
+-         * which depend on quantity of products inside.
+          */
+-        $availableProductQuantity = StockAvailable::getQuantityAvailableByProduct(
+-            $this->id_product,
+-            $this->id_product_attribute
+-        );
++        $availableProductQuantity = Product::getQuantity($this->id_product, $this->id_product_attribute);
+         if ($availableProductQuantity < $qtyToCheck) {
+             return true;
+         }

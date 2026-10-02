@@ -1,0 +1,2487 @@
+diff --git a/classes/Context.php b/classes/Context.php
+index 43488f8680083..a2e538025457c 100644
+--- a/classes/Context.php
++++ b/classes/Context.php
+@@ -298,11 +298,24 @@ public function getShopConstraint(): ShopConstraint
+     }
+ 
+     /**
+-     * Returns true when the current request is a front-office one.
++     * Returns true when the current execution is a front-office one — or cannot be proven
++     * NOT to be one.
+      *
+-     * Based on the context controller type ('front'/'modulefront'). When the controller
+-     * is not (yet) available, falls back to the _PS_FRONT_DIR_ constant, which is only
+-     * defined by the FO entry point.
++     * Based on the context controller type ('front'/'modulefront') when a legacy controller
++     * exists. Without one, only a POSITIVELY identified non-front execution is exempt: the
++     * back-office and Admin API applications declare their app id (_PS_APP_ID_) in their
++     * front controller, and the CLI has no HTTP request. Any other entry point — a module's
++     * standalone script requiring config.inc.php, the legacy webservice dispatcher, a cron —
++     * is treated as front office. That is the fail-closed default a confidentiality gate
++     * needs: a field hidden from the front office must never leak because a script was not
++     * dispatched by index.php.
++     *
++     * Deliberate asymmetry: the Admin API is exempted but the legacy webservice
++     * (webservice/dispatcher.php, which defines _PS_API_IN_USE_ and no app id) is not, although
++     * it is an authenticated admin surface too. The webservice never exposes extra properties
++     * itself, so failing closed there only affects module code reading $object->extra_properties
++     * during a webservice request — a behaviour change from 9.1 that belongs in the migration
++     * notes. Exempting it would mean also accepting defined('_PS_API_IN_USE_') below.
+      *
+      * Used to decide whether extra properties must be filtered on displayFront
+      * (see ExtraPropertiesBag::createForEntity()).
+@@ -312,10 +325,21 @@ public function getShopConstraint(): ShopConstraint
+     public static function isFrontOfficeContext(): bool
+     {
+         $controllerType = static::getContext()->controller->controller_type ?? null;
++        if (null !== $controllerType) {
++            return in_array($controllerType, ['front', 'modulefront'], true);
++        }
++
++        if (PHP_SAPI === 'cli') {
++            return false;
++        }
++
++        // AdminKernel::APP_ID and AdminAPIKernel::APP_ID, compared as literals so this gate
++        // never depends on autoloading a kernel class from a legacy entry point.
++        if (defined('_PS_APP_ID_') && in_array(_PS_APP_ID_, ['admin', 'admin-api'], true)) {
++            return false;
++        }
+ 
+-        return null !== $controllerType
+-            ? in_array($controllerType, ['front', 'modulefront'], true)
+-            : defined('_PS_FRONT_DIR_');
++        return true;
+     }
+ 
+     /**
+diff --git a/install-dev/data/db_structure.sql b/install-dev/data/db_structure.sql
+index 82cd430c4aa60..40aaded38af77 100644
+--- a/install-dev/data/db_structure.sql
++++ b/install-dev/data/db_structure.sql
+@@ -892,7 +892,7 @@ CREATE TABLE `PREFIX_extra_property_definition` (
+   `default_value` varchar(255) DEFAULT NULL,
+   `required` tinyint(1) unsigned NOT NULL DEFAULT '0',
+   `constraints` longtext DEFAULT NULL,
+-  `display_front` tinyint(1) unsigned NOT NULL DEFAULT 1,
++  `display_front` tinyint(1) unsigned NOT NULL DEFAULT 0,
+   `associated_apis` text DEFAULT NULL,
+   `associated_grids` text DEFAULT NULL,
+   `associated_forms` text DEFAULT NULL,
+diff --git a/src/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParser.php b/src/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParser.php
+index 20d7fe98d7b23..2d1732a8ffa26 100644
+--- a/src/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParser.php
++++ b/src/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParser.php
+@@ -11,6 +11,7 @@
+ 
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyConstraintException;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\UnknownExtraPropertyConstraintException;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
+ use Symfony\Component\Validator\Constraint;
+ use Symfony\Component\Validator\Constraints as Assert;
+ use Throwable;
+@@ -387,6 +388,17 @@ private static function assertOptionsAllowed(array $options, string $token): arr
+                         : 'an extra property constraint carries no payload'
+                 ));
+             }
++            // A violation message is displayed to whoever triggers it (BO form errors, the legacy
++            // error banner, API 422 bodies): it follows the same display-text rule as every other
++            // author-controlled text of a definition. Enforced here, on parse, so a stored token
++            // is refused on read exactly like a submitted one on write.
++            if (is_string($value) && str_ends_with(strtolower($option), 'message') && !ExtraPropertyValidator::isSafeDisplayText($value)) {
++                throw new InvalidExtraPropertyConstraintException(sprintf(
++                    'Option "%s" of constraint "%s" must not contain "<" or control characters.',
++                    $option,
++                    $token
++                ));
++            }
+         }
+ 
+         return $options;
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+index a22c907fa8e47..e73c965129d77 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinition.php
+@@ -14,6 +14,7 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyValueCaster;
+ use PrestaShop\PrestaShop\Core\Util\Inflector;
++use PrestaShop\TranslationToolsBundle\Translation\Helper\DomainHelper;
+ use ReflectionProperty;
+ use Symfony\Component\Validator\Constraint;
+ use Throwable;
+@@ -413,6 +414,67 @@ public function __construct(
+                 $propertyName
+             ));
+         }
++
++        // Author-controlled display texts (label/help wording, enum literals) are rendered to
++        // every employee opening a form or grid the property is placed on, and the translation
++        // domains select a catalogue. Both are validated HERE, at construction — the one path
++        // every definition goes through, registered (write) or hydrated from a registry row
++        // (read) — so a value written straight into the table cannot render what a
++        // registration would have refused: on read the offending row is skipped and logged
++        // (see ExtraPropertyDefinitionRepository::hydrateRowSafely()).
++        foreach (['labelWording' => $labelWording, 'descriptionWording' => $descriptionWording] as $parameterName => $text) {
++            if (null !== $text && !ExtraPropertyValidator::isSafeDisplayText($text)) {
++                throw new InvalidExtraPropertyDefinitionException(sprintf(
++                    'ExtraPropertyDefinition: %s must not contain "<" or control characters (entity "%s", property "%s").',
++                    $parameterName,
++                    $entityName,
++                    $propertyName
++                ));
++            }
++        }
++        // Enum literals are display texts AND SQL ENUM literals read back from the live column
++        // (SHOW COLUMNS), where a backslash does not round-trip: refuse it as well.
++        foreach ($enumValues ?? [] as $enumValue) {
++            if (is_string($enumValue) && (!ExtraPropertyValidator::isSafeDisplayText($enumValue) || str_contains($enumValue, '\\'))) {
++                throw new InvalidExtraPropertyDefinitionException(sprintf(
++                    'ExtraPropertyDefinition: enum value "%s" must not contain "<", "\\" or control characters (entity "%s", property "%s").',
++                    $enumValue,
++                    $entityName,
++                    $propertyName
++                ));
++            }
++        }
++        foreach (['labelDomain' => $labelDomain, 'descriptionDomain' => $descriptionDomain] as $parameterName => $domain) {
++            if (null === $domain || '' === $domain) {
++                continue;
++            }
++            if (!ExtraPropertyValidator::isTranslationDomain($domain)) {
++                throw new InvalidExtraPropertyDefinitionException(sprintf(
++                    'ExtraPropertyDefinition: %s "%s" must be a translation domain of 2 or 3 dot-separated PascalCase segments, e.g. "Modules.Mymodule.Admin" (entity "%s", property "%s").',
++                    $parameterName,
++                    $domain,
++                    $entityName,
++                    $propertyName
++                ));
++            }
++            // A module owns its own "Modules.<Module>.*" domains only (the same base domain the
++            // translation system derives for it): declaring a core domain — or another module's —
++            // would let its wordings shadow that catalogue shop-wide.
++            if (null !== $resolvedModuleName) {
++                $moduleBaseDomain = DomainHelper::buildModuleBaseDomain($resolvedModuleName, true) . '.';
++                if (!str_starts_with($domain, $moduleBaseDomain)) {
++                    throw new InvalidExtraPropertyDefinitionException(sprintf(
++                        'ExtraPropertyDefinition: %s "%s" of a module-owned definition must belong to the module ("%s…") (entity "%s", property "%s", module "%s").',
++                        $parameterName,
++                        $domain,
++                        $moduleBaseDomain,
++                        $entityName,
++                        $propertyName,
++                        $resolvedModuleName
++                    ));
++                }
++            }
++        }
+     }
+ 
+     // -------------------------------------------------------------------------
+diff --git a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+index 8c0d99945c229..70e1bcab93f66 100644
+--- a/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
++++ b/src/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepository.php
+@@ -53,7 +53,7 @@ class ExtraPropertyDefinitionRepository implements ExtraPropertyDefinitionReposi
+      *
+      * @var array<string, true>
+      */
+-    private array $reportedRejections = [];
++    protected array $reportedRejections = [];
+ 
+     public function __construct(
+         protected readonly Connection $connection,
+@@ -78,10 +78,45 @@ public function getAllDefinitions(): ExtraPropertyDefinitionCollection
+             $this->enrichRowsWithColumnMetadata($qb->executeQuery()->fetchAllAssociative() ?: [])
+         ));
+ 
+-        return new ExtraPropertyDefinitionCollection(array_values(array_map(
+-            static fn (array $row): ExtraPropertyDefinition => ExtraPropertyDefinition::fromRow($row),
++        return new ExtraPropertyDefinitionCollection(array_values(array_filter(array_map(
++            fn (array $row): ?ExtraPropertyDefinition => $this->hydrateRowSafely($row),
+             $rows
+-        )));
++        ))));
++    }
++
++    /**
++     * Hydrates one registry row into a definition, or skips it (returns null) when the row
++     * cannot be trusted — an invalid enum/type/scope value, an identifier that no longer
++     * passes the value-object contract, etc.
++     *
++     * Defence in depth, and the read-side counterpart of the write-time validation: this
++     * repository feeds every request (Admin API responses, BO grids/forms, front-office
++     * reads), so a single corrupt or tampered row — data drift, a downgrade, or a direct
++     * DB write bypassing the registry — must degrade to "this definition is ignored"
++     * instead of throwing and taking the whole page or endpoint down. A dropped row is
++     * logged once per id so a persistent bad row cannot flood the log.
++     *
++     * @param array<string, mixed> $row
++     */
++    protected function hydrateRowSafely(array $row): ?ExtraPropertyDefinition
++    {
++        try {
++            return ExtraPropertyDefinition::fromRow($row);
++        } catch (Throwable $exception) {
++            $id = isset($row['id_extra_property_definition']) ? (string) $row['id_extra_property_definition'] : '?';
++            $logKey = 'hydrate:' . $id;
++            if (!isset($this->reportedRejections[$logKey])) {
++                $this->reportedRejections[$logKey] = true;
++                // error, not warning: a definition silently disappearing from every surface is
++                // worth an operator's attention whether the row was tampered with or a bug hit.
++                $this->logger->error(
++                    'Skipping unreadable extra property definition row {id}: {reason}',
++                    ['id' => $id, 'reason' => $exception->getMessage(), 'exception' => $exception]
++                );
++            }
++
++            return null;
++        }
+     }
+ 
+     /**
+diff --git a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+index 1112e91db63df..f1cabf5a23833 100644
+--- a/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
++++ b/src/Core/ExtraProperty/Form/ExtraPropertiesFormBuilderModifier.php
+@@ -21,12 +21,14 @@
+ use PrestaShopBundle\Form\Admin\Type\NavigationTabType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use PrestaShopBundle\Form\FormBuilderModifier;
++use Psr\Log\LoggerInterface;
+ use Symfony\Component\Form\Extension\Core\Type\FormType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\Form\FormTypeInterface;
+ use Symfony\Component\Form\ResolvedFormTypeInterface;
+ use Symfony\Component\Validator\Constraints\All;
+ use Symfony\Contracts\Translation\TranslatorInterface;
++use Throwable;
+ 
+ /**
+  * Adds extra properties fields into an identifiable object form builder.
+@@ -60,6 +62,8 @@ public function __construct(
+         protected readonly FormBuilderModifier $formBuilderModifier,
+         protected readonly ExtraPropertyFormTypeMap $formTypeMap,
+         protected readonly ExtraPropertyDefinitionShopFilterInterface $definitionShopFilter,
++        // The read-side policy enforcement below logs every option/type it drops.
++        protected readonly LoggerInterface $logger,
+     ) {
+     }
+ 
+@@ -110,14 +114,54 @@ public function apply(FormBuilderInterface $formBuilder, string $formId, ?int $e
+                 $typeOptions['data'] = $definition->getDefaultValue();
+             }
+ 
++            // A field of that name already present in the target builder belongs to the host
++            // form: it is left alone — neither replaced nor resolved and dropped below.
+             if (null === $formEntry || null === $formEntry['path']) {
+                 $targetBuilder = $this->resolveOrCreateFallbackPath($formBuilder);
+-                if (!$targetBuilder->has($formFieldName)) {
+-                    $targetBuilder->add($formFieldName, $type, $typeOptions);
++                if ($targetBuilder->has($formFieldName)) {
++                    continue;
+                 }
++                $targetBuilder->add($formFieldName, $type, $typeOptions);
+             } else {
+-                $this->addAtPosition($formBuilder, $formEntry, $formFieldName, $type, $typeOptions);
++                $targetBuilder = $this->addAtPosition($formBuilder, $formEntry, $formFieldName, $type, $typeOptions);
++                if (null === $targetBuilder) {
++                    continue;
++                }
+             }
++
++            $this->resolveFieldOrDrop($targetBuilder, $formFieldName, $definition);
++        }
++    }
++
++    /**
++     * Resolves the field just added, so its options go through the form type's resolver and its
++     * buildForm() now rather than when the whole form is built, and drops it when that fails.
++     *
++     * The policy denies the options known to be unsafe; every other option — a custom type's own
++     * included — is validated by the type itself. On write that happens in FormOptionsValidator
++     * and refuses the definition. On read, a row written straight into the registry, a type
++     * whose options changed since the definition was saved, or a bug in a custom type must not
++     * take the whole entity form down: the offending field is removed and logged (with the
++     * exception), its siblings stay. Every throwable is caught on purpose — the type is module
++     * code, and a failing extra field is never worth a failing product or customer form.
++     * Placement errors (a container or anchor that does not exist) are thrown earlier, by
++     * addAtPosition(), outside this guard: they are a contract of the definition and keep failing.
++     */
++    protected function resolveFieldOrDrop(FormBuilderInterface $targetBuilder, string $formFieldName, ExtraPropertyDefinition $definition): void
++    {
++        try {
++            $targetBuilder->get($formFieldName);
++        } catch (Throwable $exception) {
++            $targetBuilder->remove($formFieldName);
++            $this->logger->error(
++                'Dropped the field of extra property "{property}": its form options do not build with form type "{type}" ({reason}).',
++                [
++                    'property' => $definition->getFieldName(),
++                    'type' => $definition->getFormType() ?? 'default',
++                    'reason' => $exception->getMessage(),
++                    'exception' => $exception,
++                ]
++            );
+         }
+     }
+ 
+@@ -127,12 +171,31 @@ public function apply(FormBuilderInterface $formBuilder, string $formId, ?int $e
+     protected function resolveFieldTypeAndOptions(ExtraPropertyDefinition $definition): array
+     {
+         $declaredType = $definition->getFormType();
+-        $extraOptions = $definition->getFormOptions() ?? [];
++
++        // Read-side enforcement of ExtraPropertyFormOptionsPolicy — the very rules
++        // FormOptionsValidator applied when the definition was saved. A row written straight
++        // into the registry (bypassing the registry validation) must not render what its author
++        // could not have saved: refused options are dropped and logged. Options the policy does
++        // not know (a custom type's own) are checked by building the field, see apply().
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($definition->getFormOptions());
++        $extraOptions = $sanitized['options'];
++        if ([] !== $sanitized['dropped']) {
++            $this->logger->warning(
++                'Dropped form options ({options}) of extra property "{property}": not allowed by the extra property form options policy.',
++                ['options' => implode(', ', $sanitized['dropped']), 'property' => $definition->getFieldName()]
++            );
++        }
+ 
+         if (null !== $declaredType && is_subclass_of($declaredType, FormTypeInterface::class)) {
+             $baseType = $declaredType;
+             $baseOptions = [];
+         } else {
++            if (null !== $declaredType) {
++                $this->logger->warning(
++                    'Form type "{type}" of extra property "{property}" is not a Symfony form type: rendering the mapped default type instead.',
++                    ['type' => $declaredType, 'property' => $definition->getFieldName()]
++                );
++            }
+             [$baseType, $baseOptions] = $this->formTypeMap->getDefaultFor($definition->getType(), $definition->getEnumValues());
+         }
+ 
+@@ -223,6 +286,9 @@ protected function resolveExistingValue(array $existingValues, ExtraPropertyDefi
+      * @param class-string<FormTypeInterface> $type
+      * @param array<string, mixed> $typeOptions
+      *
++     * @return FormBuilderInterface|null the builder the field was added to, or null when a field of
++     *                                   that name already existed there (left untouched)
++     *
+      * @throws InvalidArgumentException when a path segment (container or anchor parent) does not exist
+      */
+     protected function addAtPosition(
+@@ -231,18 +297,18 @@ protected function addAtPosition(
+         string $formFieldName,
+         string $type,
+         array $typeOptions,
+-    ): void {
++    ): ?FormBuilderInterface {
+         $targetBuilder = $this->resolvePath($rootBuilder, (string) $formEntry['path']);
+ 
+         if ($targetBuilder->has($formFieldName)) {
+-            return;
++            return null;
+         }
+ 
+         // Container placement (no mode): append the field directly inside the resolved node.
+         if (null === $formEntry['anchor']) {
+             $targetBuilder->add($formFieldName, $type, $typeOptions);
+ 
+-            return;
++            return $targetBuilder;
+         }
+ 
+         // Anchor placement: insert relative to the anchor field inside the parent builder.
+@@ -252,6 +318,8 @@ protected function addAtPosition(
+         } else {
+             $this->formBuilderModifier->addAfter($targetBuilder, $formEntry['anchor'], $formFieldName, $type, $typeOptions);
+         }
++
++        return $targetBuilder;
+     }
+ 
+     /**
+diff --git a/src/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicy.php b/src/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicy.php
+new file mode 100644
+index 0000000000000..e1536e4b5c486
+--- /dev/null
++++ b/src/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicy.php
+@@ -0,0 +1,640 @@
++<?php
++
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Core\ExtraProperty\Form;
++
++use PrestaShop\PrestaShop\Core\ExtraProperty\Validation\ExtraPropertyValidator;
++
++/**
++ * The single authority on the form options an extra property definition may declare for its
++ * back-office field.
++ *
++ * A definition's formType/formOptions are rendered, unchanged, inside the entity forms every
++ * employee opens (product, customer, order…), and the field type is deliberately free: modules
++ * ship rich custom types and even core types such as TextPreviewType are legitimately useful.
++ * What must stay out of a definition author's hands are the OPTIONS that make any type
++ * dangerous. They fall in two groups:
++ *
++ *  - options whose VALUE is displayed — rendered raw or purified by the UI-kit theme
++ *    (label_subtitle, hint, alert_*), interpolated as a tag name (label_tag_name), used as a
++ *    link target (download_url, external_link) — are ALLOWED, with their content checked: plain
++ *    display text (no "<", no control character, see ExtraPropertyValidator::isSafeDisplayText()),
++ *    an enumerated value, or an http(s)/root-relative URL. Every attribute NAME of an attr bag is
++ *    echoed verbatim, so "on*", inline style and URL attributes are stripped from every bag;
++ *  - options that change what the field DOES — switch a value or label to raw rendering
++ *    (allow_html, label_html), select which Twig blocks render it (block_prefix, form_theme),
++ *    change what it maps to or how it validates (mapped, data, constraints, property_path…), or
++ *    take callables and class names (choice_loader, entry_type, class…) — are DENIED by name:
++ *    no content check can make them safe.
++ *
++ * Everything else — including the options a custom type defines for itself — passes, and a
++ * definition is refused on write when the resulting field does not build (FormOptionsValidator),
++ * or its field is dropped on read when it does not build (ExtraPropertiesFormBuilderModifier).
++ *
++ * The rules are enforced at BOTH ends from this one class, so they can never drift apart:
++ *  - FormOptionsValidator (write, i.e. ExtraPropertyRegistry::register()) refuses a definition
++ *    with an explicit error naming each refused option — the author learns immediately why the
++ *    input is not accepted;
++ *  - ExtraPropertiesFormBuilderModifier (read, i.e. at render) drops the very same options and
++ *    logs them — a row written straight into the registry table cannot render what a
++ *    registration would have refused.
++ *
++ * Static-only, like ExtraPropertyConstraintGrammar: a vocabulary, not a service.
++ */
++class ExtraPropertyFormOptionsPolicy
++{
++    /**
++     * Options a definition may never set through form_options, whatever the form type: each one
++     * changes what the field DOES, so no content check applies. Grouped by the reason it is denied.
++     *
++     * The policy only filters what a definition passes through form_options. A CUSTOM form type
++     * is free to use any of these internally — it sets them in its own configureOptions() or
++     * buildForm(), from module code the shop already trusts, and this policy never sees them.
++     * That is the intended way to get, for instance, a collection of sub-fields: wrap a
++     * CollectionType in a custom type that configures entry_type / allow_add / prototype itself,
++     * declare that type as the definition's formType, and pair it with a JSON-typed property
++     * (the writer json-encodes the submitted array, the reader decodes it).
++     *
++     * @var list<string>
++     */
++    public const DENIED_OPTIONS = [
++        // Switch the stored VALUE (allow_html on TextPreviewType) or the label/help to raw HTML
++        // rendering. The danger is in the text they would render unescaped, not in the option.
++        'allow_html',
++        'help_html',
++        'label_html',
++        // Select which Twig block or theme renders the field: a block that outputs raw could be picked.
++        'block_name',
++        'block_prefix',
++        'form_theme',
++        'use_default_themes',
++        // Set by the modifier itself from the definition — label/help from its translatable
++        // wording, required from isRequired(), data from the stored value, constraints from the
++        // DSL. An override through form_options would bypass the definition.
++        'constraints',
++        'data',
++        'help',
++        'label',
++        'required',
++        // Change WHAT the field reads from and writes to. With mapped: true and a property_path,
++        // the extra value would be written onto the HOST entity (mass assignment through the
++        // product or customer form); getter/setter are callables, data_class loads a class.
++        'by_reference',
++        'compound',
++        'data_class',
++        'default_empty_data',
++        'empty_data',
++        'getter',
++        'inherit_data',
++        'mapped',
++        'property_path',
++        'setter',
++        // Change how the field validates and where its errors land (validation_groups also
++        // accepts a callable).
++        'error_bubbling',
++        'error_mapping',
++        'validation_groups',
++        // Substituted into the displayed label/help/attribute texts without any check.
++        'attr_translation_parameters',
++        'help_translation_parameters',
++        'label_translation_parameters',
++        // PrestaShop extensions that act beyond the field: write the value to every shop, bind
++        // the field to a configuration key, or substitute the displayed/stored value when empty.
++        'disabled_value',
++        'empty_view_data',
++        'modify_all_shops',
++        'multistore_configuration_key',
++        'multistore_dropdown',
++        // Take a callable, a property path, a class name or a loader object, executed or loaded
++        // while the field is built (ChoiceType and EntityType options).
++        'choice_attr',
++        'choice_filter',
++        'choice_label',
++        'choice_loader',
++        'choice_name',
++        'choice_value',
++        'class',
++        'em',
++        'group_by',
++        'query_builder',
++        // CollectionType wiring: nested fields built from options (entry_type is a class name,
++        // entry_options a full option set). Not available to a definition directly — see the
++        // custom-type alternative in the docblock above.
++        'allow_add',
++        'allow_delete',
++        'delete_empty',
++        'entry_options',
++        'entry_type',
++        'prototype',
++        'prototype_data',
++        'prototype_name',
++        'prototype_options',
++        // Form-level options, meaningless on a field.
++        'action',
++        'csrf_field_name',
++        'csrf_protection',
++        'csrf_token_id',
++        'method',
++    ];
++
++    /**
++     * Attribute names refused inside every "attr" bag (attr, label_attr, row_attr, help_attr…),
++     * on top of every "on*" event handler: inline CSS and URL-bearing attributes.
++     *
++     * @var list<string>
++     */
++    public const DENIED_ATTRIBUTES = [
++        'action',
++        'formaction',
++        'href',
++        'ping',
++        'src',
++        'srcdoc',
++        'style',
++        'xlink:href',
++    ];
++
++    /**
++     * Options whose string value is displayed (rendered raw or purified by the theme): allowed as
++     * plain display text.
++     *
++     * @var list<string>
++     */
++    public const TEXT_OPTIONS = ['alert_title', 'hint', 'label_help_box', 'label_subtitle', 'label_tab'];
++
++    /**
++     * Options carrying a list of displayed strings: allowed as lists of plain display texts
++     * (alert_message also accepts a single string).
++     *
++     * @var list<string>
++     */
++    public const TEXT_LIST_OPTIONS = ['alert_message', 'data_list'];
++
++    /**
++     * Options used as a link target: allowed as an http(s) URL or a root-relative path.
++     *
++     * @var list<string>
++     */
++    public const URL_OPTIONS = ['download_url'];
++
++    /**
++     * The option carrying the field's HTML attributes, and the suffix of the other attribute bags
++     * (label_attr, row_attr, help_attr…). Every one of them is filtered by DENIED_ATTRIBUTES.
++     */
++    private const ATTRIBUTES_OPTION = 'attr';
++    private const ATTRIBUTES_OPTION_SUFFIX = '_attr';
++
++    /**
++     * Prefix of the HTML event handler attributes (onclick, onfocus…). Compared on the lowercased
++     * attribute name: HTML attribute names are case-insensitive, so "onFocus" is a handler too.
++     */
++    private const EVENT_HANDLER_ATTRIBUTE_PREFIX = 'on';
++
++    /**
++     * Shape of an acceptable HTML attribute name: a letter, then letters, digits, ":", ".", "_"
++     * or "-" (class, data-toggle, aria-label, xlink:href, maxlength…).
++     *
++     * The form theme renders each attribute as ` {{ attrname }}="{{ attrvalue }}"`, and Twig's
++     * escaping of the NAME does not touch whitespace — so a name carrying a space would emit a
++     * second, unchecked attribute (" onfocus" or "x onfocus" both yield a live event handler,
++     * and neither starts with "on"). Checking the shape of the name closes that, and the
++     * event-handler and denied-attribute rules below then apply to a name that cannot hide one.
++     */
++    private const ATTRIBUTE_NAME_PATTERN = '/^[a-zA-Z][a-zA-Z0-9:._-]*$/';
++
++    /**
++     * The option describing a link rendered next to the field (see EXTERNAL_LINK_KEYS).
++     */
++    private const EXTERNAL_LINK_OPTION = 'external_link';
++
++    /**
++     * The TEXT_LIST_OPTIONS entry that also accepts a single string instead of a list.
++     */
++    private const SINGLE_OR_LIST_TEXT_OPTION = 'alert_message';
++
++    /**
++     * Keys of the external_link array option and their rule.
++     *
++     * @var array<string, string> key => 'url'|'text'|'bool' or an enumerated list joined by "|"
++     */
++    private const EXTERNAL_LINK_KEYS = [
++        'align' => 'left|right',
++        'href' => 'url',
++        'open_in_new_tab' => 'bool',
++        'position' => 'append|prepend',
++        'text' => 'text',
++    ];
++
++    /**
++     * Options selecting the translation catalogue of labels: a string value follows the same rule
++     * as the definition's own domains, so it can never route a label through the ICU formatter
++     * ("+intl-icu"), where a malformed pattern throws on every render.
++     *
++     * @var list<string>
++     */
++    private const DOMAIN_OPTIONS = ['choice_translation_domain', 'translation_domain'];
++
++    /**
++     * Options carrying a list of choices: labels are displayed (and, expanded, rendered like any
++     * other label) so they follow the display-text rule; values must be scalar. A string value —
++     * a property path or a callable for Symfony — is refused.
++     *
++     * @var list<string>
++     */
++    private const CHOICE_LIST_OPTIONS = ['choices', 'preferred_choices'];
++
++    /**
++     * Value rule of the known scalar options: accepted PHP types (gettype() names) and, for
++     * enumerated options, the accepted values. A wrong-typed or out-of-range value would throw in
++     * Symfony's options resolver while the entity form is built; refusing it here gives the author
++     * a clear error on write and drops it on read. label_tag_name is interpolated as an HTML tag
++     * name and alert_type as a CSS class: only known values pass.
++     *
++     * @var array<string, array{types: list<string>, values?: list<string>}>
++     */
++    private const OPTION_VALUE_RULES = [
++        'alert_position' => ['types' => ['string'], 'values' => ['append', 'prepend']],
++        'alert_type' => ['types' => ['string'], 'values' => ['danger', 'info', 'primary', 'secondary', 'success', 'warning']],
++        'currency' => ['types' => ['boolean', 'string']],
++        'divisor' => ['types' => ['integer', 'double']],
++        'expanded' => ['types' => ['boolean']],
++        'grouping' => ['types' => ['boolean']],
++        'html5' => ['types' => ['boolean']],
++        'input' => ['types' => ['string'], 'values' => ['array', 'datetime', 'datetime_immutable', 'number', 'string', 'timestamp']],
++        'invalid_message' => ['types' => ['string']],
++        'label_tag_name' => ['types' => ['string'], 'values' => ['div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'label', 'legend', 'p', 'span', 'strong']],
++        'multiple' => ['types' => ['boolean']],
++        'placeholder' => ['types' => ['boolean', 'string']],
++        'rounding_mode' => ['types' => ['integer']],
++        'scale' => ['types' => ['integer']],
++        'symbol' => ['types' => ['boolean', 'string']],
++        'trim' => ['types' => ['boolean']],
++        'type' => ['types' => ['string'], 'values' => ['fractional', 'integer']],
++        'widget' => ['types' => ['string'], 'values' => ['choice', 'single_text', 'text']],
++        'with_minutes' => ['types' => ['boolean']],
++        'with_seconds' => ['types' => ['boolean']],
++    ];
++
++    /**
++     * Static-only class.
++     */
++    private function __construct()
++    {
++    }
++
++    /**
++     * Write-side check: every reason the options are refused, as human-readable messages naming
++     * the offending option so the author can fix the definition. Empty when accepted.
++     *
++     * @param array<string, mixed>|null $formOptions
++     *
++     * @return list<string>
++     */
++    public static function validate(?array $formOptions): array
++    {
++        return self::inspect($formOptions ?? [])['errors'];
++    }
++
++    /**
++     * Read-side counterpart of validate(), built on the very same walk: the options with every
++     * refused entry removed, plus the list of what was removed (for logging). Options that
++     * validate() accepts come back untouched.
++     *
++     * @param array<string, mixed>|null $formOptions
++     *
++     * @return array{options: array<string, mixed>, dropped: list<string>}
++     */
++    public static function sanitize(?array $formOptions): array
++    {
++        $inspected = self::inspect($formOptions ?? []);
++
++        return ['options' => $inspected['options'], 'dropped' => $inspected['dropped']];
++    }
++
++    /**
++     * Walks the options once, producing both the cleaned array and the error/dropped lists, so
++     * write and read can never disagree on what is acceptable. Each option is routed to the rule
++     * of its kind by inspectOption(); an inspection without a "value" key drops the option.
++     *
++     * @param array<mixed, mixed> $formOptions
++     *
++     * @return array{options: array<string, mixed>, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspect(array $formOptions): array
++    {
++        $options = [];
++        $errors = [];
++        $dropped = [];
++
++        foreach ($formOptions as $option => $value) {
++            if (!is_string($option)) {
++                $errors[] = sprintf('Form option "%s" is not a valid option name.', (string) $option);
++                $dropped[] = (string) $option;
++                continue;
++            }
++
++            $inspected = self::inspectOption($option, $value);
++            $errors = array_merge($errors, $inspected['errors']);
++            $dropped = array_merge($dropped, $inspected['dropped']);
++            if (array_key_exists('value', $inspected)) {
++                $options[$option] = $inspected['value'];
++            }
++        }
++
++        return ['options' => $options, 'errors' => $errors, 'dropped' => $dropped];
++    }
++
++    /**
++     * Routes one option to the rule of its kind. A denied name is refused whatever its value: the
++     * denial is about the capability, not the content.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectOption(string $option, mixed $value): array
++    {
++        if (in_array($option, self::DENIED_OPTIONS, true)) {
++            return self::refused($option, sprintf('Form option "%s" cannot be set on an extra property field.', $option));
++        }
++
++        // A null is forwarded, not dropped: it overrides the form type's own default (a type
++        // defaulting label_tag_name to 'h3' must render a plain label again), and being contentless
++        // it cannot carry anything the rules below look for.
++        if (null === $value) {
++            return self::kept(null);
++        }
++
++        if (self::ATTRIBUTES_OPTION === $option || str_ends_with($option, self::ATTRIBUTES_OPTION_SUFFIX)) {
++            return self::inspectAttributes($option, $value);
++        }
++
++        if (in_array($option, self::TEXT_OPTIONS, true)) {
++            return self::inspectText($option, $value);
++        }
++
++        if (in_array($option, self::TEXT_LIST_OPTIONS, true)) {
++            return self::inspectTextList($option, $value);
++        }
++
++        if (in_array($option, self::URL_OPTIONS, true)) {
++            return self::inspectUrl($option, $value);
++        }
++
++        if (self::EXTERNAL_LINK_OPTION === $option) {
++            $error = self::externalLinkError($value);
++
++            return null === $error ? self::kept($value) : self::refused($option, $error);
++        }
++
++        if (in_array($option, self::CHOICE_LIST_OPTIONS, true)) {
++            return self::inspectChoiceList($option, $value);
++        }
++
++        if (in_array($option, self::DOMAIN_OPTIONS, true)) {
++            return self::inspectDomain($option, $value);
++        }
++
++        $error = self::knownOptionValueError($option, $value);
++        if (null !== $error) {
++            return self::refused($option, $error);
++        }
++
++        // Not denied and not a known core option: an option of the declared (possibly custom)
++        // type. Its shape is checked by building the field — refused on write, dropped on read.
++        return self::kept($value);
++    }
++
++    /**
++     * Attribute bag: the form theme echoes every attribute NAME verbatim, so a name must first be
++     * a well-formed attribute name (ATTRIBUTE_NAME_PATTERN — a name containing whitespace would
++     * smuggle a second attribute past every other rule), and is then refused when it is an event
++     * handler, an inline style or a URL attribute. Names are compared lowercased: HTML attribute
++     * names are case-insensitive, so "onFocus" is a handler just like "onfocus". Offending
++     * attributes are removed one by one and the rest of the bag is kept.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectAttributes(string $option, mixed $value): array
++    {
++        if (!is_array($value)) {
++            return self::refused($option, sprintf('Form option "%s" must be an object of attribute name => value.', $option));
++        }
++
++        $attributes = [];
++        $errors = [];
++        $dropped = [];
++        foreach ($value as $attribute => $attributeValue) {
++            $lowerAttribute = is_string($attribute) ? strtolower($attribute) : '';
++            if (!is_string($attribute)
++                || 1 !== preg_match(self::ATTRIBUTE_NAME_PATTERN, $attribute)
++                || str_starts_with($lowerAttribute, self::EVENT_HANDLER_ATTRIBUTE_PREFIX)
++                || in_array($lowerAttribute, self::DENIED_ATTRIBUTES, true)
++                || (null !== $attributeValue && !is_scalar($attributeValue))
++            ) {
++                $errors[] = sprintf(
++                    'HTML attribute "%s" of form option "%s" cannot be set on an extra property field (the name must be a plain attribute name; event handlers, inline styles and URL attributes are refused; values must be scalar).',
++                    (string) $attribute,
++                    $option
++                );
++                $dropped[] = $option . '.' . (string) $attribute;
++                continue;
++            }
++            $attributes[$attribute] = $attributeValue;
++        }
++
++        return ['value' => $attributes, 'errors' => $errors, 'dropped' => $dropped];
++    }
++
++    /**
++     * Displayed string option: plain display text only.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectText(string $option, mixed $value): array
++    {
++        if (!is_string($value) || !ExtraPropertyValidator::isSafeDisplayText($value)) {
++            return self::refused($option, self::textError($option));
++        }
++
++        return self::kept($value);
++    }
++
++    /**
++     * Displayed list of strings; alert_message also accepts a single string.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectTextList(string $option, mixed $value): array
++    {
++        $texts = is_string($value) && self::SINGLE_OR_LIST_TEXT_OPTION === $option ? [$value] : $value;
++        if (!is_array($texts) || !self::isSafeTextList($texts)) {
++            return self::refused($option, self::textError($option, true));
++        }
++
++        return self::kept($value);
++    }
++
++    /**
++     * Link target: an http(s) URL or a root-relative path.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectUrl(string $option, mixed $value): array
++    {
++        if (!is_string($value) || !ExtraPropertyValidator::isSafeUrl($value)) {
++            return self::refused($option, sprintf('Form option "%s" must be an http(s) URL or a root-relative path.', $option));
++        }
++
++        return self::kept($value);
++    }
++
++    /**
++     * Choice list: labels are displayed so they follow the display-text rule, values stay scalar.
++     * Offending entries are removed one by one and the rest of the list is kept.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectChoiceList(string $option, mixed $value): array
++    {
++        if (!is_array($value)) {
++            return self::refused($option, sprintf('Form option "%s" must be a list or an object of label => value.', $option));
++        }
++
++        $choices = [];
++        $errors = [];
++        $dropped = [];
++        foreach ($value as $label => $choiceValue) {
++            if ((is_string($label) && !ExtraPropertyValidator::isSafeDisplayText($label))
++                || (null !== $choiceValue && !is_scalar($choiceValue))
++            ) {
++                $errors[] = sprintf(
++                    'Choice "%s" of form option "%s" is not allowed: labels must not contain "<" or control characters and values must be scalar.',
++                    (string) $label,
++                    $option
++                );
++                $dropped[] = $option . '.' . (string) $label;
++                continue;
++            }
++            $choices[$label] = $choiceValue;
++        }
++
++        return ['value' => $choices, 'errors' => $errors, 'dropped' => $dropped];
++    }
++
++    /**
++     * Translation catalogue selector: false, or a domain the definition rule accepts.
++     *
++     * @return array{value?: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function inspectDomain(string $option, mixed $value): array
++    {
++        if (!is_bool($value) && !(is_string($value) && ExtraPropertyValidator::isTranslationDomain($value))) {
++            return self::refused($option, sprintf(
++                'Form option "%s" must be false or a translation domain of 2 or 3 dot-separated PascalCase segments.',
++                $option
++            ));
++        }
++
++        return self::kept($value);
++    }
++
++    /**
++     * The option is accepted with this value.
++     *
++     * @return array{value: mixed, errors: list<string>, dropped: list<string>}
++     */
++    private static function kept(mixed $value): array
++    {
++        return ['value' => $value, 'errors' => [], 'dropped' => []];
++    }
++
++    /**
++     * The option is refused as a whole: no value survives, one error names it.
++     *
++     * @return array{errors: list<string>, dropped: list<string>}
++     */
++    private static function refused(string $option, string $error): array
++    {
++        return ['errors' => [$error], 'dropped' => [$option]];
++    }
++
++    private static function textError(string $option, bool $list = false): string
++    {
++        return sprintf(
++            'Form option "%s" must be %s: no "<" and no control character.',
++            $option,
++            $list ? 'a list of plain texts' : 'a plain text'
++        );
++    }
++
++    /**
++     * @param array<mixed, mixed> $texts
++     */
++    private static function isSafeTextList(array $texts): bool
++    {
++        foreach ($texts as $text) {
++            if (null === $text || is_bool($text) || is_int($text) || is_float($text)) {
++                continue;
++            }
++            if (!is_string($text) || !ExtraPropertyValidator::isSafeDisplayText($text)) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /**
++     * The reason an external_link value is refused, or null: the link needs its "href" and "text",
++     * the href must be a safe URL, the text a plain display text, and no other key is accepted.
++     */
++    private static function externalLinkError(mixed $value): ?string
++    {
++        if (!is_array($value) || !isset($value['href'], $value['text'])) {
++            return 'Form option "external_link" must be an object with at least "href" and "text".';
++        }
++        foreach ($value as $key => $item) {
++            $rule = is_string($key) ? (self::EXTERNAL_LINK_KEYS[$key] ?? null) : null;
++            $valid = match ($rule) {
++                'url' => is_string($item) && ExtraPropertyValidator::isSafeUrl($item),
++                'text' => is_string($item) && ExtraPropertyValidator::isSafeDisplayText($item),
++                'bool' => is_bool($item),
++                null => false,
++                default => is_string($item) && in_array($item, explode('|', $rule), true),
++            };
++            if (!$valid) {
++                return sprintf(
++                    'Key "%s" of form option "external_link" is not allowed: "href" must be an http(s) URL or a root-relative path, "text" a plain text, "align" left|right, "position" append|prepend, "open_in_new_tab" a boolean.',
++                    (string) $key
++                );
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * The reason a known scalar option's value is refused, or null when it satisfies its rule
++     * (or when the option is not a known one).
++     */
++    private static function knownOptionValueError(string $option, mixed $value): ?string
++    {
++        $rule = self::OPTION_VALUE_RULES[$option] ?? null;
++        if (null === $rule) {
++            return null;
++        }
++        if (!in_array(gettype($value), $rule['types'], true)) {
++            return sprintf('Form option "%s" must be of type %s.', $option, implode(' or ', $rule['types']));
++        }
++        if (isset($rule['values']) && !in_array($value, $rule['values'], true)) {
++            return sprintf('Form option "%s" must be one of: %s.', $option, implode(', ', $rule['values']));
++        }
++
++        return null;
++    }
++}
+diff --git a/src/Core/ExtraProperty/Form/FormOptionsValidator.php b/src/Core/ExtraProperty/Form/FormOptionsValidator.php
+index f471dfcf803ed..b5591988a783d 100644
+--- a/src/Core/ExtraProperty/Form/FormOptionsValidator.php
++++ b/src/Core/ExtraProperty/Form/FormOptionsValidator.php
+@@ -66,6 +66,16 @@ public function validate(
+             )];
+         }
+ 
++        // Policy gate — the SAME rules ExtraPropertiesFormBuilderModifier enforces on read: an
++        // option the form theme could render unsafely, or that changes what the field maps to,
++        // is refused here with an explicit message naming it, so the author is told at save time
++        // instead of having it silently dropped at render time. The options that remain (the
++        // declared type's own included) are then checked by building the field below.
++        $policyErrors = ExtraPropertyFormOptionsPolicy::validate($formOptions);
++        if ([] !== $policyErrors) {
++            return $policyErrors;
++        }
++
+         [$effectiveType, $mergedOptions] = $this->resolveEffectiveTypeAndOptions(
+             $formTypeFqcn,
+             $type,
+diff --git a/src/Core/ExtraProperty/Schema/ColumnDefinitionMapper.php b/src/Core/ExtraProperty/Schema/ColumnDefinitionMapper.php
+index 40d9a3d675121..11d5117be0fb9 100644
+--- a/src/Core/ExtraProperty/Schema/ColumnDefinitionMapper.php
++++ b/src/Core/ExtraProperty/Schema/ColumnDefinitionMapper.php
+@@ -100,7 +100,7 @@ public static function parseEnumValues(string $sqlColumnType): ?array
+     }
+ 
+     /**
+-     * Builds an ENUM SQL definition from a list of allowed values, with proper single-quote escaping.
++     * Builds an ENUM SQL definition from a list of allowed values, with proper string-literal escaping.
+      *
+      * @param list<string> $enumValues
+      *
+@@ -109,13 +109,30 @@ public static function parseEnumValues(string $sqlColumnType): ?array
+     private static function buildEnumDefinition(array $enumValues): string
+     {
+         $quotedValues = array_map(
+-            static fn (string $v): string => "'" . str_replace("'", "''", $v) . "'",
++            static fn (string $v): string => "'" . self::escapeStringLiteral($v) . "'",
+             $enumValues
+         );
+ 
+         return 'ENUM(' . implode(',', $quotedValues) . ')';
+     }
+ 
++    /**
++     * Escapes a value for embedding inside a single-quoted MySQL string literal.
++     *
++     * Doubling the single quote is NOT enough: unless the session runs with
++     * NO_BACKSLASH_ESCAPES (not the default), MySQL treats the backslash as an escape
++     * character, so a value ending in "\" would escape the closing quote and let the
++     * following characters break out of the literal into executable SQL. The enum
++     * literals and the DEFAULT clause are built by string concatenation here (this mapper
++     * is static and has no DBAL connection to delegate quoting to), so every literal must
++     * neutralise the backslash as well as the quote. The backslash is escaped FIRST so it
++     * never doubles the escaping introduced for the quote.
++     */
++    private static function escapeStringLiteral(string $value): string
++    {
++        return str_replace(['\\', "'"], ['\\\\', "''"], $value);
++    }
++
+     /**
+      * Formats a default value as a SQL literal appropriate for the given type.
+      *
+@@ -140,7 +157,7 @@ private static function quoteDefaultValue(ExtraPropertyType $type, mixed $defaul
+             ExtraPropertyType::DATE,
+             ExtraPropertyType::HTML,
+             ExtraPropertyType::JSON,
+-            ExtraPropertyType::CHOICE => "'" . str_replace("'", "''", $stringValue) . "'",
++            ExtraPropertyType::CHOICE => "'" . self::escapeStringLiteral($stringValue) . "'",
+         };
+     }
+ }
+diff --git a/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php b/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
+index 7e3ec9633a1b5..c4afe3072997f 100644
+--- a/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
++++ b/src/Core/ExtraProperty/Validation/ExtraPropertyValidator.php
+@@ -69,6 +69,54 @@ public static function isModuleName(string $value): bool
+         return (bool) preg_match('/^[a-zA-Z0-9_-]+$/', $value);
+     }
+ 
++    /**
++     * Whether a text controlled by a definition author (label/description wording, enum
++     * literals, choice labels, constraint messages) is safe to display to other employees:
++     * no "<", so it can never open a tag whatever the rendering sink does, and no control
++     * character other than tab/newline.
++     *
++     * The ONE rule for author-controlled display texts, enforced at construction of the
++     * value object — i.e. both when a definition is registered (write, refused with an
++     * error) and when it is hydrated from a registry row (read, the row is skipped and
++     * logged) — so a value written straight into the table cannot bypass it.
++     *
++     * Static (not part of the interface): called by the ExtraPropertyDefinition constructor
++     * and the constraint DSL parser, which cannot receive injected services.
++     */
++    public static function isSafeDisplayText(string $value): bool
++    {
++        return 1 !== preg_match('/[<\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value);
++    }
++
++    /**
++     * Whether a value is a well-formed PrestaShop translation domain: 2 or 3 dot-separated
++     * PascalCase segments ("Admin.Actions", "Modules.Demoextrafield.Admin"). Anything that
++     * could reach another subsystem is refused — the "+intl-icu" suffix (which would route
++     * the wording through the ICU formatter, where a malformed pattern throws on every
++     * render), path or separator characters, whitespace.
++     *
++     * Static (not part of the interface): called by the ExtraPropertyDefinition constructor.
++     */
++    public static function isTranslationDomain(string $value): bool
++    {
++        return 1 === preg_match('/^[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*){1,2}$/', $value);
++    }
++
++    /**
++     * Whether a value controlled by a definition author may be used as a link target: an
++     * absolute http(s) URL or a root-relative path. Attribute escaping does not neutralise a
++     * "javascript:" or "data:" scheme inside href, so the scheme is what is checked. Whitespace
++     * and quote characters are refused, and so is the backslash: browsers normalise "\" to "/"
++     * in URLs with a special scheme, so "/\evil.example" would navigate off-site exactly like the
++     * protocol-relative "//evil.example" this rule refuses.
++     *
++     * Static (not part of the interface): called by ExtraPropertyFormOptionsPolicy.
++     */
++    public static function isSafeUrl(string $value): bool
++    {
++        return 1 === preg_match('#^(?:https?://[^\s"\'<>\\\\]+|/(?![/\\\\])[^\s"\'<>\\\\]*)$#i', $value);
++    }
++
+     /**
+      * The single rule-set for "can this value be stored under the declared type" — shared
+      * by the registry (default values, ExtraPropertyRegistry::isDefaultValueCompatible())
+diff --git a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+index 1eec970b51b00..cbb361ab5912c 100644
+--- a/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
++++ b/src/PrestaShopBundle/Resources/config/services/extra_property/backend.yml
+@@ -66,6 +66,8 @@ services:
+       $formBuilderModifier: '@PrestaShopBundle\Form\FormBuilderModifier'
+       $formTypeMap: '@PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertyFormTypeMap'
+       $definitionShopFilter: '@PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionShopFilterInterface'
++      # Logs the form options / form type the read-side policy drops at render time.
++      $logger: '@logger'
+ 
+   PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertiesFormDataPersister:
+     arguments:
+diff --git a/src/PrestaShopBundle/Translation/Translator.php b/src/PrestaShopBundle/Translation/Translator.php
+index d2045d889aa9c..8625a2bf9c989 100644
+--- a/src/PrestaShopBundle/Translation/Translator.php
++++ b/src/PrestaShopBundle/Translation/Translator.php
+@@ -40,28 +40,53 @@ public function addResource($format, $resource, $locale, $domain = null): void
+     /**
+      * {@inheritdoc}
+      *
+-     * Registers the extra property registry wordings as "extra_property" resources before the
+-     * catalogue is built, so they are baked into the compiled (cached) catalogue like any other
+-     * resource. The addResource() override above also pairs each with a "db" resource, so admin
+-     * translations of those wordings are loaded alongside their source values.
++     * Adds the extra property registry wordings to the catalogue being built, so they are baked
++     * into the compiled (cached) catalogue like any other resource (dumpCatalogue() calls this
++     * method and dumps $this->catalogues[$locale] right after).
++     *
++     * Two things are done for the registry domains, in this order:
++     *  - their "db" resources are registered BEFORE the catalogue is built, so admin translations
++     *    of those wordings (ps_translation) load like every other domain's and legitimately
++     *    override the sources;
++     *  - the wordings themselves are merged AFTER the catalogue is built, and NON-overwriting: a
++     *    wording equal to a key another resource already defines (core or module XLF, an admin
++     *    translation) resolves to that existing translation instead of replacing it with its
++     *    untranslated source. Resources load in registration order and these would come last,
++     *    so registering them as resources let a definition author un-translate core strings
++     *    shop-wide by declaring a core domain; merging by hand closes that.
++     *
++     * Only real locales are handled: addResource() resets ALL catalogues when given a fallback
++     * locale (Symfony behaviour), which would corrupt the catalogue being built as this method
++     * recurses into fallbacks ("en", "default"), and the "default" pseudo-locale is not a
++     * database language, so its "db" resource would make SqlTranslationLoader throw. Each
++     * real-locale catalogue carries the source wordings (key == value) directly, so trans()
++     * resolves them without ever needing the fallback catalogue.
+      */
+     protected function initializeCatalogue(string $locale): void
+     {
+-        // Register the registry wordings (and, via the addResource() override, their paired "db"
+-        // resource) so they are baked into the compiled catalogue. Only real locales are handled:
+-        // - addResource() resets ALL catalogues when given a fallback locale (Symfony behaviour),
+-        //   which would corrupt the catalogue being built as initializeCatalogue() recurses into
+-        //   fallbacks ("en", "default");
+-        // - the "default" pseudo-locale is not a database language, so its paired "db" resource would
+-        //   make SqlTranslationLoader throw.
+-        // This is enough: each real-locale catalogue carries the source wordings (key == value)
+-        // directly, so trans() resolves them without ever needing the fallback catalogue.
+-        if (null !== $this->extraPropertyTranslationLoader && !in_array($locale, $this->getFallbackLocales(), true)) {
+-            foreach ($this->extraPropertyTranslationLoader->getNormalizedDomains($locale) as $domain) {
+-                $this->addResource('extra_property', 'extra_property', $locale, $domain);
+-            }
++        $handlesRegistryWordings = null !== $this->extraPropertyTranslationLoader
++            && !in_array($locale, $this->getFallbackLocales(), true);
++
++        $domains = $handlesRegistryWordings ? $this->extraPropertyTranslationLoader->getNormalizedDomains($locale) : [];
++        foreach ($domains as $domain) {
++            // parent:: on purpose — the addResource() override above would pair this "db" resource
++            // with a second, identical "db" resource.
++            parent::addResource('db', $domain . '.' . $locale . '.db', $locale, $domain);
+         }
+ 
+         parent::initializeCatalogue($locale);
++
++        if ([] === $domains) {
++            return;
++        }
++        $catalogue = $this->catalogues[$locale];
++        foreach ($domains as $domain) {
++            $wordings = $this->extraPropertyTranslationLoader->load('extra_property', $locale, $domain)->all($domain);
++            foreach ($wordings as $id => $message) {
++                if (!$catalogue->defines((string) $id, $domain)) {
++                    $catalogue->set((string) $id, $message, $domain);
++                }
++            }
++        }
+     }
+ }
+diff --git a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+index 5ef21b1285922..3162eddf5f79c 100644
+--- a/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
++++ b/src/PrestaShopBundle/Translation/TranslatorLanguageLoader.php
+@@ -159,7 +159,20 @@ private function loadExtraPropertyTranslations(TranslatorInterface $translator,
+         if ($translator instanceof TranslatorBagInterface) {
+             $catalogue = $translator->getCatalogue($locale);
+             foreach ($messagesByDomain as $domain => $messages) {
+-                $catalogue->add($messages, $domain);
++                // Never overwrite a wording another resource (core or module XLF, admin
++                // translations) already defines in that domain: a registry wording equal to an
++                // existing key must resolve to the existing translation, not replace it with its
++                // untranslated source — otherwise a definition author could un-translate core
++                // strings shop-wide by picking a core domain. Only genuinely new wordings are added.
++                $newMessages = [];
++                foreach ($messages as $id => $message) {
++                    if (!$catalogue->defines((string) $id, $domain)) {
++                        $newMessages[$id] = $message;
++                    }
++                }
++                if ([] !== $newMessages) {
++                    $catalogue->add($newMessages, $domain);
++                }
+             }
+         }
+     }
+diff --git a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+index 630bf7aa51c64..f31b04e8c4819 100644
+--- a/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
++++ b/tests/Integration/Core/ExtraProperty/ExtraPropertiesFormBuilderModifierTest.php
+@@ -24,11 +24,16 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyReaderInterface;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Value\ExtraPropertyWriterInterface;
+ use PrestaShopBundle\Form\Admin\Type\NavigationTabType;
++use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
+ use PrestaShopBundle\Form\FormBuilderModifier;
++use Psr\Log\LoggerInterface;
++use Psr\Log\NullLogger;
+ use Symfony\Component\Form\Extension\Core\Type\FormType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Tests\Integration\PrestaShopBundle\Form\AbstractFormTester;
++use Tests\Unit\Core\ExtraProperty\Catalog\Fixtures\BrokenFixtureType;
++use Tests\Unit\Core\ExtraProperty\Catalog\Fixtures\HeadingLabelFixtureType;
+ 
+ /**
+  * Integration test for the form placement of extra properties and the symmetry between the builder
+@@ -49,6 +54,147 @@ public function testBareFormIdOnSimpleFormAppendsAtRoot(): void
+         $this->assertTrue($builder->has(self::FIELD_NAME), 'Field should be appended at root on a simple form.');
+     }
+ 
++    /**
++     * Read-side enforcement of ExtraPropertyFormOptionsPolicy: a definition carrying options the
++     * policy refuses (as a row written straight into the registry would) renders its declared type
++     * without the refused options, and says so in the log.
++     */
++    public function testDeniedOptionsAreDroppedAndLoggedOnRead(): void
++    {
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formType: TextPreviewType::class,
++            formOptions: ['allow_html' => true, 'attr' => ['class' => 'ok', 'onfocus' => 'alert(1)']],
++            labelWording: 'Dangerous product',
++        );
++        $logger = $this->createMock(LoggerInterface::class);
++        $logger->expects($this->once())->method('warning');
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($definition, $logger)->apply($builder, 'product', null);
++
++        $field = $builder->get(self::FIELD_NAME);
++        $this->assertInstanceOf(TextPreviewType::class, $field->getType()->getInnerType(), 'The declared type is kept: the danger is in the options.');
++        $this->assertSame(['class' => 'ok'], $field->getOption('attr'), 'Only the refused attribute is dropped.');
++        $this->assertFalse($field->getOption('allow_html'), 'allow_html is dropped, so the type falls back to its escaping default.');
++    }
++
++    /**
++     * An option the policy does not know is the declared type's business: when the type refuses it
++     * (a tampered row, or a type whose options changed since the definition was saved), the field is
++     * dropped and logged instead of taking the whole entity form down.
++     */
++    public function testAFieldWhoseOptionsDoNotBuildIsDroppedAndLoggedOnRead(): void
++    {
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formType: TextType::class,
++            formOptions: ['not_an_option_of_text_type' => true],
++            labelWording: 'Dangerous product',
++        );
++        $logger = $this->createMock(LoggerInterface::class);
++        $logger->expects($this->once())->method('error');
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($definition, $logger)->apply($builder, 'product', null);
++
++        $this->assertFalse($builder->has(self::FIELD_NAME), 'The unbuildable field is removed; the form itself survives.');
++    }
++
++    /**
++     * A null option must reach the form type: it overrides the type's own default, which is how
++     * demoextrafield keeps its supplier field from rendering a heading instead of a label.
++     */
++    public function testANullOptionOverridesTheFormTypeDefault(): void
++    {
++        $withNull = $this->headingLabelDefinition(['label_tag_name' => null]);
++        $withoutOption = $this->headingLabelDefinition(null);
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($withNull)->apply($builder, 'product', null);
++        $this->assertNull($builder->get(self::FIELD_NAME)->getOption('label_tag_name'));
++
++        $untouched = $this->createSimpleFormBuilder();
++        $this->makeModifier($withoutOption)->apply($untouched, 'product', null);
++        $this->assertSame('h3', $untouched->get(self::FIELD_NAME)->getOption('label_tag_name'));
++    }
++
++    /**
++     * @param array<string, mixed>|null $formOptions
++     */
++    private function headingLabelDefinition(?array $formOptions): ExtraPropertyDefinition
++    {
++        return new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formType: HeadingLabelFixtureType::class,
++            formOptions: $formOptions,
++            labelWording: 'Dangerous product',
++        );
++    }
++
++    /**
++     * A custom form type is module code: a bug thrown while it builds (not an options-resolver
++     * error) must not take the host form down either.
++     */
++    public function testAFieldWhoseTypeThrowsWhileBuildingIsDroppedAndLoggedOnRead(): void
++    {
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formType: BrokenFixtureType::class,
++            labelWording: 'Dangerous product',
++        );
++        $logger = $this->createMock(LoggerInterface::class);
++        $logger->expects($this->once())->method('error');
++
++        $builder = $this->createSimpleFormBuilder();
++        $this->makeModifier($definition, $logger)->apply($builder, 'product', null);
++
++        $this->assertFalse($builder->has(self::FIELD_NAME));
++    }
++
++    /**
++     * A field of the same name already present in the host form is never the extra property's:
++     * it is neither replaced, nor resolved and dropped, whatever the definition's options.
++     */
++    public function testAHostFieldWithTheSameNameIsLeftUntouched(): void
++    {
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'is_dangerous',
++            scope: ExtraPropertyScope::COMMON,
++            moduleName: 'demoextrafield',
++            associatedForms: ['product'],
++            formType: TextType::class,
++            formOptions: ['not_an_option_of_text_type' => true],
++            labelWording: 'Dangerous product',
++        );
++        $logger = $this->createMock(LoggerInterface::class);
++        $logger->expects($this->never())->method('error');
++
++        $builder = $this->createSimpleFormBuilder();
++        $builder->add(self::FIELD_NAME, TextType::class, ['label' => 'Host field']);
++        $this->makeModifier($definition, $logger)->apply($builder, 'product', null);
++
++        $this->assertTrue($builder->has(self::FIELD_NAME));
++        $this->assertSame('Host field', $builder->get(self::FIELD_NAME)->getOption('label'));
++    }
++
+     public function testDefinitionConstraintsAreAttachedToTheFieldWithoutAutoNotBlank(): void
+     {
+         $url = new \Symfony\Component\Validator\Constraints\Url();
+@@ -306,7 +452,7 @@ private function definition(string $formEntry): ExtraPropertyDefinition
+         );
+     }
+ 
+-    private function makeModifier(ExtraPropertyDefinition $definition): ExtraPropertiesFormBuilderModifier
++    private function makeModifier(ExtraPropertyDefinition $definition, ?LoggerInterface $logger = null): ExtraPropertiesFormBuilderModifier
+     {
+         $translator = $this->createMock(\Symfony\Contracts\Translation\TranslatorInterface::class);
+         $translator->method('trans')->willReturnArgument(0);
+@@ -322,6 +468,7 @@ private function makeModifier(ExtraPropertyDefinition $definition): ExtraPropert
+             new FormBuilderModifier(),
+             new ExtraPropertyFormTypeMap(),
+             $definitionShopFilter,
++            $logger ?? new NullLogger(),
+         );
+     }
+ 
+diff --git a/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php b/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php
+index 42832e4655d5d..dfce7f24fd2cc 100644
+--- a/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php
++++ b/tests/Integration/PrestaShopBundle/Translation/TranslatorLanguageLoaderTest.php
+@@ -13,6 +13,7 @@
+ use PrestaShopBundle\Translation\TranslatorComponent;
+ use PrestaShopBundle\Translation\TranslatorLanguageLoader;
+ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
++use Symfony\Component\Translation\Loader\ArrayLoader;
+ use Symfony\Component\Translation\MessageCatalogue;
+ 
+ /**
+@@ -54,6 +55,43 @@ public function testItInjectsExtraPropertyWordingsUnderNormalizedDomains(): void
+         $this->assertSame('Video link', $catalogue->get('Video link', 'ModulesDemoextrafieldAdmin'));
+     }
+ 
++    /**
++     * A registry wording must never overwrite a translation another resource already provides for the
++     * same key and domain: it would let a definition author un-translate strings shop-wide by picking
++     * an existing domain. Only genuinely new wordings are added.
++     */
++    public function testItNeverOverwritesAWordingTheCatalogueAlreadyDefines(): void
++    {
++        $locale = 'zz-ZZ';
++
++        $moduleRepository = $this->createMock(ModuleRepository::class);
++        $moduleRepository->method('getPresentModulesPaths')->willReturn([]);
++
++        $extractor = $this->createMock(ExtraPropertyTranslationExtractor::class);
++        $extractor->method('extract')->willReturnCallback(function (string $extractLocale): MessageCatalogue {
++            $catalogue = new MessageCatalogue($extractLocale);
++            // Same key as an existing translation of the same domain, and a brand-new one.
++            $catalogue->set('Video link', 'Video link', 'Modules.Demoextrafield.Admin');
++            $catalogue->set('Custom date', 'Custom date', 'Modules.Demoextrafield.Admin');
++
++            return $catalogue;
++        });
++
++        $translator = new TranslatorComponent($locale);
++        // What an XLF file or an admin translation provides: a resource, loaded when the catalogue is
++        // built (adding a resource resets the catalogues, so a value set directly on one would be lost).
++        $translator->addLoader('array', new ArrayLoader());
++        $translator->addResource('array', ['Video link' => 'Lien vidéo'], $locale, 'ModulesDemoextrafieldAdmin');
++
++        (new TranslatorLanguageLoader($moduleRepository, $extractor))
++            ->setIsAdminContext(true)
++            ->loadLanguage($translator, $locale, true);
++
++        $catalogue = $translator->getCatalogue($locale);
++        $this->assertSame('Lien vidéo', $catalogue->get('Video link', 'ModulesDemoextrafieldAdmin'), 'the existing translation must win');
++        $this->assertSame('Custom date', $catalogue->get('Custom date', 'ModulesDemoextrafieldAdmin'), 'a new wording is still added');
++    }
++
+     public function testItSkipsExtraPropertyWordingsWhenDatabaseIsDisabled(): void
+     {
+         $locale = 'zz-ZZ';
+diff --git a/tests/Unit/Core/ExtraProperty/Catalog/Fixtures/HeadingLabelFixtureType.php b/tests/Unit/Core/ExtraProperty/Catalog/Fixtures/HeadingLabelFixtureType.php
+new file mode 100644
+index 0000000000000..05424bd201f19
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Catalog/Fixtures/HeadingLabelFixtureType.php
+@@ -0,0 +1,32 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Catalog\Fixtures;
++
++use Symfony\Component\Form\AbstractType;
++use Symfony\Component\Form\Extension\Core\Type\TextType;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++/**
++ * Form type defaulting label_tag_name to a heading, like DiscountSupplierType: a definition must be
++ * able to pass null to get a plain label back.
++ */
++class HeadingLabelFixtureType extends AbstractType
++{
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver->setDefined('label_tag_name');
++        $resolver->setDefault('label_tag_name', 'h3');
++        $resolver->setAllowedTypes('label_tag_name', ['null', 'string']);
++    }
++
++    public function getParent(): string
++    {
++        return TextType::class;
++    }
++}
+diff --git a/tests/Unit/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParserTest.php b/tests/Unit/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParserTest.php
+index 36a353b139d11..24e571619e858 100644
+--- a/tests/Unit/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParserTest.php
++++ b/tests/Unit/Core/ExtraProperty/Constraint/ExtraPropertyConstraintParserTest.php
+@@ -982,6 +982,34 @@ private function parseValid(string $raw): array
+         return $constraints;
+     }
+ 
++    /**
++     * A violation message is displayed to whoever triggers it (BO form errors, the legacy error
++     * banner, API 422 bodies), so it follows the display-text rule of every other author-controlled
++     * text: the offending token is refused, its valid siblings are kept.
++     */
++    public function testAMessageThatCouldOpenATagIsRejected(): void
++    {
++        $decoded = ExtraPropertyConstraintParser::parse(
++            "NotBlank(message: '<img src=x onerror=alert(1)>')\nLength(max: 5, maxMessage: 'Too <b>long</b>')\nEmail"
++        );
++
++        $this->assertCount(2, $decoded->getRejections());
++        $this->assertStringContainsString('"message"', $decoded->getRejections()[0]['reason']);
++        $this->assertStringContainsString('"maxMessage"', $decoded->getRejections()[1]['reason']);
++        $this->assertCount(1, $decoded->getConstraints());
++    }
++
++    public function testAPlainMessageIsAccepted(): void
++    {
++        $decoded = ExtraPropertyConstraintParser::parse("NotBlank(message: 'This value is required (> 0 chars).')");
++
++        $this->assertFalse($decoded->hasRejections());
++        $constraints = $decoded->getConstraints();
++        $this->assertNotNull($constraints);
++        $this->assertInstanceOf(Assert\NotBlank::class, $constraints[0]);
++        $this->assertSame('This value is required (> 0 chars).', $constraints[0]->message);
++    }
++
+     /**
+      * Asserts the decoding reported exactly one rejection, located on the given token, whose reason
+      * carries the expected substring.
+diff --git a/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryHydrationTest.php b/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryHydrationTest.php
+new file mode 100644
+index 0000000000000..90dc309fb4956
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Definition/ExtraPropertyDefinitionRepositoryHydrationTest.php
+@@ -0,0 +1,115 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Definition;
++
++use Doctrine\DBAL\Connection;
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinitionRepository;
++use Psr\Log\AbstractLogger;
++use Stringable;
++
++/**
++ * Hydrating the registry must never let one bad row take a page or an endpoint down: the
++ * repository feeds every request (Admin API responses, BO grids and forms, front-office reads),
++ * so a row that cannot be turned into a definition — data drift, a downgrade, a value written
++ * straight into the table — is skipped and logged once, while its valid siblings stay served.
++ *
++ * This is also the read-side half of the value-object validation: a row carrying what a
++ * registration would have refused (a "<" in a label, a foreign translation domain on a
++ * module-owned definition…) is not rendered — it is dropped here.
++ */
++class ExtraPropertyDefinitionRepositoryHydrationTest extends TestCase
++{
++    private const VALID_ROW = [
++        'id_extra_property_definition' => 7,
++        'entity_name' => 'product',
++        'module_name' => null,
++        'property_name' => 'hydration_probe',
++        'type' => 'string',
++        'scope' => 'common',
++        'label_wording' => 'Hydration probe',
++    ];
++
++    public function testAValidRowIsHydrated(): void
++    {
++        $logger = new HydrationRecordingLogger();
++        $definition = $this->repository($logger)->hydrate(self::VALID_ROW);
++
++        $this->assertInstanceOf(ExtraPropertyDefinition::class, $definition);
++        $this->assertSame('hydration_probe', $definition->getPropertyName());
++        $this->assertSame([], $logger->records);
++    }
++
++    public function testAnUnreadableRowIsSkippedAndLoggedOnce(): void
++    {
++        $logger = new HydrationRecordingLogger();
++        $repository = $this->repository($logger);
++        $corrupt = ['type' => 'not_a_type'] + self::VALID_ROW;
++
++        $this->assertNull($repository->hydrate($corrupt));
++        $this->assertNull($repository->hydrate($corrupt));
++
++        $this->assertCount(1, $logger->records, 'a persistent bad row must not flood the log');
++        $this->assertSame('error', $logger->records[0]['level']);
++        $this->assertStringContainsString('Skipping unreadable extra property definition row', $logger->records[0]['message']);
++        $this->assertSame('7', $logger->records[0]['context']['id']);
++    }
++
++    public function testARowWhoseWordingCouldOpenATagIsSkipped(): void
++    {
++        $logger = new HydrationRecordingLogger();
++
++        $this->assertNull($this->repository($logger)->hydrate(['label_wording' => '<img src=x onerror=alert(1)>'] + self::VALID_ROW));
++        $this->assertCount(1, $logger->records);
++        $this->assertStringContainsString('labelWording', $logger->records[0]['context']['reason']);
++    }
++
++    public function testARowWithAForeignDomainOnAModuleDefinitionIsSkipped(): void
++    {
++        $logger = new HydrationRecordingLogger();
++
++        $this->assertNull($this->repository($logger)->hydrate(
++            ['module_name' => 'somemodule', 'label_domain' => 'Admin.Actions'] + self::VALID_ROW
++        ));
++        $this->assertCount(1, $logger->records);
++        $this->assertStringContainsString('Modules.', $logger->records[0]['context']['reason']);
++    }
++
++    private function repository(HydrationRecordingLogger $logger): HydratingRepository
++    {
++        // The connection is never used by the hydration path under test.
++        return new HydratingRepository($this->createMock(Connection::class), 'ps_', $logger);
++    }
++}
++
++/**
++ * hydrateRowSafely() is protected: this subclass only exposes it.
++ */
++final class HydratingRepository extends ExtraPropertyDefinitionRepository
++{
++    /**
++     * @param array<string, mixed> $row
++     */
++    public function hydrate(array $row): ?ExtraPropertyDefinition
++    {
++        return $this->hydrateRowSafely($row);
++    }
++}
++
++final class HydrationRecordingLogger extends AbstractLogger
++{
++    /** @var list<array{level: string, message: string, context: array<string, mixed>}> */
++    public array $records = [];
++
++    public function log($level, string|Stringable $message, array $context = []): void
++    {
++        $this->records[] = ['level' => (string) $level, 'message' => (string) $message, 'context' => $context];
++    }
++}
+diff --git a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
+index fbfc079354e5d..345640be5c99a 100644
+--- a/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
++++ b/tests/Unit/Core/ExtraProperty/ExtraPropertyDefinitionConstructorTest.php
+@@ -11,6 +11,7 @@
+ 
+ use PHPUnit\Framework\TestCase;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyDefinition;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Definition\ExtraPropertyType;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Exception\InvalidExtraPropertyDefinitionException;
+ use stdClass;
+ 
+@@ -184,10 +185,173 @@ public function testDuplicateGridIdThrows(): void
+         );
+     }
+ 
++    // -------------------------------------------------------------------------
++    // Author-controlled display texts and translation domains
++    // -------------------------------------------------------------------------
++
++    /**
++     * @dataProvider unsafeDisplayTextProvider
++     */
++    public function testLabelWordingThatCouldOpenATagThrows(string $text): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/labelWording must not contain/');
++
++        new ExtraPropertyDefinition(entityName: 'product', propertyName: 'video_link', labelWording: $text);
++    }
++
++    /**
++     * @dataProvider unsafeDisplayTextProvider
++     */
++    public function testDescriptionWordingThatCouldOpenATagThrows(string $text): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/descriptionWording must not contain/');
++
++        new ExtraPropertyDefinition(entityName: 'product', propertyName: 'video_link', descriptionWording: $text);
++    }
++
++    /**
++     * @dataProvider unsafeDisplayTextProvider
++     */
++    public function testEnumValueThatCouldOpenATagThrows(string $text): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/enum value .* must not contain/');
++
++        new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'size',
++            type: ExtraPropertyType::CHOICE,
++            enumValues: ['ok', $text],
++        );
++    }
++
++    public function testPlainWordingsAreAccepted(): void
++    {
++        $definition = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            labelWording: "Video link (it's > 5 chars, éàü)",
++            descriptionWording: "Line one\nline two\ttabbed",
++        );
++
++        $this->assertSame("Video link (it's > 5 chars, éàü)", $definition->getLabelWording());
++        $this->assertSame("Line one\nline two\ttabbed", $definition->getDescriptionWording());
++    }
++
++    /**
++     * @dataProvider invalidTranslationDomainProvider
++     */
++    public function testMalformedTranslationDomainThrows(string $domain): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/labelDomain .* must be a translation domain/');
++
++        new ExtraPropertyDefinition(entityName: 'product', propertyName: 'video_link', labelWording: 'Video link', labelDomain: $domain);
++    }
++
++    public function testAModuleOwnedDefinitionCannotDeclareACoreDomain(): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/must belong to the module/');
++
++        new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            moduleName: 'demoextrafield',
++            labelWording: 'Save',
++            labelDomain: 'Admin.Actions',
++        );
++    }
++
++    public function testAModuleOwnedDefinitionCannotDeclareAnotherModulesDomain(): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/must belong to the module \("Modules\.Demoextrafield\./');
++
++        new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'video_link',
++            moduleName: 'demoextrafield',
++            labelWording: 'Filter',
++            labelDomain: 'Modules.Facetedsearch.Admin',
++        );
++    }
++
++    /**
++     * Enum literals are read back from the live SQL ENUM column, where a backslash does not
++     * round-trip: it is refused up front, like a "<".
++     */
++    public function testEnumValueWithABackslashThrows(): void
++    {
++        $this->expectException(InvalidExtraPropertyDefinitionException::class);
++        $this->expectExceptionMessageMatches('/enum value .* must not contain/');
++
++        new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'size',
++            type: ExtraPropertyType::CHOICE,
++            enumValues: ['ok', 'a\\b'],
++        );
++    }
++
++    public function testDomainsAreAcceptedWhereTheyBelong(): void
++    {
++        $module = new ExtraPropertyDefinition(
++            entityName: 'product',
++            propertyName: 'a',
++            moduleName: 'demoextrafield',
++            labelWording: 'Video link',
++            labelDomain: 'Modules.Demoextrafield.Admin',
++            descriptionDomain: 'Modules.Demoextrafield.Help',
++        );
++        $this->assertSame('Modules.Demoextrafield.Admin', $module->getLabelDomain());
++
++        // A core-owned definition may reuse a core domain: its wording then resolves to the
++        // existing translation instead of overriding it (see TranslatorLanguageLoader).
++        $core = new ExtraPropertyDefinition(entityName: 'product', propertyName: 'b', labelWording: 'Name', labelDomain: 'Admin.Global');
++        $this->assertSame('Admin.Global', $core->getLabelDomain());
++    }
++
+     // -------------------------------------------------------------------------
+     // Data providers
+     // -------------------------------------------------------------------------
+ 
++    /**
++     * Texts that could open a tag or carry a control character, refused wherever an author controls
++     * a displayed text (wording, enum literal, choice label, constraint message).
++     *
++     * @return array<string, array{string}>
++     */
++    public static function unsafeDisplayTextProvider(): array
++    {
++        return [
++            'image with event handler' => ['<img src=x onerror=alert(1)>'],
++            'opening angle bracket only' => ['5 < 6'],
++            'script tag' => ['<script>alert(1)</script>'],
++            'NUL byte' => ["Video\0link"],
++            'escape sequence' => ["Video\x1b[31mlink"],
++        ];
++    }
++
++    /**
++     * @return array<string, array{string}>
++     */
++    public static function invalidTranslationDomainProvider(): array
++    {
++        return [
++            'ICU formatter suffix' => ['Admin.Global+intl-icu'],
++            'single segment' => ['Admin'],
++            'too many segments' => ['A.B.C.D'],
++            'lowercase segment' => ['admin.global'],
++            'space' => ['Admin. Global'],
++            'slash' => ['Admin/Global'],
++            'path traversal' => ['../Admin.Global'],
++            'trailing dot' => ['Admin.Global.'],
++        ];
++    }
++
+     /**
+      * Values that are empty or contain characters outside [a-zA-Z0-9_-] and therefore must be rejected.
+      *
+diff --git a/tests/Unit/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicyTest.php b/tests/Unit/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicyTest.php
+new file mode 100644
+index 0000000000000..1b3ed54fe27e6
+--- /dev/null
++++ b/tests/Unit/Core/ExtraProperty/Form/ExtraPropertyFormOptionsPolicyTest.php
+@@ -0,0 +1,416 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\Core\ExtraProperty\Form;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertyFormOptionsPolicy;
++
++/**
++ * The policy is the single authority for the form options a definition may declare, and
++ * validate() (write) and sanitize() (read) must agree on every option: what one refuses, the
++ * other drops.
++ */
++class ExtraPropertyFormOptionsPolicyTest extends TestCase
++{
++    public function testUsualAndCustomTypeOptionsPassUntouched(): void
++    {
++        $options = [
++            'attr' => ['class' => 'custom', 'placeholder' => 'Type here', 'maxlength' => 64, 'autofocus' => true, 'data-toggle' => 'x'],
++            'expanded' => true,
++            'scale' => 2,
++            'choices' => ['Small' => 'small', 'Large' => 'large'],
++            'trim' => false,
++            'translation_domain' => 'Modules.Demoextrafield.Admin',
++            // An option of a custom form type: unknown to the policy, passed to the type as-is.
++            'supplier_filter' => ['active' => true, 'limit' => 20],
++        ];
++
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate($options));
++        $this->assertSame(['options' => $options, 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize($options));
++    }
++
++    /**
++     * The displayed options come back with their content checked: plain text, an enumerated
++     * value, or a safe URL — enough for a rich field, without markup.
++     */
++    public function testDisplayedOptionsPassWithSafeContent(): void
++    {
++        $options = [
++            'label_subtitle' => "Shown under the label (it's > 5 chars, éàü)",
++            'label_tag_name' => 'h3',
++            'label_help_box' => 'Help shown in a popover',
++            'label_tab' => 'Tab name',
++            'hint' => 'A hint below the field',
++            'alert_title' => 'Careful',
++            'alert_message' => ['First line', 'Second line'],
++            'alert_type' => 'warning',
++            'alert_position' => 'prepend',
++            'data_list' => ['Paris', 'Lyon', 42],
++            'download_url' => 'https://docs.example.com/guide.pdf',
++            'external_link' => ['href' => '/admin-dev/index.php/sell/orders', 'text' => 'See orders', 'align' => 'right', 'open_in_new_tab' => false],
++        ];
++
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate($options));
++        $this->assertSame(['options' => $options, 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize($options));
++        // A single string alert_message is accepted too.
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate(['alert_message' => 'One line']));
++    }
++
++    public function testDisplayedOptionsWithUnsafeContentAreRefusedAndDropped(): void
++    {
++        $options = [
++            'label_subtitle' => '<img src=x onerror=alert(1)>',
++            'label_tag_name' => 'img src=x onerror=alert(1)',
++            'label_help_box' => '<b>x</b>',
++            'hint' => '<a href="https://evil">x</a>',
++            'alert_title' => "Line\x00break",
++            'alert_message' => ['fine', '<script>'],
++            'alert_type' => 'info" onmouseover="alert(1)',
++            'alert_position' => 'middle',
++            'data_list' => ['fine', '<option>'],
++            'download_url' => 'javascript:alert(1)',
++            'external_link' => ['href' => 'https://ok.example', 'text' => 'ok', 'onclick' => 'alert(1)'],
++        ];
++
++        $errors = ExtraPropertyFormOptionsPolicy::validate($options);
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($options);
++
++        $this->assertCount(count($options), $errors);
++        foreach (array_keys($options) as $option) {
++            $this->assertStringContainsString(sprintf('"%s"', $option), implode("\n", $errors));
++        }
++        $this->assertSame([], $sanitized['options']);
++        $this->assertSame(array_keys($options), $sanitized['dropped']);
++    }
++
++    /**
++     * @dataProvider urlProvider
++     */
++    public function testLinkTargetsMustBeHttpOrRootRelative(string $url, bool $accepted): void
++    {
++        $errors = ExtraPropertyFormOptionsPolicy::validate(['download_url' => $url]);
++        $linkErrors = ExtraPropertyFormOptionsPolicy::validate(['external_link' => ['href' => $url, 'text' => 'x']]);
++
++        $this->assertSame($accepted, [] === $errors, $url);
++        $this->assertSame($accepted, [] === $linkErrors, $url);
++    }
++
++    /**
++     * @return array<string, array{string, bool}>
++     */
++    public static function urlProvider(): array
++    {
++        return [
++            'https' => ['https://example.com/a?b=1#c', true],
++            'http' => ['http://example.com', true],
++            'root-relative' => ['/admin-dev/index.php/sell/orders', true],
++            'javascript scheme' => ['javascript:alert(1)', false],
++            'data scheme' => ['data:text/html,<script>alert(1)</script>', false],
++            'protocol-relative' => ['//evil.example/x', false],
++            // Browsers normalise "\" to "/" in special-scheme URLs: "/\evil" is "//evil" in disguise.
++            'backslash after the leading slash' => ['/\\evil.example/x', false],
++            'backslash inside an absolute URL' => ['https://ok.example/a\\b', false],
++            'relative path' => ['orders/list', false],
++            'quote inside' => ['https://example.com/" onmouseover="alert(1)', false],
++            'whitespace' => ['https://example.com/a b', false],
++        ];
++    }
++
++    public function testNothingDeclaredIsAccepted(): void
++    {
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate(null));
++        $this->assertSame(['options' => [], 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize(null));
++    }
++
++    /**
++     * A null is not "unset": it overrides the form type's own default (demoextrafield passes
++     * 'label_tag_name' => null precisely so its type stops rendering an h3 label), so it must reach
++     * the type. Being contentless it cannot inject anything, hence no content rule applies to it.
++     */
++    public function testNullIsForwardedForAllowedOptions(): void
++    {
++        $options = ['label_tag_name' => null, 'scale' => null, 'placeholder' => null, 'my_custom_option' => null];
++
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate($options));
++        $this->assertSame(['options' => $options, 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize($options));
++    }
++
++    public function testADeniedOptionIsRefusedEvenWhenNull(): void
++    {
++        $errors = ExtraPropertyFormOptionsPolicy::validate(['allow_html' => null]);
++
++        $this->assertCount(1, $errors);
++        $this->assertStringContainsString('"allow_html"', $errors[0]);
++        $this->assertSame(
++            ['options' => [], 'dropped' => ['allow_html']],
++            ExtraPropertyFormOptionsPolicy::sanitize(['allow_html' => null])
++        );
++    }
++
++    /**
++     * The options that change what the field DOES — switch a value to raw rendering, select
++     * rendering blocks, change what the field maps to, load classes or callables — are refused
++     * on write and dropped on read whatever their content, whatever the form type.
++     */
++    public function testDeniedOptionsAreRefusedAndDropped(): void
++    {
++        $options = [
++            'allow_html' => true,
++            'label_html' => true,
++            'help_html' => true,
++            'block_prefix' => 'text_preview',
++            'form_theme' => '@Evil/theme.html.twig',
++            'label' => 'Label',
++            'help' => 'Help',
++            'mapped' => true,
++            'data' => 'x',
++            'constraints' => [],
++            'property_path' => 'password',
++            'choice_loader' => 'x',
++            'entry_type' => 'x',
++            'class' => 'x',
++            'label_translation_parameters' => ['%name%' => '<a href="https://evil">x</a>'],
++            'multistore_configuration_key' => 'PS_SHOP_EMAIL',
++        ];
++
++        $errors = ExtraPropertyFormOptionsPolicy::validate($options);
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($options);
++
++        $this->assertCount(count($options), $errors);
++        foreach (array_keys($options) as $option) {
++            $this->assertStringContainsString(sprintf('"%s"', $option), implode("\n", $errors));
++        }
++        $this->assertSame([], $sanitized['options']);
++        $this->assertSame(array_keys($options), $sanitized['dropped']);
++    }
++
++    /**
++     * Options that only affect the field itself are not denied: a read-only field, or Symfony's
++     * own HTML sanitizer on the submitted value, are legitimate choices.
++     */
++    public function testFieldLocalOptionsAreNotDenied(): void
++    {
++        $options = ['disabled' => true, 'sanitize_html' => true];
++
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate($options));
++        $this->assertSame(['options' => $options, 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize($options));
++    }
++
++    /**
++     * Any attribute name is echoed verbatim by the form theme, so an "on*" attribute is an inline
++     * event handler: those, inline styles and URL attributes are refused in EVERY attr bag, and
++     * only the offending ones are removed.
++     */
++    public function testEventHandlerStyleAndUrlAttributesAreRefusedAndDropped(): void
++    {
++        $options = [
++            'attr' => ['class' => 'ok', 'onfocus' => 'fetch("https://evil")', 'onFocus' => 'x', 'style' => 'x', 'data-toggle' => 'y'],
++            'label_attr' => ['class' => 'ok', 'onmouseover' => 'x'],
++            'row_attr' => ['href' => 'javascript:alert(1)', 'STYLE' => 'x'],
++        ];
++
++        $errors = ExtraPropertyFormOptionsPolicy::validate($options);
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($options);
++
++        $this->assertCount(6, $errors);
++        $this->assertStringContainsString('"onfocus"', implode("\n", $errors));
++        $this->assertSame(
++            ['attr' => ['class' => 'ok', 'data-toggle' => 'y'], 'label_attr' => ['class' => 'ok'], 'row_attr' => []],
++            $sanitized['options']
++        );
++        $this->assertSame(
++            ['attr.onfocus', 'attr.onFocus', 'attr.style', 'label_attr.onmouseover', 'row_attr.href', 'row_attr.STYLE'],
++            $sanitized['dropped']
++        );
++    }
++
++    /**
++     * HTML attribute names are case-insensitive, so every spelling of an event handler or of a
++     * denied attribute must be refused: the rules compare the lowercased name instead of matching
++     * it literally. A case-sensitive check here would leave "onFocus" and "ONFOCUS" live.
++     *
++     * @dataProvider caseVariantAttributeProvider
++     */
++    public function testAttributeRulesAreCaseInsensitive(string $attribute): void
++    {
++        $options = ['attr' => ['class' => 'ok', $attribute => 'alert(1)']];
++
++        $this->assertCount(1, ExtraPropertyFormOptionsPolicy::validate($options), $attribute);
++        $this->assertSame(
++            ['options' => ['attr' => ['class' => 'ok']], 'dropped' => ['attr.' . $attribute]],
++            ExtraPropertyFormOptionsPolicy::sanitize($options),
++            $attribute
++        );
++    }
++
++    /**
++     * @return array<string, array{string}>
++     */
++    public static function caseVariantAttributeProvider(): array
++    {
++        return [
++            // Event handlers.
++            'onfocus lowercase' => ['onfocus'],
++            'onFocus mixed case' => ['onFocus'],
++            'ONFOCUS uppercase' => ['ONFOCUS'],
++            'OnClick mixed case' => ['OnClick'],
++            'ONMOUSEOVER uppercase' => ['ONMOUSEOVER'],
++            // Denied attributes.
++            'style lowercase' => ['style'],
++            'Style mixed case' => ['Style'],
++            'STYLE uppercase' => ['STYLE'],
++            'href lowercase' => ['href'],
++            'HREF uppercase' => ['HREF'],
++            'srcDoc mixed case' => ['srcDoc'],
++            'FORMACTION uppercase' => ['FORMACTION'],
++            'XLink:Href mixed case' => ['XLink:Href'],
++        ];
++    }
++
++    /**
++     * Option names, unlike attribute names, are matched case-sensitively on purpose: Symfony's
++     * options resolver is case-sensitive too, so "ALLOW_HTML" is NOT the denied "allow_html" —
++     * it is an undefined option, refused by the form build (see
++     * FormOptionsValidatorTest::testACaseVariantOfADeniedOptionIsRefusedByTheFormBuild). Lowercasing
++     * option names here would instead risk refusing a legitimate camelCase option of a custom type.
++     */
++    public function testOptionNamesAreMatchedCaseSensitivelyAndLeftToTheFormBuild(): void
++    {
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate(['ALLOW_HTML' => true]));
++        $this->assertSame(
++            ['options' => ['ALLOW_HTML' => true], 'dropped' => []],
++            ExtraPropertyFormOptionsPolicy::sanitize(['ALLOW_HTML' => true])
++        );
++    }
++
++    /**
++     * The form theme renders ` {{ attrname }}="{{ attrvalue }}"` and Twig's escaping of the name
++     * does not touch whitespace, so a name carrying a space would emit a second, unchecked
++     * attribute — and it would not start with "on". The name's shape is checked for that reason.
++     *
++     * @dataProvider malformedAttributeNameProvider
++     */
++    public function testMalformedAttributeNamesAreRefusedAndDropped(string $attribute): void
++    {
++        $options = ['attr' => ['class' => 'ok', $attribute => 'alert(1)']];
++
++        $this->assertCount(1, ExtraPropertyFormOptionsPolicy::validate($options), $attribute);
++        $this->assertSame(
++            ['options' => ['attr' => ['class' => 'ok']], 'dropped' => ['attr.' . $attribute]],
++            ExtraPropertyFormOptionsPolicy::sanitize($options),
++            $attribute
++        );
++    }
++
++    /**
++     * @return array<string, array{string}>
++     */
++    public static function malformedAttributeNameProvider(): array
++    {
++        return [
++            'leading space hides an event handler' => [' onfocus'],
++            'inner space adds a second attribute' => ['x onfocus'],
++            'leading tab' => ["\tonfocus"],
++            'leading newline' => ["\nonfocus"],
++            'quote and space' => ['x" onfocus'],
++            'equals sign' => ['x=y'],
++            'angle bracket' => ['x>y'],
++            'slash' => ['x/y'],
++            'empty name' => [''],
++            'leading digit' => ['1class'],
++            'leading hyphen' => ['-class'],
++        ];
++    }
++
++    public function testWellFormedAttributeNamesStillPass(): void
++    {
++        $options = ['attr' => [
++            'class' => 'a', 'data-toggle' => 'b', 'aria-label' => 'c',
++            'maxlength' => 10, 'xlink:title' => 'd', 'my.attr' => 'e', 'my_attr' => 'f',
++        ]];
++
++        $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate($options));
++        $this->assertSame(['options' => $options, 'dropped' => []], ExtraPropertyFormOptionsPolicy::sanitize($options));
++    }
++
++    public function testChoiceLabelsFollowTheDisplayTextRuleAndStringChoicesAreRefused(): void
++    {
++        $options = ['choices' => ['Fine' => 'a', '<b>Bold</b>' => 'b'], 'preferred_choices' => 'strtoupper'];
++
++        $errors = ExtraPropertyFormOptionsPolicy::validate($options);
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($options);
++
++        $this->assertCount(2, $errors);
++        $this->assertSame(['choices' => ['Fine' => 'a']], $sanitized['options']);
++        $this->assertSame(['choices.<b>Bold</b>', 'preferred_choices'], $sanitized['dropped']);
++    }
++
++    /**
++     * A wrong-typed or out-of-range value of a KNOWN option would throw in Symfony's options
++     * resolver while the entity form is built: refused on write, dropped on read, never a 500.
++     */
++    public function testWrongTypedAndOutOfRangeKnownValuesAreRefusedAndDropped(): void
++    {
++        $options = ['scale' => 'abc', 'expanded' => 'yes', 'widget' => 'not_a_widget', 'type' => 'fractional', 'trim' => false];
++
++        $errors = ExtraPropertyFormOptionsPolicy::validate($options);
++        $sanitized = ExtraPropertyFormOptionsPolicy::sanitize($options);
++
++        $this->assertCount(3, $errors);
++        $this->assertStringContainsString('"scale" must be of type integer', $errors[0]);
++        $this->assertStringContainsString('"expanded" must be of type boolean', $errors[1]);
++        $this->assertStringContainsString('"widget" must be one of', $errors[2]);
++        $this->assertSame(['type' => 'fractional', 'trim' => false], $sanitized['options']);
++        $this->assertSame(['scale', 'expanded', 'widget'], $sanitized['dropped']);
++    }
++
++    /**
++     * translation_domain / choice_translation_domain select the catalogue labels are translated
++     * with: a "+intl-icu" domain would route them through the ICU formatter, where a malformed
++     * pattern throws on every render of the host form.
++     */
++    public function testTranslationDomainOptionsFollowTheDomainRule(): void
++    {
++        foreach (['translation_domain', 'choice_translation_domain'] as $option) {
++            $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate([$option => false]), $option);
++            $this->assertSame([], ExtraPropertyFormOptionsPolicy::validate([$option => 'Modules.Demoextrafield.Admin']), $option);
++
++            foreach (['Admin.Global+intl-icu', 'messages+intl-icu', 'not a domain', '{'] as $domain) {
++                $errors = ExtraPropertyFormOptionsPolicy::validate([$option => $domain]);
++                $this->assertCount(1, $errors, $option . ' / ' . $domain);
++                $this->assertSame([$option], ExtraPropertyFormOptionsPolicy::sanitize([$option => $domain])['dropped'], $option . ' / ' . $domain);
++            }
++        }
++    }
++
++    /**
++     * Write and read are built on the same walk: the number of refusals equals the number of
++     * dropped entries, whatever the input.
++     */
++    public function testValidateAndSanitizeAgree(): void
++    {
++        $options = [
++            'expanded' => true,
++            'label_subtitle' => '<x>',
++            'hint' => 'fine',
++            'attr' => ['class' => 'ok', 'onblur' => 'x'],
++            'choices' => ['Ok' => 1, '<i>' => 2],
++            'rounding_mode' => 'not an int',
++            'my_custom_option' => ['anything' => 'goes'],
++            'translation_domain' => 'Bad+intl-icu',
++            'download_url' => 'javascript:1',
++            'external_link' => ['href' => 'https://ok', 'text' => '<b>'],
++        ];
++
++        $this->assertCount(
++            count(ExtraPropertyFormOptionsPolicy::sanitize($options)['dropped']),
++            ExtraPropertyFormOptionsPolicy::validate($options)
++        );
++    }
++}
+diff --git a/tests/Unit/Core/ExtraProperty/Form/FormOptionsValidatorTest.php b/tests/Unit/Core/ExtraProperty/Form/FormOptionsValidatorTest.php
+index e7d84fa59fef9..c6df98869c86d 100644
+--- a/tests/Unit/Core/ExtraProperty/Form/FormOptionsValidatorTest.php
++++ b/tests/Unit/Core/ExtraProperty/Form/FormOptionsValidatorTest.php
+@@ -14,6 +14,7 @@
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\ExtraPropertyFormTypeMap;
+ use PrestaShop\PrestaShop\Core\ExtraProperty\Form\FormOptionsValidator;
+ use PrestaShopBundle\Form\Admin\Type\DatePickerType;
++use PrestaShopBundle\Form\Admin\Type\TextPreviewType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use stdClass;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+@@ -190,6 +191,83 @@ public function testLangScopeValidatesInnerOptionsThroughTranslatableWrapping():
+         $this->assertStringContainsString('not_a_real_option', $errors[0]);
+     }
+ 
++    /**
++     * The policy gate runs before the throwaway form is built: options the form theme would render
++     * unsafely are refused with a message naming each of them, even though Symfony itself accepts
++     * them — exactly the options ExtraPropertiesFormBuilderModifier drops on read.
++     */
++    public function testUnsafeRenderingOptionsAreRefusedBeforeBuilding(): void
++    {
++        $errors = $this->buildValidator()->validate(
++            null,
++            ExtraPropertyType::STRING,
++            null,
++            ExtraPropertyScope::COMMON,
++            [
++                'label_subtitle' => '<img src=x onerror=alert(1)>',
++                'attr' => ['autofocus' => 'autofocus', 'onfocus' => 'alert(1)'],
++            ]
++        );
++
++        $this->assertCount(2, $errors);
++        $this->assertStringContainsString('"label_subtitle"', $errors[0]);
++        $this->assertStringContainsString('"onfocus"', $errors[1]);
++    }
++
++    /**
++     * Any form type may be declared — the danger is in the options: TextPreviewType only renders
++     * its value raw when allow_html is set, so the type passes and that option is refused.
++     */
++    public function testAnyFormTypeIsAcceptedButRawRenderingOptionsAreRefused(): void
++    {
++        $validator = $this->buildValidator();
++
++        $this->assertSame([], $validator->validate(TextPreviewType::class, ExtraPropertyType::STRING, null, ExtraPropertyScope::COMMON, null));
++
++        $errors = $validator->validate(TextPreviewType::class, ExtraPropertyType::STRING, null, ExtraPropertyScope::COMMON, ['allow_html' => true]);
++
++        $this->assertCount(1, $errors);
++        $this->assertStringContainsString('"allow_html"', $errors[0]);
++    }
++
++    /**
++     * The policy forwards a null instead of checking it, so the type is the one that decides: a
++     * type refusing null says so at save time, including when it fails with a TypeError rather than
++     * an options-resolver error (ChoiceType::$expanded is typed bool).
++     */
++    public function testANullTheFormTypeRefusesIsCaughtAtSaveTime(): void
++    {
++        $errors = $this->buildValidator()->validate(
++            null,
++            ExtraPropertyType::CHOICE,
++            ['a', 'b'],
++            ExtraPropertyScope::COMMON,
++            ['expanded' => null]
++        );
++
++        $this->assertCount(1, $errors);
++        $this->assertStringContainsString('could not be built with these options', $errors[0]);
++    }
++
++    /**
++     * The policy matches option names case-sensitively because Symfony does, so a case variant of
++     * a denied option is not that option: it reaches the form build, which refuses it as an
++     * undefined option. The pair of layers is what makes lowercasing option names unnecessary.
++     */
++    public function testACaseVariantOfADeniedOptionIsRefusedByTheFormBuild(): void
++    {
++        $errors = $this->buildValidator()->validate(
++            null,
++            ExtraPropertyType::STRING,
++            null,
++            ExtraPropertyScope::COMMON,
++            ['ALLOW_HTML' => true]
++        );
++
++        $this->assertCount(1, $errors);
++        $this->assertStringContainsString('ALLOW_HTML', $errors[0]);
++    }
++
+     private function buildValidator(): FormOptionsValidator
+     {
+         $locales = [
+diff --git a/tests/Unit/Core/ExtraProperty/Schema/ColumnDefinitionMapperTest.php b/tests/Unit/Core/ExtraProperty/Schema/ColumnDefinitionMapperTest.php
+index 4a83d338fa4c3..2d8f0775adda1 100644
+--- a/tests/Unit/Core/ExtraProperty/Schema/ColumnDefinitionMapperTest.php
++++ b/tests/Unit/Core/ExtraProperty/Schema/ColumnDefinitionMapperTest.php
+@@ -164,4 +164,41 @@ public function testNoDefaultValueOmitsDefaultClause(): void
+         $this->assertSame('INT(11) NULL', ColumnDefinitionMapper::getSqlDefinition($options));
+         $this->assertStringNotContainsString('DEFAULT', ColumnDefinitionMapper::getSqlDefinition($options));
+     }
++
++    /**
++     * A value ending in a backslash must not escape the closing quote of the DEFAULT
++     * clause: MySQL runs without NO_BACKSLASH_ESCAPES by default, so the backslash is
++     * doubled and the literal stays closed instead of leaking into executable SQL.
++     */
++    public function testDefaultValueEscapesBackslash(): void
++    {
++        $options = new ExtraPropertyDefinition(
++            entityName: 'entity', propertyName: 'test',
++            type: ExtraPropertyType::STRING, nullable: true, defaultValue: 'a\\',
++        );
++
++        $this->assertSame("VARCHAR(255) NULL DEFAULT 'a\\\\'", ColumnDefinitionMapper::getSqlDefinition($options));
++    }
++
++    /**
++     * A crafted default that mixes a backslash and a quote to break out of the literal
++     * (a\' , ADD COLUMN ...) must be fully neutralised: both the backslash and the quote
++     * are doubled, so the injected text stays inside the string literal.
++     *
++     * The same escapeStringLiteral() builds the ENUM literals; enum values additionally refuse
++     * the backslash at construction (see ExtraPropertyDefinitionConstructorTest), so the DEFAULT
++     * clause is the only path a backslash can still reach the mapper through.
++     */
++    public function testDefaultValueNeutralisesLiteralBreakoutAttempt(): void
++    {
++        $options = new ExtraPropertyDefinition(
++            entityName: 'entity', propertyName: 'test',
++            type: ExtraPropertyType::STRING, nullable: true, defaultValue: "a\\' , ADD COLUMN pwned INT",
++        );
++
++        $this->assertSame(
++            "VARCHAR(255) NULL DEFAULT 'a\\\\'' , ADD COLUMN pwned INT'",
++            ColumnDefinitionMapper::getSqlDefinition($options)
++        );
++    }
+ }

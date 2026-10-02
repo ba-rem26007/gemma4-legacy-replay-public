@@ -1,0 +1,102 @@
+diff --git a/classes/checkout/CheckoutAddressesStep.php b/classes/checkout/CheckoutAddressesStep.php
+index 82166801efea2..0ace5187ed8aa 100644
+--- a/classes/checkout/CheckoutAddressesStep.php
++++ b/classes/checkout/CheckoutAddressesStep.php
+@@ -103,9 +103,8 @@ public function handleRequest(array $requestParams = [])
+                 $id_address = $this->addressForm->getAddress()->id;
+                 if ($requestParams['saveAddress'] === 'delivery') {
+                     $this->getCheckoutSession()->setIdAddressDelivery($id_address);
+-                    if ($this->use_same_address) {
+-                        $this->getCheckoutSession()->setIdAddressInvoice($id_address);
+-                    }
++                    $idAddressInvoice = $this->use_same_address ? $id_address : null;
++                    $this->getCheckoutSession()->setIdAddressInvoice($idAddressInvoice);
+                 } else {
+                     $this->getCheckoutSession()->setIdAddressInvoice($id_address);
+                 }
+@@ -190,9 +189,16 @@ public function handleRequest(array $requestParams = [])
+             if (!$this->getCheckoutProcess()->hasErrors()) {
+                 $this->setNextStepAsCurrent();
+                 $this->setComplete(
++                    !isset($requestParams['saveAddress']) &&
+                     $this->getCheckoutSession()->getIdAddressInvoice() &&
+                     $this->getCheckoutSession()->getIdAddressDelivery()
+                 );
++
++                // if we just pushed the invoice address form, we are using another address for invoice
++                // (param 'id_address_delivery' is only pushed in invoice address form)
++                if (isset($requestParams['saveAddress'], $requestParams['id_address_delivery'])) {
++                    $this->use_same_address = false;
++                }
+             }
+         }
+ 
+diff --git a/classes/controller/FrontController.php b/classes/controller/FrontController.php
+index 93ceff17b56e9..8127499de5e32 100644
+--- a/classes/controller/FrontController.php
++++ b/classes/controller/FrontController.php
+@@ -170,6 +170,22 @@ class FrontControllerCore extends Controller
+      */
+     protected $cccReducer;
+ 
++    /**
++     * Set this parameter to false if you don't want cart's invoice address
++     * to be set automatically (this behavior is kept for legacy and BC purpose)
++     *
++     * @var bool automaticallyAllocateInvoiceAddress
++     */
++    protected $automaticallyAllocateInvoiceAddress = true;
++
++    /**
++     * Set this parameter to false if you don't want cart's delivery address
++     * to be set automatically (this behavior is kept for legacy and BC purpose)
++     *
++     * @var bool automaticallyAllocateDeliveryAddress
++     */
++    protected $automaticallyAllocateDeliveryAddress = true;
++
+     /**
+      * Controller constructor.
+      *
+@@ -399,13 +415,13 @@ public function init()
+             }
+             /* Select an address if not set */
+             if (isset($cart) && (!isset($cart->id_address_delivery) || $cart->id_address_delivery == 0 ||
+-                !isset($cart->id_address_invoice) || $cart->id_address_invoice == 0) && $this->context->cookie->id_customer) {
++                    !isset($cart->id_address_invoice) || $cart->id_address_invoice == 0) && $this->context->cookie->id_customer) {
+                 $to_update = false;
+-                if (!isset($cart->id_address_delivery) || $cart->id_address_delivery == 0) {
++                if ($this->automaticallyAllocateDeliveryAddress && (!isset($cart->id_address_delivery) || $cart->id_address_delivery == 0)) {
+                     $to_update = true;
+                     $cart->id_address_delivery = (int) Address::getFirstCustomerAddressId($cart->id_customer);
+                 }
+-                if (!isset($cart->id_address_invoice) || $cart->id_address_invoice == 0) {
++                if ($this->automaticallyAllocateInvoiceAddress && (!isset($cart->id_address_invoice) || $cart->id_address_invoice == 0)) {
+                     $to_update = true;
+                     $cart->id_address_invoice = (int) Address::getFirstCustomerAddressId($cart->id_customer);
+                 }
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index a623af29a500e..cd95fbebc2bf0 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -45,6 +45,20 @@ class OrderControllerCore extends FrontController
+      */
+     protected $cartChecksum;
+ 
++    /**
++     * Overrides the same parameter in FrontController
++     *
++     * @var bool automaticallyAllocateInvoiceAddress
++     */
++    protected $automaticallyAllocateInvoiceAddress = false;
++
++    /**
++     * Overrides the same parameter in FrontController
++     *
++     * @var bool
++     */
++    protected $automaticallyAllocateDeliveryAddress = false;
++
+     /**
+      * Initialize order controller.
+      *

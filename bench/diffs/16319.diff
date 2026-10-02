@@ -1,0 +1,178 @@
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+index 55edce459f44a..ddbe9f7445e20 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderForViewingHandler.php
+@@ -36,6 +36,7 @@
+ use DateTimeImmutable;
+ use Db;
+ use Gender;
++use Group;
+ use Image;
+ use ImageManager;
+ use Module;
+@@ -132,8 +133,9 @@ public function __construct(
+     public function handle(GetOrderForViewing $query): OrderForViewing
+     {
+         $order = $this->getOrder($query->getOrderId());
++        $taxCalculationMethod = $this->getOrderTaxCalculationMethod($order);
+ 
+-        $isTaxIncluded = $order->getTaxCalculationMethod() == PS_TAX_INC;
++        $isTaxIncluded = ($taxCalculationMethod == PS_TAX_INC);
+ 
+         $taxMethod = $isTaxIncluded ?
+             $this->translator->trans('Tax included', [], 'Admin.Global') :
+@@ -292,6 +294,8 @@ private function getOrderInvoiceAddress(Order $order): OrderInvoiceAddressForVie
+      */
+     private function getOrderProducts(Order $order): OrderProductsForViewing
+     {
++        $taxCalculationMethod = $this->getOrderTaxCalculationMethod($order);
++
+         $products = $order->getProducts();
+         $currency = new Currency((int) $order->id_currency);
+ 
+@@ -390,7 +394,7 @@ private function getOrderProducts(Order $order): OrderProductsForViewing
+ 
+         $productsForViewing = [];
+ 
+-        $isOrderTaxExcluded = $order->getTaxCalculationMethod() == PS_TAX_EXC;
++        $isOrderTaxExcluded = ($taxCalculationMethod == PS_TAX_EXC);
+ 
+         foreach ($products as $product) {
+             $unitPrice = $isOrderTaxExcluded ?
+@@ -583,6 +587,8 @@ private function getOrderDocuments(Order $order): OrderDocumentsForViewing
+ 
+     private function getOrderShipping(Order $order): OrderShippingForViewing
+     {
++        $taxCalculationMethod = $this->getOrderTaxCalculationMethod($order);
++
+         $shipping = $order->getShipping();
+         $carriers = [];
+         $carrierModuleInfo = null;
+@@ -600,7 +606,7 @@ private function getOrderShipping(Order $order): OrderShippingForViewing
+ 
+         if (!$order->isVirtual()) {
+             foreach ($shipping as $item) {
+-                if ($order->getTaxCalculationMethod() == PS_TAX_INC) {
++                if ($taxCalculationMethod == PS_TAX_INC) {
+                     $price = Tools::displayPrice($item['shipping_cost_tax_incl'], $currency);
+                 } else {
+                     $price = Tools::displayPrice($item['shipping_cost_tax_excl'], $currency);
+@@ -758,7 +764,7 @@ private function getOrderPrices(Order $order): OrderPricesForViewing
+         $currency = new Currency($order->id_currency);
+         $customer = $order->getCustomer();
+ 
+-        $isTaxExcluded = $order->getTaxCalculationMethod() == PS_TAX_EXC;
++        $isTaxExcluded = ($this->getOrderTaxCalculationMethod($order) == PS_TAX_EXC);
+ 
+         $shipping_refundable_tax_excl = $order->total_shipping_tax_excl;
+         $shipping_refundable_tax_incl = $order->total_shipping_tax_incl;
+@@ -820,4 +826,16 @@ private function getOrderDiscounts(Order $order): OrderDiscountsForViewing
+ 
+         return new OrderDiscountsForViewing($discountsForViewing);
+     }
++
++    /**
++     * @param Order $order
++     *
++     * @return int
++     */
++    private function getOrderTaxCalculationMethod(Order $order): int
++    {
++        $customer = new Customer($order->id_customer);
++
++        return Group::getPriceDisplayMethod((int) $customer->id_default_group);
++    }
+ }
+diff --git a/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php b/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
+index 5466993c0ac6e..2a85ce855ab7e 100644
+--- a/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
++++ b/src/Adapter/Order/QueryHandler/GetOrderPreviewHandler.php
+@@ -30,6 +30,7 @@
+ use Country;
+ use Currency;
+ use Customer;
++use Group;
+ use Order;
+ use OrderCarrier;
+ use PrestaShop\Decimal\Number;
+@@ -80,13 +81,14 @@ public function __construct(
+     public function handle(GetOrderPreview $query): OrderPreview
+     {
+         $order = $this->getOrder($query->getOrderId());
++        $priceDisplayMethod = $this->getOrderTaxCalculationMethod($order);
+ 
+         return new OrderPreview(
+             $this->getInvoiceDetails($order),
+             $this->getShippingDetails($order),
+             $this->getProductDetails($order),
+             $order->isVirtual(),
+-            PS_TAX_INC === $order->getTaxCalculationMethod()
++            $priceDisplayMethod == PS_TAX_INC
+         );
+     }
+ 
+@@ -187,6 +189,8 @@ private function getProductDetails(Order $order): array
+         $currency = new Currency($order->id_currency);
+         $locale = $this->localeRepository->getLocale($this->locale);
+ 
++        $taxCalculationMethod = $this->getOrderTaxCalculationMethod($order);
++
+         foreach ($order->getProductsDetail() as $detail) {
+             $unitPrice = $detail['unit_price_tax_excl'];
+             $totalPrice = $detail['total_price_tax_excl'];
+@@ -196,7 +200,7 @@ private function getProductDetails(Order $order): array
+ 
+             $totalTaxAmount = $totalPriceTaxIncl->minus($totalPriceTaxExcl);
+ 
+-            if (PS_TAX_INC === $order->getTaxCalculationMethod()) {
++            if (PS_TAX_INC === $taxCalculationMethod) {
+                 $unitPrice = $detail['unit_price_tax_incl'];
+                 $totalPrice = $detail['total_price_tax_incl'];
+             }
+@@ -218,4 +222,16 @@ private function getProductDetails(Order $order): array
+ 
+         return $productDetails;
+     }
++
++    /**
++     * @param Order $order
++     *
++     * @return int
++     */
++    private function getOrderTaxCalculationMethod(Order $order): int
++    {
++        $customer = new Customer($order->id_customer);
++
++        return Group::getPriceDisplayMethod((int) $customer->id_default_group);
++    }
+ }
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/preview.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/preview.html.twig
+index 674288d85d335..a6a4c1ab3c2a6 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/preview.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/preview.html.twig
+@@ -136,9 +136,11 @@
+             </th>
+             <th>{{ 'Reference'|trans({}, 'Admin.Global') }}</th>
+             <th>{{ 'Stock location'|trans({}, 'Admin.Orderscustomers.Feature') }}</th>
+-            <th class="text-center">
+-              {{ 'Tax'|trans({}, 'Admin.Global') }}
+-            </th>
++            {% if orderPreview.taxIncluded == false %}
++              <th class="text-center">
++                {{ 'Tax'|trans({}, 'Admin.Global') }}
++              </th>
++            {% endif %}
+             <th class="text-center">{{ 'Quantity'|trans({}, 'Admin.Global') }}</th>
+             <th class="text-center">
+               {{ 'Total'|trans({}, 'Admin.Global') }}
+@@ -154,7 +156,9 @@
+               <td class="p-1">
+                 {% if productDetail.location is not empty %}{{ productDetail.location }}{% else %}-{% endif %}
+               </td>
+-              <td class="p-1 text-center">{{ productDetail.totalTax }}</td>
++              {% if orderPreview.taxIncluded == false %}
++                <td class="p-1 text-center">{{ productDetail.totalTax }}</td>
++              {% endif %}
+               <td class="p-1 text-center">{{ productDetail.quantity }}</td>
+               <td class="p-1 text-center">{{ productDetail.totalPrice }}</td>
+             </tr>

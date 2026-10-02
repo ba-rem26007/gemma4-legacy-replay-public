@@ -1,0 +1,262 @@
+diff --git a/classes/checkout/CheckoutSession.php b/classes/checkout/CheckoutSession.php
+index 7bfed1447e065..cb14eefd4328c 100644
+--- a/classes/checkout/CheckoutSession.php
++++ b/classes/checkout/CheckoutSession.php
+@@ -23,21 +23,24 @@
+  * @copyright Since 2007 PrestaShop SA and Contributors
+  * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
+  */
++
++use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsInterface;
++
+ class CheckoutSessionCore
+ {
+     /** @var Context */
+     protected $context;
+-    /** @var DeliveryOptionsFinder */
+-    protected $deliveryOptionsFinder;
++    /** @var DeliveryOptionsInterface */
++    protected $deliveryOptions;
+ 
+     /**
+      * @param Context $context
+-     * @param DeliveryOptionsFinder $deliveryOptionsFinder
++     * @param DeliveryOptionsInterface $deliveryOptions
+      */
+-    public function __construct(Context $context, DeliveryOptionsFinder $deliveryOptionsFinder)
++    public function __construct(Context $context, DeliveryOptionsInterface $deliveryOptions)
+     {
+         $this->context = $context;
+-        $this->deliveryOptionsFinder = $deliveryOptionsFinder;
++        $this->deliveryOptions = $deliveryOptions;
+     }
+ 
+     /**
+@@ -150,12 +153,12 @@ public function setDeliveryOption($option)
+ 
+     public function getSelectedDeliveryOption()
+     {
+-        return $this->deliveryOptionsFinder->getSelectedDeliveryOption();
++        return $this->deliveryOptions->getSelectedDeliveryOption();
+     }
+ 
+     public function getDeliveryOptions()
+     {
+-        return $this->deliveryOptionsFinder->getDeliveryOptions();
++        return $this->deliveryOptions->getDeliveryOptions();
+     }
+ 
+     public function setRecyclable($option)
+diff --git a/classes/checkout/DeliveryOptionsFinder.php b/classes/checkout/DeliveryOptionsFinder.php
+index 0db7f44e1b824..7868cbbe12e86 100644
+--- a/classes/checkout/DeliveryOptionsFinder.php
++++ b/classes/checkout/DeliveryOptionsFinder.php
+@@ -25,9 +25,10 @@
+  */
+ use PrestaShop\PrestaShop\Adapter\Presenter\Object\ObjectPresenter;
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
++use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsInterface;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+-class DeliveryOptionsFinderCore
++class DeliveryOptionsFinderCore implements DeliveryOptionsInterface
+ {
+     private $context;
+     private $objectPresenter;
+diff --git a/controllers/front/OrderController.php b/controllers/front/OrderController.php
+index 89d5c3dfed9fa..8167adffa17c5 100644
+--- a/controllers/front/OrderController.php
++++ b/controllers/front/OrderController.php
+@@ -25,7 +25,10 @@
+  */
+ 
+ use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
++use PrestaShop\PrestaShop\Adapter\Shipment\DeliveryOptionsProvider;
+ use PrestaShop\PrestaShop\Core\Checkout\TermsAndConditions;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagSettings;
++use PrestaShop\PrestaShop\Core\FeatureFlag\FeatureFlagStateCheckerInterface;
+ use PrestaShop\PrestaShop\Core\Foundation\Templating\RenderableProxy;
+ use PrestaShopBundle\Translation\TranslatorComponent;
+ 
+@@ -118,12 +121,24 @@ public function getCheckoutProcess(): CheckoutProcess
+      */
+     public function getCheckoutSession(): CheckoutSession
+     {
+-        $deliveryOptionsFinder = new DeliveryOptionsFinder(
+-            $this->context,
+-            $this->getTranslator(),
+-            $this->objectPresenter,
+-            new PriceFormatter()
+-        );
++        /** @var FeatureFlagStateCheckerInterface $featureFlagManager */
++        $featureFlagManager = $this->get(FeatureFlagStateCheckerInterface::class);
++
++        if ($featureFlagManager->isEnabled(FeatureFlagSettings::FEATURE_FLAG_IMPROVED_SHIPMENT)) {
++            $deliveryOptionsFinder = new DeliveryOptionsProvider(
++                $this->context,
++                $this->getTranslator(),
++                $this->objectPresenter,
++                new PriceFormatter()
++            );
++        } else {
++            $deliveryOptionsFinder = new DeliveryOptionsFinder(
++                $this->context,
++                $this->getTranslator(),
++                $this->objectPresenter,
++                new PriceFormatter()
++            );
++        }
+ 
+         $session = new CheckoutSession(
+             $this->context,
+diff --git a/src/Adapter/Shipment/DeliveryOptionsInterface.php b/src/Adapter/Shipment/DeliveryOptionsInterface.php
+new file mode 100644
+index 0000000000000..d90fdeca1becd
+--- /dev/null
++++ b/src/Adapter/Shipment/DeliveryOptionsInterface.php
+@@ -0,0 +1,36 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++interface DeliveryOptionsInterface
++{
++    public function getSelectedDeliveryOption();
++
++    public function getDeliveryOptions();
++}
+diff --git a/src/Adapter/Shipment/DeliveryOptionsProvider.php b/src/Adapter/Shipment/DeliveryOptionsProvider.php
+new file mode 100644
+index 0000000000000..6be872bb3a940
+--- /dev/null
++++ b/src/Adapter/Shipment/DeliveryOptionsProvider.php
+@@ -0,0 +1,103 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++declare(strict_types=1);
++
++namespace PrestaShop\PrestaShop\Adapter\Shipment;
++
++use Context;
++use DeliveryOptionsFinderCore;
++use Hook;
++use Module;
++use PrestaShop\PrestaShop\Adapter\Presenter\Object\ObjectPresenter;
++use PrestaShop\PrestaShop\Adapter\Product\PriceFormatter;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class DeliveryOptionsProvider extends DeliveryOptionsFinderCore
++{
++    private $context;
++
++    public function __construct(
++        Context $context,
++        TranslatorInterface $translator,
++        ObjectPresenter $objectPresenter,
++        PriceFormatter $priceFormatter
++    ) {
++        parent::__construct($context, $translator, $objectPresenter, $priceFormatter);
++        $this->context = $context;
++    }
++
++    public function getDeliveryOptions()
++    {
++        $parentOutput = parent::getDeliveryOptions();
++
++        $deliveryOptions = $this->context->cart->getDeliveryOptionList();
++        $currentAddressDeliveryOptions = $deliveryOptions[$this->context->cart->id_address_delivery];
++
++        foreach ($currentAddressDeliveryOptions as $deliveryOption) {
++            $carrierIdsAsString = implode(',', array_keys($deliveryOption['carrier_list'])) . ',';
++            $carriersDetails = $this->getCarriersDetails($deliveryOption);
++
++            // override parent output to mention all the carrier within the delivery option
++            if (!empty($carriersDetails)) {
++                $parentOutput[$carrierIdsAsString]['name'] = $carriersDetails['name'];
++                $parentOutput[$carrierIdsAsString]['delay'] = $carriersDetails['delay'];
++                $parentOutput[$carrierIdsAsString]['extraContent'] = $carriersDetails['extraContent'];
++            }
++        }
++
++        return $parentOutput;
++    }
++
++    private function getCarriersDetails(array $deliveryOption): array
++    {
++        $carriers = $deliveryOption['carrier_list'];
++
++        if (count($carriers) === 1) {
++            return [];
++        }
++
++        $names = [];
++        $delays = [];
++        $extraContent = '';
++
++        // If carrier related to a module, check for additionnal data to display
++        foreach ($carriers as $carrier) {
++            $names[] = $carrier['instance']->name;
++            $delays[] = $carrier['instance']->delay[$this->context->language->id];
++
++            // if more than on carrier are in the same delivery options then concatenate
++            // all extracontent
++            $extraContent .= Hook::exec('displayCarrierExtraContent', ['carrier' => $carrier['instance']], Module::getModuleIdByName($carrier['instance']->id));
++        }
++
++        return [
++            'name' => implode(', ', $names),
++            'delay' => implode(', ', $delays),
++            'extraContent' => $extraContent,
++        ];
++    }
++}

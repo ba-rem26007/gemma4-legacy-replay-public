@@ -1,0 +1,88 @@
+diff --git a/controllers/front/ProductController.php b/controllers/front/ProductController.php
+index a52b28bc554f6..a6845aa2374f8 100644
+--- a/controllers/front/ProductController.php
++++ b/controllers/front/ProductController.php
+@@ -476,6 +476,9 @@ protected function assignAttributesGroups($product_for_template = null)
+                                 $current_cover = $image;
+                             }
+                         }
++                        if (!isset($current_cover)) {
++                            $current_cover = array_values($this->context->smarty->tpl_vars['product']->value['images'])[0];
++                        }
+ 
+                         if (is_array($combination_images[$row['id_product_attribute']])) {
+                             foreach ($combination_images[$row['id_product_attribute']] as $tmp) {
+@@ -497,7 +500,9 @@ protected function assignAttributesGroups($product_for_template = null)
+                                     $this->context->smarty->assign('images', $product_images);
+                                 }
+                             }
++
+                             $cover = $current_cover;
++
+                             if (isset($cover) && is_array($cover) && isset($product_images) && is_array($product_images)) {
+                                 $product_images[$cover['id_image']]['cover'] = 0;
+                                 if (isset($product_images[$id_image])) {
+diff --git a/src/Adapter/Image/ImageRetriever.php b/src/Adapter/Image/ImageRetriever.php
+index 5070b79e40334..5031dbd7a012d 100644
+--- a/src/Adapter/Image/ImageRetriever.php
++++ b/src/Adapter/Image/ImageRetriever.php
+@@ -18,6 +18,7 @@ public function __construct(Link $link)
+ 
+     public function getProductImages(array $product, Language $language)
+     {
++        $productAttributeId = $product['id_product_attribute'];
+         $productInstance = new Product(
+             $product['id_product'],
+             false,
+@@ -42,7 +43,11 @@ public function getProductImages(array $product, Language $language)
+             }
+         }
+ 
+-        $images = array_map(function (array $image) use ($productInstance, $imageToCombinations) {
++        $images = array_map(function (array $image) use (
++            $productInstance,
++            $imageToCombinations,
++            $productAttributeId
++        ) {
+             $image =  array_merge($this->getImage(
+                 $productInstance,
+                 $image['id_image']
+@@ -54,10 +59,21 @@ public function getProductImages(array $product, Language $language)
+                 $image['associatedVariants'] = [];
+             }
+ 
+-            return $image;
++            /* If product have combinations, we need to filter */
++            if (
++                in_array($productAttributeId, $image['associatedVariants'])
++                && count($imageToCombinations) > 0
++            ) {
++                return $image;
++            }
++            
++            /* If product have no combinations, return all images */
++            if (0 === count($imageToCombinations)) {
++                return $image;
++            }
+         }, $images);
+ 
+-        return $images;
++        return array_filter($images);
+     }
+ 
+     public function getImage($object, $id_image)
+diff --git a/src/Core/Product/AbstractProductPresenter.php b/src/Core/Product/AbstractProductPresenter.php
+index f65508f3a7b64..482b04c632801 100644
+--- a/src/Core/Product/AbstractProductPresenter.php
++++ b/src/Core/Product/AbstractProductPresenter.php
+@@ -64,8 +64,8 @@ private function fillImages(
+         }
+ 
+         if (!isset($presentedProduct['cover'])) {
+-            if (isset($presentedProduct['images'][0])) {
+-                $presentedProduct['cover'] = $presentedProduct['images'][0];
++            if (count($presentedProduct['images']) > 0) {
++                $presentedProduct['cover'] = array_values($presentedProduct['images'])[0];
+             } else {
+                 $presentedProduct['cover'] = null;
+             }

@@ -1,0 +1,202 @@
+diff --git a/classes/PhpEncryption.php b/classes/PhpEncryption.php
+index c9946f509732f..ea53317a4e2e4 100644
+--- a/classes/PhpEncryption.php
++++ b/classes/PhpEncryption.php
+@@ -24,6 +24,8 @@
+  * International Registered Trademark & Property of PrestaShop SA
+  */
+ 
++use Defuse\Crypto\Exception\EnvironmentIsBrokenException;
++
+ /**
+  * Class PhpEncryptionCore for openSSL 1.0.1+.
+  */
+@@ -42,7 +44,7 @@ class PhpEncryptionCore
+     public function __construct($hexString)
+     {
+         $engineClass = self::resolveEngineToUse();
+-        $this->engine = new $engineClass($hexString);
++        self::$engine = new $engineClass($hexString);
+     }
+ 
+     /**
+@@ -54,7 +56,7 @@ public function __construct($hexString)
+      */
+     public function encrypt($plaintext)
+     {
+-        return $this->engine->encrypt($plaintext);
++        return self::$engine->encrypt($plaintext);
+     }
+ 
+     /**
+@@ -69,7 +71,7 @@ public function encrypt($plaintext)
+      */
+     public function decrypt($cipherText)
+     {
+-        return $this->engine->decrypt($cipherText);
++        return self::$engine->decrypt($cipherText);
+     }
+ 
+     /**
+@@ -89,12 +91,21 @@ public static function saveBytesToChecksummedAsciiSafeString($header, $bytes)
+ 
+     /**
+      * @return string
++     * @throws Exception
++     *
+      */
+     public static function createNewRandomKey()
+     {
+         $engine = self::resolveEngineToUse();
+ 
+-        return $engine::createNewRandomKey();
++        try {
++            $randomKey = $engine::createNewRandomKey();
++        } catch (EnvironmentIsBrokenException $exception) {
++            $buf = $engine::randomCompat();
++            $randomKey = $engine::saveToAsciiSafeString($buf);
++        }
++
++        return $randomKey;
+     }
+ 
+     /**
+diff --git a/classes/PhpEncryptionEngine.php b/classes/PhpEncryptionEngine.php
+index 4564a6aba5d91..0ddb44899939b 100644
+--- a/classes/PhpEncryptionEngine.php
++++ b/classes/PhpEncryptionEngine.php
+@@ -105,9 +105,59 @@ public static function createNewRandomKey()
+ 
+     /**
+      * @param $hexString
++     * @return Key
+      */
+     public static function loadFromAsciiSafeString($hexString)
+     {
+         return Key::loadFromAsciiSafeString($hexString);
+     }
++
++    /**
++     * @return string
++     * @throws Exception
++     *
++     * @see https://github.com/paragonie/random_compat/blob/v1.4.1/lib/random_bytes_openssl.php
++     * @see https://github.com/paragonie/random_compat/blob/v1.4.1/lib/random_bytes_mcrypt.php
++     */
++    public static function randomCompat()
++    {
++        $bytes = Key::KEY_BYTE_SIZE;
++
++        $secure = true;
++        $buf = openssl_random_pseudo_bytes($bytes, $secure);
++        if (
++            $buf !== false
++            &&
++            $secure
++            &&
++            RandomCompat_strlen($buf) === $bytes
++        ) {
++            return $buf;
++        }
++
++        $buf = @mcrypt_create_iv($bytes, MCRYPT_DEV_URANDOM);
++        if (
++            $buf !== false
++            &&
++            RandomCompat_strlen($buf) === $bytes
++        ) {
++            return $buf;
++        }
++
++        throw new Exception(
++            'Could not gather sufficient random data'
++        );
++    }
++
++    /**
++     * @param $buf
++     * @return string
++     */
++    public static function saveToAsciiSafeString($buf)
++    {
++        return Encoding::saveBytesToChecksummedAsciiSafeString(
++            Key::KEY_CURRENT_VERSION,
++            $buf
++        );
++    }
+ }
+diff --git a/src/PrestaShopBundle/Install/Upgrade.php b/src/PrestaShopBundle/Install/Upgrade.php
+index 9a233259ca0fc..e8d4722e36817 100644
+--- a/src/PrestaShopBundle/Install/Upgrade.php
++++ b/src/PrestaShopBundle/Install/Upgrade.php
+@@ -32,6 +32,7 @@
+ use Symfony\Component\Filesystem\Exception\IOException;
+ use RandomLib;
+ use Composer\Script\Event;
++use PhpEncryption;
+ 
+ class Upgrade
+ {
+@@ -68,8 +69,7 @@ public static function migrateSettingsFile(Event $event = null)
+         $fileMigrated = false;
+         $default_parameters = Yaml::parse(file_get_contents($root_dir.'/app/config/parameters.yml.dist'));
+         require_once $root_dir.'/vendor/paragonie/random_compat/lib/random.php';
+-        $key = \Defuse\Crypto\Key::createNewRandomKey();
+-        $default_parameters['parameters']['new_cookie_key'] = $key->saveToAsciiSafeString();
++        $default_parameters['parameters']['new_cookie_key'] = PhpEncryption::createNewRandomKey();
+         if (file_exists($root_dir.'/'.self::SETTINGS_FILE)) {
+             $tmp_settings = file_get_contents($root_dir.'/'.self::SETTINGS_FILE);
+         } else {
+diff --git a/tests/Unit/classes/PhpEncryptionTest.php b/tests/Unit/classes/PhpEncryptionTest.php
+new file mode 100644
+index 0000000000000..1fdf45ea684fa
+--- /dev/null
++++ b/tests/Unit/classes/PhpEncryptionTest.php
+@@ -0,0 +1,47 @@
++<?php
++/**
++ * 2007-2016 PrestaShop.
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.txt.
++ * It is also available through the world-wide-web at this URL:
++ * http://opensource.org/licenses/osl-3.0.php
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to http://www.prestashop.com for more information.
++ *
++ * @author    PrestaShop SA <contact@prestashop.com>
++ * @copyright 2007-2016 PrestaShop SA
++ * @license   http://opensource.org/licenses/osl-3.0.php Open Software License (OSL 3.0)
++ * International Registered Trademark & Property of PrestaShop SA
++ */
++
++namespace PrestaShop\PrestaShop\tests\Unit\classes;
++
++use PhpEncryption;
++
++class PhpEncryptionTest extends \PHPUnit_Framework_TestCase
++{
++    const FOO = 'foo';
++    private $engine;
++
++    public function setUp()
++    {
++        $randomKey = PhpEncryption::createNewRandomKey();
++        $this->engine = new PhpEncryption($randomKey);
++    }
++
++    public function testEncryptAndDecrypt()
++    {
++        $encryptedValue = $this->engine->encrypt(self::FOO);
++        $this->assertSame(self::FOO, $this->engine->decrypt($encryptedValue));
++    }
++}

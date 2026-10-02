@@ -1,0 +1,642 @@
+diff --git a/classes/Dispatcher.php b/classes/Dispatcher.php
+index 5d6401485f689..d097d5c20b11a 100644
+--- a/classes/Dispatcher.php
++++ b/classes/Dispatcher.php
+@@ -681,21 +681,16 @@ protected function loadRoutes($id_shop = null)
+             /*
+              * Step 5 - Custom routes set in ps_configurations. Those are configured product, category,
+              * cms etc. rules that you can configure in SEO & URL section in the backoffice.
+-             *
+-             * Beware that these routes are not multilanguage, they will be the same for each language of the shop.
+-             * It probably would not be difficult to make them multilanguage, if route was stored in configuration
+-             * for each language.
+              */
+             foreach ($this->default_routes as $routeName => $routeDefinition) {
+-                if ($customRouteRule = Configuration::get('PS_ROUTE_' . $routeName, null, null, $id_shop)) {
+-                    $computedRoute = $this->computeRoute(
+-                        $customRouteRule,
+-                        $routeDefinition['controller'],
+-                        $routeDefinition['keywords'],
+-                        isset($routeDefinition['params']) ? $routeDefinition['params'] : []
+-                    );
+-                    foreach ($language_ids as $id_lang) {
+-                        $this->routes[$id_shop][$id_lang][$routeName] = $computedRoute;
++                foreach ($language_ids as $id_lang) {
++                    if ($customRouteRule = Configuration::get('PS_ROUTE_' . $routeName, $id_lang, null, $id_shop)) {
++                        $this->routes[$id_shop][$id_lang][$routeName] = $this->computeRoute(
++                            $customRouteRule,
++                            $routeDefinition['controller'],
++                            $routeDefinition['keywords'],
++                            isset($routeDefinition['params']) ? $routeDefinition['params'] : []
++                        );
+                     }
+                 }
+             }
+diff --git a/src/Adapter/Meta/UrlSchemaDataConfiguration.php b/src/Adapter/Meta/UrlSchemaDataConfiguration.php
+index 5d401d8321ece..87171b9f3c4fb 100644
+--- a/src/Adapter/Meta/UrlSchemaDataConfiguration.php
++++ b/src/Adapter/Meta/UrlSchemaDataConfiguration.php
+@@ -10,6 +10,7 @@
+ use PrestaShop\PrestaShop\Adapter\Shop\Context;
+ use PrestaShop\PrestaShop\Core\Configuration\AbstractMultistoreConfiguration;
+ use PrestaShop\PrestaShop\Core\Feature\FeatureInterface;
++use PrestaShop\PrestaShop\Core\Language\LanguageInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ 
+ /**
+@@ -23,6 +24,11 @@ final class UrlSchemaDataConfiguration extends AbstractMultistoreConfiguration
+      */
+     private $rules;
+ 
++    /**
++     * @var LanguageInterface[]
++     */
++    private $languages;
++
+     /**
+      * UrlSchemaDataConfiguration constructor.
+      *
+@@ -30,12 +36,14 @@ final class UrlSchemaDataConfiguration extends AbstractMultistoreConfiguration
+      * @param Context $shopContext
+      * @param FeatureInterface $multistoreFeature
+      * @param array $rules
++     * @param array $languages
+      */
+-    public function __construct(Configuration $configuration, Context $shopContext, FeatureInterface $multistoreFeature, array $rules)
++    public function __construct(Configuration $configuration, Context $shopContext, FeatureInterface $multistoreFeature, array $rules, array $languages)
+     {
+         parent::__construct($configuration, $shopContext, $multistoreFeature);
+ 
+         $this->rules = $rules;
++        $this->languages = $languages;
+     }
+ 
+     /**
+@@ -47,8 +55,18 @@ public function getConfiguration()
+         $shopConstraint = $this->getShopConstraint();
+ 
+         foreach ($this->rules as $routeId => $defaultRule) {
+-            $result = $this->configuration->get($this->getConfigurationKey($routeId), null, $shopConstraint) ?: $defaultRule;
+-            $configResult[$routeId] = $result;
++            // Get value from configuration
++            $currentValue = $this->configuration->get($this->getConfigurationKey($routeId), null, $shopConstraint);
++            if (is_array($currentValue)) {
++                $configResult[$routeId] = $currentValue;
++                continue;
++            } elseif (is_string($currentValue)) {
++                $configResult[$routeId] = array_fill_keys(array_column($this->languages, 'id_lang'), $currentValue);
++                continue;
++            } else {
++                $configResult[$routeId] = array_fill_keys(array_column($this->languages, 'id_lang'), $defaultRule);
++                continue;
++            }
+         }
+ 
+         return $configResult;
+@@ -80,7 +98,7 @@ protected function buildResolver(): OptionsResolver
+         $resolver = new OptionsResolver();
+         $resolver->setDefined($rulesIds);
+         foreach ($rulesIds as $ruleId) {
+-            $resolver->setAllowedTypes($ruleId, 'string');
++            $resolver->setAllowedTypes($ruleId, 'array');
+         }
+ 
+         return $resolver;
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
+index 876f802f49655..0350c7b1dccaa 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProvider.php
+@@ -86,38 +86,39 @@ private function validateData(array $data)
+     {
+         $patternErrors = [];
+         $fieldErrors = [];
+-        foreach ($data as $routeId => $rule) {
++        foreach ($data as $routeId => $routeData) {
+             // Skip multistore checkbox helper fields added to the form, they are not route patterns.
+-            if (str_starts_with($routeId, 'multistore_') && is_bool($rule)) {
++            if (str_starts_with($routeId, 'multistore_') && is_bool($routeData)) {
+                 continue;
+             }
++            foreach ($routeData as $langId => $routeRule) {
++                if (!$this->routeValidator->isRoutePattern($routeRule)) {
++                    $patternErrors[] = $this->translator->trans(
++                        'The route %routeRule% is not valid',
++                        [
++                            '%routeRule%' => htmlspecialchars($routeRule),
++                        ],
++                        'Admin.Shopparameters.Feature'
++                    );
++                }
+ 
+-            if (!$this->routeValidator->isRoutePattern($rule)) {
+-                $patternErrors[] = $this->translator->trans(
+-                    'The route %routeRule% is not valid',
+-                    [
+-                        '%routeRule%' => htmlspecialchars($rule),
+-                    ],
+-                    'Admin.Shopparameters.Feature'
+-                );
+-            }
+-
+-            $errors = $this->routeValidator->isRouteValid($routeId, $rule);
+-
+-            foreach (['missing', 'unknown'] as $type) {
+-                if (!empty($errors[$type])) {
+-                    foreach ($errors[$type] as $keyword) {
+-                        $fieldErrors[] = $this->translator->trans(
+-                            $type === 'missing'
+-                                ? 'Keyword "{%keyword%}" required for route "%routeName%" (rule: "%routeRule%")'
+-                                : 'Keyword "{%keyword%}" doesn\'t exist for route "%routeName%" (rule: "%routeRule%")',
+-                            [
+-                                '%keyword%' => $keyword,
+-                                '%routeName%' => $routeId,
+-                                '%routeRule%' => $rule,
+-                            ],
+-                            'Admin.Shopparameters.Feature'
+-                        );
++                $errors = $this->routeValidator->isRouteValid($routeId, $routeRule);
++
++                foreach (['missing', 'unknown'] as $type) {
++                    if (!empty($errors[$type])) {
++                        foreach ($errors[$type] as $keyword) {
++                            $fieldErrors[] = $this->translator->trans(
++                                $type === 'missing'
++                                    ? 'Keyword "{%keyword%}" required for route "%routeName%" (rule: "%routeRule%")'
++                                    : 'Keyword "{%keyword%}" doesn\'t exist for route "%routeName%" (rule: "%routeRule%")',
++                                [
++                                    '%keyword%' => $keyword,
++                                    '%routeName%' => $routeId,
++                                    '%routeRule%' => $routeRule,
++                                ],
++                                'Admin.Shopparameters.Feature'
++                            );
++                        }
+                     }
+                 }
+             }
+diff --git a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/UrlSchemaType.php b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/UrlSchemaType.php
+index e8f692df66f47..64290f7c971ca 100644
+--- a/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/UrlSchemaType.php
++++ b/src/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/UrlSchemaType.php
+@@ -8,12 +8,14 @@
+ 
+ use PrestaShop\PrestaShop\Adapter\Routes\DefaultRouteProvider;
+ use PrestaShopBundle\Form\Admin\Type\MultistoreConfigurationType;
++use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatorAwareType;
+ use PrestaShopBundle\Form\Extension\MultistoreConfigurationTypeExtension;
+ use PrestaShopException;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
++use Symfony\Component\Validator\Constraints\NotBlank;
+ use Symfony\Contracts\Translation\TranslatorInterface;
+ 
+ /**
+@@ -42,61 +44,152 @@ public function __construct(
+     public function buildForm(FormBuilderInterface $builder, array $options)
+     {
+         $builder
+-            ->add('product_rule', TextType::class, [
++            ->add('product_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to products',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('product_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_product_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('category_rule', TextType::class, [
++            ->add('category_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to category',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('category_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_category_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('supplier_rule', TextType::class, [
++            ->add('supplier_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to supplier',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('supplier_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_supplier_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('manufacturer_rule', TextType::class, [
++            ->add('manufacturer_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to brand',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('manufacturer_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_manufacturer_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('cms_rule', TextType::class, [
++            ->add('cms_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to page',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('cms_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_cms_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('cms_category_rule', TextType::class, [
++            ->add('cms_category_rule', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to page category',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('cms_category_rule'),
+                 'multistore_configuration_key' => 'PS_ROUTE_cms_category_rule',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+-            ->add('module', TextType::class, [
++            ->add('module', TranslatableType::class, [
+                 'label' => $this->trans(
+                     'Route to modules',
+                     'Admin.Shopparameters.Feature'
+                 ),
++                'type' => TextType::class,
++                'only_enabled_locales' => false,
+                 'help' => $this->getKeywords('module'),
+                 'multistore_configuration_key' => 'PS_ROUTE_module',
++                'options' => [
++                    'required' => true,
++                    'constraints' => [
++                        new NotBlank([
++                            'message' => $this->trans(
++                                'This field cannot be empty.',
++                                'Admin.Notifications.Error'
++                            ),
++                        ]),
++                    ],
++                ],
+             ]);
+     }
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+index 79548bfd6b359..f839116b8bd15 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/data_configuration.yml
+@@ -263,6 +263,7 @@ services:
+       - '@prestashop.adapter.shop.context'
+       - '@prestashop.adapter.multistore_feature'
+       - '@=service("prestashop.adapter.data_provider.default_route").getRules()'
++      - '@=service("prestashop.core.admin.lang.repository").findAll()'
+ 
+   prestashop.adapter.meta.seo_options.configuration:
+     class: 'PrestaShop\PrestaShop\Adapter\Meta\SEOOptionsDataConfiguration'
+diff --git a/tests/Unit/Adapter/Meta/UrlSchemaDataConfigurationTest.php b/tests/Unit/Adapter/Meta/UrlSchemaDataConfigurationTest.php
+index 119ddb47ce5e1..120a0d0bb1205 100644
+--- a/tests/Unit/Adapter/Meta/UrlSchemaDataConfigurationTest.php
++++ b/tests/Unit/Adapter/Meta/UrlSchemaDataConfigurationTest.php
+@@ -19,13 +19,34 @@ class UrlSchemaDataConfigurationTest extends AbstractConfigurationTestCase
+     private const SHOP_ID = 42;
+ 
+     private const VALID_CONFIGURATION = [
+-        'category_rule' => '{id}-{rewrite}{id}',
+-        'supplier_rule' => 'supplier/{id}-{rewrite}{id}',
+-        'manufacturer_rule' => 'brand/{id}-{rewrite}{id}',
+-        'cms_rule' => 'content/{id}-{rewrite}{id}',
+-        'cms_category_rule' => 'content/category/{id}-{rewrite}{id}',
+-        'module' => 'module/{module}{/:controller}{id}',
+-        'product_rule' => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}{id}.html',
++        'category_rule' => [
++            1 => '{id}-{rewrite}{id}',
++            2 => '{id}-{rewrite}{id}',
++        ],
++        'supplier_rule' => [
++            1 => 'supplier/{id}-{rewrite}{id}',
++            2 => 'supplier/{id}-{rewrite}{id}',
++        ],
++        'manufacturer_rule' => [
++            1 => 'brand/{id}-{rewrite}{id}',
++            2 => 'brand/{id}-{rewrite}{id}',
++        ],
++        'cms_rule' => [
++            1 => 'content/{id}-{rewrite}{id}',
++            2 => 'content/{id}-{rewrite}{id}',
++        ],
++        'cms_category_rule' => [
++            1 => 'content/category/{id}-{rewrite}{id}',
++            2 => 'content/category/{id}-{rewrite}{id}',
++        ],
++        'module' => [
++            1 => 'module/{module}{/:controller}{id}',
++            2 => 'module/{module}{/:controller}{id}',
++        ],
++        'product_rule' => [
++            1 => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}{id}.html',
++            2 => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}{id}.html',
++        ],
+     ];
+ 
+     /**
+@@ -41,6 +62,14 @@ class UrlSchemaDataConfigurationTest extends AbstractConfigurationTestCase
+         'product_rule' => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}.html',
+     ];
+ 
++    /**
++     * @var array
++     */
++    private const LANGUAGES = [
++        ['id_lang' => 1],
++        ['id_lang' => 2],
++    ];
++
+     /**
+      * @dataProvider provideShopConstraints
+      *
+@@ -52,7 +81,8 @@ public function testGetConfiguration(ShopConstraint $shopConstraint): void
+             $this->mockConfiguration,
+             $this->mockShopConfiguration,
+             $this->mockMultistoreFeature,
+-            self::RULES
++            self::RULES,
++            self::LANGUAGES
+         );
+ 
+         $this->mockShopConfiguration
+@@ -78,6 +108,65 @@ public function testGetConfiguration(ShopConstraint $shopConstraint): void
+         $this->assertSame(self::VALID_CONFIGURATION, $result);
+     }
+ 
++    /**
++     * @dataProvider provideShopConstraints
++     *
++     * @param ShopConstraint $shopConstraint
++     */
++    public function testGetConfigurationAsArray(ShopConstraint $shopConstraint): void
++    {
++        $urlSchemaDataConfiguration = new UrlSchemaDataConfiguration(
++            $this->mockConfiguration,
++            $this->mockShopConfiguration,
++            $this->mockMultistoreFeature,
++            self::RULES,
++            self::LANGUAGES
++        );
++
++        $this->mockShopConfiguration
++            ->method('getShopConstraint')
++            ->willReturn($shopConstraint);
++
++        $this->mockConfiguration
++            ->method('get')
++            ->willReturnMap(
++                [
++                    ['PS_ROUTE_product_rule', null, $shopConstraint, [
++                        1 => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}{id}.html',
++                        2 => '{category:/}{id}{-:id_product_attribute}-{rewrite}{-:ean13}{id}.html',
++                    ]],
++                    ['PS_ROUTE_category_rule', null, $shopConstraint, [
++                        1 => '{id}-{rewrite}{id}',
++                        2 => '{id}-{rewrite}{id}',
++                    ]],
++                    ['PS_ROUTE_supplier_rule', null, $shopConstraint, [
++                        1 => 'supplier/{id}-{rewrite}{id}',
++                        2 => 'supplier/{id}-{rewrite}{id}',
++                    ]],
++                    ['PS_ROUTE_manufacturer_rule', null, $shopConstraint, [
++                        1 => 'brand/{id}-{rewrite}{id}',
++                        2 => 'brand/{id}-{rewrite}{id}',
++                    ]],
++                    ['PS_ROUTE_cms_rule', null, $shopConstraint, [
++                        1 => 'content/{id}-{rewrite}{id}',
++                        2 => 'content/{id}-{rewrite}{id}',
++                    ]],
++                    ['PS_ROUTE_cms_category_rule', null, $shopConstraint, [
++                        1 => 'content/category/{id}-{rewrite}{id}',
++                        2 => 'content/category/{id}-{rewrite}{id}',
++                    ]],
++                    ['PS_ROUTE_module', null, $shopConstraint, [
++                        1 => 'module/{module}{/:controller}{id}',
++                        2 => 'module/{module}{/:controller}{id}',
++                    ]],
++                ]
++            );
++
++        $result = $urlSchemaDataConfiguration->getConfiguration();
++
++        $this->assertSame(self::VALID_CONFIGURATION, $result);
++    }
++
+     /**
+      * @dataProvider provideInvalidConfiguration
+      *
+@@ -90,7 +179,8 @@ public function testUpdateConfigurationWithInvalidConfiguration(string $exceptio
+             $this->mockConfiguration,
+             $this->mockShopConfiguration,
+             $this->mockMultistoreFeature,
+-            self::RULES
++            self::RULES,
++            self::LANGUAGES
+         );
+ 
+         $this->expectException($exception);
+@@ -119,7 +209,8 @@ public function testSuccessfulUpdate(): void
+             $this->mockConfiguration,
+             $this->mockShopConfiguration,
+             $this->mockMultistoreFeature,
+-            self::RULES
++            self::RULES,
++            self::LANGUAGES
+         );
+ 
+         $res = $urlSchemaDataConfiguration->updateConfiguration(self::VALID_CONFIGURATION);
+diff --git a/tests/Unit/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProviderTest.php b/tests/Unit/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProviderTest.php
+new file mode 100644
+index 0000000000000..8965451902fdd
+--- /dev/null
++++ b/tests/Unit/PrestaShopBundle/Form/Admin/Configure/ShopParameters/TrafficSeo/Meta/MetaSettingsUrlSchemaFormDataProviderTest.php
+@@ -0,0 +1,112 @@
++<?php
++/**
++ * For the full copyright and license information, please view the
++ * docs/licenses/LICENSE.txt file that was distributed with this source code.
++ */
++
++declare(strict_types=1);
++
++namespace Tests\Unit\PrestaShopBundle\Form\Admin\Configure\ShopParameters\TrafficSeo\Meta;
++
++use PHPUnit\Framework\TestCase;
++use PrestaShop\PrestaShop\Adapter\Routes\RouteValidator;
++use PrestaShop\PrestaShop\Core\Configuration\DataConfigurationInterface;
++use PrestaShopBundle\Form\Admin\Configure\ShopParameters\TrafficSeo\Meta\MetaSettingsUrlSchemaFormDataProvider;
++use Symfony\Contracts\Translation\TranslatorInterface;
++
++class MetaSettingsUrlSchemaFormDataProviderTest extends TestCase
++{
++    /**
++     * Routes are now translatable, so each route value is a [langId => pattern] array. The form also
++     * adds top-level "multistore_<route>" checkbox helper fields which are plain booleans. Those must
++     * be skipped before iterating the per-language patterns, otherwise validation raises
++     * "foreach() argument must be of type array|object, bool given".
++     */
++    public function testSetDataSkipsMultistoreCheckboxHelpersWithoutFailing(): void
++    {
++        $provider = new MetaSettingsUrlSchemaFormDataProvider(
++            $this->mockDataConfiguration([]),
++            $this->mockTranslator(),
++            $this->mockRouteValidator(true, ['missing' => [], 'unknown' => []])
++        );
++
++        $data = [
++            // Multistore checkbox helper fields (top-level booleans) added by the form.
++            'multistore_product_rule' => true,
++            'multistore_category_rule' => false,
++            // Actual per-language route patterns.
++            'product_rule' => [1 => '{id}-{rewrite}.html', 2 => '{id}-{rewrite}.html'],
++            'category_rule' => [1 => '{id}-{rewrite}', 2 => '{id}-{rewrite}'],
++        ];
++
++        // If the checkbox helpers are not skipped, iterating their boolean value raises
++        // "foreach() argument must be of type array|object, bool given", which becomes a fatal
++        // error in the form context. Capture warnings to assert it does not happen.
++        $warnings = [];
++        set_error_handler(static function (int $severity, string $message) use (&$warnings): bool {
++            $warnings[] = $message;
++
++            return false;
++        }, E_WARNING);
++
++        try {
++            $result = $provider->setData($data);
++        } finally {
++            restore_error_handler();
++        }
++
++        $foreachWarnings = array_filter($warnings, static fn (string $m): bool => str_contains($m, 'foreach()'));
++        $this->assertEmpty($foreachWarnings, 'Multistore checkbox helper fields must be skipped before iterating route patterns.');
++        // No validation errors: setData returns whatever updateConfiguration returns (here []).
++        $this->assertSame([], $result);
++    }
++
++    public function testSetDataValidatesEveryLanguageOfEveryRoute(): void
++    {
++        $routeValidator = $this->createMock(RouteValidator::class);
++        $routeValidator->method('isRouteValid')->willReturn(['missing' => [], 'unknown' => []]);
++        // Only the second language of the product route is an invalid pattern.
++        $routeValidator->method('isRoutePattern')->willReturnCallback(
++            static fn ($pattern): bool => $pattern !== 'invalid pattern'
++        );
++
++        $provider = new MetaSettingsUrlSchemaFormDataProvider(
++            $this->mockDataConfiguration([]),
++            $this->mockTranslator(),
++            $routeValidator
++        );
++
++        $data = [
++            'product_rule' => [1 => '{id}-{rewrite}.html', 2 => 'invalid pattern'],
++        ];
++
++        $result = $provider->setData($data);
++
++        $this->assertNotEmpty($result, 'An invalid pattern in any language must produce a validation error.');
++    }
++
++    private function mockDataConfiguration(array $updateResult): DataConfigurationInterface
++    {
++        $mock = $this->createMock(DataConfigurationInterface::class);
++        $mock->method('updateConfiguration')->willReturn($updateResult);
++
++        return $mock;
++    }
++
++    private function mockTranslator(): TranslatorInterface
++    {
++        $mock = $this->createMock(TranslatorInterface::class);
++        $mock->method('trans')->willReturnArgument(0);
++
++        return $mock;
++    }
++
++    private function mockRouteValidator(bool $isPattern, array $isValid): RouteValidator
++    {
++        $mock = $this->createMock(RouteValidator::class);
++        $mock->method('isRoutePattern')->willReturn($isPattern);
++        $mock->method('isRouteValid')->willReturn($isValid);
++
++        return $mock;
++    }
++}

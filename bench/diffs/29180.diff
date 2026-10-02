@@ -1,0 +1,183 @@
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Order/OrderPaymentType.php b/src/PrestaShopBundle/Form/Admin/Sell/Order/OrderPaymentType.php
+index 64dce3fca628a..d084f1cf176c2 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Order/OrderPaymentType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Order/OrderPaymentType.php
+@@ -28,15 +28,16 @@
+ 
+ use PrestaShop\PrestaShop\Core\Form\ConfigurableFormChoiceProviderInterface;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
++use PrestaShopBundle\Form\Admin\Type\AmountCurrencyType;
+ use PrestaShopBundle\Form\Admin\Type\DatePickerType;
+ use Symfony\Component\Form\AbstractType;
+ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+-use Symfony\Component\Form\Extension\Core\Type\NumberType;
+ use Symfony\Component\Form\Extension\Core\Type\TextType;
+ use Symfony\Component\Form\FormBuilderInterface;
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ use Symfony\Component\Translation\TranslatorInterface;
+ use Symfony\Component\Validator\Constraints\GreaterThan;
++use Symfony\Component\Validator\Constraints\NotNull;
+ 
+ class OrderPaymentType extends AbstractType
+ {
+@@ -109,8 +110,9 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
+             ->add('transaction_id', TextType::class, [
+                 'required' => false,
+             ])
+-            ->add('amount', NumberType::class, [
+-                'constraints' => [
++            ->add('amount_currency', AmountCurrencyType::class, [
++                'amount_constraints' => [
++                    new NotNull(),
+                     new GreaterThan([
+                         'value' => 0,
+                         'message' => $this->translator->trans(
+@@ -118,9 +120,7 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
+                         ),
+                     ]),
+                 ],
+-            ])
+-            ->add('id_currency', ChoiceType::class, [
+-                'choices' => $this->currencySymbolByIdChoiceProvider->getChoices([
++                'currencies' => $this->currencySymbolByIdChoiceProvider->getChoices([
+                     'id_shop' => $this->contextShopId,
+                 ]),
+             ])
+diff --git a/src/PrestaShopBundle/Form/Admin/Type/AmountCurrencyType.php b/src/PrestaShopBundle/Form/Admin/Type/AmountCurrencyType.php
+new file mode 100644
+index 0000000000000..aa94f099dbedf
+--- /dev/null
++++ b/src/PrestaShopBundle/Form/Admin/Type/AmountCurrencyType.php
+@@ -0,0 +1,79 @@
++<?php
++/**
++ * Copyright since 2007 PrestaShop SA and Contributors
++ * PrestaShop is an International Registered Trademark & Property of PrestaShop SA
++ *
++ * NOTICE OF LICENSE
++ *
++ * This source file is subject to the Open Software License (OSL 3.0)
++ * that is bundled with this package in the file LICENSE.md.
++ * It is also available through the world-wide-web at this URL:
++ * https://opensource.org/licenses/OSL-3.0
++ * If you did not receive a copy of the license and are unable to
++ * obtain it through the world-wide-web, please send an email
++ * to license@prestashop.com so we can send you a copy immediately.
++ *
++ * DISCLAIMER
++ *
++ * Do not edit or add to this file if you wish to upgrade PrestaShop to newer
++ * versions in the future. If you wish to customize PrestaShop for your
++ * needs please refer to https://devdocs.prestashop.com/ for more information.
++ *
++ * @author    PrestaShop SA and Contributors <contact@prestashop.com>
++ * @copyright Since 2007 PrestaShop SA and Contributors
++ * @license   https://opensource.org/licenses/OSL-3.0 Open Software License (OSL 3.0)
++ */
++
++namespace PrestaShopBundle\Form\Admin\Type;
++
++use Symfony\Component\Form\AbstractType;
++use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
++use Symfony\Component\Form\Extension\Core\Type\HiddenType;
++use Symfony\Component\Form\Extension\Core\Type\NumberType;
++use Symfony\Component\Form\FormBuilderInterface;
++use Symfony\Component\OptionsResolver\OptionsResolver;
++
++class AmountCurrencyType extends AbstractType
++{
++    /**
++     * {@inheritdoc}
++     */
++    public function buildForm(FormBuilderInterface $builder, array $options): void
++    {
++        $amountOptions = [
++            'constraints' => $options['amount_constraints'],
++        ];
++
++        if (count($options['currencies']) > 1) {
++            $builder
++                ->add('amount', NumberType::class, $amountOptions)
++                ->add('id_currency', ChoiceType::class, [
++                    'choices' => $options['currencies'],
++                ])
++            ;
++        } else {
++            $firstCurrencyKey = array_keys($options['currencies'])[0];
++            $amountOptions['unit'] = $firstCurrencyKey;
++            $builder
++                ->add('amount', NumberType::class, $amountOptions)
++                ->add('id_currency', HiddenType::class, [
++                    'data' => $options['currencies'][$firstCurrencyKey],
++                ])
++            ;
++        }
++    }
++
++    public function configureOptions(OptionsResolver $resolver): void
++    {
++        $resolver->setDefault('amount_constraints', []);
++        $resolver->setDefault('label', false);
++        $resolver->setDefault('inherit_data', true);
++        $resolver->setRequired('currencies');
++        $resolver->setAllowedTypes('currencies', ['array']);
++    }
++
++    public function getBlockPrefix(): string
++    {
++        return 'amount_currency';
++    }
++}
+diff --git a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+index dedb5ac8adb9a..7479cc4560a73 100644
+--- a/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
++++ b/src/PrestaShopBundle/Resources/config/services/bundle/form/form_type.yml
+@@ -1172,6 +1172,10 @@ services:
+     tags:
+       - { name: form.type }
+ 
++  PrestaShopBundle\Form\Admin\Type\AmountCurrencyType:
++    tags:
++      - { name: form.type }
++
+   form.type.feature:
+     class: 'PrestaShopBundle\Form\Admin\Sell\Catalog\FeatureType'
+     arguments:
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/payments.html.twig b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/payments.html.twig
+index d7adc07567a6b..f6e14c2384546 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/payments.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/Sell/Order/Order/Blocks/View/payments.html.twig
+@@ -110,10 +110,7 @@
+             {{ form_widget(addOrderPaymentForm.transaction_id) }}
+           </td>
+           <td>
+-            <div class="input-group">
+-              {{ form_widget(addOrderPaymentForm.amount) }}
+-              {{ form_widget(addOrderPaymentForm.id_currency) }}
+-            </div>
++            {{ form_widget(addOrderPaymentForm.amount_currency) }}
+           </td>
+           <td>
+             <div {% if addOrderPaymentForm.id_invoice.vars.choices is empty %}class="d-none"{% endif %}>
+diff --git a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_horizontal_layout.html.twig b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_horizontal_layout.html.twig
+index 8b33baa6c9c0b..d36db766a8f9b 100644
+--- a/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_horizontal_layout.html.twig
++++ b/src/PrestaShopBundle/Resources/views/Admin/TwigTemplateForm/bootstrap_4_horizontal_layout.html.twig
+@@ -176,3 +176,17 @@
+     </div>
+   {% endif %}
+ {% endblock form_unit_prepend %}
++
++{% block amount_currency_widget %}
++  <div class="input-group">
++    <input type="text" class="form-control" name="{{ form.amount.vars.full_name }}" required>
++    <div class="input-group-append">
++      {% if form.amount.vars.unit is defined %}
++        <span class="input-group-text">{{ form.amount.vars.unit }}</span>
++        {{ form_widget(form.id_currency) }}
++      {% else %}
++        {{ form_widget(form.id_currency, {'attr': {'class': 'form-control'}}) }}
++      {% endif %}
++    </div>
++  </div>
++{% endblock %}

@@ -1,0 +1,335 @@
+diff --git a/classes/CartRule.php b/classes/CartRule.php
+index 47fc053e47c96..f747f8a5b8f9a 100644
+--- a/classes/CartRule.php
++++ b/classes/CartRule.php
+@@ -1314,12 +1314,7 @@ public function getContextualValue($use_tax, Context $context = null, $filter =
+                             && (($this->reduction_exclude_special && !$product['reduction_applies']) || !$this->reduction_exclude_special)) {
+                             $price = $product['price'];
+                             if ($use_tax) {
+-                                $infos = Product::getTaxesInformations($product, $context);
+-                                $tax_rate = $infos['rate'] / 100;
+-                                // As the price is tax excluded but ecotax included, we need to substract the ecotax before getting the price tax included
+-                                $price -= $product['ecotax'];
+-                                $price *= (1 + $tax_rate);
+-                                $price += $product['ecotax'];
++                                $price = $product['price_without_reduction'];
+                             }
+ 
+                             $selected_products_reduction += $price * $product['cart_quantity'];
+diff --git a/classes/Product.php b/classes/Product.php
+index c494b62102a35..17f599d1abbe6 100644
+--- a/classes/Product.php
++++ b/classes/Product.php
+@@ -432,6 +432,9 @@ class ProductCore extends ObjectModel
+      */
+     protected static $cacheStock = [];
+ 
++    /** @var int|null */
++    protected static $psEcotaxTaxRulesGroupId = null;
++
+     /**
+      * Product can be temporary saved in database
+      */
+@@ -553,8 +556,8 @@ class ProductCore extends ObjectModel
+             'name' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'isCatalogName', 'required' => false, 'size' => ProductSettings::MAX_NAME_LENGTH],
+             'description' => ['type' => self::TYPE_HTML, 'lang' => true, 'validate' => 'isCleanHtml'],
+             'description_short' => ['type' => self::TYPE_HTML, 'lang' => true, 'validate' => 'isCleanHtml'],
+-            'available_now' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'isGenericName', 'size' => 255],
+-            'available_later' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'IsGenericName', 'size' => 255],
++            'available_now' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'isGenericName', 'size' => ProductSettings::MAX_AVAILABLE_NOW_LABEL_LENGTH],
++            'available_later' => ['type' => self::TYPE_STRING, 'lang' => true, 'validate' => 'IsGenericName', 'size' => ProductSettings::MAX_AVAILABLE_LATER_LABEL_LENGTH],
+         ],
+         'associations' => [
+             'manufacturer' => ['type' => self::HAS_ONE],
+@@ -1233,6 +1236,7 @@ public static function resetStaticCache()
+         static::$_pricesLevel2 = [];
+         static::$_incat = [];
+         static::$_combinations = [];
++        static::$psEcotaxTaxRulesGroupId = null;
+         Cache::clean('Product::*');
+     }
+ 
+@@ -3863,14 +3867,13 @@ public static function priceCalculation(
+                 $ecotax = Tools::convertPrice($ecotax, $id_currency);
+             }
+             if ($use_tax) {
+-                static $psEcotaxTaxRulesGroupId = null;
+-                if ($psEcotaxTaxRulesGroupId === null) {
+-                    $psEcotaxTaxRulesGroupId = (int) Configuration::get('PS_ECOTAX_TAX_RULES_GROUP_ID');
++                if (self::$psEcotaxTaxRulesGroupId === null) {
++                    self::$psEcotaxTaxRulesGroupId = (int) Configuration::get('PS_ECOTAX_TAX_RULES_GROUP_ID');
+                 }
+                 // reinit the tax manager for ecotax handling
+                 $tax_manager = TaxManagerFactory::getManager(
+                     $address,
+-                    $psEcotaxTaxRulesGroupId
++                    self::$psEcotaxTaxRulesGroupId
+                 );
+                 $ecotax_tax_calculator = $tax_manager->getTaxCalculator();
+                 $price += $ecotax_tax_calculator->addTaxes($ecotax);
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 2eb393705fbb2..c6a7a699ce4ff 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -37,6 +37,7 @@ services:
+       PS_COUNTRY: ${PS_COUNTRY:-fr}
+       PS_LANGUAGE: ${PS_LANGUAGE:-fr}
+       PS_DEV_MODE: ${PS_DEV_MODE:-0}
++      ADMIN_MAIL: ${ADMIN_MAIL:-demo@prestashop.com}
+       ADMIN_PASSWD: ${ADMIN_PASSWD:-Correct Horse Battery Staple}
+     command: ["/tmp/wait-for-it.sh", "--timeout=60", "--strict", "mysql:3306", "--", "/tmp/docker_run_git.sh"]
+     ports:
+diff --git a/src/Core/Domain/Product/ProductSettings.php b/src/Core/Domain/Product/ProductSettings.php
+index a76e6ef63b5d7..ff88f617e4061 100644
+--- a/src/Core/Domain/Product/ProductSettings.php
++++ b/src/Core/Domain/Product/ProductSettings.php
+@@ -48,8 +48,9 @@ private function __construct()
+     public const MAX_MPN_LENGTH = 40;
+     public const MAX_META_TITLE_LENGTH = 70;
+     public const MAX_META_DESCRIPTION_LENGTH = 160;
+-
+     public const MAX_DESCRIPTION_SHORT_LENGTH = 800;
+     public const MAX_DESCRIPTION_LENGTH = 21844;
+     public const MAX_LINK_REWRITE_LENGTH = 128;
++    public const MAX_AVAILABLE_NOW_LABEL_LENGTH = 255;
++    public const MAX_AVAILABLE_LATER_LABEL_LENGTH = 255;
+ }
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/EmployeeController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/EmployeeController.php
+index 697bb942c5eb8..4aacb6b3a549c 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/EmployeeController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/EmployeeController.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters;
+ 
+ use Exception;
++use ImageManager;
+ use PrestaShop\PrestaShop\Core\Domain\Employee\Command\BulkDeleteEmployeeCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Employee\Command\BulkUpdateEmployeeStatusCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Employee\Command\DeleteEmployeeCommand;
+@@ -46,6 +47,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\ShowcaseCard\ValueObject\ShowcaseCard;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Builder\FormBuilderInterface;
+ use PrestaShop\PrestaShop\Core\Form\IdentifiableObject\Handler\FormHandler;
++use PrestaShop\PrestaShop\Core\Image\Uploader\Exception\UploadedImageConstraintException;
+ use PrestaShop\PrestaShop\Core\Search\Filters\EmployeeFilters;
+ use PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController;
+ use PrestaShopBundle\Security\Annotation\AdminSecurity;
+@@ -476,6 +478,13 @@ protected function getEmployeeFormHandler()
+     protected function getErrorMessages(Exception $e)
+     {
+         return [
++            UploadedImageConstraintException::class => $this->trans(
++                'Image format not recognized, allowed formats are: %s',
++                'Admin.Notifications.Error',
++                [
++                    implode(', ', ImageManager::MIME_TYPE_SUPPORTED),
++                ]
++            ),
+             InvalidEmployeeIdException::class => $this->trans(
+                 'The object cannot be loaded (the identifier is missing or invalid)',
+                 'Admin.Notifications.Error'
+diff --git a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ProfileController.php b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ProfileController.php
+index bfc2a5ba745f6..90a084445cbb3 100644
+--- a/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ProfileController.php
++++ b/src/PrestaShopBundle/Controller/Admin/Configure/AdvancedParameters/ProfileController.php
+@@ -27,6 +27,7 @@
+ namespace PrestaShopBundle\Controller\Admin\Configure\AdvancedParameters;
+ 
+ use Exception;
++use ImageManager;
+ use PrestaShop\PrestaShop\Core\Domain\Profile\Command\BulkDeleteProfileCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Profile\Command\DeleteProfileCommand;
+ use PrestaShop\PrestaShop\Core\Domain\Profile\Exception\CannotDeleteSuperAdminProfileException;
+@@ -37,6 +38,7 @@
+ use PrestaShop\PrestaShop\Core\Domain\Profile\ProfileSettings;
+ use PrestaShop\PrestaShop\Core\Domain\Profile\Query\GetProfileForEditing;
+ use PrestaShop\PrestaShop\Core\Domain\Profile\QueryResult\EditableProfile;
++use PrestaShop\PrestaShop\Core\Image\Uploader\Exception\UploadedImageConstraintException;
+ use PrestaShop\PrestaShop\Core\Search\Filters\ProfileFilters;
+ use PrestaShopBundle\Controller\Admin\FrameworkBundleAdminController;
+ use PrestaShopBundle\Security\Annotation\AdminSecurity;
+@@ -286,6 +288,11 @@ public function bulkDeleteAction(Request $request)
+     protected function getErrorMessages()
+     {
+         return [
++            UploadedImageConstraintException::class => $this->trans(
++                'Image format not recognized, allowed formats are: %s',
++                'Admin.Notifications.Error',
++                [implode(', ', ImageManager::EXTENSIONS_SUPPORTED)]
++            ),
+             ProfileConstraintException::class => [
+                 ProfileConstraintException::INVALID_NAME => $this->trans(
+                     'This field cannot be longer than %limit% characters (incl. HTML tags)',
+diff --git a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/AvailabilityType.php b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/AvailabilityType.php
+index c94846c6ce589..a80bbd5e331bc 100644
+--- a/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/AvailabilityType.php
++++ b/src/PrestaShopBundle/Form/Admin/Sell/Product/Stock/AvailabilityType.php
+@@ -28,6 +28,8 @@
+ 
+ namespace PrestaShopBundle\Form\Admin\Sell\Product\Stock;
+ 
++use PrestaShop\PrestaShop\Core\ConstraintValidator\Constraints\TypedRegex;
++use PrestaShop\PrestaShop\Core\Domain\Product\ProductSettings;
+ use PrestaShop\PrestaShop\Core\Form\FormChoiceProviderInterface;
+ use PrestaShopBundle\Form\Admin\Type\DatePickerType;
+ use PrestaShopBundle\Form\Admin\Type\TranslatableType;
+@@ -38,6 +40,7 @@
+ use Symfony\Component\OptionsResolver\OptionsResolver;
+ use Symfony\Component\Routing\RouterInterface;
+ use Symfony\Component\Translation\TranslatorInterface;
++use Symfony\Component\Validator\Constraints\Length;
+ 
+ class AvailabilityType extends TranslatorAwareType
+ {
+@@ -90,6 +93,19 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 'label' => $this->trans('Label when in stock', 'Admin.Catalog.Feature'),
+                 'required' => false,
+                 'modify_all_shops' => true,
++                'options' => [
++                    'constraints' => [
++                        new TypedRegex(TypedRegex::TYPE_GENERIC_NAME),
++                        new Length([
++                            'max' => ProductSettings::MAX_AVAILABLE_NOW_LABEL_LENGTH,
++                            'maxMessage' => $this->trans(
++                                'This field cannot be longer than %limit% characters.',
++                                'Admin.Notifications.Error',
++                                ['%limit%' => ProductSettings::MAX_AVAILABLE_NOW_LABEL_LENGTH]
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+             ->add('available_later_label', TranslatableType::class, [
+                 'type' => TextType::class,
+@@ -99,6 +115,19 @@ public function buildForm(FormBuilderInterface $builder, array $options)
+                 ),
+                 'required' => false,
+                 'modify_all_shops' => true,
++                'options' => [
++                    'constraints' => [
++                        new TypedRegex(TypedRegex::TYPE_GENERIC_NAME),
++                        new Length([
++                            'max' => ProductSettings::MAX_AVAILABLE_LATER_LABEL_LENGTH,
++                            'maxMessage' => $this->trans(
++                                'This field cannot be longer than %limit% characters.',
++                                'Admin.Notifications.Error',
++                                ['%limit%' => ProductSettings::MAX_AVAILABLE_LATER_LABEL_LENGTH]
++                            ),
++                        ]),
++                    ],
++                ],
+             ])
+             ->add('available_date', DatePickerType::class, [
+                 'label' => $this->trans('Availability date', 'Admin.Catalog.Feature'),
+diff --git a/tests/Integration/Behaviour/Features/Context/CartFeatureContext.php b/tests/Integration/Behaviour/Features/Context/CartFeatureContext.php
+index b128832793fbf..a405bc59c95b5 100644
+--- a/tests/Integration/Behaviour/Features/Context/CartFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/CartFeatureContext.php
+@@ -28,6 +28,7 @@
+ 
+ use Cart;
+ use Context;
++use PHPUnit\Framework\Assert;
+ use Tests\Integration\Utility\CartOld;
+ 
+ class CartFeatureContext extends AbstractPrestaShopFeatureContext
+@@ -200,4 +201,14 @@ public function calculateCartShippingFees($expectedShippingFees, $taxes = null)
+             throw new \RuntimeException(sprintf('Expects %s, got %s instead', $expectedTotal, $shippingFees));
+         }
+     }
++
++    /**
++     * @Then /^I should have a voucher named "(.+)" with (\d+\.\d+) of discount$/
++     */
++    public function cartVoucher($voucherName, $discountAmount)
++    {
++        $cartRules = $this->getCurrentCart()->getCartRules();
++        Assert::assertEquals($cartRules[0]['code'], $voucherName);
++        Assert::assertEquals((float) $cartRules[0]['value_real'], (float) $discountAmount);
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Context/TaxFeatureContext.php b/tests/Integration/Behaviour/Features/Context/TaxFeatureContext.php
+index cff9bfaa56eaa..2bf60b5729ffc 100644
+--- a/tests/Integration/Behaviour/Features/Context/TaxFeatureContext.php
++++ b/tests/Integration/Behaviour/Features/Context/TaxFeatureContext.php
+@@ -203,4 +203,14 @@ public function setCarrierTaxRuleGroup($carrierName, $taxName)
+         $carrier = $this->carrierFeatureContext->getCarrierWithName($carrierName);
+         $carrier->setTaxRulesGroup($this->taxRuleGroups[$taxName]->id);
+     }
++
++    /**
++     * @Given /^Ecotax belongs to tax group "(.+)"$/
++     */
++    public function setEcotaxTaxRuleGroup($taxName)
++    {
++        $this->checkTaxRuleWithNameExists($taxName);
++        $configuration = CommonFeatureContext::getContainer()->get('prestashop.adapter.legacy.configuration');
++        $configuration->set('PS_ECOTAX_TAX_RULES_GROUP_ID', $this->taxRuleGroups[$taxName]->id);
++    }
+ }
+diff --git a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/ecotax.feature b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/ecotax.feature
+index 8e7b2c78fd480..1a80949370ad3 100644
+--- a/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/ecotax.feature
++++ b/tests/Integration/Behaviour/Features/Scenario/Cart/Calculation/CartRule/ecotax.feature
+@@ -12,6 +12,7 @@ Feature: Cart rule (percent) calculation with one cart rule
+     And there is a country named "country1" and iso code "FR" in zone "zone1"
+     And there is a state named "state1" with iso code "TEST-1" in country "country1" and zone "zone1"
+     And there is an address named "address1" with postcode "1" in state "state1"
++    And shop configuration for "PS_USE_ECOTAX" is set to 1
+ 
+   Scenario:
+     Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
+@@ -27,8 +28,8 @@ Feature: Cart rule (percent) calculation with one cart rule
+     And cart rule "cartRuleFiftyPercent" is restricted on the selection of products
+     And cart rule "cartRuleFiftyPercent" has a discount code "cartRuleFiftyPercent"
+     ## Add product
+-    When I add 1 item of product "product_without_ecotax" in my cart
+-    And I select address "address1" in my cart
++    When I select address "address1" in my cart
++    And I add 1 item of product "product_without_ecotax" in my cart
+     Then my cart total should be 10.400 tax included
+     And my cart total should be 10.000 tax excluded
+     And I use the discount "cartRuleFiftyPercent"
+@@ -50,10 +51,36 @@ Feature: Cart rule (percent) calculation with one cart rule
+     And cart rule "cartRuleFiftyPercent" is restricted on the selection of products
+     And cart rule "cartRuleFiftyPercent" has a discount code "cartRuleFiftyPercent"
+     ## Add product
+-    When I add 1 item of product "product_with_ecotax" in my cart
+-    And I select address "address1" in my cart
+-    Then my cart total should be 10.400 tax included
+-    And my cart total should be 10.000 tax excluded
++    When I select address "address1" in my cart
++    And I add 1 item of product "product_with_ecotax" in my cart
++    Then my cart total should be 12.400 tax included
++    And my cart total should be 12.000 tax excluded
+     And I use the discount "cartRuleFiftyPercent"
+-    Then my cart total should be 5.200 tax included
+-    And my cart total should be 5.000 tax excluded
++    Then my cart total should be 6.200 tax included
++    And my cart total should be 6.000 tax excluded
++    Then I should have a voucher named "cartRuleFiftyPercent" with 6.2 of discount
++
++  Scenario:
++    Given shop configuration for "PS_CART_RULE_FEATURE_ACTIVE" is set to 1
++    And there is a tax named "tax4Percent" and rate 4.0%
++    And there is a tax rule named "taxRule4Percent" in country "country1" where tax "tax4Percent" is applied
++    And Ecotax belongs to tax group "taxRule4Percent"
++    And I have an empty default cart
++    ## Set Product
++    And there is a product in the catalog named "product_with_ecotax" with a price of 10.000 and 1000 items in stock
++    And the product "product_with_ecotax" ecotax is 2.00
++    And product "product_with_ecotax" belongs to tax group "taxRule4Percent"
++    ## Set Cart Rule
++    When there is a cart rule named "cartRuleFiftyPercent" that applies a percent discount of 50.0% with priority 2, quantity of 1000 and quantity per user 1000
++    And cart rule "cartRuleFiftyPercent" is restricted to product "product_with_ecotax"
++    And cart rule "cartRuleFiftyPercent" is restricted on the selection of products
++    And cart rule "cartRuleFiftyPercent" has a discount code "cartRuleFiftyPercent"
++    ## Add product
++    When I select address "address1" in my cart
++    And I add 1 item of product "product_with_ecotax" in my cart
++    Then my cart total should be precisely 12.48 tax included
++    And my cart total should be 12.000 tax excluded
++    And I use the discount "cartRuleFiftyPercent"
++    Then my cart total should be precisely 6.24 tax included
++    And my cart total should be 6.000 tax excluded
++    Then I should have a voucher named "cartRuleFiftyPercent" with 6.24 of discount

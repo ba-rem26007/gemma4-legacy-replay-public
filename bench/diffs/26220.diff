@@ -1,0 +1,124 @@
+diff --git a/admin-dev/themes/new-theme/js/pages/customer/index.ts b/admin-dev/themes/new-theme/js/pages/customer/index.ts
+index d5abc1f0d6397..0ed1b239ca72c 100644
+--- a/admin-dev/themes/new-theme/js/pages/customer/index.ts
++++ b/admin-dev/themes/new-theme/js/pages/customer/index.ts
+@@ -70,6 +70,7 @@ $(() => {
+ 
+   const customerAddressesGrid = new Grid('customer_address');
+   customerAddressesGrid.addExtension(new SubmitRowActionExtension());
++  customerAddressesGrid.addExtension(new SortingExtension());
+   customerAddressesGrid.addExtension(new LinkRowActionExtension());
+ 
+   const showcaseCard = new ShowcaseCard('customersShowcaseCard');
+diff --git a/src/Core/Grid/Data/Factory/CustomerAddressGridDataFactoryDecorator.php b/src/Core/Grid/Data/Factory/CustomerAddressGridDataFactoryDecorator.php
+index c3f4a246f92b9..19fbcbd5cc252 100644
+--- a/src/Core/Grid/Data/Factory/CustomerAddressGridDataFactoryDecorator.php
++++ b/src/Core/Grid/Data/Factory/CustomerAddressGridDataFactoryDecorator.php
+@@ -29,8 +29,6 @@
+ namespace PrestaShop\PrestaShop\Core\Grid\Data\Factory;
+ 
+ use PrestaShop\PrestaShop\Core\Grid\Data\GridData;
+-use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollection;
+-use PrestaShop\PrestaShop\Core\Grid\Record\RecordCollectionInterface;
+ use PrestaShop\PrestaShop\Core\Grid\Search\SearchCriteriaInterface;
+ 
+ /**
+@@ -59,50 +57,10 @@ public function getData(SearchCriteriaInterface $searchCriteria)
+     {
+         $customerData = $this->customerAddressDoctrineGridDataFactory->getData($searchCriteria);
+ 
+-        $customerRecords = $this->applyModifications($customerData->getRecords());
+-
+         return new GridData(
+-            $customerRecords,
++            $customerData->getRecords(),
+             $customerData->getRecordsTotal(),
+             $customerData->getQuery()
+         );
+     }
+-
+-    /**
+-     * @param RecordCollectionInterface $addresses
+-     *
+-     * @return RecordCollection
+-     */
+-    private function applyModifications(RecordCollectionInterface $addresses)
+-    {
+-        $modifiedAddresses = [];
+-
+-        foreach ($addresses as $address) {
+-            if (empty($address['company'])) {
+-                $address['company'] = '--';
+-            }
+-
+-            $address['full_name'] = sprintf('%s %s', $address['firstname'], $address['lastname']);
+-
+-            $address['full_address'] = sprintf(
+-                '%s %s %s %s',
+-                $address['address1'],
+-                $address['address2'],
+-                $address['postcode'],
+-                $address['city']
+-            );
+-
+-            if (!empty($address['phone'])) {
+-                $address['phone_number'] = $address['phone'];
+-            } elseif (!empty($address['phone_mobile'])) {
+-                $address['phone_number'] = $address['phone_mobile'];
+-            } else {
+-                $address['phone_number'] = '--';
+-            }
+-
+-            $modifiedAddresses[] = $address;
+-        }
+-
+-        return new RecordCollection($modifiedAddresses);
+-    }
+ }
+diff --git a/src/Core/Grid/Definition/Factory/CustomerAddressGridDefinitionFactory.php b/src/Core/Grid/Definition/Factory/CustomerAddressGridDefinitionFactory.php
+index 2642d34f8c5c2..86a0673e194ce 100644
+--- a/src/Core/Grid/Definition/Factory/CustomerAddressGridDefinitionFactory.php
++++ b/src/Core/Grid/Definition/Factory/CustomerAddressGridDefinitionFactory.php
+@@ -105,6 +105,7 @@ protected function getColumns()
+                     ->setName($this->trans('Address', [], 'Admin.Global'))
+                     ->setOptions([
+                         'field' => 'full_address',
++                        'sortable' => false,
+                     ])
+             )
+             ->add(
+@@ -119,6 +120,7 @@ protected function getColumns()
+                     ->setName($this->trans('Phone number(s)', [], 'Admin.Orderscustomers.Feature'))
+                     ->setOptions([
+                         'field' => 'phone_number',
++                        'sortable' => false,
+                     ])
+             )
+             ->add((new ActionColumn('actions'))
+diff --git a/src/Core/Grid/Query/CustomerAddressQueryBuilder.php b/src/Core/Grid/Query/CustomerAddressQueryBuilder.php
+index 3c9fbcba8c558..4100ef86be718 100644
+--- a/src/Core/Grid/Query/CustomerAddressQueryBuilder.php
++++ b/src/Core/Grid/Query/CustomerAddressQueryBuilder.php
+@@ -80,8 +80,20 @@ public function getSearchQueryBuilder(SearchCriteriaInterface $searchCriteria):
+         $qb = $this->getQueryBuilder($searchCriteria->getFilters());
+ 
+         $qb
+-            ->select('a.`id_address`, a.`firstname`, a.`lastname`, a.`address1`, a.`address2`, a.`postcode`, ' .
+-                'a.`city`, a.`company`, a.`phone`, a.`phone_mobile`'
++            ->select(
++                'a.`id_address`,
++                CONCAT(a.`firstname`, " ", a.`lastname`) AS full_name,
++                CONCAT(a.`address1`, " ", a.`address2`, " ", a.`postcode`, " ", a.`city`) AS full_address,
++                IF(
++                  a.`company` IS NULL or a.`company` = "",
++                  "--",
++                  a.`company`
++                ) AS company,
++                IF(
++                  a.`phone` IS NULL or a.`phone` = "",
++                  IF(a.`phone_mobile` IS NULL or a.`phone_mobile` = "", "--",  a.`phone_mobile`),
++                  a.`phone`
++                ) AS phone_number'
+             )
+             ->addSelect('cl.`name` as country_name')
+         ;

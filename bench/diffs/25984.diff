@@ -1,0 +1,97 @@
+diff --git a/classes/stock/StockAvailable.php b/classes/stock/StockAvailable.php
+index e68a84c0a0354..32fd5f354866e 100644
+--- a/classes/stock/StockAvailable.php
++++ b/classes/stock/StockAvailable.php
+@@ -625,6 +625,8 @@ public static function setQuantity($id_product, $id_product_attribute, $quantity
+                     'id_product' => $id_product,
+                     'id_product_attribute' => $id_product_attribute,
+                     'quantity' => $stock_available->quantity,
++                    'delta_quantity' => $deltaQuantity ?? null,
++                    'id_shop' => $id_shop,
+                 ]
+             );
+         }
+diff --git a/src/Adapter/Product/Stock/Update/ProductStockUpdater.php b/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
+index f35588938266b..06073575a6144 100644
+--- a/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
++++ b/src/Adapter/Product/Stock/Update/ProductStockUpdater.php
+@@ -29,6 +29,7 @@
+ namespace PrestaShop\PrestaShop\Adapter\Product\Stock\Update;
+ 
+ use PrestaShop\PrestaShop\Adapter\Configuration;
++use PrestaShop\PrestaShop\Adapter\HookManager;
+ use PrestaShop\PrestaShop\Adapter\Product\Repository\ProductMultiShopRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Repository\MovementReasonRepository;
+ use PrestaShop\PrestaShop\Adapter\Product\Stock\Repository\StockAvailableMultiShopRepository;
+@@ -83,19 +84,24 @@ class ProductStockUpdater
+      */
+     private $advancedStockEnabled;
+ 
++    /** @var HookManager */
++    private $hookManager;
++
+     /**
+      * @param StockManager $stockManager
+      * @param ProductMultiShopRepository $productRepository
+      * @param StockAvailableMultiShopRepository $stockAvailableRepository
+      * @param MovementReasonRepository $movementReasonRepository
+      * @param Configuration $configuration
++     * @param HookManager $hookManager
+      */
+     public function __construct(
+         StockManager $stockManager,
+         ProductMultiShopRepository $productRepository,
+         StockAvailableMultiShopRepository $stockAvailableRepository,
+         MovementReasonRepository $movementReasonRepository,
+-        Configuration $configuration
++        Configuration $configuration,
++        HookManager $hookManager
+     ) {
+         $this->stockManager = $stockManager;
+         $this->productRepository = $productRepository;
+@@ -103,6 +109,7 @@ public function __construct(
+         $this->movementReasonRepository = $movementReasonRepository;
+         $this->configuration = $configuration;
+         $this->advancedStockEnabled = $this->configuration->getBoolean('PS_ADVANCED_STOCK_MANAGEMENT');
++        $this->hookManager = $hookManager;
+     }
+ 
+     /**
+@@ -309,5 +316,16 @@ private function saveMovement(StockAvailable $stockAvailable, StockModification
+                 'id_shop' => (int) $stockAvailable->id_shop,
+             ]
+         );
++
++        $this->hookManager->exec(
++            'actionUpdateQuantity',
++            [
++                'id_product' => $stockAvailable->id_product,
++                'id_product_attribute' => $stockAvailable->id_product_attribute,
++                'quantity' => $stockAvailable->quantity,
++                'delta_quantity' => $stockModification->getDeltaQuantity(),
++                'id_shop' => (int) $stockAvailable->id_shop,
++            ]
++        );
+     }
+ }
+diff --git a/src/Core/Stock/StockManager.php b/src/Core/Stock/StockManager.php
+index d65217d0dae4f..b0273bda836f1 100644
+--- a/src/Core/Stock/StockManager.php
++++ b/src/Core/Stock/StockManager.php
+@@ -191,6 +191,7 @@ public function updateQuantity($product, $id_product_attribute, $delta_quantity,
+                 'id_product_attribute' => $id_product_attribute,
+                 'quantity' => $stockAvailable->quantity,
+                 'delta_quantity' => $delta_quantity,
++                'id_shop' => $id_shop,
+             ]
+         );
+ 
+diff --git a/src/PrestaShopBundle/Resources/config/services/adapter/product/_stock.yml b/src/PrestaShopBundle/Resources/config/services/adapter/product/_stock.yml
+index 28abb3c539083..ab534a0621921 100644
+--- a/src/PrestaShopBundle/Resources/config/services/adapter/product/_stock.yml
++++ b/src/PrestaShopBundle/Resources/config/services/adapter/product/_stock.yml
+@@ -56,3 +56,4 @@ services:
+       - '@prestashop.adapter.product.stock.repository.stock_available_multi_shop_repository'
+       - '@prestashop.adapter.product.stock.repository.movement_reason_repository'
+       - '@prestashop.adapter.legacy.configuration'
++      - '@prestashop.adapter.hook.manager'
