@@ -121,7 +121,7 @@ if tok.pad_token_id is None:
     tok.pad_token_id = tok.eos_token_id
 
 # v16 : 4096 tokens (médiane des chemins ≈ 3 900 tokens ; à 2048 seuls 89/585 passaient)
-MAX_LEN = 4096
+MAX_LEN = int(os.environ.get("MAX_LEN", 4096))  # v17 : 8192 sur A100 (garde les correctifs multi-fichiers)
 EPOCHS = 2
 TIME_LIMIT_S = 10.5 * 3600  # marge sous la limite de 12 h d'une session Kaggle
 

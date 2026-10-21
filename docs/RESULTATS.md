@@ -58,6 +58,13 @@ Si l'intervalle contient 0, l'injection de corrections similaires n'a pas d'effe
 | [#41570](https://github.com/PrestaShop/PrestaShop/pull/41570) | missing column to change the position of the features on prestashop 9. | 0 | 0 |
 | [#41923](https://github.com/PrestaShop/PrestaShop/pull/41923) | Not able to change stock behaviour in shared stock | 0 | 0 |
 
+## Répétitions : B et O sur 3 essais (agent figé au commit de leur run 1)
+
+| Condition | Essais (résolus / 33) | Moyenne | Bon fichier (moy.) | Écart à A, apparié (IC 95 %) |
+|---|---|---|---|---|
+| B | 15, 12, 12 (3 essais) | 13.0 | 17.3 | +0.8% [-7.3% ; +8.6%] |
+| O | 16, 13, 15 (3 essais) | 14.7 | 18.7 | +5.8% [-1.5% ; +13.9%] |
+
 ## Borne haute : l'oracle comme retour (condition O, 1 essai)
 
 L'agent reçoit le résultat de l'**oracle caché** après chaque tentative (fuite volontaire) et peut corriger 2 fois.
@@ -79,7 +86,6 @@ Gagné = résolu ici mais jamais par A (0/4) ; perdu = raté ici mais toujours r
 | Condition | Bugs traités | Résolus | Bon fichier | Gagnés | Perdus |
 |---|---|---|---|---|---|
 | A · moyenne des 4 essais | 33 | 12.8 | 19.8 | — | — |
-| B · Replay tests avec feedback dynamique (Gemma 4 31B) | 33 | 15 | 17 | 1 (#41923) | 0 |
 | A-4B · Zero-Shot sans LoRA (Gemma 4 4B Base) | 33 | 5 | 21 | 0 | 5 |
 | E · Fine-tuné complet QLoRA (Gemma 4 4B) | 33 | 4 | 14 | 0 | 4 |
 | C · + glossaire automatique (provisoire) | 33 | 13 | 18 | 2 (#41530, #41923) | 1 |

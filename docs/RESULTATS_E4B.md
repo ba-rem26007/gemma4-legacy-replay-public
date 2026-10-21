@@ -24,3 +24,12 @@ v16 − base : -11.1 pts, IC 95 % [-22.2 ; -2.0]
 - L'ancien résultat « E = 4/33 » (v15, 28 sept., serveur ngrok, 1 run) est dans le bruit de la base (3-4/33 par run).
 - Hypothèse (non testée) : chemins condensés = trajectoires « idéales » sans erreur ni retour ; le modèle apprend à éditer
   vite et sûr de lui sur des schémas TRAIN, au détriment de la lecture (v16 = surapprentissage, perte 1,46 → 0,22).
+
+## Matériel grand public : E4B base sur une T4 16 Go (7 oct.)
+Même condition E, mêmes 33 bugs, E4B base 4 bits NF4 servi par `tools/colab_llm_server.py --dtype fp16` (la T4 n'a pas de bf16)
+sur une Colab T4 ; agent sur psbench1 (`runs/20261007-151758-E`).
+- **3 / 33 résolus** (A100 : 3, 4, 4), bon fichier 17 / 33 ; run complet 2 h 05 (3,8 min par bug, PrestaShop compris).
+- 168 appels au modèle : 29,5 s en moyenne (médiane 15 s, max 145 s) ; requêtes de 5 606 tokens en moyenne (max 11 299), sorties de 184 (max 1 024).
+- Mémoire GPU : 8,67 Go après chargement ; **pointe 10,8 Go** (11,1 Go réservés) sur la plus longue requête observée
+  (11 299 + 1 024 tokens, `tools/e4b_vram_probe.py`, `runs/20261007-151758-E/_t4/vram_probe.json`), 7 tokens/s en génération.
+  Tient sur une carte de 12 Go (marge ~1 Go).

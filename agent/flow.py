@@ -39,6 +39,24 @@ def show(commit, path):
     return git("show", f"{commit}:{path}")
 
 
+def resolve_paths(commit, requested):
+    """Sépare les chemins demandés par le modèle en existants / introuvables (L0, réparation du 2 oct. 2026).
+    Pour un chemin introuvable : chemins existants proches (même nom de fichier, puis ressemblance difflib), 5 max.
+    Retourne (existants, note) ; note = "" si tout existe."""
+    import difflib
+    ok = [f for f in requested if show(commit, f)]
+    missing = [f for f in requested if f not in ok]
+    if not missing:
+        return ok, ""
+    tree = [f for f in git("ls-tree", "-r", "--name-only", commit).splitlines() if f.endswith(tuple(CODE_EXT))]
+    lines = []
+    for f in missing:
+        name = f.rsplit("/", 1)[-1]
+        near = [x for x in tree if x.rsplit("/", 1)[-1] == name][:5] or difflib.get_close_matches(f, tree, n=5, cutoff=0.6)
+        lines.append(f"- {f} : introuvable" + (" ; chemins proches : " + ", ".join(near) if near else ""))
+    return ok, "FICHIERS INTROUVABLES (vérifie le chemin) :\n" + "\n".join(lines)
+
+
 def grep(commit, keywords):
     """Recherche sur le commit de base : contenu (git grep) + chemins de fichiers.
     Classement : nom de fichier contenant un mot-clé, puis nb de mots-clés DISTINCTS trouvés, puis nb de lignes."""

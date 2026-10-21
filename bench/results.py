@@ -17,9 +17,18 @@ TRIALS = {
 LABEL = {"A": "A · ticket seul", "R": "R · ticket + 2 corrections TRAIN similaires"}
 # condition O (borne haute B*) : 1 essai, oracle comme retour (2 corrections) ; union de deux dossiers (run repris)
 O_DIRS = ["20260926-052040-O", "20260926-065152-O"]
+# Répétitions (2 oct.) : B et O relancés 2 fois avec le code d'agent EXACT de leur run 1 (arbres /home/elrems/kaggle-rep/<C>,
+# agent figé : B 4f649d9, O f7dcbdc). Dossiers d'un même essai fusionnés dans l'ordre (le dernier l'emporte bug par bug).
+# O essai 3 : 20261002-132120-O a reçu par collision (même seconde de lancement) les écritures de la reprise de l'essai 2
+# pour 18 bugs ; ces 18 bugs ont été relancés proprement le 6 oct. (20261006-134200-O), qui l'emporte.
+REPS = {
+    "B": [["20260928-092011-B"], ["20261002-082406-B"], ["20261002-082409-B"]],
+    "O": [O_DIRS, ["20261002-082412-O", "20261006-134154-O"], ["20261002-132120-O", "20261006-134200-O"]],
+}
+# reprises du 6 oct. : nombre de bugs attendus (un essai n'est compté que lorsque ses reprises sont terminées)
+EXPECT = {"20261006-134154-O": 17, "20261006-134200-O": 18}
 # conditions à 1 essai, comparées à la moyenne de A (4 essais) ; dossiers ajoutés au fil des runs
 SINGLE = {
-    "B · Replay tests avec feedback dynamique (Gemma 4 31B)": ["20260928-092011-B"],
     "A-4B · Zero-Shot sans LoRA (Gemma 4 4B Base)": ["20260926-052040-A", "20260926-065152-A"],
     "E · Fine-tuné complet QLoRA (Gemma 4 4B)": ["20260928-175551-E"],
     "C · + glossaire automatique (provisoire)": ["20260926-103202-C"],
@@ -90,11 +99,44 @@ def main():
               "## Détail par bug (nombre d'essais résolus sur 4)", "", "| Bug | Ticket | A | R |", "|---|---|---|---|"]
     for b in sorted(bugs, key=lambda b: -(per_bug[b]["A"] + per_bug[b]["R"])):
         lines.append(f"| [#{b}](https://github.com/PrestaShop/PrestaShop/pull/{b}) | {title[b][:70]} | {per_bug[b]['A']} | {per_bug[b]['R']} |")
+    lines += reps_section(bugs, per_bug, solved)
     lines += o_section(bugs, per_bug, solved)
     lines += single_section(bugs, data, per_bug, solved)
     export_csv(bugs, solved)
     (ROOT / "docs" / "RESULTATS.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[:20]))
+
+
+def complete_reps(bugs):
+    """Essais de REPS dont les 33 bugs ont un verdict (un essai incomplet est ignoré, avec un avertissement)."""
+    out = {}
+    for c, trials in REPS.items():
+        out[c] = []
+        for i, dirs in enumerate(trials):
+            d = load(dirs, bugs)
+            pending = [x for x in dirs if x in EXPECT and len(list((RUNS / x).glob("*/result.json"))) < EXPECT[x]]
+            if len(d) == len(bugs) and not pending:
+                out[c].append((i + 1, dirs, d))
+            else:
+                print(f"AVERTISSEMENT : {c} essai {i + 1} incomplet ({len(d)}/{len(bugs)}), ignoré")
+    return out
+
+
+def reps_section(bugs, per_bug, solved):
+    """B et O sur 3 essais : résolus par essai, moyenne, écart apparié par bug contre A (bootstrap, même méthode que R − A)."""
+    out = ["", "## Répétitions : B et O sur 3 essais (agent figé au commit de leur run 1)", "",
+           "| Condition | Essais (résolus / 33) | Moyenne | Bon fichier (moy.) | Écart à A, apparié (IC 95 %) |", "|---|---|---|---|---|"]
+    for c, trials in complete_reps(bugs).items():
+        if not trials:
+            continue
+        counts = [sum(solved(d.get(b)) for b in bugs) for _, _, d in trials]
+        locs = [sum(bool(d.get(b, {}).get("loc_hit")) for b in bugs) for _, _, d in trials]
+        diffs = [sum(solved(d.get(b)) for _, _, d in trials) / len(trials) - per_bug[b]["A"] / 4 for b in bugs]
+        random.seed(0)
+        boots = sorted(statistics.mean(random.choices(diffs, k=len(diffs))) for _ in range(5000))
+        out.append(f"| {c} | {', '.join(map(str, counts))} ({len(trials)} essais) | {statistics.mean(counts):.1f} | {statistics.mean(locs):.1f} | "
+                   f"{statistics.mean(diffs):+.1%} [{boots[125]:+.1%} ; {boots[4875]:+.1%}] |")
+    return out
 
 
 def o_section(bugs, per_bug, solved):
@@ -141,7 +183,9 @@ def single_section(bugs, data, per_bug, solved):
 
 def export_csv(bugs, solved):
     """eval/results.csv (kit phase 8) : une ligne par (condition, essai, bug) ; base du notebook Kaggle."""
-    runs = [(c, i + 1, t) for c in TRIALS for i, t in enumerate(TRIALS[c])] + [("O", 1, O_DIRS)] + \
+    reps = complete_reps(bugs)
+    runs = [(c, i + 1, t) for c in TRIALS for i, t in enumerate(TRIALS[c])] + \
+           [(c, i, dirs) for c in reps for i, dirs, _ in reps[c]] + \
            [(name.split(" ·")[0], 1, dirs) for name, dirs in SINGLE.items()]
     out = ROOT / "eval" / "results.csv"
     out.parent.mkdir(exist_ok=True)

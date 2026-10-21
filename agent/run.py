@@ -152,13 +152,16 @@ def run_bug(bug, condition, model, retries, out, policy="llm"):
     kws = flow.parse_json(turn("localiser", flow.msg_ticket(bug, condition, replay_spec(bug["pr"]))), "keywords")
     hits = flow.grep(base, kws)
     # 2. LIRE
-    files = [f for f in flow.parse_json(turn("lire", flow.msg_grep(hits), "grep", {"keywords": kws, "hits": hits}), "files")
-             if flow.show(base, f)][:flow.MAX_FILES_READ]
+    files, missing_note = flow.resolve_paths(base, flow.parse_json(
+        turn("lire", flow.msg_grep(hits), "grep", {"keywords": kws, "hits": hits}), "files"))
+    files = files[:flow.MAX_FILES_READ]
     initial_files = list(files)
     all_files_read = set(files)
     contents = {f: flow.windows(flow.show(base, f), kws) for f in files}
     # 3. ÉDITER (avec au plus 2 retours arrière : relire d'autres fichiers ou relancer une recherche)
-    reply = turn("editer", flow.msg_read(contents), "read", {"files": files})
+    read_msg = flow.msg_read(contents)
+    reply = turn("editer", (missing_note + "\n\n" + read_msg).strip() if missing_note else read_msg, "read",
+                 {"files": files, "missing": missing_note})
     state, result, backtracks = {}, None, 0
 
     def backtrack(reply):
@@ -170,12 +173,20 @@ def run_bug(bug, condition, model, retries, out, policy="llm"):
                 kws = flow.parse_json(reply, "keywords")
                 h = flow.grep(base, kws)
                 reply = turn("relocaliser", flow.msg_grep(h), "grep", {"keywords": kws, "hits": h})
-            new = [f for f in flow.parse_json(reply, "files") if flow.show(base, f)][:flow.MAX_FILES_READ]
+            new, missing_note = flow.resolve_paths(base, flow.parse_json(reply, "files"))
+            new = new[:flow.MAX_FILES_READ]
             if new:
                 files = new
                 all_files_read.update(new)
                 contents = {f: flow.windows(flow.show(base, f), kws) for f in files}
-                reply = turn("relire", flow.msg_read(contents), "read", {"files": files})
+                msg = flow.msg_read(contents)
+                reply = turn("relire", (missing_note + "\n\n" + msg).strip() if missing_note else msg, "read",
+                             {"files": files, "missing": missing_note})
+            elif missing_note:
+                # L0 (2 oct. 2026) : avant, un chemin inexistant laissait `reply` inchangé → la boucle brûlait les
+                # 2 retours sans aucun tour modèle (ex. #41727). Désormais le modèle est informé et a la main.
+                reply = turn("relire", missing_note + "\nRedemande des chemins existants, ou produis tes blocs SEARCH/REPLACE.",
+                             "read", {"files": [], "missing": missing_note})
         return reply
 
     reply = backtrack(reply)
@@ -227,7 +238,8 @@ def run_bug(bug, condition, model, retries, out, policy="llm"):
         "loc_hit_ever": bool(all_files_read & set(bug["files"])),
         "loc_hit_edited": bool(set(state.keys()) & set(bug["files"])),
         "loc_hit": bool(all_files_read & set(bug["files"])),
-        "turns": len(msgs) // 2
+        "turns": len(msgs) // 2,
+        "feedbacks": feedbacks,  # retours de test vus en cours de run (B/O) ; réenregistrés le 2 oct. (supprimés le 29 sept.)
     })
     (out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1))
     trace.close()

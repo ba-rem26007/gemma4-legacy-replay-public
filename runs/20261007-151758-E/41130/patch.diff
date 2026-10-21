@@ -1,0 +1,87 @@
+--- a/src/Adapter/Domain/AbstractObjectModelHandler.php
++++ b/src/Adapter/Domain/AbstractObjectModelHandler.php
+@@ -44,24 +44,52 @@
+ 
+         // Get list of shop id we want to exclude from asso deletion
+         $excludeIds = $shopAssociation;
+-        foreach (Db::getInstance()->executeS('SELECT id_shop FROM ' . _DB_PREFIX_ . 'shop') as $row) {
+-            if (!Context::getContext()->employee->hasAuthOnShop($row['id_shop'])) {
+-                $excludeIds[] = $row['id_shop'];
++        $allShopIds = [];
++        $shopIdsFromDb = Db::getInstance()->executeS('SELECT id_shop FROM ' . _DB_PREFIX_ . 'shop');
++        foreach ($shopIdsFromDb as $row) {
++            $allShopIds[] = (int) $row['id_shop'];
++        }
++
++        $excludeIds = [];
++        foreach ($allShopIds as $shopId) {
++            // Si l'API Admin est utilisée, Context::getContext()->employee peut être null.
++            // Nous devons vérifier l'accès au niveau du contexte ou ignorer si le contexte est incomplet.
++            if (Context::getContext() && Context::getContext()->employee && Context::getContext()->employee->hasAuthOnShop($shopId)) {
++                $excludeIds[] = $shopId;
++            } else {
++                // Si le contexte est incomplet (Admin API OAuth2), nous devons considérer que toutes les shops sont potentiellement accessibles
++                // pour la suppression, mais nous devons aussi nous assurer que l'insertion est sécurisée.
++                // Pour la suppression, si l'employé n'est pas défini, on ne peut pas utiliser hasAuthOnShop, donc on ne filtre pas par défaut.
+             }
+         }
+ 
+-        $excludeShopsCondtion =
+-            ' AND id_shop NOT IN (' . implode(', ', array_map('intval', $excludeIds)) . ')';
++        // Dans le cas où Context::getContext()->employee est null (Admin API OAuth2), nous devons éviter le crash.
++        // Nous allons supprimer toutes les associations pour la suppression, car nous ne pouvons pas vérifier l'accès par shop.
++        // Cependant, pour la cohérence avec le comportement attendu (qui implique que l'API doit fonctionner),
++        // nous devons nous assurer que l'insertion est sécurisée.
+ 
++        // Suppression : On supprime toutes les associations pour éviter le crash si employee est null.
++        // Nous devons nous assurer que la suppression est faite sans dépendre de hasAuthOnShop si employee est null.
+         Db::getInstance()->delete(
+             $tableName . '_shop',
+-            '`' . $primaryKeyName . '` = ' . $primaryKeyValue . $excludeShopsCondtion
++            '`' . $primaryKeyName . '` = ' . $primaryKeyValue
+         );
+ 
+         $insert = [];
+-        foreach ($shopAssociation as $shopId) {
+-            // Check if context employee has access to the shop before inserting shop association.
+-            if (Context::getContext()->employee->hasAuthOnShop($shopId)) {
++        if (Context::getContext() && Context::getContext()->employee) {
++            foreach ($shopAssociation as $shopId) {
++                // Check if context employee has access to the shop before inserting shop association.
++                if (Context::getContext()->employee->hasAuthOnShop($shopId)) {
++                    $insert[] = [
++                        $primaryKeyName => $primaryKeyValue,
++                        'id_shop' => (int) $shopId,
++                    ];
++                }
++            }
++        } else {
++            // Si l'API est utilisée sans employee défini, on insère toutes les associations fournies,
++            // car le contexte de l'API est considéré comme ayant le droit de modifier toutes les shops concernées par le scope.
++            foreach ($shopAssociation as $shopId) {
+                 $insert[] = [
+                     $primaryKeyName => $primaryKeyValue,
+                     'id_shop' => (int) $shopId,
+@@ -69,13 +97,15 @@
+             }
+         }
+ 
+-        Db::getInstance()->insert(
+-            $tableName . '_shop',
+-            $insert,
+-            false,
+-            true,
+-            Db::INSERT_IGNORE
+-        );
++        if (!empty($insert)) {
++            Db::getInstance()->insert(
++                $tableName . '_shop',
++                $insert,
++                false,
++                true,
++                Db::INSERT_IGNORE
++            );
++        }
+     }
+ 
+     /**

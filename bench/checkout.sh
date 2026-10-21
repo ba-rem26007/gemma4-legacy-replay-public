@@ -9,6 +9,18 @@ PSB="${PSB:-1}"; PROJ="psbench$([ "$PSB" = 1 ] || echo "$PSB")"
 export PS_PORT="${PS_PORT:-$((8080 + PSB))}"
 DC="docker compose -p $PROJ -f $ENV/docker-compose.yml"
 
+# Garde-fou mémoire : chaque instance psbench (PrestaShop + MySQL) prend ~1 Go de RAM sur un serveur partagé.
+# Refus si PSB_MAX autres instances tournent déjà (réutiliser sa propre instance reste permis). PSB_MAX=0 : sans limite.
+PSB_MAX="${PSB_MAX:-3}"
+if [ "$PSB_MAX" -gt 0 ] && [ -z "$(docker ps -q --filter "label=com.docker.compose.project=$PROJ")" ]; then
+  AUTRES="$(docker ps --filter name=psbench --format '{{.Label "com.docker.compose.project"}}' | sort -u | grep -vx "$PROJ" || true)"
+  if [ "$(printf '%s\n' "$AUTRES" | grep -c .)" -ge "$PSB_MAX" ]; then
+    echo "REFUS : $PSB_MAX instances psbench tournent déjà ($(echo $AUTRES)), $PROJ ne sera pas lancée." >&2
+    echo "Réutiliser une instance (PSB=n) ou en arrêter une : docker compose -p psbenchN -f $ENV/docker-compose.yml stop" >&2
+    exit 2
+  fi
+fi
+
 read -r BASE MERGE FILES BRANCH < <(python3 -c "
 import json, glob
 pr = int($PR)

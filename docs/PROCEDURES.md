@@ -98,3 +98,11 @@ python training/train_qlora.py --model google/gemma-4-e4b-it      # QLoRA (PC ou
 ## Fine-tuning : toujours tester sur Google Colab avant Kaggle
 Voir `docs/FINETUNING_KAGGLE.md` §0 : `notebook/colab_smoke_training.ipynb` en `SMOKE=1` (pré-test mémoire + 2 pas),
 puis seulement `kaggle kernels push -p training/kaggle_kernel`. Le quota GPU Kaggle est réservé aux runs complets.
+
+## Mémoire du serveur partagé : 3 instances psbench au maximum (2 oct. 2026)
+Le 2 oct., 7 instances tournaient en même temps (~7 Go de RAM, swap plein). `bench/checkout.sh` refuse désormais d'en lancer une
+NOUVELLE si `PSB_MAX` (défaut 3) autres tournent déjà ; réutiliser une instance déjà lancée reste permis.
+- Réutiliser les instances existantes (`PSB=1` à `3`) : plusieurs runs peuvent partager une instance (verrou `bench/.eval<PSB>.lock`
+  pendant chaque évaluation).
+- Arrêter celles dont on n'a plus besoin : `docker compose -p psbenchN -f bench/env/docker-compose.yml stop`.
+- **Ne jamais contourner la limite avec `PSB_MAX`** sans l'accord de Rémi.
